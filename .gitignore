@@ -1,1 +1,44 @@
 .superpowers/
+
+# Worktrees
+.worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# Build artifacts
+build/
+dist/
+*.egg
+
+# Better-memory runtime state
+.better-memory/
+memory.db
+memory.db-*
+knowledge.db
+knowledge.db-*
+spool/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
