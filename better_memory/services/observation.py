@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -46,8 +47,23 @@ from uuid import uuid4
 
 import sqlite_vec
 
+from better_memory.search.hybrid import (
+    SearchFilters,
+    SearchResult,
+    hybrid_search,
+)
+
 Outcome = Literal["success", "failure", "neutral"]
 UseOutcome = Literal["success", "failure"]
+
+
+@dataclass(frozen=True)
+class BucketedResults:
+    """Outcome-filtered buckets returned by :meth:`ObservationService.retrieve`."""
+
+    do: list[SearchResult]
+    dont: list[SearchResult]
+    neutral: list[SearchResult]
 
 
 def _default_clock() -> datetime:
@@ -168,6 +184,65 @@ class ObservationService:
         # Service owns the connection — see class docstring for the contract.
         conn.commit()
         return obs_id
+
+    async def retrieve(
+        self,
+        query: str | None = None,
+        *,
+        component: str | None = None,
+        status: str | None = "active",
+        window_days: int | None = 30,
+        scope_path: str | None = None,
+        project: str | None = None,
+        do_limit: int = 10,
+        dont_limit: int = 10,
+        neutral_limit: int = 5,
+        candidate_k: int = 50,
+        reinforcement_alpha: float = 0.1,
+    ) -> BucketedResults:
+        """Run three outcome-filtered hybrid searches and return them bucketed.
+
+        The query is embedded *once* and the vector is reused for all three
+        sub-searches (success / failure / neutral), saving two embedder
+        round-trips per retrieve.
+        """
+        resolved_project = project if project is not None else self._project_resolver()
+
+        # Embed the query once, if any, so vector search is available to every
+        # bucket without paying three embed calls.
+        query_vector: list[float] | None = None
+        if query is not None and query.strip():
+            query_vector = await self._embedder.embed(query)
+
+        base_kwargs: dict[str, Any] = {
+            "project": resolved_project,
+            "component": component,
+            "status": status,
+            "window_days": window_days,
+            "scope_path": scope_path,
+        }
+
+        def _run(outcome: Outcome, limit: int) -> list[SearchResult]:
+            filters = SearchFilters(outcome=outcome, **base_kwargs)
+            return hybrid_search(
+                self._conn,
+                query_text=query,
+                query_vector=query_vector,
+                filters=filters,
+                limit=limit,
+                candidate_k=candidate_k,
+                reinforcement_alpha=reinforcement_alpha,
+                clock=self._clock,
+            )
+
+        do_hits = _run("success", do_limit)
+        dont_hits = _run("failure", dont_limit)
+        neutral_hits = _run("neutral", neutral_limit)
+
+        # TODO(phase-10): per-result retrieval audit — wired behind
+        # ``config.audit_log_retrieved``. Intentionally not written here yet.
+
+        return BucketedResults(do=do_hits, dont=dont_hits, neutral=neutral_hits)
 
     def record_use(
         self,

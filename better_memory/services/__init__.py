@@ -1,5 +1,5 @@
 """Service layer for better-memory."""
 
-from better_memory.services.observation import ObservationService
+from better_memory.services.observation import BucketedResults, ObservationService
 
-__all__ = ["ObservationService"]
+__all__ = ["BucketedResults", "ObservationService"]
