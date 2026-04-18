@@ -21,7 +21,7 @@ def _run_session_close(
     stdin: str = "",
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "BETTER_MEMORY_SPOOL_DIR": str(tmp_spool)}
+    env = {**os.environ, "BETTER_MEMORY_HOME": str(tmp_spool.parent)}
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
@@ -36,9 +36,8 @@ def _run_session_close(
 
 @pytest.fixture
 def tmp_spool(tmp_path: Path) -> Path:
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    return spool
+    """Expected spool dir under a tmp BETTER_MEMORY_HOME. Created on first write."""
+    return tmp_path / "spool"
 
 
 def test_session_close_empty_stdin_writes_marker(tmp_spool: Path) -> None:

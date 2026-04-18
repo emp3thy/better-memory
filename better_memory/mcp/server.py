@@ -34,6 +34,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import urllib.error
+import urllib.request
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -60,6 +63,40 @@ from better_memory.services.spool import SpoolService
 # ``python -m better_memory.mcp`` finds them without needing extra config.
 _MEMORY_MIGRATIONS = Path(__file__).parent.parent / "db" / "migrations"
 _KNOWLEDGE_MIGRATIONS = Path(__file__).parent.parent / "db" / "knowledge_migrations"
+
+_OLLAMA_PROBE_TIMEOUT_SEC = 2.0
+
+
+def _probe_ollama(host: str) -> None:
+    """Log a clear stderr warning if Ollama isn't reachable. Never raise.
+
+    Called once at startup; purely informational. The server continues in
+    either case — knowledge-only tools (``knowledge.search``, ``knowledge.list``)
+    don't need Ollama, and embedding-dependent tools raise a clean
+    ``EmbeddingError`` the first time they're invoked against a down host.
+    """
+    url = host.rstrip("/") + "/api/tags"
+    try:
+        with urllib.request.urlopen(  # noqa: S310 — local-only URL
+            url, timeout=_OLLAMA_PROBE_TIMEOUT_SEC
+        ) as response:
+            if response.status == 200:
+                return
+            print(
+                f"[better-memory] WARNING: Ollama probe at {url} returned "
+                f"HTTP {response.status}; memory.observe / memory.retrieve "
+                "may fail until this is resolved.",
+                file=sys.stderr,
+                flush=True,
+            )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(
+            f"[better-memory] WARNING: Ollama unreachable at {host} "
+            f"({type(exc).__name__}: {exc}). memory.observe and memory.retrieve "
+            "will fail until Ollama is running; knowledge.* tools still work.",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 # --------------------------------------------------------------------------- tools
@@ -276,6 +313,12 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
     # One embedder per server. Construction is cheap and does NOT contact
     # Ollama (see OllamaEmbedder.__init__); the first embed() call does.
     embedder = OllamaEmbedder()
+
+    # Cheap reachability probe against Ollama. Warn (to stderr) if it's down
+    # but do not block startup — knowledge.* tools still work without Ollama,
+    # and if Ollama comes up later, memory.observe / memory.retrieve will
+    # succeed on their next call without a restart.
+    _probe_ollama(config.ollama_host)
 
     observations = ObservationService(memory_conn, embedder)
     insights = InsightService(memory_conn, embedder=embedder)

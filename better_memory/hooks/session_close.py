@@ -25,14 +25,14 @@ _MAX_STDIN_BYTES = 1_048_576
 
 
 def _default_spool_dir() -> Path:
-    """Return the configured spool dir, honouring ``BETTER_MEMORY_SPOOL_DIR``.
+    """Return ``$BETTER_MEMORY_HOME/spool``, defaulting to ``~/.better-memory``.
 
     Mirrors the observer hook. Kept duplicated to avoid a cross-module import
     that would slow hook startup.
     """
-    override = os.environ.get("BETTER_MEMORY_SPOOL_DIR")
-    if override:
-        return Path(override)
+    home = os.environ.get("BETTER_MEMORY_HOME")
+    if home:
+        return Path(home).expanduser() / "spool"
     return Path.home() / ".better-memory" / "spool"
 
 

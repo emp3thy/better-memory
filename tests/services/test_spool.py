@@ -349,10 +349,10 @@ def test_drain_commit_failure_leaves_files_in_spool_and_no_rows(
 def test_drain_defaults_spool_dir_from_config(
     conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    spool = tmp_path / "from-config"
-    monkeypatch.setenv("SPOOL_DIR", str(spool))
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_path / "bm"))
     service = SpoolService(conn)
-    # No files yet; drain should create the dir and return a zero report.
+    # No files yet; drain should create the derived spool dir and return a
+    # zero report.
     report = service.drain()
     assert report == DrainReport(drained=0, quarantined=0)
-    assert spool.exists()
+    assert (tmp_path / "bm" / "spool").exists()

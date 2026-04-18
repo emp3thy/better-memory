@@ -24,9 +24,8 @@ from better_memory.services.spool import DrainReport, SpoolService
 
 @pytest.fixture
 def tmp_spool(tmp_path: Path) -> Path:
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    return spool
+    """Expected spool dir under a tmp BETTER_MEMORY_HOME. Created on first write."""
+    return tmp_path / "spool"
 
 
 @pytest.fixture
@@ -52,7 +51,7 @@ def test_observer_then_drain_produces_hook_events_row(
         "timestamp": "2026-04-18T12:34:56Z",
     }
 
-    env = {**os.environ, "BETTER_MEMORY_SPOOL_DIR": str(tmp_spool)}
+    env = {**os.environ, "BETTER_MEMORY_HOME": str(tmp_spool.parent)}
     result = subprocess.run(
         [sys.executable, "-m", "better_memory.hooks.observer"],
         input=json.dumps(payload),
@@ -92,7 +91,7 @@ def test_session_close_then_drain_produces_session_end_row(
 ) -> None:
     env = {
         **os.environ,
-        "BETTER_MEMORY_SPOOL_DIR": str(tmp_spool),
+        "BETTER_MEMORY_HOME": str(tmp_spool.parent),
         "CLAUDE_SESSION_ID": "sess-int-close",
     }
     result = subprocess.run(

@@ -47,14 +47,11 @@ def server_params(tmp_path: Path) -> StdioServerParameters:
     """
     env = {
         **os.environ,
-        "MEMORY_DB": str(tmp_path / "memory.db"),
-        "KNOWLEDGE_DB": str(tmp_path / "knowledge.db"),
-        "SPOOL_DIR": str(tmp_path / "spool"),
-        "KNOWLEDGE_BASE": str(tmp_path / "knowledge-base"),
+        "BETTER_MEMORY_HOME": str(tmp_path),
     }
     # Ensure knowledge-base exists so the startup reindex has something to
     # walk; otherwise the reindex path would silently no-op.
-    Path(env["KNOWLEDGE_BASE"]).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "knowledge-base").mkdir(parents=True, exist_ok=True)
 
     return StdioServerParameters(
         command=sys.executable,
@@ -222,7 +219,7 @@ async def test_spool_drain_on_retrieve(
     tmp_path: Path,
 ) -> None:
     """A file dropped into the spool is consumed by ``memory.retrieve``."""
-    spool_dir = Path(server_params.env["SPOOL_DIR"])
+    spool_dir = Path(server_params.env["BETTER_MEMORY_HOME"]) / "spool"
     spool_dir.mkdir(parents=True, exist_ok=True)
 
     spool_file = spool_dir / "20260418T120000-abc.json"

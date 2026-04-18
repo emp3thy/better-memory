@@ -22,7 +22,9 @@ def _run_observer(
     *,
     stdin: str,
 ) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "BETTER_MEMORY_SPOOL_DIR": str(tmp_spool)}
+    # Observer derives the spool dir from $BETTER_MEMORY_HOME/spool; point HOME
+    # at the parent so the hook writes into tmp_spool.
+    env = {**os.environ, "BETTER_MEMORY_HOME": str(tmp_spool.parent)}
     return subprocess.run(
         [sys.executable, "-m", "better_memory.hooks.observer"],
         input=stdin,
@@ -35,9 +37,11 @@ def _run_observer(
 
 @pytest.fixture
 def tmp_spool(tmp_path: Path) -> Path:
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    return spool
+    """Expected spool dir under a tmp BETTER_MEMORY_HOME.
+
+    The hook creates the dir on first write — we don't pre-create it.
+    """
+    return tmp_path / "spool"
 
 
 def test_observer_writes_file_for_valid_json(tmp_spool: Path) -> None:
