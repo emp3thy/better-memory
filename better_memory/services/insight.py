@@ -33,7 +33,6 @@ from the caller. Same contract as :class:`ObservationService`.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,6 +43,7 @@ from uuid import uuid4
 import sqlite_vec
 
 from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.services import audit
 
 Polarity = Literal["do", "dont", "neutral"]
 RelationType = Literal["related", "contradicts", "supersedes"]
@@ -207,7 +207,6 @@ class InsightService:
                     "project": project,
                     "component": component,
                 },
-                now=now,
             )
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT insight_create")
@@ -310,7 +309,6 @@ class InsightService:
                     entity_id=insight_id,
                     action="status_changed",
                     detail={"fields": list(candidate.keys())},
-                    now=now,
                     from_status=old_status,
                     to_status=candidate["status"],
                 )
@@ -319,7 +317,6 @@ class InsightService:
                     entity_id=insight_id,
                     action="updated",
                     detail={"fields": list(candidate.keys())},
-                    now=now,
                 )
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT insight_update")
@@ -344,7 +341,6 @@ class InsightService:
             raise ValueError(f"Insight not found: {insight_id}")
 
         title = existing["title"]
-        now = self._clock().isoformat()
         conn = self._conn
         conn.execute("SAVEPOINT insight_delete")
         try:
@@ -366,7 +362,6 @@ class InsightService:
                 entity_id=insight_id,
                 action="retired",
                 detail={"title": title},
-                now=now,
             )
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT insight_delete")
@@ -428,7 +423,6 @@ class InsightService:
                 entity_id=insight_id,
                 action="evidence_added",
                 detail={"observation_id": observation_id},
-                now=now,
             )
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT insight_add_source")
@@ -475,7 +469,6 @@ class InsightService:
             if not exists:
                 raise ValueError(f"Insight not found ({label}): {iid}")
 
-        now = self._clock().isoformat()
         conn = self._conn
         conn.execute("SAVEPOINT insight_add_relation")
         try:
@@ -498,7 +491,6 @@ class InsightService:
                     "to_insight_id": to_insight_id,
                     "relation_type": relation_type,
                 },
-                now=now,
             )
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT insight_add_relation")
@@ -587,26 +579,24 @@ class InsightService:
         entity_id: str,
         action: str,
         detail: dict[str, Any],
-        now: str,
         from_status: str | None = None,
         to_status: str | None = None,
     ) -> None:
-        """Insert a row into ``audit_log``. Caller owns the transaction."""
-        self._conn.execute(
-            """
-            INSERT INTO audit_log (
-                id, entity_type, entity_id, action, from_status, to_status,
-                actor, detail, session_id, created_at
-            ) VALUES (?, 'insight', ?, ?, ?, ?, 'ai', ?, ?, ?)
-            """,
-            (
-                uuid4().hex,
-                entity_id,
-                action,
-                from_status,
-                to_status,
-                json.dumps(detail),
-                self._session_id,
-                now,
-            ),
+        """Insert an insight audit row via :func:`audit.log`.
+
+        Thin adapter that fills in the insight-service defaults
+        (``entity_type``, ``actor``, ``session_id``) so call sites stay
+        concise. ``audit_log.created_at`` is populated by the schema's
+        ``DEFAULT CURRENT_TIMESTAMP`` — callers should not override it.
+        """
+        audit.log(
+            self._conn,
+            entity_type="insight",
+            entity_id=entity_id,
+            action=action,
+            actor="ai",
+            from_status=from_status,
+            to_status=to_status,
+            session_id=self._session_id,
+            detail=detail,
         )

@@ -36,7 +36,6 @@ hand, is NOT trigger-populated and must be written manually.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,11 +46,13 @@ from uuid import uuid4
 
 import sqlite_vec
 
+from better_memory.config import get_config
 from better_memory.search.hybrid import (
     SearchFilters,
     SearchResult,
     hybrid_search,
 )
+from better_memory.services import audit
 
 Outcome = Literal["success", "failure", "neutral"]
 UseOutcome = Literal["success", "failure"]
@@ -96,6 +97,7 @@ class ObservationService:
         project_resolver: Callable[[], str] | None = None,
         scope_resolver: Callable[[], str | None] | None = None,
         session_id: str | None = None,
+        audit_log_retrieved: bool | None = None,
     ) -> None:
         self._conn = conn
         self._embedder = embedder
@@ -107,6 +109,13 @@ class ObservationService:
             scope_resolver if scope_resolver is not None else (lambda: None)
         )
         self._session_id = session_id if session_id is not None else uuid4().hex
+        # ``None`` defers to the resolved config value so tests can inject
+        # ``False`` without having to monkeypatch the environment.
+        self._audit_log_retrieved: bool = (
+            audit_log_retrieved
+            if audit_log_retrieved is not None
+            else get_config().audit_log_retrieved
+        )
 
     # ------------------------------------------------------------------ public
     async def create(
@@ -172,7 +181,6 @@ class ObservationService:
                     "scope_path": resolved_scope,
                     "component": component,
                 },
-                now=now,
             )
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT observation_create")
@@ -239,10 +247,66 @@ class ObservationService:
         dont_hits = _run("failure", dont_limit)
         neutral_hits = _run("neutral", neutral_limit)
 
-        # TODO(phase-10): per-result retrieval audit — wired behind
-        # ``config.audit_log_retrieved``. Intentionally not written here yet.
+        if self._audit_log_retrieved:
+            self._record_retrieval(
+                do=do_hits, dont=dont_hits, neutral=neutral_hits
+            )
 
         return BucketedResults(do=do_hits, dont=dont_hits, neutral=neutral_hits)
+
+    # ---------------------------------------------------------- retrieval audit
+    def _record_retrieval(
+        self,
+        *,
+        do: list[SearchResult],
+        dont: list[SearchResult],
+        neutral: list[SearchResult],
+    ) -> None:
+        """Bump ``retrieved_count`` and write one audit row per returned result.
+
+        Gated by ``AUDIT_LOG_RETRIEVED`` — when disabled the whole path is
+        skipped (no counter bump, no audit row). Run as a single batch so
+        the counters and audit rows land atomically for the caller's
+        retrieve call.
+        """
+        now = self._clock().isoformat()
+        conn = self._conn
+
+        buckets: tuple[tuple[str, list[SearchResult]], ...] = (
+            ("do", do),
+            ("dont", dont),
+            ("neutral", neutral),
+        )
+
+        conn.execute("SAVEPOINT observation_retrieve_audit")
+        try:
+            for bucket_name, hits in buckets:
+                for hit in hits:
+                    conn.execute(
+                        """
+                        UPDATE observations
+                           SET retrieved_count = retrieved_count + 1,
+                               last_retrieved = ?
+                         WHERE id = ?
+                        """,
+                        (now, hit.id),
+                    )
+                    self._write_audit(
+                        entity_id=hit.id,
+                        action="retrieved",
+                        detail={
+                            "outcome": hit.outcome,
+                            "final_score": hit.final_score,
+                            "bucket": bucket_name,
+                        },
+                    )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT observation_retrieve_audit")
+            conn.execute("RELEASE SAVEPOINT observation_retrieve_audit")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT observation_retrieve_audit")
+        conn.commit()
 
     def record_use(
         self,
@@ -303,7 +367,6 @@ class ObservationService:
             entity_id=observation_id,
             action="used",
             detail={"outcome": outcome},
-            now=now,
         )
         conn.commit()
 
@@ -314,22 +377,20 @@ class ObservationService:
         entity_id: str,
         action: str,
         detail: dict[str, Any],
-        now: str,
     ) -> None:
-        """Insert a row into ``audit_log``. Caller owns the transaction."""
-        self._conn.execute(
-            """
-            INSERT INTO audit_log (
-                id, entity_type, entity_id, action, actor, detail,
-                session_id, created_at
-            ) VALUES (?, 'observation', ?, ?, 'ai', ?, ?, ?)
-            """,
-            (
-                uuid4().hex,
-                entity_id,
-                action,
-                json.dumps(detail),
-                self._session_id,
-                now,
-            ),
+        """Insert an observation audit row via :func:`audit.log`.
+
+        Thin adapter that fills in the observation-service defaults
+        (``entity_type``, ``actor``, ``session_id``) so call sites stay
+        concise. ``audit_log.created_at`` is populated by the schema's
+        ``DEFAULT CURRENT_TIMESTAMP`` — callers should not override it.
+        """
+        audit.log(
+            self._conn,
+            entity_type="observation",
+            entity_id=entity_id,
+            action=action,
+            actor="ai",
+            session_id=self._session_id,
+            detail=detail,
         )
