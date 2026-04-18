@@ -5,46 +5,61 @@ When to use: at every decision point — design finalised, implementation done, 
 ## Mandatory fields
 
 - `content` — short narrative (max 500 chars). Past tense. Specific.
-- `outcome` — one of `success`, `failure`, `neutral`. **Required.** Pick honestly.
 - `component` — the subsystem you were working on.
 - `trigger_type` — what caused the write: `decision | implementation | bug | abandoned | observation`.
+- `outcome` — one of `success`, `failure`, `neutral`. **Default to `neutral`.** Only claim `success` or `failure` when the evidence exists *right now*.
 
-## When to mark outcome
+## The evidence-in-hand rule
 
-| Situation | Outcome |
-|---|---|
-| Approach worked, tests pass, shipped | `success` |
-| Tried X, it caused Y, reverted | `failure` |
-| Observed unexpected behaviour but no change made | `neutral` |
-| Bug identified AND fixed (same session) | `success` — record the fix |
-| Bug identified but NOT fixed yet | `neutral` — record the observation |
-| Design chosen after considering alternatives | `success` for chosen, optional `failure` for abandoned |
+Set `outcome='success'` or `outcome='failure'` at observe-time ONLY when the work is already complete and the evidence is already visible:
+
+- Tests ran and you saw the exit code.
+- The approach was reverted and you committed the revert.
+- The user explicitly confirmed or rejected it.
+
+For decisions whose outcome you cannot yet prove, write `outcome='neutral'`, **keep the returned id**, and close the loop later with `memory.record_use(id, outcome=...)` once validation arrives.
+
+This matches the reinforcement loop's design: `record_use(outcome)` is what moves `reinforcement_score`, so the outcome you stamp there is what future retrievals rank on.
+
+## When to pick each outcome
+
+| Situation | At observe time | Later via record_use |
+|---|---|---|
+| Decision just made, not yet validated | `neutral` | `success` or `failure` when validated |
+| Tests just passed, shipped the change | `success` (evidence in hand) | — |
+| Tried X, caused Y, reverted in-session | `failure` (evidence in hand) | — |
+| Pure fact / observed system behaviour | `neutral` (no outcome inherent) | — |
+| Bug identified AND fixed same session | `success` (fix verified) | — |
+| Bug identified, not yet fixed | `neutral` | `success` when fix lands |
+| Applied a memory someone else wrote | **don't observe** — call `record_use(retrieved_id, outcome=...)` instead | — |
 
 ## Examples
 
-### Success
+### Decision at observe-time, outcome later
 
 ```python
-memory.observe(
-    content="Added FK index on insight_sources.observation_id — query cost dropped from 40ms to 2ms on 10k rows.",
-    component="services/insight",
-    trigger_type="implementation",
-    outcome="success",
+obs_id = memory.observe(
+    content="Chose SAVEPOINT-based rollback over BEGIN/ROLLBACK for ObservationService.create — lets nested calls compose if a later caller holds the outer txn.",
+    component="services/observation",
+    trigger_type="decision",
+    outcome="neutral",   # not yet validated
 )
+# ... implement, run tests ...
+memory.record_use(obs_id, outcome="success")   # tests green → stamp success
 ```
 
-### Failure (the important one — record these!)
+### Failure — evidence already in hand
 
 ```python
 memory.observe(
     content="Tried opening two sqlite3 connections to memory.db from a thread pool. WAL mode hung on writer handoff. Reverted to single-connection per MCP loop.",
     component="db/connection",
     trigger_type="abandoned",
-    outcome="failure",
+    outcome="failure",   # the attempt was made and already reverted
 )
 ```
 
-### Failure — "tried X, caused Y, don't do this when Z"
+### "Tried X, caused Y, don't do this when Z"
 
 ```python
 memory.observe(
@@ -55,7 +70,7 @@ memory.observe(
 )
 ```
 
-### Neutral
+### Pure observation — stays neutral forever
 
 ```python
 memory.observe(
@@ -72,7 +87,8 @@ Record failures with the same frequency as successes. Failures prevent future re
 
 ## Anti-patterns
 
-- Don't batch at session end. Write at the point of decision.
-- Don't prefer `neutral` when you have actual signal. If it worked, say `success`. If it didn't, say `failure`.
-- Don't write a memory for every trivial action — only decision points.
-- Don't omit `outcome`. The field is mandatory for a reason: the retrieval bucketer depends on it.
+- **Don't claim `success` before you have evidence.** If the code compiles but tests haven't run, it's still `neutral`. Wait.
+- **Don't batch at session end.** Write at the point of decision. Outcome can be closed later via `record_use`.
+- **Don't prefer `neutral` when you actually have evidence.** If the result is in hand, say `success` or `failure` honestly.
+- **Don't write a memory for every trivial action** — only decision points.
+- **Don't omit `outcome`.** The field is mandatory. Default to `neutral`.

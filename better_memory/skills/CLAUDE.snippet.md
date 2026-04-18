@@ -6,12 +6,16 @@ This project uses better-memory for persistent AI knowledge.
 
 - Starting work → read `better_memory/skills/memory-retrieve.md`
 - Decision point reached → read `better_memory/skills/memory-write.md`
-- Using a retrieved memory → read `better_memory/skills/memory-feedback.md`
+- Validation arrives (evidence in hand) → read `better_memory/skills/memory-feedback.md`
 - Session ending → read `better_memory/skills/session-close.md`
 
-### Memory outcomes
+### Memory outcomes — the evidence-in-hand rule
 
-Every observation has an `outcome`: `success`, `failure`, or `neutral`. Record failures at the same cadence as successes — `dont` bucket retrieval depends on it.
+Every observation has an `outcome`: `success`, `failure`, or `neutral`.
+
+- **Default to `neutral`** at observe time. Only claim `success` or `failure` when the evidence exists RIGHT NOW (tests ran, approach reverted, user confirmed).
+- For decisions whose outcome is not yet provable, write `neutral`, keep the returned id, and close the loop later with `memory.record_use(id, outcome=...)` once validation arrives.
+- Record failures at the same cadence as successes — the `dont` bucket depends on it.
 
 ### Retrieval buckets
 

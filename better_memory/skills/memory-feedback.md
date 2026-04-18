@@ -1,44 +1,70 @@
 # memory-feedback
 
-When to use: immediately after a retrieved memory influences your work.
+When to use: immediately after evidence arrives that confirms or disproves a prior decision.
 
-## Single rule
+## Two call sites
 
-Every time a `retrieve()` result was used, call:
+`record_use` is the canonical way to stamp an outcome once evidence is in hand. It's called in two situations:
+
+**1. Closing the loop on a memory YOU wrote as neutral.** Every `memory.observe(outcome='neutral')` with a decision baked in should, eventually, get a matching `record_use(id, outcome=...)` once validation arrives.
+
+**2. Validating a memory you RETRIEVED and applied.** If a retrieved memory influenced your work, close the loop with `record_use(retrieved_id, outcome=...)` once you know whether it held up.
 
 ```python
 memory.record_use(id, outcome='success' | 'failure' | None)
 ```
 
-- `outcome='success'` — the memory's approach worked for you.
-- `outcome='failure'` — the memory's approach did NOT work; something has changed.
-- `outcome=None` (omit param) — memory was read/considered but wasn't validated.
+- `outcome='success'` — the approach worked. `reinforcement_score += 1.0`.
+- `outcome='failure'` — the approach did NOT work (or no longer applies). `reinforcement_score -= 1.0`. The memory stays; only its ranking drops.
+- `outcome=None` (omit) — you looked at it but don't have evidence yet.
 
 ## Cost: 2 seconds. Do it inline.
 
-Do NOT batch feedback at session end. Call `record_use` the moment you've validated or disproved the memory.
+Do NOT batch feedback at session end. Call `record_use` the moment evidence is in hand.
 
-## Why outcome matters
+## Why this matters
 
-`outcome='success'` bumps `reinforcement_score += 1`; `outcome='failure'` drops it by 1.
-High-reinforcement items rank above low-reinforcement at equivalent similarity — so your feedback directly shapes the next retrieval.
+`reinforcement_score` is multiplied into every future retrieval's ranking (`score *= (1 + α·reinforcement_score)`). Proven successes surface first; proven failures sink. A memory that nobody ever validates stays ambient — the system can't learn from it.
 
 Recording a `failure` against a stale memory is how you retire bad advice over time.
 
-## Inline usage pattern
+## Pattern 1 — closing your own neutral observe
+
+```python
+# At decision time — no evidence yet
+obs_id = memory.observe(
+    content="Switched to async embedder to allow batch requests.",
+    component="embeddings/ollama",
+    trigger_type="decision",
+    outcome="neutral",
+)
+
+# ... implement and test ...
+
+# Evidence arrives
+memory.record_use(obs_id, outcome="success")  # if tests passed
+# OR
+memory.record_use(obs_id, outcome="failure")  # if it broke something
+```
+
+## Pattern 2 — validating a retrieved memory
 
 ```python
 hits = memory.retrieve(query="add FK index", component="db")
 
 for item in hits["do"]:
-    # About to apply this approach — note the use.
+    # About to apply — mark the read
     memory.record_use(item["id"])
 
-# ... you finish the work ...
+# ... finish the work, observe the result ...
 
-# Approach from item[0] worked.
+# The first approach worked
 memory.record_use(hits["do"][0]["id"], outcome="success")
 
-# Approach from item[1] no longer applies (schema moved on).
+# The second approach is stale — schema changed underneath
 memory.record_use(hits["do"][1]["id"], outcome="failure")
 ```
+
+## Rule of thumb
+
+If you're about to write `memory.observe(outcome='success')` but the tests haven't run, stop. Write `outcome='neutral'`, hold the id, and come back with `record_use` once the evidence is real.
