@@ -5,9 +5,12 @@ Migration files live in :mod:`better_memory.db.migrations` and are named
 version (the ``NNNN`` prefix) is recorded in the ``schema_migrations`` table so
 re-running :func:`apply_migrations` is a no-op.
 
-Each file is executed inside an explicit transaction. ``CREATE VIRTUAL TABLE``
-and ``CREATE TRIGGER`` work inside a transaction in modern SQLite builds
-(>= 3.39), which matches the minimum we test against.
+Each file is executed via :meth:`sqlite3.Connection.executescript`, which
+issues an implicit ``COMMIT`` before running the script; migrations are
+therefore **not** atomic. On failure the database may be left in a partial
+state — for first-time installs the recovery is to discard the DB file and
+re-run. Multi-file migrations that require atomicity must use a different
+execution path.
 """
 
 from __future__ import annotations

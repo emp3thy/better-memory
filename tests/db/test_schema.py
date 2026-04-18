@@ -197,6 +197,106 @@ def test_fts_triggers_index_insights(tmp_memory_db: Path) -> None:
         conn.close()
 
 
+def test_fts_update_trigger_on_observations(tmp_memory_db: Path) -> None:
+    """Updating observations.content re-indexes the FTS row."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO observations (id, content, project) VALUES (?, ?, ?)",
+            ("obs-u", "flamingo marker", "proj-a"),
+        )
+        conn.commit()
+        conn.execute(
+            "UPDATE observations SET content = ? WHERE id = ?",
+            ("pelican marker", "obs-u"),
+        )
+        conn.commit()
+        flamingo = conn.execute(
+            "SELECT rowid FROM observation_fts WHERE observation_fts MATCH ?",
+            ("flamingo",),
+        ).fetchall()
+        pelican = conn.execute(
+            "SELECT rowid FROM observation_fts WHERE observation_fts MATCH ?",
+            ("pelican",),
+        ).fetchall()
+        assert len(flamingo) == 0, "UPDATE trigger left stale FTS row"
+        assert len(pelican) == 1, "UPDATE trigger did not index new content"
+    finally:
+        conn.close()
+
+
+def test_fts_delete_trigger_on_observations(tmp_memory_db: Path) -> None:
+    """Deleting an observation removes the FTS row."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO observations (id, content, project) VALUES (?, ?, ?)",
+            ("obs-d", "heron marker", "proj-a"),
+        )
+        conn.commit()
+        conn.execute("DELETE FROM observations WHERE id = ?", ("obs-d",))
+        conn.commit()
+        rows = conn.execute(
+            "SELECT rowid FROM observation_fts WHERE observation_fts MATCH ?",
+            ("heron",),
+        ).fetchall()
+        assert len(rows) == 0, "DELETE trigger left FTS row behind"
+    finally:
+        conn.close()
+
+
+def test_fts_update_trigger_on_insights(tmp_memory_db: Path) -> None:
+    """Updating insights.title/content re-indexes the FTS row."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO insights (id, title, content) VALUES (?, ?, ?)",
+            ("ins-u", "flamingo marker", "flamingo marker"),
+        )
+        conn.commit()
+        conn.execute(
+            "UPDATE insights SET title = ?, content = ? WHERE id = ?",
+            ("pelican marker", "pelican marker", "ins-u"),
+        )
+        conn.commit()
+        flamingo = conn.execute(
+            "SELECT rowid FROM insight_fts WHERE insight_fts MATCH ?",
+            ("flamingo",),
+        ).fetchall()
+        pelican = conn.execute(
+            "SELECT rowid FROM insight_fts WHERE insight_fts MATCH ?",
+            ("pelican",),
+        ).fetchall()
+        assert len(flamingo) == 0, "UPDATE trigger left stale FTS row"
+        assert len(pelican) == 1, "UPDATE trigger did not index new content"
+    finally:
+        conn.close()
+
+
+def test_fts_delete_trigger_on_insights(tmp_memory_db: Path) -> None:
+    """Deleting an insight removes the FTS row."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO insights (id, title, content) VALUES (?, ?, ?)",
+            ("ins-d", "heron marker", "heron marker"),
+        )
+        conn.commit()
+        conn.execute("DELETE FROM insights WHERE id = ?", ("ins-d",))
+        conn.commit()
+        rows = conn.execute(
+            "SELECT rowid FROM insight_fts WHERE insight_fts MATCH ?",
+            ("heron",),
+        ).fetchall()
+        assert len(rows) == 0, "DELETE trigger left FTS row behind"
+    finally:
+        conn.close()
+
+
 def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
     """Running :func:`apply_migrations` twice applies 0001 exactly once."""
     conn = connect(tmp_memory_db)

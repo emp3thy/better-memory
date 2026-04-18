@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from better_memory.db.connection import connect, connection
 
@@ -71,7 +74,23 @@ def test_connection_context_manager_closes(tmp_memory_db: Path) -> None:
         assert conn.execute("SELECT vec_version()").fetchone()[0]
 
     # Using the connection after the context manager should raise.
-    import pytest
-
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
+
+
+def test_connect_closes_connection_if_vec_load_fails(tmp_memory_db: Path) -> None:
+    """If ``sqlite_vec.load`` raises, ``connect`` must close the underlying DB.
+
+    On Windows an un-closed :class:`sqlite3.Connection` keeps a file lock which
+    prevents the test tmp directory from being cleaned up. We verify the lock
+    is gone by unlinking the DB file afterwards.
+    """
+    with patch("sqlite_vec.load", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError, match="boom"):
+            connect(tmp_memory_db)
+
+    # If ``connect`` leaked the connection, the file would still be locked on
+    # Windows and ``unlink`` would raise ``PermissionError``.
+    assert tmp_memory_db.exists(), "connect should still have created the DB file"
+    tmp_memory_db.unlink()
+    assert not tmp_memory_db.exists()
