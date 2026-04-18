@@ -214,6 +214,39 @@ def test_search_project_filter_preserves_languages_and_standards(
     assert hits[0].document.language == "python"
 
 
+def test_reindex_content_update_propagates_to_fts(
+    tmp_knowledge_base: Path,
+    knowledge_conn: sqlite3.Connection,
+    fixed_clock: Any,
+) -> None:
+    """A content rewrite must remove old terms and insert new ones in FTS."""
+    (tmp_knowledge_base / "projects" / "test").mkdir(parents=True)
+    doc = tmp_knowledge_base / "projects" / "test" / "foo.md"
+    doc.write_text("alpha marker", encoding="utf-8")
+
+    service = KnowledgeService(
+        knowledge_conn,
+        knowledge_base=tmp_knowledge_base,
+        clock=fixed_clock,
+    )
+    service.reindex()
+    hits = service.search("alpha")
+    assert len(hits) == 1
+    assert hits[0].document.path == "projects/test/foo.md"
+
+    # Rewrite content and bump mtime so reindex picks it up.
+    doc.write_text("beta marker", encoding="utf-8")
+    _bump_mtime(doc)
+
+    report = service.reindex()
+    assert report.updated == 1
+
+    assert service.search("alpha") == []
+    beta_hits = service.search("beta")
+    assert len(beta_hits) == 1
+    assert beta_hits[0].document.path == "projects/test/foo.md"
+
+
 # ---------------------------------------------------------------------------
 # list_documents
 # ---------------------------------------------------------------------------
@@ -276,6 +309,18 @@ def test_detect_languages_by_extension(tmp_path: Path) -> None:
         "python",
         "typescript",
     ]
+
+
+def test_detect_languages_skips_vendor_dirs(tmp_path: Path) -> None:
+    """Files under `.git` / `node_modules` must not influence detection."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "hook.py").write_text("")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "foo.ts").write_text("")
+
+    service = KnowledgeService.__new__(KnowledgeService)  # type: ignore[call-arg]
+    assert KnowledgeService.detect_languages(service, tmp_path) == ["python"]
 
 
 # ---------------------------------------------------------------------------

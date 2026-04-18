@@ -25,6 +25,7 @@ not share a connection that already has an open transaction.
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -124,6 +125,8 @@ def _row_to_document(row: sqlite3.Row) -> KnowledgeDocument:
 
 # Language detection --------------------------------------------------------
 
+# JavaScript and TypeScript share a single knowledge bundle in this system, so
+# `.js`/`.jsx` files and `package.json` all surface the `typescript` scope.
 _EXT_LANGUAGES: dict[str, str] = {
     ".py": "python",
     ".ts": "typescript",
@@ -139,6 +142,28 @@ _MARKER_LANGUAGES: dict[str, str] = {
     "package.json": "typescript",
     "tsconfig.json": "typescript",
 }
+
+# Directories pruned from the detect_languages walk — vendor / build / VCS
+# caches that would otherwise dominate the traversal and pollute results
+# (e.g. vendored JS under `.venv` misclassified as "typescript").
+_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "env",
+        "__pycache__",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        ".idea",
+        ".vscode",
+    }
+)
 
 
 class KnowledgeService:
@@ -263,17 +288,18 @@ class KnowledgeService:
             found.add("csharp")
 
         # Extension sweep — bounded to avoid traversing huge vendor trees.
-        # We still use rglob but bail out as soon as every language has a hit.
+        # os.walk lets us prune _SKIP_DIRS in-place, and we bail out as soon
+        # as every language has a hit.
         want = set(_EXT_LANGUAGES.values())
-        for file_path in cwd.rglob("*"):
-            if found >= want:
-                break
-            if not file_path.is_file():
-                continue
-            ext = file_path.suffix.lower()
-            lang = _EXT_LANGUAGES.get(ext)
-            if lang is not None:
-                found.add(lang)
+        for _dirpath, dirnames, filenames in os.walk(cwd):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            for fname in filenames:
+                ext = Path(fname).suffix.lower()
+                lang = _EXT_LANGUAGES.get(ext)
+                if lang is not None:
+                    found.add(lang)
+                    if found >= want:
+                        return sorted(found)
 
         return sorted(found)
 
