@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,7 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.search.hybrid import SearchResult
-from better_memory.services.insight import InsightService
+from better_memory.services.insight import InsightSearchResult, InsightService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
     KnowledgeSearchResult,
@@ -101,11 +102,6 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {
                     "query": {"type": "string"},
                     "component": {"type": "string"},
-                    "type": {
-                        "type": "string",
-                        "enum": ["observation", "insight", "all"],
-                        "default": "all",
-                    },
                     "window": {
                         "type": "string",
                         "default": "30d",
@@ -197,9 +193,15 @@ def _parse_window(value: str | None) -> int | None:
     if raw in {"", "none"}:
         return None
     if raw.endswith("d"):
-        return int(raw[:-1])
+        magnitude = raw[:-1]
+        if not magnitude.isdigit():
+            raise ValueError(f"Unrecognised window: {value!r}")
+        return int(magnitude)
     if raw.endswith("h"):
-        hours = int(raw[:-1])
+        magnitude = raw[:-1]
+        if not magnitude.isdigit():
+            raise ValueError(f"Unrecognised window: {value!r}")
+        hours = int(magnitude)
         # Any sub-day window collapses to a single day because the underlying
         # hybrid_search windowing is day-granular. We round up so a request of
         # "1h" still matches same-day rows.
@@ -221,7 +223,7 @@ def _serialize_result(result: SearchResult) -> dict[str, Any]:
     }
 
 
-def _serialize_insight(result: Any) -> dict[str, Any]:
+def _serialize_insight(result: InsightSearchResult) -> dict[str, Any]:
     insight = result.insight
     return {
         "id": insight.id,
@@ -256,8 +258,14 @@ def _serialize_knowledge_doc(doc: KnowledgeDocument) -> dict[str, Any]:
 # --------------------------------------------------------------------------- factory
 
 
-def create_server() -> Server:
-    """Wire services and register tools; return an unstarted ``Server``."""
+def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
+    """Wire services and register tools.
+
+    Returns a ``(server, cleanup)`` tuple where ``cleanup`` is an idempotent
+    async function that closes the two SQLite connections and the Ollama
+    embedder's HTTP client. Callers must await ``cleanup`` on shutdown
+    (typically in a ``finally`` around ``server.run``).
+    """
     config = get_config()
 
     memory_conn = connect(config.memory_db)
@@ -399,14 +407,43 @@ def create_server() -> Server:
 
         raise ValueError(f"Unknown tool: {name}")
 
-    return server
+    cleaned = False
+
+    async def cleanup() -> None:
+        """Close SQLite connections and the embedder HTTP client.
+
+        Idempotent: safe to call multiple times. SQLite ``Connection.close``
+        is a no-op after the first call, and we guard the embedder close with
+        a local flag so we don't double-close its httpx client either.
+        """
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        try:
+            memory_conn.close()
+        except Exception:  # noqa: BLE001 — best-effort shutdown
+            pass
+        try:
+            knowledge_conn.close()
+        except Exception:  # noqa: BLE001 — best-effort shutdown
+            pass
+        try:
+            await embedder.aclose()
+        except Exception:  # noqa: BLE001 — best-effort shutdown
+            pass
+
+    return server, cleanup
 
 
 async def run() -> None:
     """Start the server on stdio and run until the client disconnects."""
-    server = create_server()
-    async with stdio_server() as (read, write):
-        await server.run(read, write, server.create_initialization_options())
+    server, cleanup = create_server()
+    try:
+        async with stdio_server() as (read, write):
+            await server.run(read, write, server.create_initialization_options())
+    finally:
+        await cleanup()
 
 
 if __name__ == "__main__":  # pragma: no cover — module entry-point shim
