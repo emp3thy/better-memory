@@ -23,15 +23,21 @@ case "$(uname -s)" in
         ;;
 esac
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -W 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BETTER_MEMORY_HOME_DEFAULT="${HOME}/.better-memory"
 BETTER_MEMORY_HOME="${BETTER_MEMORY_HOME:-$BETTER_MEMORY_HOME_DEFAULT}"
 
-# Windows path conversion for the printed JSON.
+# Windows path conversion for the printed JSON (uppercase drive letter,
+# backslash-escaped for JSON string literals).
 win_path() {
     if [[ "$OS" == "windows" ]]; then
-        # /c/Users/... -> C:\Users\...
-        echo "$1" | sed -E 's|^/([a-zA-Z])/|\1:/|' | sed 's|/|\\\\|g'
+        local p="$1"
+        if [[ "$p" =~ ^/([a-zA-Z])/(.*) ]]; then
+            local drive="${BASH_REMATCH[1]^^}"
+            p="${drive}:/${BASH_REMATCH[2]}"
+        fi
+        # Replace / with \\ for JSON string literals.
+        echo "${p//\//\\\\}"
     else
         echo "$1"
     fi
