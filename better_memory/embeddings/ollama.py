@@ -10,13 +10,15 @@ Design choices:
     * Every returned vector is length-checked against ``expected_dim`` (768 for
       ``nomic-embed-text``). A mismatch raises :class:`EmbeddingError` rather
       than silently padding / truncating.
-    * Transient failures (connect errors, connect timeouts, 5xx responses) are
-      retried with exponential backoff. 4xx responses fail immediately — they
-      indicate a configuration error (missing model, bad request body) that
-      retrying will not fix.
-    * If Ollama is ultimately unreachable, the final exception is wrapped in
-      :class:`EmbeddingError` so callers can catch a single type. Exception
-      chaining via ``raise ... from exc`` preserves the original cause.
+    * Transient transport failures (``httpx.TransportError`` — connect errors,
+      connect/read timeouts, protocol errors, read errors, etc.) and 5xx
+      responses are retried with exponential backoff. 4xx responses fail
+      immediately — they indicate a configuration error (missing model, bad
+      request body) that retrying will not fix.
+    * Any ``httpx.HTTPError`` that escapes the specific branches is wrapped in
+      :class:`EmbeddingError` so callers only ever need to catch a single
+      type. Exception chaining via ``raise ... from exc`` preserves the
+      original cause.
 """
 
 from __future__ import annotations
@@ -72,6 +74,9 @@ class OllamaEmbedder:
         expected_dim: int = 768,
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        if max_retries < 1:
+            raise ValueError("max_retries must be >= 1")
+
         cfg = get_config()
         self._host = host if host is not None else cfg.ollama_host
         self._model = model if model is not None else cfg.embed_model
@@ -141,7 +146,7 @@ class OllamaEmbedder:
         for attempt in range(self._max_retries):
             try:
                 response = await self._client.post("/api/embed", json=body)
-            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            except httpx.TransportError as exc:
                 last_exc = exc
                 if attempt + 1 >= self._max_retries:
                     raise EmbeddingError(
@@ -150,6 +155,13 @@ class OllamaEmbedder:
                     ) from exc
                 await asyncio.sleep(self._backoff_base * (2**attempt))
                 continue
+            except httpx.HTTPError as exc:
+                # Any other httpx error (e.g. InvalidURL, UnsupportedProtocol,
+                # a non-transport RequestError subclass) is surfaced as an
+                # EmbeddingError so callers never see raw httpx exceptions.
+                raise EmbeddingError(
+                    f"Unexpected httpx error talking to Ollama: {exc}"
+                ) from exc
 
             if 500 <= response.status_code < 600:
                 last_exc = httpx.HTTPStatusError(

@@ -340,6 +340,120 @@ async def test_context_manager_delegates_to_aclose() -> None:
     await client.aclose()
 
 
+async def test_embed_read_timeout_is_retried_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("better_memory.embeddings.ollama.asyncio.sleep", fake_sleep)
+
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ReadTimeout("slow first load")
+        return httpx.Response(200, json={"embeddings": [_VEC_768]})
+
+    client = _make_client(handler)
+    embedder = OllamaEmbedder(client=client, max_retries=3, backoff_base=0.5)
+    try:
+        out = await embedder.embed("hi")
+    finally:
+        await client.aclose()
+
+    assert out == _VEC_768
+    assert call_count == 2
+    assert sleeps == [0.5]
+
+
+async def test_embed_read_timeout_exhausted_raises_embedding_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("better_memory.embeddings.ollama.asyncio.sleep", fake_sleep)
+
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        raise httpx.ReadTimeout("still slow")
+
+    client = _make_client(handler)
+    embedder = OllamaEmbedder(client=client, max_retries=3, backoff_base=0.5)
+    try:
+        with pytest.raises(EmbeddingError) as excinfo:
+            await embedder.embed("hi")
+    finally:
+        await client.aclose()
+
+    assert call_count == 3
+    assert sleeps == [0.5, 1.0]
+    assert isinstance(excinfo.value.__cause__, httpx.ReadTimeout)
+
+
+async def test_embed_remote_protocol_error_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("better_memory.embeddings.ollama.asyncio.sleep", fake_sleep)
+
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.RemoteProtocolError("peer closed connection")
+        return httpx.Response(200, json={"embeddings": [_VEC_768]})
+
+    client = _make_client(handler)
+    embedder = OllamaEmbedder(client=client, max_retries=3, backoff_base=0.5)
+    try:
+        out = await embedder.embed("hi")
+    finally:
+        await client.aclose()
+
+    assert out == _VEC_768
+    assert call_count == 2
+    assert sleeps == [0.5]
+
+
+async def test_embed_unknown_http_error_is_wrapped_as_embedding_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.HTTPError("synthetic")
+
+    client = _make_client(handler)
+    embedder = OllamaEmbedder(client=client, max_retries=3)
+    try:
+        with pytest.raises(EmbeddingError) as excinfo:
+            await embedder.embed("hi")
+    finally:
+        await client.aclose()
+
+    # The raw httpx exception is wrapped, not re-raised.
+    assert isinstance(excinfo.value.__cause__, httpx.HTTPError)
+    assert not isinstance(excinfo.value, httpx.HTTPError)
+
+
+async def test_max_retries_below_one_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="max_retries must be >= 1"):
+        OllamaEmbedder(max_retries=0)
+
+
 async def test_defaults_come_from_get_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OLLAMA_HOST", "http://example.invalid:9999")
     monkeypatch.setenv("EMBED_MODEL", "custom-model")
