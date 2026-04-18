@@ -14,8 +14,14 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+# Cap stdin reads so a malicious or accidentally huge payload can't starve the
+# hook process of memory. 1 MiB is far larger than anything Claude Code emits
+# in practice but small enough to be trivially bounded.
+_MAX_STDIN_BYTES = 1_048_576
 
 
 def _default_spool_dir() -> Path:
@@ -52,7 +58,12 @@ def _safe_tool(raw: object) -> str:
 
 def main() -> None:
     try:
-        payload = sys.stdin.read()
+        # Read one byte past the cap so we can detect oversize without holding
+        # more than MAX+1 bytes in memory.
+        payload = sys.stdin.read(_MAX_STDIN_BYTES + 1)
+        if len(payload) > _MAX_STDIN_BYTES:
+            # Oversized — silently drop and exit 0; hooks never fail.
+            sys.exit(0)
         # ``json.loads`` raises on empty input, which cascades into the outer
         # ``except Exception`` and exits 0 without writing a file.
         data = json.loads(payload)
@@ -70,9 +81,14 @@ def main() -> None:
         ts_component = _safe_timestamp(data.get("timestamp"))
         tool_component = _safe_tool(data.get("tool"))
         # SHA-256 prefix of the serialised payload — cheap collision avoidance
-        # for two events that happen in the same second on the same tool.
+        # for two events that happen in the same second on the same tool. The
+        # salt (monotonic-nanosecond clock + PID) guarantees uniqueness even
+        # for two invocations with byte-identical payloads, which is otherwise
+        # possible when Claude Code replays the same tool call. The salt does
+        # NOT appear in the written body — it only perturbs the filename.
         serialised = json.dumps(data, sort_keys=True).encode("utf-8")
-        hash_hex = hashlib.sha256(serialised).hexdigest()[:12]
+        salt = f"{time.time_ns()}:{os.getpid()}".encode()
+        hash_hex = hashlib.sha256(serialised + salt).hexdigest()[:12]
 
         file_name = f"{ts_component}_{tool_component}_{hash_hex}.json"
         (spool_dir / file_name).write_text(

@@ -284,6 +284,68 @@ def test_drain_ignores_subdirectories(
     assert preexisting.read_text(encoding="utf-8") == "garbage"
 
 
+def test_drain_commit_failure_leaves_files_in_spool_and_no_rows(
+    conn: sqlite3.Connection, tmp_spool: Path
+) -> None:
+    # Simulate a commit failure (e.g. disk full, lock held). The invariant:
+    # if commit() fails, spool files MUST remain on disk so a subsequent
+    # drain can retry, and the hook_events table MUST have 0 rows because
+    # the transaction was rolled back / never applied.
+    _write_event(
+        tmp_spool,
+        name="2026-04-18T12-00-00Z_Edit_a.json",
+        timestamp="2026-04-18T12:00:00Z",
+    )
+    _write_event(
+        tmp_spool,
+        name="2026-04-18T12-00-01Z_Edit_b.json",
+        timestamp="2026-04-18T12:00:01Z",
+    )
+
+    class _CommitBoom(sqlite3.OperationalError):
+        pass
+
+    class _ExplodingCommitConn:
+        """Delegates everything to the real connection but raises on commit.
+
+        ``sqlite3.Connection`` disallows attribute assignment, so we can't
+        monkeypatch ``conn.commit`` directly. A thin proxy lets us swap in a
+        failing commit while leaving ``execute`` and friends untouched.
+        """
+
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self._inner = inner
+
+        def commit(self) -> None:
+            raise _CommitBoom("simulated commit failure")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    proxy = _ExplodingCommitConn(conn)
+    service = SpoolService(proxy, spool_dir=tmp_spool)  # type: ignore[arg-type]
+    with pytest.raises(_CommitBoom):
+        service.drain()
+
+    # Both source files must still be present at the top level (not unlinked,
+    # not quarantined) so the next drain can retry them.
+    remaining = sorted(p.name for p in tmp_spool.glob("*.json"))
+    assert remaining == [
+        "2026-04-18T12-00-00Z_Edit_a.json",
+        "2026-04-18T12-00-01Z_Edit_b.json",
+    ]
+    quarantined = list((tmp_spool / ".quarantine").glob("*.json"))
+    assert quarantined == []
+
+    # Restore a working commit so we can read the table state. INSERTs issued
+    # before the failed commit are part of the open transaction on THIS
+    # connection, so issue a rollback to ensure visibility matches a
+    # post-failure state from a fresh connection's perspective.
+    conn.rollback()
+    count = conn.execute("SELECT COUNT(*) AS c FROM hook_events").fetchone()["c"]
+    assert count == 0
+
+
 def test_drain_defaults_spool_dir_from_config(
     conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

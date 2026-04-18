@@ -14,6 +14,11 @@ Design rules
 * Top-level glob only — the ``.quarantine`` subdirectory is never re-scanned.
 * Commit once per batch; the ``hook_events`` table is append-only and each row
   is independently meaningful, so per-file rollbacks have no semantic value.
+* Commit-before-unlink: spool files are only deleted after the batch commit
+  succeeds. If ``commit()`` raises (disk full, lock held, etc.) the files
+  remain in the spool and a subsequent drain retries them. Data integrity
+  takes precedence over cleanup — a row must never be ``lost`` because its
+  file was deleted before the transaction was durable.
 """
 
 from __future__ import annotations
@@ -67,6 +72,17 @@ class SpoolService:
 
         Malformed files (bad JSON, missing required fields, insert error) are
         moved to ``<spool>/.quarantine/`` under their original name.
+
+        The method runs in three passes so we only delete source files after
+        the database transaction has been committed:
+
+        1. Parse-and-insert every top-level JSON file. Bad files are
+           quarantined immediately; successfully inserted files are queued
+           for deletion.
+        2. ``conn.commit()`` — if this raises, the queued files are left on
+           disk for a subsequent drain to retry and the exception propagates.
+        3. Unlink each committed file. Unlink failures (e.g. Windows file
+           locks) quarantine the source so it isn't re-inserted next drain.
         """
         spool = self._spool_dir
         spool.mkdir(parents=True, exist_ok=True)
@@ -78,9 +94,12 @@ class SpoolService:
         # processed first and inserts land in chronological order.
         files = sorted(spool.glob("*.json"))
 
-        drained = 0
         quarantined = 0
+        # Files whose rows were queued on the connection. Cleanup happens
+        # AFTER commit() returns successfully.
+        inserted: list[Path] = []
 
+        # ---- Pass 1: parse + insert (no file unlinks yet) -----------------
         for path in files:
             try:
                 self._insert_one(path)
@@ -90,18 +109,29 @@ class SpoolService:
                 self._quarantine(path, quarantine)
                 quarantined += 1
             else:
-                try:
-                    path.unlink()
-                except OSError:
-                    # File couldn't be deleted (e.g. locked on Windows). The
-                    # row is already inserted, so a re-drain would double-insert.
-                    # Quarantine the source instead to prevent duplication.
-                    self._quarantine(path, quarantine)
-                    # Still counts as drained — the row is in the DB.
-                drained += 1
+                inserted.append(path)
 
-        # One commit per batch; see module docstring.
+        # ---- Pass 2: commit once per batch --------------------------------
+        # If commit raises, ``inserted`` files stay on disk; the exception
+        # propagates so the caller knows the drain did not complete. A
+        # subsequent drain will re-read those files and retry.
         self._conn.commit()
+
+        # ---- Pass 3: unlink committed files -------------------------------
+        # Only reached if commit() succeeded. Every file in ``inserted`` now
+        # has a durable row, so losing the file is safe; failing to unlink
+        # is a bookkeeping problem (quarantine to prevent re-insertion on
+        # the next drain).
+        drained = 0
+        for path in inserted:
+            try:
+                path.unlink()
+            except OSError:
+                # File couldn't be deleted (e.g. locked on Windows). The row
+                # is already committed, so a re-drain would double-insert.
+                # Quarantine the source instead to prevent duplication.
+                self._quarantine(path, quarantine)
+            drained += 1
 
         return DrainReport(drained=drained, quarantined=quarantined)
 

@@ -132,6 +132,44 @@ def test_observer_two_identical_payloads_produce_distinct_files(
     assert len(names) == 2
 
 
+def test_observer_same_payload_twice_produces_distinct_filenames(
+    tmp_spool: Path,
+) -> None:
+    # Byte-identical stdin on two successive invocations must still result in
+    # two distinct spool files — the hash salt (ns clock + PID) guarantees
+    # uniqueness. Without the salt, the second invocation would overwrite the
+    # first, silently losing an event.
+    payload = json.dumps(
+        {
+            "event_type": "tool_use",
+            "tool": "Edit",
+            "file": "auth.py",
+            "timestamp": "2026-04-18T12:00:00Z",
+        }
+    )
+    r1 = _run_observer(tmp_spool, stdin=payload)
+    r2 = _run_observer(tmp_spool, stdin=payload)
+    assert r1.returncode == 0, r1.stderr
+    assert r2.returncode == 0, r2.stderr
+    files = list(tmp_spool.glob("*.json"))
+    assert len(files) == 2, [f.name for f in files]
+    assert len({f.name for f in files}) == 2
+
+
+def test_observer_oversized_stdin_is_dropped(tmp_spool: Path) -> None:
+    # Anything strictly larger than 1 MiB should exit 0 without writing a
+    # spool file — hooks never fail, but they also never allocate unbounded
+    # memory. We build a valid JSON document whose serialised form is well
+    # over the cap.
+    huge_value = "x" * (1_048_576 + 16)
+    payload = json.dumps({"event_type": "tool_use", "tool": "Edit", "blob": huge_value})
+    assert len(payload) > 1_048_576  # sanity — the cap must actually be tripped
+
+    result = _run_observer(tmp_spool, stdin=payload)
+    assert result.returncode == 0, result.stderr
+    assert list(tmp_spool.glob("*.json")) == []
+
+
 def test_observer_missing_tool_field_still_succeeds(tmp_spool: Path) -> None:
     payload = {
         "event_type": "tool_use",

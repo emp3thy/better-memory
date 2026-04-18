@@ -14,9 +14,14 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+
+# Mirror the observer cap: reject any stdin payload above 1 MiB without
+# raising. Hooks must never fail.
+_MAX_STDIN_BYTES = 1_048_576
 
 
 def _default_spool_dir() -> Path:
@@ -53,9 +58,15 @@ def main() -> None:
 
         raw_stdin = ""
         try:
-            raw_stdin = sys.stdin.read()
+            # Read one byte past the cap so we can detect oversize without
+            # holding more than MAX+1 bytes in memory.
+            raw_stdin = sys.stdin.read(_MAX_STDIN_BYTES + 1)
         except Exception:
             raw_stdin = ""
+
+        if len(raw_stdin) > _MAX_STDIN_BYTES:
+            # Oversized — silently drop and exit 0; hooks never fail.
+            sys.exit(0)
 
         parsed: object = None
         if raw_stdin.strip():
@@ -84,8 +95,12 @@ def main() -> None:
         spool_dir.mkdir(parents=True, exist_ok=True)
 
         ts_component = _safe_timestamp(str(data.get("timestamp")))
+        # Salt the hash with monotonic-nanosecond clock + PID so two
+        # byte-identical payloads in the same second can't collide on
+        # filename. The salt does NOT appear in the written body.
         serialised = json.dumps(data, sort_keys=True).encode("utf-8")
-        hash_hex = hashlib.sha256(serialised).hexdigest()[:12]
+        salt = f"{time.time_ns()}:{os.getpid()}".encode()
+        hash_hex = hashlib.sha256(serialised + salt).hexdigest()[:12]
 
         file_name = f"{ts_component}_session_end_{hash_hex}.json"
         (spool_dir / file_name).write_text(
