@@ -637,6 +637,34 @@ async def test_search_limit_is_respected(
     assert len(results) == 2
 
 
+async def test_search_with_hyphenated_query_does_not_crash(
+    service: InsightService,
+) -> None:
+    """Regression: ``better-memory`` once raised ``no such column: memory``.
+
+    FTS5 parses ``-memory`` as a column-exclusion filter; the service must
+    sanitise operator characters out of user text before calling MATCH.
+    """
+    matching_id = await service.create(
+        title="better-memory retrieval", content="project commit push conventions"
+    )
+
+    results = service.search("better-memory project commit push conventions")
+
+    assert [r.insight.id for r in results] == [matching_id]
+
+
+async def test_search_with_fts5_operator_chars_does_not_crash(
+    service: InsightService,
+) -> None:
+    """Any combination of FTS5 operators must survive: colon, quote, paren."""
+    await service.create(title="alpha", content="beta gamma")
+
+    # None of these should propagate sqlite3.OperationalError.
+    service.search('alpha:beta "gamma" (delta)')
+    service.search("AND OR NOT NEAR")
+
+
 # ---------------------------------------------------------------------------
 # Smoke: sqlite_vec is available (used when embed=True)
 # ---------------------------------------------------------------------------

@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from better_memory.search.query import sanitize_fts5_query
+
 
 @dataclass(frozen=True)
 class KnowledgeDocument:
@@ -329,6 +331,13 @@ class KnowledgeService:
         When ``project`` is set, project-scoped rows are restricted to that
         project; standards and languages always surface.
         """
+        # Sanitise before MATCH: raw user text containing FTS5 operator
+        # chars (``-``, ``:``, ``"``) would otherwise crash the query
+        # (e.g. ``better-memory`` → ``no such column: memory``).
+        sanitized = sanitize_fts5_query(query)
+        if not sanitized:
+            return []
+
         sql = (
             "SELECT d.id AS id, d.path AS path, d.scope AS scope, "
             "       d.project AS project, d.language AS language, "
@@ -339,7 +348,7 @@ class KnowledgeService:
             "JOIN documents d ON d.rowid = document_fts.rowid "
             "WHERE document_fts MATCH ? "
         )
-        params: list[object] = [query]
+        params: list[object] = [sanitized]
         if project is not None:
             sql += (
                 "AND (d.scope = 'standard' OR d.scope = 'language' "
@@ -349,7 +358,11 @@ class KnowledgeService:
         sql += "ORDER BY rank LIMIT ?"
         params.append(limit)
 
-        rows = self._conn.execute(sql, params).fetchall()
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            # Safety net for any FTS5 operator the sanitiser missed.
+            return []
         return [
             KnowledgeSearchResult(document=_row_to_document(row), rank=row["rank"])
             for row in rows

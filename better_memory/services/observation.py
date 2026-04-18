@@ -52,6 +52,7 @@ from better_memory.search.hybrid import (
     SearchResult,
     hybrid_search,
 )
+from better_memory.search.query import sanitize_fts5_query
 from better_memory.services import audit
 
 Outcome = Literal["success", "failure", "neutral"]
@@ -222,6 +223,15 @@ class ObservationService:
         if query is not None and query.strip():
             query_vector = await self._embedder.embed(query)
 
+        # Sanitise before FTS5 MATCH: user queries like ``better-memory retrieval``
+        # would otherwise be parsed by FTS5 as ``-memory`` column-exclusion and
+        # resolve to [] (via the safety net in hybrid._fts_candidates), yielding
+        # zero hits for any hyphenated term. The embedder still receives the
+        # raw query — operator chars don't affect semantic similarity.
+        fts_query_text = (
+            sanitize_fts5_query(query) if query is not None else None
+        ) or None
+
         base_kwargs: dict[str, Any] = {
             "project": resolved_project,
             "component": component,
@@ -234,7 +244,7 @@ class ObservationService:
             filters = SearchFilters(outcome=outcome, **base_kwargs)
             return hybrid_search(
                 self._conn,
-                query_text=query,
+                query_text=fts_query_text,
                 query_vector=query_vector,
                 filters=filters,
                 limit=limit,

@@ -198,3 +198,36 @@ async def test_retrieve_with_no_query_still_returns_bucketed(
     assert result.do == []
     assert result.dont == []
     assert result.neutral == []
+
+
+async def test_retrieve_with_hyphenated_query_ranks_fts_match_first(
+    service: ObservationService,
+) -> None:
+    """Regression: ``better-memory`` once crashed FTS5 as ``-memory`` column.
+
+    The safety net in hybrid search would swallow the error and return ``[]``
+    for the FTS path, so users got vector-only hits (or nothing) for any
+    hyphenated query. After sanitising, the FTS path delivers the matching
+    row, which then ranks first in RRF fusion because only it contributes
+    an FTS rank on top of the vector rank.
+    """
+    matched_id = await service.create(
+        "better memory retrieval conventions", outcome="success"
+    )
+    await service.create("unrelated row about something else", outcome="success")
+
+    result = await service.retrieve(query="better-memory retrieval conventions")
+
+    assert len(result.do) >= 1
+    assert result.do[0].id == matched_id
+
+
+async def test_retrieve_with_fts5_operator_chars_does_not_crash(
+    service: ObservationService,
+) -> None:
+    """Colons, quotes, parentheses must all survive end-to-end."""
+    await service.create("alpha beta gamma", outcome="success")
+
+    # None of these should propagate sqlite3.OperationalError.
+    await service.retrieve(query='alpha:beta "gamma" (delta)')
+    await service.retrieve(query="AND OR NOT NEAR")

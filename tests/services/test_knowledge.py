@@ -214,6 +214,29 @@ def test_search_project_filter_preserves_languages_and_standards(
     assert hits[0].document.language == "python"
 
 
+def test_search_with_hyphenated_query_does_not_crash(
+    service: KnowledgeService,
+) -> None:
+    """Regression: ``better-memory`` once raised ``no such column: memory``.
+
+    FTS5 parses ``-memory`` as a column-exclusion filter; the service must
+    sanitise operator characters out of user text before calling MATCH.
+    """
+    service.reindex()
+
+    # Must not raise; may return any hits (we only assert it completes).
+    service.search("better-memory project commit push conventions")
+
+
+def test_search_with_fts5_operator_chars_does_not_crash(
+    service: KnowledgeService,
+) -> None:
+    """Colons, quotes, parentheses, and reserved keywords must all survive."""
+    service.reindex()
+    service.search('alpha:beta "gamma" (delta)')
+    service.search("AND OR NOT NEAR")
+
+
 def test_reindex_content_update_propagates_to_fts(
     tmp_knowledge_base: Path,
     knowledge_conn: sqlite3.Connection,

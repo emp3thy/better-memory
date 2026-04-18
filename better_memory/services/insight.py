@@ -43,6 +43,7 @@ from uuid import uuid4
 import sqlite_vec
 
 from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.search.query import sanitize_fts5_query
 from better_memory.services import audit
 
 Polarity = Literal["do", "dont", "neutral"]
@@ -540,6 +541,13 @@ class InsightService:
             params.append(status)
 
         if query is not None and query.strip():
+            # Sanitise before MATCH: raw user text containing FTS5 operator
+            # chars (``-``, ``:``, ``"``) would otherwise crash the query
+            # (e.g. ``better-memory`` → ``no such column: memory``).
+            sanitized = sanitize_fts5_query(query)
+            if not sanitized:
+                return []
+
             sql = (
                 "SELECT i.*, bm25(insight_fts) AS rank "
                 "FROM insight_fts "
@@ -547,12 +555,16 @@ class InsightService:
                 "WHERE insight_fts MATCH ? "
             )
             # Prepend the MATCH param before the filter params.
-            match_params: list[Any] = [query]
+            match_params: list[Any] = [sanitized]
             if filter_clauses:
                 sql += "AND " + " AND ".join(filter_clauses) + " "
             sql += "ORDER BY rank LIMIT ?"
             final_params = match_params + params + [limit]
-            rows = self._conn.execute(sql, final_params).fetchall()
+            try:
+                rows = self._conn.execute(sql, final_params).fetchall()
+            except sqlite3.OperationalError:
+                # Safety net for any FTS5 operator the sanitiser missed.
+                return []
             return [
                 InsightSearchResult(
                     insight=_row_to_insight(row), rank=row["rank"]

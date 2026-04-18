@@ -202,7 +202,13 @@ def _fts_candidates(
     where_params: list[Any],
     candidate_k: int,
 ) -> list[str]:
-    """Return observation ids ordered by BM25 (best first), honouring filters."""
+    """Return observation ids ordered by BM25 (best first), honouring filters.
+
+    ``query_text`` is treated as a raw FTS5 MATCH expression — callers that
+    accept natural-language user input are responsible for sanitising it
+    first (see :func:`better_memory.search.query.sanitize_fts5_query`).
+    Malformed queries are caught as a safety net and resolve to [].
+    """
     sql = (
         "SELECT o.id AS id, bm25(observation_fts) AS bm "
         "FROM observation_fts "
