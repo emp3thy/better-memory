@@ -56,7 +56,20 @@ def _default_clock() -> datetime:
 
 
 class ObservationService:
-    """Service for creating observations and recording their reinforcement."""
+    """Service for creating observations and recording their reinforcement.
+
+    Connection ownership
+    --------------------
+    ``ObservationService`` assumes it owns the provided :class:`sqlite3.Connection`
+    and is free to call :meth:`~sqlite3.Connection.commit` and
+    :meth:`~sqlite3.Connection.rollback` on it. Callers must not share a
+    connection that already has an open transaction with other services: the
+    ``commit()`` in :meth:`create` and the ``rollback()`` in
+    :meth:`record_use` (unknown id path) would otherwise steal commit/rollback
+    authority from the caller and either commit uncommitted work or discard it.
+    This contract may be revisited when higher-level orchestration lands in a
+    later phase.
+    """
 
     def __init__(
         self,
@@ -152,6 +165,7 @@ class ObservationService:
         else:
             conn.execute("RELEASE SAVEPOINT observation_create")
 
+        # Service owns the connection — see class docstring for the contract.
         conn.commit()
         return obs_id
 
@@ -206,6 +220,7 @@ class ObservationService:
 
         if cursor.rowcount == 0:
             # No row updated — reject to give callers a clear error.
+            # Service owns the connection — see class docstring for the contract.
             conn.rollback()
             raise ValueError(f"Observation not found: {observation_id}")
 
