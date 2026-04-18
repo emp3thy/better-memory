@@ -1,5 +1,10 @@
 """Service layer for better-memory."""
 
+from better_memory.services.insight import (
+    Insight,
+    InsightSearchResult,
+    InsightService,
+)
 from better_memory.services.knowledge import (
     KnowledgeDocument,
     KnowledgeSearchResult,
@@ -11,6 +16,9 @@ from better_memory.services.observation import BucketedResults, ObservationServi
 
 __all__ = [
     "BucketedResults",
+    "Insight",
+    "InsightSearchResult",
+    "InsightService",
     "KnowledgeDocument",
     "KnowledgeSearchResult",
     "KnowledgeService",
