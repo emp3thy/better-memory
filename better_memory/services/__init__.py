@@ -13,9 +13,11 @@ from better_memory.services.knowledge import (
     SessionLoad,
 )
 from better_memory.services.observation import BucketedResults, ObservationService
+from better_memory.services.spool import DrainReport, SpoolService
 
 __all__ = [
     "BucketedResults",
+    "DrainReport",
     "Insight",
     "InsightSearchResult",
     "InsightService",
@@ -25,4 +27,5 @@ __all__ = [
     "ObservationService",
     "ReindexReport",
     "SessionLoad",
+    "SpoolService",
 ]
