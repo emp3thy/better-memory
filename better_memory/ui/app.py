@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import threading
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, abort, redirect, render_template, request, url_for
 from werkzeug.wrappers import Response
 
 from better_memory.config import resolve_home
+from better_memory.db.connection import connect
+from better_memory.services.insight import InsightService
 
 
 def create_app(
@@ -18,6 +21,7 @@ def create_app(
     inactivity_timeout: float = 1800.0,
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
+    db_path: Path | None = None,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -34,6 +38,21 @@ def create_app(
         synchronously without spawning threads.
     """
     app = Flask(__name__)
+
+    # Resolve DB path from arg or config.
+    resolved_db = db_path if db_path is not None else resolve_home() / "memory.db"
+    db_conn = connect(resolved_db)
+
+    app.extensions["db_connection"] = db_conn
+    app.extensions["insight_service"] = InsightService(conn=db_conn)
+
+    @app.teardown_appcontext
+    def _close_db_on_teardown(_exc: BaseException | None) -> None:
+        # Flask calls this after every request in an app context. We keep
+        # the connection open for the life of the app (shared single-request
+        # model with threaded=False), so do nothing per-request. The
+        # connection is closed when the process exits.
+        return None
 
     def _cleanup_ui_url() -> None:
         try:

@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import threading
 import time as _time
+from pathlib import Path
 from unittest.mock import patch
 
 from flask.testing import FlaskClient
 
 from better_memory.ui.app import create_app
+
+
+class TestServiceWiring:
+    def test_app_exposes_insight_service(self, client: FlaskClient) -> None:
+        # The service is attached to app.extensions for routes to use.
+        assert "insight_service" in client.application.extensions
+
+    def test_app_exposes_open_db_connection(
+        self, tmp_db: Path
+    ) -> None:
+        app = create_app(start_watchdog=False, db_path=tmp_db)
+        conn = app.extensions["db_connection"]
+        # Connection is open and usable against the migrated schema.
+        row = conn.execute("SELECT COUNT(*) FROM observations").fetchone()
+        assert row[0] == 0
 
 
 class TestHealthz:
