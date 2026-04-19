@@ -170,10 +170,10 @@ class TestInactivityTimeout:
             mock_exit.assert_not_called()
 
     def test_watchdog_thread_started_by_default(self) -> None:
+        before = sum(1 for t in threading.enumerate() if t.name == "ui-watchdog")
         app = create_app()
-        # Name is set in the factory; look for it in the thread roster.
-        names = [t.name for t in threading.enumerate()]
-        assert "ui-watchdog" in names
+        after = sum(1 for t in threading.enumerate() if t.name == "ui-watchdog")
+        assert after == before + 1
 
     def test_watchdog_thread_skipped_when_disabled(self) -> None:
         # Tests that don't want the thread can pass start_watchdog=False.
