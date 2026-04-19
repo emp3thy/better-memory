@@ -185,5 +185,12 @@ def start_consolidation_job(
             _lock.release()
 
     t = threading.Thread(target=_run, daemon=True, name=f"consolidation-{job_id[:8]}")
-    t.start()
+    try:
+        t.start()
+    except BaseException:
+        # Thread never ran, so its finally won't release the lock.
+        _current_job_id = None
+        _jobs.pop(job_id, None)
+        _lock.release()
+        raise
     return state
