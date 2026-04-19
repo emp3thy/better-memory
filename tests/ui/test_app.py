@@ -157,46 +157,46 @@ class TestShutdown:
 
 
 class TestInactivityTimeout:
-    def test_request_resets_last_activity(self) -> None:
-        app = create_app()
+    def test_request_resets_last_activity(self, tmp_path: Path) -> None:
+        app = create_app(db_path=tmp_path / "memory.db")
         with app.test_client() as c:
             app.config["_last_activity"] = 0.0  # pretend ancient
             c.get("/pipeline")
             # After the request, _last_activity should be ~now.
             assert _time.monotonic() - app.config["_last_activity"] < 0.1
 
-    def test_healthz_does_not_reset_last_activity(self) -> None:
-        app = create_app()
+    def test_healthz_does_not_reset_last_activity(self, tmp_path: Path) -> None:
+        app = create_app(db_path=tmp_path / "memory.db")
         with app.test_client() as c:
             app.config["_last_activity"] = 0.0
             c.get("/healthz")
             # /healthz must not update _last_activity
             assert app.config["_last_activity"] == 0.0
 
-    def test_check_idle_exits_when_over_threshold(self, tmp_path) -> None:
-        app = create_app(inactivity_timeout=60.0)
+    def test_check_idle_exits_when_over_threshold(self, tmp_path: Path) -> None:
+        app = create_app(inactivity_timeout=60.0, db_path=tmp_path / "memory.db")
         app.config["_last_activity"] = _time.monotonic() - 120.0  # 2 min idle
         with patch("better_memory.ui.app.resolve_home", return_value=tmp_path), \
              patch("better_memory.ui.app.os._exit") as mock_exit:
             app.config["_check_idle"]()
             mock_exit.assert_called_once_with(0)
 
-    def test_check_idle_noop_when_under_threshold(self) -> None:
-        app = create_app(inactivity_timeout=60.0)
+    def test_check_idle_noop_when_under_threshold(self, tmp_path: Path) -> None:
+        app = create_app(inactivity_timeout=60.0, db_path=tmp_path / "memory.db")
         app.config["_last_activity"] = _time.monotonic()  # just now
         with patch("better_memory.ui.app.os._exit") as mock_exit:
             app.config["_check_idle"]()
             mock_exit.assert_not_called()
 
-    def test_watchdog_thread_started_by_default(self) -> None:
+    def test_watchdog_thread_started_by_default(self, tmp_path: Path) -> None:
         before = sum(1 for t in threading.enumerate() if t.name == "ui-watchdog")
-        create_app()
+        create_app(db_path=tmp_path / "memory.db")
         after = sum(1 for t in threading.enumerate() if t.name == "ui-watchdog")
         assert after == before + 1
 
-    def test_watchdog_thread_skipped_when_disabled(self) -> None:
+    def test_watchdog_thread_skipped_when_disabled(self, tmp_path: Path) -> None:
         # Tests that don't want the thread can pass start_watchdog=False.
-        app = create_app(start_watchdog=False)
+        app = create_app(start_watchdog=False, db_path=tmp_path / "memory.db")
         assert app.config["_check_idle"]  # helper still registered
 
 
