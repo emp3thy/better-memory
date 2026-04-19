@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from flask import Flask, Response, redirect, render_template, url_for
+from flask import Flask, redirect, render_template, url_for
+from werkzeug.wrappers import Response
 
 
 def create_app() -> Flask:
