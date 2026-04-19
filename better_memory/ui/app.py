@@ -131,8 +131,15 @@ def create_app(
 
     @app.get("/pipeline/panel/<stage>")
     def pipeline_panel(stage: str) -> str:
-        # Task 6 implements this.
-        return ""
+        conn = app.extensions["db_connection"]
+        project = _project_name()
+        if stage == "observations":
+            return render_template(
+                "fragments/panel_observations.html",
+                rows=queries.list_observations(conn, project=project),
+            )
+        # Other stages land in Task 7.
+        abort(404)
 
     @app.post("/pipeline/consolidate")
     def pipeline_consolidate() -> str:

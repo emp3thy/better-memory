@@ -1,0 +1,11 @@
+{% if not rows %}
+  <div class="empty-state">
+    <p>No observations yet. Memories appear here once the MCP writes them.</p>
+  </div>
+{% else %}
+  <div class="card-list">
+    {% for obs in rows %}
+      {% include "fragments/observation_card_compact.html" %}
+    {% endfor %}
+  </div>
+{% endif %}

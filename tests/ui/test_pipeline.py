@@ -57,3 +57,27 @@ class TestPipelinePage:
         # The panel-candidates fragment is loaded via HTMX — assert the
         # hx-get attribute is present and points to the candidates panel.
         assert "/pipeline/panel/candidates" in body
+
+
+class TestObservationsPanel:
+    def test_empty_shows_empty_state(self, client: FlaskClient) -> None:
+        response = client.get("/pipeline/panel/observations")
+        assert response.status_code == 200
+        body = response.data.decode()
+        assert "No observations yet" in body
+
+    def test_lists_observations_newest_first(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_observation(conn, project, "oldest")
+        _insert_observation(conn, project, "newest")
+
+        response = client.get("/pipeline/panel/observations")
+        body = response.data.decode()
+        # Both visible
+        assert "obs-newest" in body
+        assert "obs-oldest" in body
+        # Newest appears before oldest in the rendered HTML
+        assert body.index("obs-newest") < body.index("obs-oldest")
