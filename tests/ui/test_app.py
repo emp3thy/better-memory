@@ -266,3 +266,10 @@ class TestOnlyOneExpandedScript:
         assert b"collapse-me" in body
         # Modal target div exists for promote / merge.
         assert b'id="modal"' in body
+
+
+class TestConsolidationWiring:
+    def test_app_exposes_db_path_for_threaded_jobs(
+        self, client: FlaskClient
+    ) -> None:
+        assert "_db_path" in client.application.extensions

@@ -89,3 +89,15 @@ def test_tmp_knowledge_base_fixture(tmp_knowledge_base: Path) -> None:
     assert isinstance(tmp_knowledge_base, Path)
     assert tmp_knowledge_base.is_dir()
     assert list(tmp_knowledge_base.iterdir()) == []
+
+
+def test_consolidate_model_defaults_to_llama3(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CONSOLIDATE_MODEL", raising=False)
+    cfg = get_config()
+    assert cfg.consolidate_model == "llama3"
+
+
+def test_consolidate_model_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONSOLIDATE_MODEL", "mistral")
+    cfg = get_config()
+    assert cfg.consolidate_model == "mistral"

@@ -9,10 +9,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, abort, redirect, render_template, request, url_for
+from markupsafe import escape
 from werkzeug.wrappers import Response
 
 from better_memory.config import resolve_home
 from better_memory.db.connection import connect
+from better_memory.llm.ollama import ChatCompleter, OllamaChat
+from better_memory.services.consolidation import ConsolidationService
 from better_memory.services.insight import InsightService
 from better_memory.ui import jobs, queries
 
@@ -28,6 +31,7 @@ def create_app(
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
     db_path: Path | None = None,
+    chat: ChatCompleter | None = None,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -51,6 +55,9 @@ def create_app(
 
     app.extensions["db_connection"] = db_conn
     app.extensions["insight_service"] = InsightService(conn=db_conn)
+    app.extensions["_db_path"] = resolved_db
+    resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
+    app.extensions["chat"] = resolved_chat
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:
@@ -235,14 +242,38 @@ def create_app(
         )
 
     @app.post("/candidates/<id>/merge")
-    def candidate_merge(id: str) -> str:
-        # Phase 3 ships the real merge logic (ConsolidationService).
-        return (
-            '<div class="card card-error">'
-            "<p>Merge cannot run: ConsolidationService ships in <strong>Phase 3</strong>. "
-            "The picker is live; the logic isn't. Retry after Phase 3 lands.</p>"
-            "</div>"
-        )
+    def candidate_merge(id: str) -> tuple[str, int]:
+        target_id = request.args.get("target", "")
+        if not target_id:
+            return (
+                '<div class="card card-error">'
+                "<p>Missing <code>target</code> query parameter.</p>"
+                "</div>"
+            ), 200
+        db_path = app.extensions["_db_path"]
+        chat = app.extensions["chat"]
+        try:
+            def _do_merge() -> None:
+                import asyncio
+
+                # Fresh connection on the worker thread (SQLite is thread-bound).
+                conn = connect(db_path)
+                try:
+                    merge_svc = ConsolidationService(conn=conn, chat=chat)
+                    asyncio.run(
+                        merge_svc.merge(source_id=id, target_id=target_id)
+                    )
+                finally:
+                    conn.close()
+
+            jobs._run_sync_or_in_worker(_do_merge)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(exc)}</p>"
+                "</div>"
+            ), 200
+        return "", 200
 
     @app.get("/insights/<id>/card")
     def insight_card(id: str) -> str:
@@ -335,16 +366,44 @@ def create_app(
 
     @app.post("/pipeline/consolidate")
     def pipeline_consolidate() -> tuple[str, int, dict[str, str]]:
-        state = jobs.start_phase3_stub_job()
+        db_path = app.extensions["_db_path"]
+        chat = app.extensions["chat"]
+        state = jobs.start_consolidation_job(
+            db_path=db_path, chat=chat, project=_project_name()
+        )
+        rendered = render_template("fragments/consolidation_job.html", job=state)
+        headers = {}
+        if state.status == "complete":
+            headers["HX-Trigger"] = "job-complete"
+        return rendered, 200, headers
+
+    @app.post("/jobs/<id>/apply")
+    def jobs_apply(id: str) -> tuple[str, int, dict[str, str]]:
+        db_path = app.extensions["_db_path"]
+        chat = app.extensions["chat"]
+        try:
+            state = jobs.apply_job(id, db_path=db_path, chat=chat)
+        except LookupError:
+            abort(404)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error"><p>{escape(exc)}</p></div>',
+                200,
+                {},
+            )
         rendered = render_template("fragments/consolidation_job.html", job=state)
         return rendered, 200, {"HX-Trigger": "job-complete"}
 
     @app.get("/jobs/<id>")
-    def jobs_get(id: str) -> str:
+    def jobs_get(id: str) -> tuple[str, int, dict[str, str]]:
         state = jobs.get_job(id)
         if state is None:
             abort(404)
-        return render_template("fragments/consolidation_job.html", job=state)
+        rendered = render_template("fragments/consolidation_job.html", job=state)
+        headers = {}
+        if state.status == "complete":
+            headers["HX-Trigger"] = "job-complete"
+        return rendered, 200, headers
 
     @app.get("/pipeline/badge")
     def pipeline_badge() -> str:
