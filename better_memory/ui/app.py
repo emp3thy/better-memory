@@ -331,8 +331,6 @@ def create_app(
             abort(404)
         conn = app.extensions["db_connection"]
         rows = queries.list_insight_sources(conn, insight_id=id)
-        if not rows:
-            return '<div class="insight-sources"><p class="muted">No source observations linked.</p></div>'
         return render_template("fragments/insight_sources.html", rows=rows)
 
     @app.post("/pipeline/consolidate")

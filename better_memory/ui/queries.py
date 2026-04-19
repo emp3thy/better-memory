@@ -136,7 +136,7 @@ def list_insight_sources(
         FROM insight_sources s
         JOIN observations o ON o.id = s.observation_id
         WHERE s.insight_id = ?
-        ORDER BY o.created_at DESC, o.id DESC
+        ORDER BY o.created_at DESC, o.rowid DESC
         """,
         (insight_id,),
     ).fetchall()
