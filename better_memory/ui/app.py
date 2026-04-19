@@ -344,16 +344,27 @@ def create_app(
 
     @app.post("/pipeline/consolidate")
     def pipeline_consolidate() -> tuple[str, int, dict[str, str]]:
-        state = jobs.start_phase3_stub_job()
+        db_path = app.extensions["_db_path"]
+        chat = app.extensions["chat"]
+        state = jobs.start_consolidation_job(
+            db_path=db_path, chat=chat, project=_project_name()
+        )
         rendered = render_template("fragments/consolidation_job.html", job=state)
-        return rendered, 200, {"HX-Trigger": "job-complete"}
+        headers = {}
+        if state.status == "complete":
+            headers["HX-Trigger"] = "job-complete"
+        return rendered, 200, headers
 
     @app.get("/jobs/<id>")
-    def jobs_get(id: str) -> str:
+    def jobs_get(id: str) -> tuple[str, int, dict[str, str]]:
         state = jobs.get_job(id)
         if state is None:
             abort(404)
-        return render_template("fragments/consolidation_job.html", job=state)
+        rendered = render_template("fragments/consolidation_job.html", job=state)
+        headers = {}
+        if state.status == "complete":
+            headers["HX-Trigger"] = "job-complete"
+        return rendered, 200, headers
 
     @app.get("/pipeline/badge")
     def pipeline_badge() -> str:

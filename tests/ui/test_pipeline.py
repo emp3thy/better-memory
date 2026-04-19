@@ -405,7 +405,7 @@ class TestMergePicker:
 
 
 class TestConsolidationButton:
-    def test_click_returns_job_fragment_with_phase3_message(
+    def test_click_returns_running_job_fragment(
         self, client: FlaskClient
     ) -> None:
         response = client.post(
@@ -413,26 +413,48 @@ class TestConsolidationButton:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 200
-        assert b"Phase 3" in response.data
-        # Response carries HX-Trigger: job-complete so the candidates
-        # panel listener refreshes.
-        assert response.headers.get("HX-Trigger") == "job-complete"
+        assert b'data-job-id="' in response.data
 
-    def test_jobs_endpoint_returns_fragment(
+    def test_completed_job_renders_branch_candidates(
         self, client: FlaskClient
     ) -> None:
+        """End-to-end: seed a cluster, run consolidate, wait for the job
+        thread to finish deterministically, verify the rendered fragment
+        lists the candidate."""
         import re
+        import threading
 
-        response = client.post(
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO observations (id, content, project, component, "
+                "theme, status, validated_true, outcome) VALUES "
+                "(?, ?, ?, 'api', 'retry', 'active', 1, 'success')",
+                (f"obs-{i}", f"content {i}", project),
+            )
+        conn.commit()
+
+        fake = client.application.config["_fake_chat"]
+        fake.responses.append(
+            "Always retry 5xx responses with exponential backoff; "
+            "never retry 4xx."
+        )
+
+        post_resp = client.post(
             "/pipeline/consolidate",
             headers={"Origin": "http://localhost"},
         )
-        # Extract the job-id from the rendered fragment's data attribute.
-        match = re.search(rb'data-job-id="([a-f0-9]+)"', response.data)
-        assert match is not None, "consolidation response must render a job fragment"
+        match = re.search(rb'data-job-id="([a-f0-9]+)"', post_resp.data)
+        assert match is not None
         job_id = match.group(1).decode()
 
-        # GET /jobs/<id> returns the job's fragment (Phase 3 message).
+        # Deterministic wait — join the consolidation thread by name.
+        for t in threading.enumerate():
+            if t.name.startswith("consolidation-"):
+                t.join(timeout=5.0)
+                assert not t.is_alive(), "consolidation thread did not exit"
+
         get_resp = client.get(f"/jobs/{job_id}")
-        assert get_resp.status_code == 200
-        assert b"Phase 3" in get_resp.data
+        assert b"job-status-complete" in get_resp.data
+        assert b"Always retry 5xx" in get_resp.data

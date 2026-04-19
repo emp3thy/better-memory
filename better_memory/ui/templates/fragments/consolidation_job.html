@@ -1,4 +1,9 @@
-<div class="consolidation-job" data-job-id="{{ job.id }}">
+<div class="consolidation-job" data-job-id="{{ job.id }}"
+     {% if job.status == 'running' %}
+     hx-get="{{ url_for('jobs_get', id=job.id) }}"
+     hx-trigger="every 1s"
+     hx-target="this" hx-swap="outerHTML"
+     {% endif %}>
   <div class="job-status job-status-{{ job.status }}">
     {% if job.status == "running" %}
       <span class="spinner">⟳</span>
@@ -9,5 +14,31 @@
     {% endif %}
     {{ job.status }}
   </div>
-  <div class="job-message">{{ job.message }}</div>
+  {% if job.message %}<div class="job-message">{{ job.message }}</div>{% endif %}
+  {% if job.error %}<pre class="job-error">{{ job.error }}</pre>{% endif %}
+  {% if job.result %}
+    {% if job.result.branch %}
+      <h4>Candidate insights ({{ job.result.branch|length }})</h4>
+      <ul class="branch-candidates">
+        {% for c in job.result.branch %}
+          <li>
+            <strong>{{ c.title }}</strong>
+            <div class="muted">{{ c.component or '—' }} · {{ c.polarity }} · {{ c.observation_ids|length }} source(s)</div>
+            <p>{{ c.content }}</p>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if job.result.sweep %}
+      <h4>Sweep candidates ({{ job.result.sweep|length }})</h4>
+      <ul class="sweep-candidates">
+        {% for s in job.result.sweep %}
+          <li class="muted">{{ s.observation_id }} — {{ s.reason }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if not job.result.branch and not job.result.sweep %}
+      <p class="muted">Nothing to consolidate.</p>
+    {% endif %}
+  {% endif %}
 </div>

@@ -1,71 +1,101 @@
 """Background-job registry for the Management UI.
 
-Phase 2 provides the plumbing — a lock, a current-job-id, a record of
-job state. Phase 3 replaces the job body with ``ConsolidationService``
-calls. The public surface is deliberately minimal so Phase 3's
-implementation can slot in without churn.
+Phase 3: ``start_consolidation_job`` spawns a ``threading.Thread`` that
+runs ``ConsolidationService.dry_run()`` and stores the result. The UI
+polls ``/jobs/<id>`` until ``state.status == 'complete'`` (or
+``'failed'``).
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
+import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
+
+from better_memory.db.connection import connect
+from better_memory.llm.ollama import ChatCompleter
+from better_memory.services.consolidation import (
+    ConsolidationService,
+    DryRunResult,
+)
 
 _lock = threading.Lock()
 _current_job_id: str | None = None
 _jobs: dict[str, "JobState"] = {}
 
-# TODO(phase3): cap _jobs dict size when Phase 3 makes the stub a real
-# long-running job. Simple LRU eviction of ~100 entries is sufficient.
+# TODO(phase4): cap _jobs dict size once long-running jobs become common.
 
 
 @dataclass
 class JobState:
     id: str
     status: str  # "running" | "complete" | "failed"
-    message: str
-
-
-def start_phase3_stub_job() -> JobState:
-    """Start a placeholder job that records a Phase-3-not-ready message.
-
-    Phase 3 replaces this function with one that spawns a real
-    threading.Thread running ConsolidationService.dry_run().
-    """
-    global _current_job_id
-    if not _lock.acquire(blocking=False):
-        # Another job is active — return the existing state.
-        existing_id = _current_job_id
-        if existing_id is not None and existing_id in _jobs:
-            return _jobs[existing_id]
-        # Lock held but no job recorded — shouldn't happen, but return an
-        # error state rather than falling through to try/finally (which
-        # would crash on release-without-acquire).
-        return JobState(
-            id="unknown",
-            status="failed",
-            message="Consolidation is busy but no job is recorded. Retry in a moment.",
-        )
-    try:
-        job_id = uuid4().hex
-        state = JobState(
-            id=job_id,
-            status="complete",
-            message="ConsolidationService ships in Phase 3. This button will run the real dry-run then.",
-        )
-        _jobs[job_id] = state
-        _current_job_id = job_id
-        # Phase 2: the "job" is synchronous and complete immediately.
-        # Phase 3 will make this async and clear _current_job_id on thread exit.
-        return state
-    finally:
-        # Clear the id BEFORE releasing the lock so another thread entering
-        # start_phase3_stub_job cannot set its own id and then have this
-        # finally clause overwrite it back to None.
-        _current_job_id = None  # Phase 2: job is done by the time we return.
-        _lock.release()
+    message: str = ""
+    result: DryRunResult | None = None
+    error: str | None = None
 
 
 def get_job(job_id: str) -> JobState | None:
     return _jobs.get(job_id)
+
+
+def start_consolidation_job(
+    *,
+    db_path: Path,
+    chat: ChatCompleter,
+    project: str,
+    stale_days: int = 30,
+) -> JobState:
+    """Spawn a consolidation thread. Returns the initial ``JobState``.
+
+    The thread owns its own ``sqlite3.Connection`` (the UI's request
+    connection is single-threaded). The lock prevents concurrent jobs.
+    """
+    global _current_job_id
+    if not _lock.acquire(blocking=False):
+        existing_id = _current_job_id
+        if existing_id is not None and existing_id in _jobs:
+            return _jobs[existing_id]
+        return JobState(
+            id="unknown",
+            status="failed",
+            error="Consolidation busy but no job recorded; retry shortly.",
+        )
+
+    job_id = uuid4().hex
+    state = JobState(id=job_id, status="running", message="Running consolidation\u2026")
+    _jobs[job_id] = state
+    _current_job_id = job_id
+
+    def _run() -> None:
+        global _current_job_id
+        try:
+            conn = connect(db_path)
+            try:
+                svc = ConsolidationService(conn=conn, chat=chat)
+                result = asyncio.run(
+                    svc.dry_run(project=project, stale_days=stale_days)
+                )
+                state.result = result
+                state.status = "complete"
+                state.message = (
+                    f"{len(result.branch)} candidate(s), "
+                    f"{len(result.sweep)} sweep item(s)."
+                )
+            finally:
+                conn.close()
+        except Exception:
+            state.status = "failed"
+            state.error = traceback.format_exc()
+        finally:
+            # Clear current job ID BEFORE releasing the lock to avoid race
+            # with another caller that might acquire the lock immediately.
+            _current_job_id = None
+            _lock.release()
+
+    t = threading.Thread(target=_run, daemon=True, name=f"consolidation-{job_id[:8]}")
+    t.start()
+    return state
