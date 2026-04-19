@@ -6,6 +6,7 @@ import re
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from flask.testing import FlaskClient
 
@@ -170,7 +171,6 @@ class TestApplyUnknownJob:
 
 class TestApplyIncompleteJob:
     def test_apply_rejects_incomplete_job(self, client: FlaskClient) -> None:
-        from uuid import uuid4
         job_id = uuid4().hex
         jobs._jobs[job_id] = jobs.JobState(id=job_id, status="running")
         try:

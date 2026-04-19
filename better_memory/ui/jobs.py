@@ -23,6 +23,7 @@ from better_memory.services.consolidation import (
 )
 
 _lock = threading.Lock()
+_apply_lock = threading.Lock()
 _current_job_id: str | None = None
 _jobs: dict[str, "JobState"] = {}
 
@@ -55,39 +56,41 @@ def apply_job(
     Returns the updated ``JobState``. Raises ``LookupError`` if the job
     is unknown, ``ValueError`` if it is not ``complete`` or has no result.
     """
-    state = _jobs.get(job_id)
-    if state is None:
-        raise LookupError(job_id)
-    if state.status != "complete" or state.result is None:
-        raise ValueError(f"Cannot apply job in status {state.status!r}")
-    if state.applied:
+    with _apply_lock:
+        state = _jobs.get(job_id)
+        if state is None:
+            raise LookupError(job_id)
+        if state.status != "complete" or state.result is None:
+            raise ValueError(f"Cannot apply job in status {state.status!r}")
+        if state.applied:
+            return state
+
+        result = state.result
+        # Note: apply_branch commits per candidate. If a candidate raises mid-loop,
+        # earlier candidates are already committed but state.applied stays False.
+        # Retries may produce duplicate pending_review rows until apply_branch is
+        # made fully transactional across all candidates.
+        conn = connect(db_path)
+        try:
+            svc = ConsolidationService(conn=conn, chat=chat)
+
+            async def _do_apply() -> tuple[int, int]:
+                for c in result.branch:
+                    await svc.apply_branch(c)
+                for s in result.sweep:
+                    await svc.apply_sweep(s.observation_id)
+                return len(result.branch), len(result.sweep)
+
+            branch_count, sweep_count = asyncio.run(_do_apply())
+        finally:
+            conn.close()
+
+        state.applied = True
+        state.message = (
+            f"Applied {branch_count} candidate(s) to review queue, "
+            f"archived {sweep_count} observation(s)."
+        )
         return state
-
-    conn = connect(db_path)
-    try:
-        svc = ConsolidationService(conn=conn, chat=chat)
-
-        async def _do_apply() -> tuple[int, int]:
-            branch_count = 0
-            for c in state.result.branch:  # type: ignore[union-attr]
-                await svc.apply_branch(c)
-                branch_count += 1
-            sweep_count = 0
-            for s in state.result.sweep:  # type: ignore[union-attr]
-                await svc.apply_sweep(s.observation_id)
-                sweep_count += 1
-            return branch_count, sweep_count
-
-        branch_count, sweep_count = asyncio.run(_do_apply())
-    finally:
-        conn.close()
-
-    state.applied = True
-    state.message = (
-        f"Applied {branch_count} candidate(s) to review queue, "
-        f"archived {sweep_count} observation(s)."
-    )
-    return state
 
 
 def start_consolidation_job(
