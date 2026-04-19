@@ -10,7 +10,10 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.llm.fake import FakeChat
 from better_memory.services.consolidation import (
+    BranchCandidate,
+    ConsolidationService,
     ObservationCluster,
     ObservationForPrompt,
     build_draft_prompt,
@@ -235,3 +238,65 @@ class TestExistingInsightForCluster:
         result = existing_insight_for_cluster(conn, cluster)
         assert result is not None
         assert result.id == "pr1"
+
+
+class TestBranchDryRun:
+    async def test_drafts_candidates_for_each_accepted_cluster(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        for i in range(3):
+            _insert_observation(
+                conn, id=f"a{i}", project="p",
+                component="api", theme="retry", validated_true=1,
+            )
+        chat = FakeChat(
+            responses=[
+                "Retry 5xx with exponential backoff; do not retry 4xx.",
+            ]
+        )
+        svc = ConsolidationService(conn=conn, chat=chat)
+        candidates = await svc.branch_dry_run(project="p")
+        assert len(candidates) == 1
+        c = candidates[0]
+        assert isinstance(c, BranchCandidate)
+        assert c.project == "p"
+        assert c.component == "api"
+        assert c.theme == "retry"
+        assert c.observation_ids == ["a0", "a1", "a2"]
+        assert "Retry 5xx" in c.content
+        assert len(c.title) > 0
+
+    async def test_skips_clusters_with_existing_confirmed_insight(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        for i in range(3):
+            _insert_observation(
+                conn, id=f"a{i}", project="p",
+                component="api", theme="retry", validated_true=1,
+            )
+        _insert_insight(conn, id="i1", project="p", component="api",
+                        status="confirmed")
+
+        chat = FakeChat(responses=[])  # no calls should happen
+        svc = ConsolidationService(conn=conn, chat=chat)
+        candidates = await svc.branch_dry_run(project="p")
+        assert candidates == []
+        assert chat.calls == []
+
+    async def test_polarity_inferred_from_outcomes(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        conn.execute(
+            "INSERT INTO observations (id, content, project, component, "
+            "theme, validated_true, outcome) VALUES "
+            "('a1', 'c1', 'p', 'api', 'retry', 1, 'success'),"
+            "('a2', 'c2', 'p', 'api', 'retry', 1, 'success'),"
+            "('a3', 'c3', 'p', 'api', 'retry', 0, 'failure')"
+        )
+        conn.commit()
+
+        chat = FakeChat(responses=["drafted insight text"])
+        svc = ConsolidationService(conn=conn, chat=chat)
+        candidates = await svc.branch_dry_run(project="p")
+        assert len(candidates) == 1
+        assert candidates[0].polarity == "do"

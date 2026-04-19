@@ -8,8 +8,13 @@ Triggered by the UI; never runs automatically.
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Literal
 
+from better_memory.llm.ollama import ChatCompleter
 from better_memory.services.insight import Insight, row_to_insight
 
 
@@ -114,6 +119,50 @@ def build_draft_prompt(observations: list[ObservationForPrompt]) -> str:
     return "\n".join(lines)
 
 
+Polarity = Literal["do", "dont", "neutral"]
+
+
+def _default_clock() -> datetime:
+    """UTC-aware ``now``. Module-level so tests can patch for determinism."""
+    return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class BranchCandidate:
+    """A drafted insight ready for human review.
+
+    Phase 3 callers feed this into ``apply_branch`` after human approval.
+    """
+
+    project: str
+    component: str | None
+    theme: str | None
+    title: str
+    content: str
+    polarity: Polarity
+    observation_ids: list[str]
+    confidence: str  # "low" | "medium" | "high"
+
+
+def _infer_polarity(outcomes: list[str]) -> Polarity:
+    """Majority-vote outcome → polarity mapping."""
+    counts = Counter(outcomes)
+    top, _ = counts.most_common(1)[0]
+    if top == "success":
+        return "do"
+    if top == "failure":
+        return "dont"
+    return "neutral"
+
+
+def _derive_title(content: str) -> str:
+    """First sentence or first 80 chars of ``content`` as a title."""
+    first = content.split(".", 1)[0].strip()
+    if len(first) > 80:
+        first = first[:77].rstrip() + "..."
+    return first or "Untitled insight"
+
+
 def existing_insight_for_cluster(
     conn: sqlite3.Connection, cluster: ObservationCluster
 ) -> Insight | None:
@@ -137,3 +186,81 @@ def existing_insight_for_cluster(
     if row is None:
         return None
     return row_to_insight(row)
+
+
+class ConsolidationService:
+    """Consolidation engine: branch pass, sweep pass, merge.
+
+    The service owns the sqlite connection and expects writes to be
+    sequenced by the caller (Phase 2's Flask factory runs with
+    ``threaded=False``, so one request / one job at a time).
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        chat: ChatCompleter,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._conn = conn
+        self._chat = chat
+        self._clock: Callable[[], datetime] = clock or _default_clock
+
+    async def branch_dry_run(
+        self, *, project: str
+    ) -> list[BranchCandidate]:
+        """Return draft candidates for clusters needing consolidation.
+
+        Does NOT write to the database. Caller applies each accepted
+        candidate via :meth:`apply_branch`.
+        """
+        clusters = find_clusters(self._conn, project=project)
+        if not clusters:
+            return []
+
+        out: list[BranchCandidate] = []
+        for cluster in clusters:
+            if existing_insight_for_cluster(self._conn, cluster) is not None:
+                continue
+
+            rows = self._conn.execute(
+                f"""
+                SELECT id, content, created_at, outcome
+                FROM observations
+                WHERE id IN ({",".join("?" * len(cluster.observation_ids))})
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                cluster.observation_ids,
+            ).fetchall()
+
+            prompt_rows = [
+                ObservationForPrompt(
+                    id=r["id"],
+                    created_at=r["created_at"],
+                    content=r["content"],
+                    outcome=r["outcome"],
+                )
+                for r in rows
+            ]
+            prompt = build_draft_prompt(prompt_rows)
+            drafted = (await self._chat.complete(prompt)).strip()
+            if not drafted:
+                continue
+
+            polarity = _infer_polarity([r["outcome"] for r in rows])
+            confidence = "high" if len(rows) >= 5 else "medium"
+
+            out.append(
+                BranchCandidate(
+                    project=cluster.project,
+                    component=cluster.component,
+                    theme=cluster.theme,
+                    title=_derive_title(drafted),
+                    content=drafted,
+                    polarity=polarity,
+                    observation_ids=list(cluster.observation_ids),
+                    confidence=confidence,
+                )
+            )
+        return out
