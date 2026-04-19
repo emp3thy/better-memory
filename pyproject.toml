@@ -14,12 +14,14 @@ dependencies = [
     "sqlite-vec",
     "httpx",
     "pydantic>=2",
+    "flask>=3",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-playwright",
     "ruff",
 ]
 

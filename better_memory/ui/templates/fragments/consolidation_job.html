@@ -1,0 +1,13 @@
+<div class="consolidation-job" data-job-id="{{ job.id }}">
+  <div class="job-status job-status-{{ job.status }}">
+    {% if job.status == "running" %}
+      <span class="spinner">⟳</span>
+    {% elif job.status == "complete" %}
+      <span class="checkmark">✓</span>
+    {% elif job.status == "failed" %}
+      <span class="cross">✗</span>
+    {% endif %}
+    {{ job.status }}
+  </div>
+  <div class="job-message">{{ job.message }}</div>
+</div>

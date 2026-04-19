@@ -91,7 +91,7 @@ def _default_clock() -> datetime:
     return datetime.now(UTC)
 
 
-def _row_to_insight(row: sqlite3.Row) -> Insight:
+def row_to_insight(row: sqlite3.Row) -> Insight:
     return Insight(
         id=row["id"],
         title=row["title"],
@@ -226,7 +226,7 @@ class InsightService:
         ).fetchone()
         if row is None:
             return None
-        return _row_to_insight(row)
+        return row_to_insight(row)
 
     # ------------------------------------------------------------------ update
     def update(
@@ -567,7 +567,7 @@ class InsightService:
                 return []
             return [
                 InsightSearchResult(
-                    insight=_row_to_insight(row), rank=row["rank"]
+                    insight=row_to_insight(row), rank=row["rank"]
                 )
                 for row in rows
             ]
@@ -580,7 +580,7 @@ class InsightService:
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [
-            InsightSearchResult(insight=_row_to_insight(row), rank=0.0)
+            InsightSearchResult(insight=row_to_insight(row), rank=0.0)
             for row in rows
         ]
 

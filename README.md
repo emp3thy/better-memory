@@ -172,3 +172,16 @@ See `docs/superpowers/specs/2026-04-06-better-memory-design.md` for the full des
 ## License
 
 See [LICENSE](LICENSE).
+
+## Management UI
+
+Spawn the UI on demand (Phase 10 of Plan 2 will expose this as the
+`memory.start_ui()` MCP tool). Until then, start it manually:
+
+```bash
+BETTER_MEMORY_HOME=~/.better-memory uv run python -m better_memory.ui
+cat ~/.better-memory/ui.url   # print the bound URL
+```
+
+The UI exits after 30 minutes of inactivity, or when you click
+**Close UI** in the header.

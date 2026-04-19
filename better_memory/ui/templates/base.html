@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}better-memory{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">better-memory</div>
+    <nav class="tabs">
+      <a class="tab {% if active_tab == 'pipeline' %}active{% endif %}" href="{{ url_for('pipeline') }}">
+        Pipeline
+        <span id="badge"
+              hx-get="{{ url_for('pipeline_badge') }}"
+              hx-trigger="load, every 10s"
+              hx-swap="innerHTML"></span>
+      </a>
+      <a class="tab {% if active_tab == 'sweep' %}active{% endif %}" href="{{ url_for('sweep') }}">Sweep</a>
+      <a class="tab {% if active_tab == 'knowledge' %}active{% endif %}" href="{{ url_for('knowledge') }}">Knowledge</a>
+      <a class="tab {% if active_tab == 'audit' %}active{% endif %}" href="{{ url_for('audit') }}">Audit</a>
+      <a class="tab {% if active_tab == 'graph' %}active{% endif %}" href="{{ url_for('graph') }}">Graph</a>
+    </nav>
+    <button class="close-ui"
+            hx-post="{{ url_for('shutdown') }}"
+            hx-confirm="Shut down the UI?"
+            hx-swap="none">Close UI</button>
+  </header>
+  <main>
+    {% block main %}{% endblock %}
+  </main>
+  <div id="modal"></div>
+  <script>
+(function () {
+  // Collapse any currently-expanded cards when a new card is clicked to expand.
+  // HTMX fires htmx:beforeRequest before every request — we check if the
+  // triggering element is a collapsed card on a panel, and if so, fire
+  // the collapse handler on any sibling [data-expanded="true"] card.
+  document.body.addEventListener('htmx:beforeRequest', function (evt) {
+    var target = evt.detail.elt;
+    // Only act on compact-card expand requests.
+    if (!target.classList || !target.classList.contains('card-compact')) return;
+    // Find the enclosing panel (card-list) and collapse any expanded sibling.
+    var list = target.closest('.card-list');
+    if (!list) return;
+    var expanded = list.querySelectorAll('[data-expanded="true"]');
+    expanded.forEach(function (card) {
+      // Trigger the card's collapse handler — it's hx-get on the panel list,
+      // but we just need the UI to flip back. Simplest: click the card's
+      // .collapse-me button.
+      var btn = card.querySelector('.collapse-me');
+      if (btn) btn.click();
+    });
+  });
+})();
+  </script>
+</body>
+</html>
