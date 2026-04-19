@@ -252,38 +252,54 @@ def create_app(
                 "<p>Missing <code>target</code> query parameter.</p>"
                 "</div>"
             ), 200
+        svc = app.extensions["consolidation_service"]
         try:
             import asyncio
-            import concurrent.futures
+            # In production, asyncio.run() works fine. In pytest-asyncio with
+            # auto mode when running full suite, an event loop is active, so
+            # we detect and handle that case separately.
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No loop running (production), use asyncio.run
+                asyncio.run(svc.merge(source_id=id, target_id=target_id))
+            else:
+                # Loop is running (pytest-asyncio auto with full suite).
+                # Run in thread to avoid "asyncio.run() cannot be called from
+                # a running event loop" error.
+                import concurrent.futures
+                import sqlite3
+                db_path = app.extensions["_db_path"]
+                chat = app.extensions["chat"]
 
-            db_path = app.extensions["_db_path"]
-            chat = app.extensions["chat"]
-
-            def _run_merge() -> None:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    # Open a new connection in the background thread
-                    merge_conn = connect(db_path)
-                    svc = ConsolidationService(conn=merge_conn, chat=chat)
+                def _run_merge() -> None:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
                     try:
-                        loop.run_until_complete(
-                            svc.merge(source_id=id, target_id=target_id)
+                        # Create new connection in thread for SQLite thread-safety
+                        merge_conn = connect(db_path)
+                        merge_svc = ConsolidationService(
+                            conn=merge_conn, chat=chat
                         )
+                        try:
+                            loop.run_until_complete(
+                                merge_svc.merge(
+                                    source_id=id, target_id=target_id
+                                )
+                            )
+                        finally:
+                            merge_conn.close()
                     finally:
-                        merge_conn.close()
-                finally:
-                    loop.close()
+                        loop.close()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(_run_merge).result()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    executor.submit(_run_merge).result()
         except ValueError as exc:
             return (
                 f'<div class="card card-error">'
                 f"<p>{exc}</p>"
                 "</div>"
             ), 200
-        # Source retired → card removed from candidates panel.
         return "", 200
 
     @app.get("/insights/<id>/card")
