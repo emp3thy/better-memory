@@ -4,17 +4,32 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from urllib.parse import urlparse
 
 from flask import Flask, abort, redirect, render_template, request, url_for
 from werkzeug.wrappers import Response
 
 
-def create_app() -> Flask:
+def create_app(
+    *,
+    inactivity_timeout: float = 1800.0,
+    inactivity_poll_interval: float = 30.0,
+    start_watchdog: bool = True,
+) -> Flask:
     """Build and return a configured Flask app.
 
-    A factory rather than a module-level ``app`` so tests can spin up
-    fresh instances in isolation.
+    Parameters
+    ----------
+    inactivity_timeout:
+        Seconds without a non-``/healthz`` request before the server
+        calls ``os._exit(0)``. Default 30 minutes.
+    inactivity_poll_interval:
+        Seconds between watchdog-thread liveness checks. Default 30 s.
+    start_watchdog:
+        If ``False``, skip starting the background watchdog thread.
+        ``_check_idle`` is still registered so tests can drive it
+        synchronously without spawning threads.
     """
     app = Flask(__name__)
 
@@ -36,6 +51,29 @@ def create_app() -> Flask:
         if origin_host == expected_host or referer_host == expected_host:
             return
         abort(403)
+
+    app.config["_last_activity"] = time.monotonic()
+
+    @app.before_request
+    def _record_activity() -> None:
+        if request.path != "/healthz":
+            app.config["_last_activity"] = time.monotonic()
+
+    def _check_idle() -> None:
+        idle = time.monotonic() - app.config["_last_activity"]
+        if idle > inactivity_timeout:
+            os._exit(0)
+
+    app.config["_check_idle"] = _check_idle
+
+    if start_watchdog:
+        def _watchdog() -> None:
+            while True:
+                time.sleep(inactivity_poll_interval)
+                _check_idle()
+
+        t = threading.Thread(target=_watchdog, daemon=True, name="ui-watchdog")
+        t.start()
 
     @app.get("/healthz")
     def healthz() -> tuple[str, int]:

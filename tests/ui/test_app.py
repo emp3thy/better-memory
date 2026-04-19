@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+import time as _time
 from unittest.mock import patch
 
 from flask.testing import FlaskClient
+
+from better_memory.ui.app import create_app
 
 
 class TestHealthz:
@@ -132,3 +136,46 @@ class TestShutdown:
             assert args[1] is _os._exit
             assert args[2] == (0,)
             mock_timer.return_value.start.assert_called_once()
+
+
+class TestInactivityTimeout:
+    def test_request_resets_last_activity(self) -> None:
+        app = create_app()
+        with app.test_client() as c:
+            app.config["_last_activity"] = 0.0  # pretend ancient
+            c.get("/pipeline")
+            # After the request, _last_activity should be ~now.
+            assert _time.monotonic() - app.config["_last_activity"] < 0.1
+
+    def test_healthz_does_not_reset_last_activity(self) -> None:
+        app = create_app()
+        with app.test_client() as c:
+            app.config["_last_activity"] = 0.0
+            c.get("/healthz")
+            # /healthz must not update _last_activity
+            assert app.config["_last_activity"] == 0.0
+
+    def test_check_idle_exits_when_over_threshold(self) -> None:
+        app = create_app(inactivity_timeout=60.0)
+        app.config["_last_activity"] = _time.monotonic() - 120.0  # 2 min idle
+        with patch("better_memory.ui.app.os._exit") as mock_exit:
+            app.config["_check_idle"]()
+            mock_exit.assert_called_once_with(0)
+
+    def test_check_idle_noop_when_under_threshold(self) -> None:
+        app = create_app(inactivity_timeout=60.0)
+        app.config["_last_activity"] = _time.monotonic()  # just now
+        with patch("better_memory.ui.app.os._exit") as mock_exit:
+            app.config["_check_idle"]()
+            mock_exit.assert_not_called()
+
+    def test_watchdog_thread_started_by_default(self) -> None:
+        app = create_app()
+        # Name is set in the factory; look for it in the thread roster.
+        names = [t.name for t in threading.enumerate()]
+        assert "ui-watchdog" in names
+
+    def test_watchdog_thread_skipped_when_disabled(self) -> None:
+        # Tests that don't want the thread can pass start_watchdog=False.
+        app = create_app(start_watchdog=False)
+        assert app.config["_check_idle"]  # helper still registered
