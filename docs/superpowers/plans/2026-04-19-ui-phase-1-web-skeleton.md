@@ -6,7 +6,7 @@
 
 **Architecture:** Single Flask app factory. `threaded=False` dev server. Routes live in one `app.py`. Templates in `templates/`. Static (HTMX + CSS) served from `static/`. Entry point `__main__.py` uses `werkzeug.serving.make_server` so we can bind to port 0, capture the assigned port, write `ui.url` before accepting traffic, and call `serve_forever()` ourselves.
 
-**Tech Stack:** Python 3.12, Flask, Jinja2 (bundled with Flask), Werkzeug (bundled), HTMX 2.0.4 (vendored JS), plain hand-written CSS, pytest + Flask test client for integration tests.
+**Tech Stack:** Python 3.12, Flask, Jinja2 (bundled with Flask), Werkzeug (bundled), HTMX 2.0.8 (vendored JS), plain hand-written CSS, pytest + Flask test client for integration tests.
 
 **Scope (Phase 1 only):**
 - Builds everything from spec §2 (Technology and process model) and §3 (Information architecture and routes) _layout shell + `/healthz` + empty views_.
@@ -26,7 +26,7 @@ better_memory/ui/
   __main__.py                    # python -m better_memory.ui — bind, write ui.url, serve
   app.py                         # Flask app factory, routes, middleware, config
   static/
-    htmx.min.js                  # vendored HTMX 2.0.4
+    htmx.min.js                  # vendored HTMX 2.0.8
     app.css                      # plain dark-theme CSS for the shell
   templates/
     base.html                    # layout shell (header, nav tabs, <main>)
@@ -635,13 +635,13 @@ class TestStaticAssets:
 Run: `uv run pytest tests/ui/test_app.py::TestStaticAssets -v`
 Expected: Both FAIL — 404.
 
-- [ ] **Step 3: Vendor HTMX 2.0.4**
+- [ ] **Step 3: Vendor HTMX 2.0.8**
 
 Pin a specific version. Download the minified bundle once and commit it:
 
 ```bash
 curl -fsSL -o better_memory/ui/static/htmx.min.js \
-  https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js
+  https://unpkg.com/htmx.org@2.0.8/dist/htmx.min.js
 ```
 
 Verify:
@@ -770,7 +770,7 @@ Expected: All PASS.
 
 ```bash
 git add better_memory/ui/static/htmx.min.js better_memory/ui/static/app.css tests/ui/test_app.py
-git commit -m "UI Phase 1: vendor HTMX 2.0.4 and write shell CSS"
+git commit -m "UI Phase 1: vendor HTMX 2.0.8 and write shell CSS"
 ```
 
 ---
@@ -852,9 +852,9 @@ git commit -m "UI Phase 1: /shutdown defers os._exit via threading.Timer"
 - Modify: `better_memory/ui/app.py`
 - Modify: `tests/ui/test_app.py`
 
-**Context:** Spec §2 — "30-minute inactivity timeout (reset on every non-`/healthz` request). On expiry, server calls `os._exit(0)`." Implementation: a daemon thread that wakes up periodically, checks `time.monotonic() - last_activity`, and exits if the gap exceeds the window. Every request updates `last_activity` except `/healthz` (so external liveness probes don't keep the UI alive forever).
+**Context:** Spec §2 — "30-minute inactivity timeout (reset on every non-`/healthz` request). On expiry, server calls `os._exit(0)`." Every request updates `last_activity` except `/healthz` (so external liveness probes don't keep the UI alive forever).
 
-To keep the unit tests fast, make the timeout window and the poll interval configurable at app-factory time.
+Implementation design for testability: the idle-check logic lives in a helper that tests can invoke **synchronously** via `app.config["_check_idle"]()`. The production path is a daemon thread that calls the helper in a loop. No real-time sleeps in tests.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -867,57 +867,58 @@ from better_memory.ui.app import create_app
 
 
 class TestInactivityTimeout:
-    def test_activity_extends_deadline(self) -> None:
-        # 0.2s timeout, 0.02s poll interval
-        app = create_app(
-            inactivity_timeout=0.2, inactivity_poll_interval=0.02
-        )
+    def test_request_resets_last_activity(self) -> None:
+        app = create_app()
         with app.test_client() as c:
-            start = _time.monotonic()
-            # Keep requesting every 50ms for 400ms — total elapsed 400ms,
-            # but each request resets the deadline to 200ms.
-            for _ in range(8):
-                _time.sleep(0.05)
-                response = c.get("/pipeline")
-                assert response.status_code == 200
-            elapsed = _time.monotonic() - start
-            assert elapsed >= 0.4
-            # App's last_activity should still be recent
+            app.config["_last_activity"] = 0.0  # pretend ancient
+            c.get("/pipeline")
+            # After the request, _last_activity should be ~now.
             assert _time.monotonic() - app.config["_last_activity"] < 0.1
 
-    def test_healthz_does_not_reset_deadline(self) -> None:
-        app = create_app(
-            inactivity_timeout=10.0, inactivity_poll_interval=1.0
-        )
-        app.config["_last_activity"] = 0.0  # pretend ancient
+    def test_healthz_does_not_reset_last_activity(self) -> None:
+        app = create_app()
         with app.test_client() as c:
+            app.config["_last_activity"] = 0.0
             c.get("/healthz")
             # /healthz must not update _last_activity
             assert app.config["_last_activity"] == 0.0
 
-    def test_timer_fires_os_exit_on_expiry(self) -> None:
-        # Use a very short timeout and poll interval, patch os._exit,
-        # wait briefly, assert os._exit was called.
+    def test_check_idle_exits_when_over_threshold(self) -> None:
+        app = create_app(inactivity_timeout=60.0)
+        app.config["_last_activity"] = _time.monotonic() - 120.0  # 2 min idle
         with patch("better_memory.ui.app.os._exit") as mock_exit:
-            app = create_app(
-                inactivity_timeout=0.05, inactivity_poll_interval=0.02
-            )
-            app.config["_last_activity"] = _time.monotonic() - 10.0
-            # Give the background thread a chance to observe expiry
-            _time.sleep(0.1)
-            # Keep the app alive so its thread isn't collected prematurely
-            _ = app
-            mock_exit.assert_called()
+            app.config["_check_idle"]()
+            mock_exit.assert_called_once_with(0)
+
+    def test_check_idle_noop_when_under_threshold(self) -> None:
+        app = create_app(inactivity_timeout=60.0)
+        app.config["_last_activity"] = _time.monotonic()  # just now
+        with patch("better_memory.ui.app.os._exit") as mock_exit:
+            app.config["_check_idle"]()
+            mock_exit.assert_not_called()
+
+    def test_watchdog_thread_started_by_default(self) -> None:
+        app = create_app()
+        # Name is set in the factory; look for it in the thread roster.
+        names = [t.name for t in threading.enumerate()]
+        assert "ui-watchdog" in names
+
+    def test_watchdog_thread_skipped_when_disabled(self) -> None:
+        # Tests that don't want the thread can pass start_watchdog=False.
+        app = create_app(start_watchdog=False)
+        assert app.config["_check_idle"]  # helper still registered
 ```
+
+(Add `import threading` at the top of the test file if not already present.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/ui/test_app.py::TestInactivityTimeout -v`
-Expected: FAIL — `create_app()` does not accept `inactivity_timeout` / `inactivity_poll_interval`, and no background thread exists.
+Expected: FAIL — `create_app()` does not accept `inactivity_timeout` / `start_watchdog`, and the helpers don't exist yet.
 
-- [ ] **Step 3: Update the factory and add the timeout thread**
+- [ ] **Step 3: Update the factory**
 
-Edit `better_memory/ui/app.py`. Add import:
+Edit `better_memory/ui/app.py`. Add imports at top if missing:
 
 ```python
 import time
@@ -930,6 +931,7 @@ def create_app(
     *,
     inactivity_timeout: float = 1800.0,
     inactivity_poll_interval: float = 30.0,
+    start_watchdog: bool = True,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -939,11 +941,15 @@ def create_app(
         Seconds without a non-``/healthz`` request before the server
         calls ``os._exit(0)``. Default 30 minutes.
     inactivity_poll_interval:
-        Seconds between background-thread liveness checks. Default 30 s.
+        Seconds between watchdog-thread liveness checks. Default 30 s.
+    start_watchdog:
+        If ``False``, skip starting the background watchdog thread.
+        ``_check_idle`` is still registered so tests can drive it
+        synchronously without spawning threads.
     """
 ```
 
-Inside `create_app()`, **before** registering routes, add:
+Inside `create_app()`, **after** `_origin_check` (which was added in Task 5) and **before** the route definitions, add:
 
 ```python
     app.config["_last_activity"] = time.monotonic()
@@ -953,29 +959,35 @@ Inside `create_app()`, **before** registering routes, add:
         if request.path != "/healthz":
             app.config["_last_activity"] = time.monotonic()
 
-    def _watchdog() -> None:
-        while True:
-            time.sleep(inactivity_poll_interval)
-            idle = time.monotonic() - app.config["_last_activity"]
-            if idle > inactivity_timeout:
-                os._exit(0)
+    def _check_idle() -> None:
+        idle = time.monotonic() - app.config["_last_activity"]
+        if idle > inactivity_timeout:
+            os._exit(0)
 
-    t = threading.Thread(target=_watchdog, daemon=True, name="ui-watchdog")
-    t.start()
+    app.config["_check_idle"] = _check_idle
+
+    if start_watchdog:
+        def _watchdog() -> None:
+            while True:
+                time.sleep(inactivity_poll_interval)
+                _check_idle()
+
+        t = threading.Thread(target=_watchdog, daemon=True, name="ui-watchdog")
+        t.start()
 ```
 
-Note: the `_record_activity` hook must be registered **after** `_origin_check` if you declared that one earlier in the same factory — order within `before_request` matters for the reject behavior. If `_origin_check` aborts with 403, `_record_activity` will not run (Flask short-circuits). That is the correct behavior.
+Registration order matters: `_origin_check` must be registered before `_record_activity` so that a 403 short-circuits before we record activity for a would-be rejected request.
 
 - [ ] **Step 4: Run tests**
 
 Run: `uv run pytest tests/ui/test_app.py -v`
-Expected: All PASS. The expiry test may be flaky on very slow machines — if it fails intermittently, bump the `sleep(0.1)` to `0.2`.
+Expected: All PASS. No real-time sleeps in the assertions, so no flakiness.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add better_memory/ui/app.py tests/ui/test_app.py
-git commit -m "UI Phase 1: inactivity watchdog thread exits after idle window"
+git commit -m "UI Phase 1: inactivity watchdog with synchronously-testable check"
 ```
 
 ---
@@ -1031,11 +1043,14 @@ def spawn_ui(tmp_path: Path):
     def _spawn() -> tuple[subprocess.Popen, Path]:
         nonlocal proc
         env = {**os.environ, "BETTER_MEMORY_HOME": str(tmp_path)}
+        # Discard child stdout/stderr — werkzeug prints one line per
+        # request, and we don't want to risk pipe-buffer deadlocks on
+        # platforms with small pipe sizes (notably Windows).
         proc = subprocess.Popen(
             [sys.executable, "-m", "better_memory.ui"],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         return proc, tmp_path / "ui.url"
 
@@ -1210,16 +1225,14 @@ Update the `shutdown` view:
         return "", 204
 ```
 
-Update the `_watchdog` body:
+Update `_check_idle` to clean up before exiting:
 
 ```python
-    def _watchdog() -> None:
-        while True:
-            time.sleep(inactivity_poll_interval)
-            idle = time.monotonic() - app.config["_last_activity"]
-            if idle > inactivity_timeout:
-                _cleanup_ui_url()
-                os._exit(0)
+    def _check_idle() -> None:
+        idle = time.monotonic() - app.config["_last_activity"]
+        if idle > inactivity_timeout:
+            _cleanup_ui_url()
+            os._exit(0)
 ```
 
 The shutdown test in `test_app.py` (Task 7) asserts `threading.Timer` is called with `os._exit`. Update that test to assert the Timer is called with a callable and position-0 delay of 0.1:
@@ -1262,35 +1275,48 @@ git commit -m "UI Phase 1: __main__ entry point + ui.url lifecycle"
 - Modify: `better_memory/ui/app.py`
 - Modify: `tests/ui/test_app.py`
 
-**Context:** The badge currently returns a bare `"0"` string. Phase 2 will read real candidate counts; Phase 1 serves a template that's easy to swap later. A fragment template keeps rendering centralized.
+**Context:** The badge route currently returns a bare `"0"` string. The CSS hides the badge when its content is empty, so for Phase 1 (where the count is always zero) we want the fragment to render an empty string. Phase 2 will plug in real candidate counts and the template will emit the number.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Replace the existing badge assertion**
 
-Append to `tests/ui/test_app.py`:
+In `tests/ui/test_app.py` find the test `TestLayoutShell.test_pipeline_renders_base_layout` — leave it as-is — and append a new class below it:
 
 ```python
 class TestBadgeFragment:
-    def test_badge_returns_zero_as_html(self, client: FlaskClient) -> None:
+    def test_badge_empty_when_zero(self, client: FlaskClient) -> None:
         response = client.get("/pipeline/badge")
         assert response.status_code == 200
         assert response.content_type.startswith("text/html")
-        # Phase 1: count is always 0 and rendered as plain text
-        assert response.data.strip() == b"0"
+        # Phase 1: always zero ⇒ CSS hides the badge ⇒ fragment is empty.
+        assert response.data.strip() == b""
+
+    def test_badge_template_renders_number_when_positive(
+        self, client: FlaskClient
+    ) -> None:
+        # Render the template directly with a non-zero count, proving
+        # the Phase-2-ready code path works without needing to stub the
+        # view or mock the DB.
+        from flask import render_template
+
+        with client.application.app_context():
+            out = render_template("fragments/badge.html", count=7)
+            assert out == "7"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify the first one fails**
 
 Run: `uv run pytest tests/ui/test_app.py::TestBadgeFragment -v`
-Expected: In its current form the badge returns `"0"` with `text/html` content-type — the test may already pass. If so, skip the implementation and just verify, then add the template for Phase-2 readiness.
+Expected: `test_badge_empty_when_zero` FAILS (current route returns `b"0"`, not `b""`).
 
 - [ ] **Step 3: Create the fragment template**
 
 Create `better_memory/ui/templates/fragments/badge.html`:
 
 ```html
-{# Candidate-count badge. Phase 1 always renders 0. #}
-{{ count }}
+{%- if count and count > 0 -%}{{ count }}{%- endif -%}
 ```
+
+The `{%- -%}` whitespace-control markers ensure no leading/trailing whitespace in the output. Empty string when `count == 0`; the number otherwise.
 
 - [ ] **Step 4: Update the route**
 
@@ -1311,7 +1337,7 @@ Expected: All PASS.
 
 ```bash
 git add better_memory/ui/templates/fragments/ better_memory/ui/app.py tests/ui/test_app.py
-git commit -m "UI Phase 1: badge fragment template (stub count, Phase 2 replaces)"
+git commit -m "UI Phase 1: badge fragment renders empty when count is zero"
 ```
 
 ---
