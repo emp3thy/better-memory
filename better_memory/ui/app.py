@@ -58,9 +58,6 @@ def create_app(
     app.extensions["_db_path"] = resolved_db
     resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
     app.extensions["chat"] = resolved_chat
-    app.extensions["consolidation_service"] = ConsolidationService(
-        conn=db_conn, chat=resolved_chat
-    )
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:

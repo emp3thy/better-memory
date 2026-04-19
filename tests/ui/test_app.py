@@ -269,11 +269,6 @@ class TestOnlyOneExpandedScript:
 
 
 class TestConsolidationWiring:
-    def test_app_exposes_consolidation_service(
-        self, client: FlaskClient
-    ) -> None:
-        assert "consolidation_service" in client.application.extensions
-
     def test_app_exposes_db_path_for_threaded_jobs(
         self, client: FlaskClient
     ) -> None:
