@@ -98,7 +98,7 @@ def create_app(
 
     @app.get("/pipeline/badge")
     def pipeline_badge() -> str:
-        return ""
+        return render_template("fragments/badge.html", count=0)
 
     @app.get("/sweep")
     def sweep() -> str:

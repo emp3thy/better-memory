@@ -178,3 +178,24 @@ class TestInactivityTimeout:
         # Tests that don't want the thread can pass start_watchdog=False.
         app = create_app(start_watchdog=False)
         assert app.config["_check_idle"]  # helper still registered
+
+
+class TestBadgeFragment:
+    def test_badge_empty_when_zero(self, client: FlaskClient) -> None:
+        response = client.get("/pipeline/badge")
+        assert response.status_code == 200
+        assert response.content_type.startswith("text/html")
+        # Phase 1: always zero ⇒ CSS hides the badge ⇒ fragment is empty.
+        assert response.data.strip() == b""
+
+    def test_badge_template_renders_number_when_positive(
+        self, client: FlaskClient
+    ) -> None:
+        # Render the template directly with a non-zero count, proving
+        # the Phase-2-ready code path works without needing to stub the
+        # view or mock the DB.
+        from flask import render_template
+
+        with client.application.app_context():
+            out = render_template("fragments/badge.html", count=7)
+            assert out == "7"
