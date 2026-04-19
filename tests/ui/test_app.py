@@ -10,3 +10,25 @@ class TestHealthz:
         response = client.get("/healthz")
         assert response.status_code == 200
         assert response.data == b"ok"
+
+
+class TestRootRedirect:
+    def test_redirects_to_pipeline(self, client: FlaskClient) -> None:
+        response = client.get("/")
+        assert response.status_code == 302
+        assert response.headers["Location"].endswith("/pipeline")
+
+
+class TestLayoutShell:
+    def test_pipeline_renders_base_layout(self, client: FlaskClient) -> None:
+        response = client.get("/pipeline")
+        assert response.status_code == 200
+        body = response.data.decode()
+        # All five nav tabs appear in the header
+        assert "Pipeline" in body
+        assert "Sweep" in body
+        assert "Knowledge" in body
+        assert "Audit" in body
+        assert "Graph" in body
+        # Close UI button is rendered
+        assert "Close UI" in body
