@@ -250,3 +250,19 @@ class TestBadgeRealCount:
         response = client.get("/pipeline/badge")
         assert response.status_code == 200
         assert response.data.strip() == b"2"
+
+
+class TestOnlyOneExpandedScript:
+    def test_base_includes_only_one_expanded_listener(
+        self, client: FlaskClient
+    ) -> None:
+        response = client.get("/pipeline")
+        body = response.data
+        # Script must listen for the HTMX event that fires before any
+        # request and walk the .card-list for expanded siblings.
+        assert b"htmx:beforeRequest" in body
+        assert b"card-compact" in body
+        assert b"data-expanded" in body
+        assert b"collapse-me" in body
+        # Modal target div exists for promote / merge.
+        assert b'id="modal"' in body
