@@ -51,7 +51,7 @@ def create_app(
 
     @app.before_request
     def _origin_check() -> None:
-        if request.method == "GET":
+        if request.method in ("GET", "HEAD"):
             return
         expected_host = request.host  # e.g. "localhost" or "127.0.0.1:54321"
         origin_host = _host_of(request.headers.get("Origin"))
