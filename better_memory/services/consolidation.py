@@ -74,3 +74,39 @@ def find_clusters(
             )
         )
     return out
+
+
+@dataclass(frozen=True)
+class ObservationForPrompt:
+    """Subset of observation fields the draft prompt shows to the LLM."""
+
+    id: str
+    created_at: str
+    content: str
+    outcome: str
+
+
+def build_draft_prompt(observations: list[ObservationForPrompt]) -> str:
+    """Build the insight-draft prompt from spec §9."""
+    lines = [
+        f"Here are {len(observations)} observations about the same pattern:",
+        "",
+    ]
+    for obs in observations:
+        lines.append(
+            f"- [{obs.created_at}] ({obs.outcome}) {obs.id}: {obs.content}"
+        )
+    lines.extend(
+        [
+            "",
+            "Write a single insight that:",
+            "- Generalises the pattern in present tense",
+            "- States the conditions under which it holds",
+            "- Notes any exceptions observed",
+            "- Is specific enough to be actionable",
+            "- Is concise (2-4 sentences for the pattern, 1-2 for conditions/exceptions)",
+            "",
+            "Return the insight text only, no preamble or formatting.",
+        ]
+    )
+    return "\n".join(lines)

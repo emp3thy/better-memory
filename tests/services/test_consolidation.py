@@ -12,6 +12,8 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.services.consolidation import (
     ObservationCluster,
+    ObservationForPrompt,
+    build_draft_prompt,
     find_clusters,
 )
 
@@ -128,3 +130,35 @@ class TestFindClusters:
         clusters = find_clusters(conn, project="p")
         assert len(clusters) == 1
         assert "consolidated" not in clusters[0].observation_ids
+
+
+class TestBuildDraftPrompt:
+    def test_renders_spec_prompt(self) -> None:
+        observations = [
+            ObservationForPrompt(
+                id="o1",
+                created_at="2026-03-01T10:00:00+00:00",
+                content="The API retries on 503s with exponential backoff.",
+                outcome="success",
+            ),
+            ObservationForPrompt(
+                id="o2",
+                created_at="2026-03-05T14:22:00+00:00",
+                content="Retrying on 4xx is always wrong — they won't resolve.",
+                outcome="failure",
+            ),
+            ObservationForPrompt(
+                id="o3",
+                created_at="2026-03-10T09:15:00+00:00",
+                content="Add jitter to avoid thundering-herd retries.",
+                outcome="success",
+            ),
+        ]
+        prompt = build_draft_prompt(observations)
+        assert "Here are 3 observations about the same pattern:" in prompt
+        assert "o1" in prompt
+        assert "2026-03-01" in prompt
+        assert "success" in prompt
+        assert "Write a single insight that:" in prompt
+        assert "Generalises the pattern in present tense" in prompt
+        assert "Is concise" in prompt
