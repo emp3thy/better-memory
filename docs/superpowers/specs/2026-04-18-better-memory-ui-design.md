@@ -33,7 +33,8 @@ A single Python web app, `better_memory.ui`, that covers all 10 Management UI ph
 
 - **Flask** (+ Jinja2, bundled) for routing and templates.
 - **HTMX** (vendored, ~14 KB) for server-pushed fragment updates.
-- **Cytoscape.js** (vendored, ~500 KB) loaded only on the Graph route.
+- **Cytoscape.js** + **`cytoscape-fcose`** extension (vendored, ~500 KB combined) loaded only on the Graph route.
+- **Styling.** Hand-written plain CSS in `static/app.css`. No framework (no Tailwind, no Bootstrap, no Pico). The UI is small enough that a single stylesheet is simpler than a framework. Dark theme only.
 - New dependency in `pyproject.toml`: `flask`. Nothing else.
 
 ### Process model
@@ -45,7 +46,7 @@ A single Python web app, `better_memory.ui`, that covers all 10 Management UI ph
 - **Single-instance guard.** Before spawning, `memory.start_ui()` checks `~/.better-memory/ui.pid`. If the PID is alive and `GET /healthz` on its port returns `200`, return that URL instead of spawning a second. Stale entries are cleared.
 - **Lifecycle.**
   - 30-minute inactivity timeout (reset on every non-`/healthz` request). On expiry, server calls `os._exit(0)`.
-  - `POST /shutdown` endpoint hit by the "Close UI" button. Responds, then `os._exit(0)`.
+  - `POST /shutdown` endpoint hit by the "Close UI" button. Handler returns the response, then schedules shutdown via `threading.Timer(0.1, os._exit, (0,)).start()` so Flask can flush the response before the process dies.
 - **Origin check.** Flask `before_request` rejects non-GET requests unless `Origin` or `Referer` matches the bound host:port. Browsers always send these; a cross-origin tab cannot forge them. Combined with `127.0.0.1`-only binding and random port, this is adequate for a single-user local tool.
 
 ### Data access
@@ -113,12 +114,15 @@ better_memory/ui/
   static/
     htmx.min.js
     cytoscape.min.js
+    cytoscape-fcose.min.js
     app.css
   templates/
     base.html
     pipeline.html, sweep.html, knowledge.html, audit.html, graph.html
     fragments/
-      candidate_card.html, insight_card.html, panel.html, job.html, ...
+      candidate_card.html, insight_card.html, panel.html, job.html
+      graph_node_observation.html, graph_node_insight.html, graph_node_knowledge.html
+      ...
 ```
 
 ---
@@ -145,7 +149,9 @@ Compact row by default:
                  [component · evidence · confidence]
 ```
 
-Click the row to expand — hits `/candidates/<id>/card` (or `/insights/<id>/card`), swaps the row in place for the expanded version showing title, full content, sources link, and all four actions. Click again to collapse. Only one card expanded at a time; opening a second collapses the first.
+Click the row to expand — hits `/candidates/<id>/card` (or `/insights/<id>/card`), swaps the row in place for the expanded version showing title, full content, sources link, and all four actions. Click again to collapse.
+
+**Only one card expanded at a time.** Each expanded card has `data-expanded="true"` and an `hx-on:click` handler that, before swapping, closes any other `[data-expanded="true"]` in the panel by re-fetching that card's compact fragment. Implemented with a tiny inline script — no extra library.
 
 ### Per-stage actions
 
@@ -162,7 +168,11 @@ Clicking Merge on a candidate swaps the action bar for an inline picker listing 
 
 ### Consolidation button
 
-`POST /pipeline/consolidate` registers a background job via `jobs.py` (an in-memory `dict[job_id, JobState]` plus a `threading.Thread` running `ConsolidationService.dry_run()`). The POST response is an HTMX fragment showing a progress bar with `hx-get="/jobs/<id>"` polling every 2 s. On completion, the fragment triggers a refresh of the Candidates panel (`hx-trigger="load from:(job-complete)"`). Only one consolidation job runs at a time; the button is disabled while one is active.
+`POST /pipeline/consolidate` registers a background job via `jobs.py` (an in-memory `dict[job_id, JobState]` plus a `threading.Thread` running `ConsolidationService.dry_run()`). The POST response is an HTMX fragment showing a progress bar with `hx-get="/jobs/<id>"` polling every 2 s.
+
+**Cross-fragment refresh.** When the job finishes, `/jobs/<id>` returns the final fragment plus an `HX-Trigger: job-complete` response header. The Candidates panel listens for it with `hx-trigger="job-complete from:body"` and re-fetches itself.
+
+**Single-job enforcement.** `jobs.py` holds a module-level `threading.Lock` plus a `current_job_id: str | None`. `POST /pipeline/consolidate` tries `lock.acquire(blocking=False)`; if it fails, it returns the existing job's progress fragment instead of starting a new one. The button is rendered `disabled` whenever `current_job_id is not None`.
 
 ### Empty states
 
@@ -223,7 +233,7 @@ Kanban Promoted cards link back via `promoted_to`; "View doc" opens the KB edito
 
 Reads the existing `audit_log` table (wired in Plan 1 Phase 10).
 
-- **Filter form** at top: `entity_type`, `action`, `actor` (session_id), `project`, date range. Submits via HTMX; `#rows` target swaps in the new page.
+- **Filter form** at top: `entity_type`, `action`, `actor` (session_id), `project`, date range (two `<input type="date">` fields, `from` and `to`; empty means unbounded on that side), and a small "Last 7 days" / "Last 30 days" / "All" preset row that populates the date inputs. Submits via HTMX; `#rows` target swaps in the new page.
 - **Body:** paginated table. Columns: timestamp, entity type, entity id (linked), action, `from_status → to_status`, actor, details. 50 rows per page. "Load more" at the bottom fires `hx-get="/audit/rows?offset=..."` and appends.
 - **Lineage drawer.** Clicking an entity id opens a side drawer with the entity's full lineage. For an insight, the chain is source observations → insight → (if promoted) knowledge doc. Rendered as a vertical list, not a graph.
 - **Volume control.** `retrieved` events can flood the log (parent spec §8 calls them out as the first thing to drop). The timeline filters `retrieved` out by default; users opt in.
@@ -233,9 +243,9 @@ Reads the existing `audit_log` table (wired in Plan 1 Phase 10).
 - Route renders a minimal shell with a single `#cy` div. `/graph/data` returns `{nodes: [...], edges: [...]}`.
 - **Node types.** observation (small, neutral) · insight (medium, colored by polarity: green = do, red = dont, grey = neutral) · knowledge doc (large, distinct shape).
 - **Edge types.** `derived_from` (observation → insight) · `related` / `contradicts` / `supersedes` (insight → insight) · `promoted_to` (insight → doc).
-- **Layout.** Cytoscape's `cose` force layout. Default. No dagre. No manual positions.
+- **Layout.** Cytoscape's `fcose` extension (faster and better-looking than `cose` at hundreds of nodes). Vendored alongside `cytoscape.min.js`. No dagre. No manual positions.
 - **Filters** (top bar): project · component · date range · include-archived checkbox. Changes re-fetch `/graph/data` and re-run the layout.
-- **Interactions.** Click node → side panel with that entity's details (reuses the card fragments). Shift-click to multi-select. Pan/zoom free from Cytoscape.
+- **Interactions.** Click node → side panel with that entity's details. Panel content is a small per-type fragment: `fragments/graph_node_observation.html` (content snippet, component, outcome, source session), `fragments/graph_node_insight.html` (reuses the expanded insight card), `fragments/graph_node_knowledge.html` (file path, scope, excerpt, "Open in editor" link). Shift-click to multi-select. Pan/zoom free from Cytoscape.
 - **Performance cap.** Graph data is capped at 500 nodes. If the query matches more, show "N more hidden — narrow the filter" as an overlay. The cap is a simple `LIMIT 500` per node-type bucket in `/graph/data`.
 
 ### `memory.start_ui()` (Phase 10)
