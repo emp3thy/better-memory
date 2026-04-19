@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time as _time
 from pathlib import Path
@@ -223,14 +224,12 @@ class TestBadgeFragment:
 
 class TestBadgeRealCount:
     def test_badge_shows_candidate_count_from_db(
-        self, client: FlaskClient, tmp_db: Path
+        self, client: FlaskClient
     ) -> None:
         # Insert candidates directly via the app's connection so the
         # project name matches cwd (same as the kanban query).
-        from pathlib import Path as _Path
-        import sqlite3 as _sqlite3
-        conn: _sqlite3.Connection = client.application.extensions["db_connection"]
-        project = _Path.cwd().name
+        conn: sqlite3.Connection = client.application.extensions["db_connection"]
+        project = Path.cwd().name
         conn.execute(
             "INSERT INTO insights (id, title, content, project, status, polarity) "
             "VALUES ('c1', 't', 'c', ?, 'pending_review', 'neutral')",
