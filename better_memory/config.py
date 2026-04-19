@@ -23,6 +23,7 @@ from pathlib import Path
 _DEFAULT_HOME = "~/.better-memory"
 _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 _DEFAULT_EMBED_MODEL = "nomic-embed-text"
+_DEFAULT_CONSOLIDATE_MODEL = "llama3"
 
 
 def resolve_home() -> Path:
@@ -54,6 +55,7 @@ class Config:
     spool_dir: Path
     ollama_host: str
     embed_model: str
+    consolidate_model: str
     audit_log_retrieved: bool
 
 
@@ -71,5 +73,8 @@ def get_config() -> Config:
         spool_dir=home / "spool",
         ollama_host=_resolve_str("OLLAMA_HOST", _DEFAULT_OLLAMA_HOST),
         embed_model=_resolve_str("EMBED_MODEL", _DEFAULT_EMBED_MODEL),
+        consolidate_model=_resolve_str(
+            "CONSOLIDATE_MODEL", _DEFAULT_CONSOLIDATE_MODEL
+        ),
         audit_log_retrieved=_resolve_bool("AUDIT_LOG_RETRIEVED", default=True),
     )
