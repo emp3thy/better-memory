@@ -388,7 +388,7 @@ class TestMergePicker:
         assert "c3" in body
         assert "id=\"merge-target-c1\"" not in body
 
-    def test_merge_post_returns_phase3_stub(
+    def test_merge_post_combines_candidates(
         self, client: FlaskClient
     ) -> None:
         conn = client.application.extensions["db_connection"]
@@ -401,7 +401,31 @@ class TestMergePicker:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 200
-        assert b"Phase 3" in response.data
+        assert response.data.strip() == b""
+        row = conn.execute(
+            "SELECT status FROM insights WHERE id = 'c1'"
+        ).fetchone()
+        assert row["status"] == "retired"
+
+    def test_merge_post_validation_error_surfaces(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, "
+            "polarity) VALUES ('tgt', 't', 'c', ?, 'retired', 'neutral')",
+            (project,),
+        )
+        conn.commit()
+
+        response = client.post(
+            "/candidates/c1/merge?target=tgt",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert b"Cannot merge into status 'retired'" in response.data
 
 
 class TestConsolidationButton:

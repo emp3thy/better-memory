@@ -244,14 +244,47 @@ def create_app(
         )
 
     @app.post("/candidates/<id>/merge")
-    def candidate_merge(id: str) -> str:
-        # Phase 3 ships the real merge logic (ConsolidationService).
-        return (
-            '<div class="card card-error">'
-            "<p>Merge cannot run: ConsolidationService ships in <strong>Phase 3</strong>. "
-            "The picker is live; the logic isn't. Retry after Phase 3 lands.</p>"
-            "</div>"
-        )
+    def candidate_merge(id: str) -> tuple[str, int]:
+        target_id = request.args.get("target", "")
+        if not target_id:
+            return (
+                '<div class="card card-error">'
+                "<p>Missing <code>target</code> query parameter.</p>"
+                "</div>"
+            ), 200
+        try:
+            import asyncio
+            import concurrent.futures
+
+            db_path = app.extensions["_db_path"]
+            chat = app.extensions["chat"]
+
+            def _run_merge() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Open a new connection in the background thread
+                    merge_conn = connect(db_path)
+                    svc = ConsolidationService(conn=merge_conn, chat=chat)
+                    try:
+                        loop.run_until_complete(
+                            svc.merge(source_id=id, target_id=target_id)
+                        )
+                    finally:
+                        merge_conn.close()
+                finally:
+                    loop.close()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(_run_merge).result()
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">'
+                f"<p>{exc}</p>"
+                "</div>"
+            ), 200
+        # Source retired → card removed from candidates panel.
+        return "", 200
 
     @app.get("/insights/<id>/card")
     def insight_card(id: str) -> str:
