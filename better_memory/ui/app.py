@@ -119,7 +119,25 @@ def create_app(
 
     @app.get("/pipeline")
     def pipeline() -> str:
-        return render_template("pipeline.html", active_tab="pipeline")
+        counts = queries.kanban_counts(
+            app.extensions["db_connection"], project=_project_name()
+        )
+        return render_template(
+            "pipeline.html",
+            active_tab="pipeline",
+            active_stage="candidates",
+            counts=counts,
+        )
+
+    @app.get("/pipeline/panel/<stage>")
+    def pipeline_panel(stage: str) -> str:
+        # Task 6 implements this.
+        return ""
+
+    @app.post("/pipeline/consolidate")
+    def pipeline_consolidate() -> str:
+        # Task 13 implements this.
+        return ""
 
     @app.get("/pipeline/badge")
     def pipeline_badge() -> str:
