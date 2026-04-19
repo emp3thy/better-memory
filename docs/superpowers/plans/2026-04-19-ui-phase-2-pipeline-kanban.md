@@ -375,12 +375,32 @@ git commit -m "UI Phase 2: queries.py — kanban_counts aggregator"
 ## Task 3: queries.py — list functions for each stage
 
 **Files:**
+- Modify: `better_memory/services/insight.py`
 - Modify: `better_memory/ui/queries.py`
 - Modify: `tests/ui/test_queries.py`
 
 **Context:** Each panel needs a list of rows. For observations, a light dataclass with the columns we'll render in cards. For candidates/insights/promoted, we return `Insight` rows directly (already defined in `better_memory.services.insight`).
 
-- [ ] **Step 1: Write failing tests**
+The `_row_to_insight` helper in the service module is used internally today. We need to call it from `queries.py`, so promote it to public (`row_to_insight`), matching the Phase-1 `resolve_home` pattern.
+
+- [ ] **Step 1: Rename `_row_to_insight` → `row_to_insight` in `better_memory/services/insight.py`**
+
+Edit `better_memory/services/insight.py`. Rename the helper definition at line 94 from `_row_to_insight` to `row_to_insight`. Then `replace_all` the internal callers inside `insight.py` (there are three or four). Verify with:
+
+Run: `grep -rn "_row_to_insight" better_memory tests`
+Expected: No output.
+
+Run: `uv run pytest tests/services/test_insight.py -q`
+Expected: All pass — tests don't reference the old name directly.
+
+Commit this rename separately so the queries-introducing commit stays small:
+
+```bash
+git add better_memory/services/insight.py
+git commit -m "UI Phase 2: promote row_to_insight to public helper"
+```
+
+- [ ] **Step 2: Write failing tests**
 
 Append to `tests/ui/test_queries.py`:
 
@@ -446,17 +466,17 @@ class TestListInsightsByStatus:
         assert sorted(i.id for i in result) == ["pr1", "pr2"]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run tests to verify they fail**
 
 Run: `uv run pytest tests/ui/test_queries.py -v`
 Expected: FAIL — `ObservationListRow`, `list_observations`, `list_candidates`, `list_insights`, `list_promoted` don't exist.
 
-- [ ] **Step 3: Extend `queries.py`**
+- [ ] **Step 4: Extend `queries.py`**
 
 Append to `better_memory/ui/queries.py`:
 
 ```python
-from better_memory.services.insight import Insight, _row_to_insight
+from better_memory.services.insight import Insight, row_to_insight
 
 
 @dataclass(frozen=True)
@@ -511,7 +531,7 @@ def _list_insights_by_status(
         """,
         (project, status, limit),
     ).fetchall()
-    return [_row_to_insight(r) for r in rows]
+    return [row_to_insight(r) for r in rows]
 
 
 def list_candidates(
@@ -538,14 +558,12 @@ def list_promoted(
     )
 ```
 
-Note: `_row_to_insight` is underscored in the `insight` module; importing it across modules is acceptable for the internal `better_memory.ui` package. If future cleanup wants it public, that's a separate concern.
-
-- [ ] **Step 4: Run tests**
+- [ ] **Step 5: Run tests**
 
 Run: `uv run pytest tests/ui/test_queries.py -v`
 Expected: All PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add better_memory/ui/queries.py tests/ui/test_queries.py
@@ -706,9 +724,13 @@ class TestPipelinePage:
         assert "Candidates" in body
         assert "Insights" in body
         assert "Promoted" in body
-        # Real counts rendered somewhere (crude check; templates verified
-        # more precisely in per-stage tests).
-        assert ">1<" in body  # two places: observations & candidates both = 1
+        # Real counts rendered inside the <span class="count"> inside each
+        # pill — assert the exact token so a stray "1" elsewhere cannot
+        # trigger a false pass.
+        import re
+        count_tokens = re.findall(r'<span class="count">(\d+)</span>', body)
+        # Observations=1, Candidates=1, Insights=0, Promoted=0 (in pill order).
+        assert count_tokens == ["1", "1", "0", "0"]
 
     def test_default_panel_is_candidates(self, client: FlaskClient) -> None:
         response = client.get("/pipeline")
@@ -1360,8 +1382,9 @@ Create `better_memory/ui/templates/fragments/insight_card_expanded.html`:
     <button hx-get="{{ url_for('insight_edit', id=i.id) }}"
             hx-target="closest .card" hx-swap="outerHTML">Edit</button>
     <button hx-get="{{ url_for('insight_sources', id=i.id) }}"
-            hx-target="closest .card-content" hx-swap="beforeend">View sources</button>
+            hx-target="#sources-{{ i.id }}" hx-swap="innerHTML">View sources</button>
   </div>
+  <div id="sources-{{ i.id }}" class="sources-container"></div>
 </div>
 ```
 
@@ -1485,15 +1508,38 @@ Also add an empty `#modal` div just before `</body>` so promote/merge modals hav
 <div id="modal"></div>
 ```
 
-- [ ] **Step 2: Run full suite**
+- [ ] **Step 2: Add a smoke-level regression test**
+
+The behavior is browser-only, but we can still guard against the script being deleted or edited out. Append to `tests/ui/test_app.py`:
+
+```python
+class TestOnlyOneExpandedScript:
+    def test_base_includes_only_one_expanded_listener(
+        self, client: FlaskClient
+    ) -> None:
+        response = client.get("/pipeline")
+        body = response.data
+        # Script must listen for the HTMX event that fires before any
+        # request and walk the .card-list for expanded siblings.
+        assert b"htmx:beforeRequest" in body
+        assert b"card-compact" in body
+        assert b"data-expanded" in body
+        assert b"collapse-me" in body
+        # Modal target div exists for promote / merge.
+        assert b'id="modal"' in body
+```
+
+This test will catch deletions or accidental edits that remove the core parts of the logic, without requiring a browser. Behavioural verification still relies on manual browser smoke-testing (Task 15).
+
+- [ ] **Step 3: Run full suite**
 
 Run: `uv run pytest tests/ui/ -v`
-Expected: All PASS. No tests assert on the script (behavior is browser-only), but adding the script must not break existing tests.
+Expected: All PASS.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add better_memory/ui/templates/base.html
+git add better_memory/ui/templates/base.html tests/ui/test_app.py
 git commit -m "UI Phase 2: inline script for only-one-expanded card behavior"
 ```
 
@@ -2037,7 +2083,7 @@ Create `better_memory/ui/templates/fragments/promotion_stub_modal.html`:
     <h3>Promotion workflow</h3>
     <p>The promotion workflow ships in Phase 7.</p>
     <p>When it lands, this modal will let you pick a knowledge-base destination, edit a draft, and save a markdown file.</p>
-    <button onclick="document.getElementById('modal').innerHTML = ''">Close</button>
+    <button hx-on:click="document.getElementById('modal').innerHTML = ''">Close</button>
   </div>
 </div>
 ```
@@ -2144,21 +2190,28 @@ class TestConsolidationButton:
         )
         assert response.status_code == 200
         assert b"Phase 3" in response.data
+        # Response carries HX-Trigger: job-complete so the candidates
+        # panel listener refreshes.
+        assert response.headers.get("HX-Trigger") == "job-complete"
 
     def test_jobs_endpoint_returns_fragment(
         self, client: FlaskClient
     ) -> None:
-        # Start a "job" first.
-        client.post(
-            "/pipeline/consolidate", headers={"Origin": "http://localhost"}
+        import re
+
+        response = client.post(
+            "/pipeline/consolidate",
+            headers={"Origin": "http://localhost"},
         )
-        # There's one current_job_id set; endpoint should return it.
-        from better_memory.ui import jobs
-        job_id = jobs.current_job_id()
-        assert job_id is not None
-        response = client.get(f"/jobs/{job_id}")
-        assert response.status_code == 200
-        assert b"Phase 3" in response.data
+        # Extract the job-id from the rendered fragment's data attribute.
+        match = re.search(rb'data-job-id="([a-f0-9]+)"', response.data)
+        assert match is not None, "consolidation response must render a job fragment"
+        job_id = match.group(1).decode()
+
+        # GET /jobs/<id> returns the job's fragment (Phase 3 message).
+        get_resp = client.get(f"/jobs/{job_id}")
+        assert get_resp.status_code == 200
+        assert b"Phase 3" in get_resp.data
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2630,7 +2683,12 @@ git commit -m "UI Phase 2: kanban CSS — pills, cards, actions, empty states, m
 
 - [ ] **Step 1: Seed a test candidate and run the UI**
 
+**Important:** the UI derives `project` from `Path.cwd().name`. To match the user's real observations (which were written with their project as cwd), launch from the project root — not an arbitrary directory.
+
 ```bash
+# Run from the better-memory project root so project name resolves correctly.
+cd C:/Users/gethi/source/better-memory   # or wherever the repo lives
+
 # Ensure no stale UI is running.
 test -f ~/.better-memory/ui.url && rm ~/.better-memory/ui.url
 
