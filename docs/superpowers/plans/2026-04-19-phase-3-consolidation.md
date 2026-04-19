@@ -2053,10 +2053,11 @@ class TestConsolidationButton:
     def test_completed_job_renders_branch_candidates(
         self, client: FlaskClient
     ) -> None:
-        """End-to-end: seed a cluster, run consolidate, poll /jobs/<id>
-        until complete, verify the rendered fragment lists the candidate."""
+        """End-to-end: seed a cluster, run consolidate, wait for the job
+        thread to finish deterministically, verify the rendered fragment
+        lists the candidate."""
         import re
-        import time as _time
+        import threading
 
         conn = client.application.extensions["db_connection"]
         project = Path.cwd().name
@@ -2084,17 +2085,16 @@ class TestConsolidationButton:
         assert match is not None
         job_id = match.group(1).decode()
 
-        # Poll up to ~3 seconds for job to finish (test-seeded dry-run is fast).
-        for _ in range(60):
-            get_resp = client.get(f"/jobs/{job_id}")
-            if b"job-status-complete" in get_resp.data:
-                break
-            _time.sleep(0.05)
-        else:
-            raise AssertionError(
-                f"Job did not complete. Last body: {get_resp.data[:500]!r}"
-            )
+        # Wait for the consolidation thread to finish. Deterministic —
+        # no wall-clock timing reliance. Thread names start with
+        # "consolidation-<job-id-prefix>".
+        for t in threading.enumerate():
+            if t.name.startswith("consolidation-"):
+                t.join(timeout=5.0)
+                assert not t.is_alive(), "consolidation thread did not exit"
 
+        get_resp = client.get(f"/jobs/{job_id}")
+        assert b"job-status-complete" in get_resp.data
         assert b"Always retry 5xx" in get_resp.data
 ```
 
@@ -2446,7 +2446,6 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import time as _time
 from pathlib import Path
 
 from flask.testing import FlaskClient
@@ -2471,7 +2470,9 @@ def _seed_cluster(
 
 
 def _run_consolidation(client: FlaskClient, draft_text: str) -> str:
-    """Run /pipeline/consolidate, wait for completion, return job_id."""
+    """Run /pipeline/consolidate, join the worker thread, return job_id."""
+    import threading
+
     fake = client.application.config["_fake_chat"]
     fake.responses.append(draft_text)
 
@@ -2482,12 +2483,12 @@ def _run_consolidation(client: FlaskClient, draft_text: str) -> str:
     assert match is not None
     job_id = match.group(1).decode()
 
-    for _ in range(60):
-        get = client.get(f"/jobs/{job_id}")
-        if b"job-status-complete" in get.data:
-            return job_id
-        _time.sleep(0.05)
-    raise AssertionError("job did not complete in time")
+    # Deterministic wait — join the consolidation thread by name.
+    for t in threading.enumerate():
+        if t.name.startswith("consolidation-"):
+            t.join(timeout=5.0)
+            assert not t.is_alive(), "consolidation thread did not exit"
+    return job_id
 
 
 def test_approve_a_real_candidate(client: FlaskClient) -> None:
@@ -2588,6 +2589,7 @@ git commit -m "Phase 3: E2E smoke tests — Approve/Reject/Retire real candidate
 ## Task 17: Opt-in integration test — real Ollama chat
 
 **Files:**
+- Modify: `pyproject.toml` (add `addopts` so integration tests skip by default)
 - Create: `tests/services/test_consolidation_integration.py`
 
 **Context:** Every other Phase-3 test uses `FakeChat`. One integration test exercises the real `OllamaChat` end-to-end so drift between our prompt / response format and Ollama's API surface is caught. Marked `@pytest.mark.integration` — off by default; opt-in via `pytest -m integration`.
@@ -2657,22 +2659,38 @@ async def test_real_ollama_drafts_insight(conn: sqlite3.Connection) -> None:
     assert c.observation_ids == ["o0", "o1", "o2"]
 ```
 
-- [ ] **Step 2: Verify the marker is registered**
+- [ ] **Step 2: Add `addopts` to `pyproject.toml` so integration tests are skipped by default**
 
-`pyproject.toml` already has `markers = ["integration: marks tests as integration tests (require external services)"]` under `[tool.pytest.ini_options]`. No changes needed there.
+Edit `pyproject.toml`. Under `[tool.pytest.ini_options]`, add an `addopts` line:
 
-- [ ] **Step 3: Verify the test is SKIPPED by default**
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-m 'not integration'"
+markers = [
+    "integration: marks tests as integration tests (require external services)",
+]
+```
+
+**Note:** `tests/mcp/test_server_integration.py` is NOT marked with `@pytest.mark.integration` (it documents this deliberately — it wants to run by default), so this change does NOT affect it. Only tests that actively carry the mark get skipped.
+
+- [ ] **Step 3: Verify default behavior**
 
 Run: `uv run pytest tests/services/test_consolidation_integration.py -v`
-Expected: test is collected but skipped (`-m "not integration"` is not the default, but `@pytest.mark.integration` without selection still runs — so actually it WILL run by default here). Verify by running and making sure it passes (needs real Ollama).
+Expected: 1 test deselected — "1 deselected in …s". The test is skipped by default.
 
-If you want it truly opt-in, run with `-m "not integration"` to exclude, or set `addopts = "-m 'not integration'"` in `pyproject.toml`. For Phase 3's scope, keep the default behavior: runs if Ollama is reachable, fails/errors otherwise. Document this expectation in the test file's docstring.
+Run: `uv run pytest -m integration tests/services/test_consolidation_integration.py -v`
+Expected: 1 test runs. Passes if real Ollama + `$CONSOLIDATE_MODEL` is reachable; errors with `ChatError` or timeout otherwise.
+
+Run the full default suite to confirm nothing else was affected: `uv run pytest -v`
+Expected: All existing tests still run (MCP integration tests included — they aren't marked).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add tests/services/test_consolidation_integration.py
-git commit -m "Phase 3: opt-in Ollama integration test"
+git add pyproject.toml tests/services/test_consolidation_integration.py
+git commit -m "Phase 3: opt-in Ollama integration test with pytest -m integration"
 ```
 
 ---
