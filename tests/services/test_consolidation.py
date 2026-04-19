@@ -14,6 +14,7 @@ from better_memory.services.consolidation import (
     ObservationCluster,
     ObservationForPrompt,
     build_draft_prompt,
+    existing_insight_for_cluster,
     find_clusters,
 )
 
@@ -162,3 +163,75 @@ class TestBuildDraftPrompt:
         assert "Write a single insight that:" in prompt
         assert "Generalises the pattern in present tense" in prompt
         assert "Is concise" in prompt
+
+
+def _insert_insight(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    project: str,
+    component: str | None,
+    status: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO insights "
+        "(id, title, content, project, component, status, polarity) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'neutral')",
+        (id, f"t-{id}", f"c-{id}", project, component, status),
+    )
+    conn.commit()
+
+
+class TestExistingInsightForCluster:
+    def test_returns_none_when_no_match(self, conn: sqlite3.Connection) -> None:
+        cluster = ObservationCluster(
+            project="p", component="api", theme="retry",
+            observation_ids=["o1"], total_validated_true=0,
+        )
+        assert existing_insight_for_cluster(conn, cluster) is None
+
+    def test_finds_confirmed_match_same_project_component(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_insight(conn, id="i1", project="p", component="api",
+                        status="confirmed")
+        cluster = ObservationCluster(
+            project="p", component="api", theme="retry",
+            observation_ids=["o1"], total_validated_true=0,
+        )
+        result = existing_insight_for_cluster(conn, cluster)
+        assert result is not None
+        assert result.id == "i1"
+
+    def test_ignores_pending_review(self, conn: sqlite3.Connection) -> None:
+        _insert_insight(conn, id="c1", project="p", component="api",
+                        status="pending_review")
+        cluster = ObservationCluster(
+            project="p", component="api", theme="retry",
+            observation_ids=["o1"], total_validated_true=0,
+        )
+        assert existing_insight_for_cluster(conn, cluster) is None
+
+    def test_ignores_different_component(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_insight(conn, id="i1", project="p", component="db",
+                        status="confirmed")
+        cluster = ObservationCluster(
+            project="p", component="api", theme="retry",
+            observation_ids=["o1"], total_validated_true=0,
+        )
+        assert existing_insight_for_cluster(conn, cluster) is None
+
+    def test_accepts_promoted_as_match(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_insight(conn, id="pr1", project="p", component="api",
+                        status="promoted")
+        cluster = ObservationCluster(
+            project="p", component="api", theme="retry",
+            observation_ids=["o1"], total_validated_true=0,
+        )
+        result = existing_insight_for_cluster(conn, cluster)
+        assert result is not None
+        assert result.id == "pr1"

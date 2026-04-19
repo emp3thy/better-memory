@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from better_memory.services.insight import Insight, row_to_insight
+
 
 @dataclass(frozen=True)
 class ObservationCluster:
@@ -110,3 +112,28 @@ def build_draft_prompt(observations: list[ObservationForPrompt]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def existing_insight_for_cluster(
+    conn: sqlite3.Connection, cluster: ObservationCluster
+) -> Insight | None:
+    """Return the first confirmed or promoted insight matching the cluster.
+
+    Match criterion: same ``(project, component)`` AND
+    ``status IN ('confirmed', 'promoted')``. Both statuses mean a human
+    has accepted the insight, so both count as "already exists".
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM insights
+        WHERE project = ?
+          AND (component IS ? OR component = ?)
+          AND status IN ('confirmed', 'promoted')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (cluster.project, cluster.component, cluster.component),
+    ).fetchone()
+    if row is None:
+        return None
+    return row_to_insight(row)
