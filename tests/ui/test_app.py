@@ -153,10 +153,11 @@ class TestInactivityTimeout:
             # /healthz must not update _last_activity
             assert app.config["_last_activity"] == 0.0
 
-    def test_check_idle_exits_when_over_threshold(self) -> None:
+    def test_check_idle_exits_when_over_threshold(self, tmp_path) -> None:
         app = create_app(inactivity_timeout=60.0)
         app.config["_last_activity"] = _time.monotonic() - 120.0  # 2 min idle
-        with patch("better_memory.ui.app.os._exit") as mock_exit:
+        with patch("better_memory.ui.app.resolve_home", return_value=tmp_path), \
+             patch("better_memory.ui.app.os._exit") as mock_exit:
             app.config["_check_idle"]()
             mock_exit.assert_called_once_with(0)
 
