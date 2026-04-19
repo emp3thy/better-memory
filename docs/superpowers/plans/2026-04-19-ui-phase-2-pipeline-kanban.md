@@ -1529,7 +1529,7 @@ class TestOnlyOneExpandedScript:
         assert b'id="modal"' in body
 ```
 
-This test will catch deletions or accidental edits that remove the core parts of the logic, without requiring a browser. Behavioural verification still relies on manual browser smoke-testing (Task 15).
+This test will catch deletions or accidental edits that remove the core parts of the logic, without requiring a browser. Behavioural verification is covered by the Playwright browser test in Task 16 and by manual smoke-testing in Task 15.
 
 - [ ] **Step 3: Run full suite**
 
@@ -2733,6 +2733,309 @@ Phase 3's plan should include **smoke tests that exercise Phase 2's action butto
 
 ---
 
+## Task 16: Browser-test harness via Playwright
+
+**Files:**
+- Modify: `pyproject.toml`
+- Create: `tests/ui/conftest_browser.py`
+- Create: `tests/ui/test_browser.py`
+
+**Context:** Task 9 ships a small inline script for the only-one-expanded behavior. That script runs only in a browser, so Phase 2's unit tests cannot verify it. This task adds a Playwright-based browser test harness so that behavior — plus future JS-driven behavior in Phases 5–9 — has automated regression coverage. Future phases add more browser tests as they need them; Phase 2 ships the harness + one representative test.
+
+`pytest-playwright` provides a `page` fixture automatically. Browsers are installed via `playwright install chromium` (one-off, ~100 MB).
+
+- [ ] **Step 1: Add dependency and install browser**
+
+Edit `pyproject.toml`'s dev group:
+
+```toml
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-playwright",
+    "ruff",
+]
+```
+
+Then:
+
+```bash
+uv sync
+uv run playwright install chromium
+```
+
+Verify:
+
+```bash
+uv run python -c "from playwright.sync_api import sync_playwright; print('ok')"
+```
+
+Expected: `ok`.
+
+- [ ] **Step 2: Write the harness fixture**
+
+Create `tests/ui/conftest_browser.py`:
+
+```python
+"""Fixtures for Playwright-driven browser tests of the Management UI.
+
+Spawns ``python -m better_memory.ui`` as a subprocess with an isolated
+``BETTER_MEMORY_HOME``, waits for ``ui.url``, and yields the URL (plus
+the tmp home dir so tests can seed data). Teardown terminates the
+subprocess.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from better_memory.db.connection import connect
+from better_memory.db.schema import apply_migrations
+
+
+@pytest.fixture
+def ui_url(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """Spawn the UI, apply migrations, yield (url, home_dir)."""
+    # Apply migrations so the UI opens a schema'd DB.
+    db_path = tmp_path / "memory.db"
+    conn = connect(db_path)
+    try:
+        apply_migrations(conn)
+    finally:
+        conn.close()
+
+    env = {**os.environ, "BETTER_MEMORY_HOME": str(tmp_path)}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "better_memory.ui"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    url_path = tmp_path / "ui.url"
+
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if url_path.exists():
+                break
+            time.sleep(0.05)
+        else:
+            raise TimeoutError("UI did not write ui.url within 5s")
+
+        url = url_path.read_text().strip()
+        # Sanity-check the server is reachable.
+        with urllib.request.urlopen(f"{url}/healthz", timeout=2) as resp:
+            assert resp.status == 200
+
+        yield url, tmp_path
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+```
+
+Note: the file is named `conftest_browser.py` (not `conftest.py`) so pytest does not auto-load it. Tests that want the fixture import it explicitly via `pytest_plugins`.
+
+- [ ] **Step 3: Write the only-one-expanded browser test**
+
+Create `tests/ui/test_browser.py`:
+
+```python
+"""End-to-end browser tests for Phase 2 Pipeline Kanban JS behavior.
+
+Covers the only-one-expanded card invariant defined in spec §4. Future
+phases extend with modal open/close, merge picker, etc.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+import pytest
+from playwright.sync_api import Page, expect
+
+from better_memory.db.connection import connect
+
+pytest_plugins = ["tests.ui.conftest_browser"]
+
+
+def _seed_two_candidates(db_path: Path) -> None:
+    conn = connect(db_path)
+    try:
+        project = Path.cwd().name
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('c1', 'first', 'content one', ?, 'pending_review', 'neutral')",
+            (project,),
+        )
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('c2', 'second', 'content two', ?, 'pending_review', 'neutral')",
+            (project,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_expanding_second_card_collapses_first(
+    ui_url: tuple[str, Path], page: Page
+) -> None:
+    url, home = ui_url
+    _seed_two_candidates(home / "memory.db")
+
+    page.goto(f"{url}/pipeline")
+
+    # Wait for the Candidates panel to populate.
+    page.wait_for_selector('.candidate-card[data-id="c1"]')
+    page.wait_for_selector('.candidate-card[data-id="c2"]')
+
+    # Click c1 → it expands.
+    page.click('.candidate-card[data-id="c1"]')
+    page.wait_for_selector('.card-expanded[data-id="c1"]')
+    expect(page.locator('[data-expanded="true"]')).to_have_count(1)
+
+    # Click c2 → it expands AND c1 collapses.
+    page.click('.candidate-card[data-id="c2"]')
+    page.wait_for_selector('.card-expanded[data-id="c2"]')
+
+    # Only one expanded card remains, and it's c2.
+    expanded = page.locator('[data-expanded="true"]')
+    expect(expanded).to_have_count(1)
+    expect(expanded).to_have_attribute("data-id", "c2")
+```
+
+- [ ] **Step 4: Run the test**
+
+Run: `uv run pytest tests/ui/test_browser.py -v`
+Expected: 1 passed. First run downloads ~100 MB of browser (already done in Step 1); subsequent runs are ~2 s.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pyproject.toml uv.lock tests/ui/conftest_browser.py tests/ui/test_browser.py
+git commit -m "UI Phase 2: Playwright browser-test harness + only-one-expanded test"
+```
+
+---
+
+## Task 17: GitHub Actions CI for UI tests
+
+**Files:**
+- Create: `.github/workflows/ui-tests.yml`
+
+**Context:** Repo is on GitHub (`emp3thy/better-memory`). There is currently no CI. Task 17 adds a minimal workflow that runs the UI test suite (unit + integration + browser) on every pull request and push to `main`. Full-repo tests are out of scope for this workflow because `tests/mcp/test_server_integration.py` requires a running Ollama instance, which CI doesn't have — that's a separate workflow concern for later.
+
+Reference: [GitHub Actions — Understand GitHub Actions](https://docs.github.com/en/actions/get-started/understand-github-actions).
+
+- [ ] **Step 1: Create the workflow file**
+
+Create `.github/workflows/ui-tests.yml`:
+
+```yaml
+name: UI tests
+
+on:
+  pull_request:
+    paths:
+      - "better_memory/**"
+      - "tests/ui/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ui-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "better_memory/**"
+      - "tests/ui/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ui-tests.yml"
+
+jobs:
+  ui-tests:
+    name: UI test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install project
+        run: uv sync --dev
+
+      - name: Install Playwright browsers
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run UI tests
+        run: uv run pytest tests/ui/ -v --tb=short
+```
+
+Notes on the design:
+
+- **Path-filtered triggers.** The workflow only runs when UI-relevant paths change, which keeps other PRs (e.g. docs-only) from paying the ~2-minute CI cost.
+- **`actions/checkout@v4`, `astral-sh/setup-uv@v4`.** Both are widely used, stable, and maintained.
+- **`--with-deps chromium`.** `--with-deps` auto-installs Linux system libraries Playwright needs (libnss, libnspr, etc.). Scoped to just Chromium to keep install time under a minute.
+- **`--tb=short`.** Shorter failure output so PR-comment logs stay readable.
+- **`timeout-minutes: 15`.** Safety net — the suite currently runs in under 30 seconds, so 15 minutes is generous.
+- **No matrix.** Single job on ubuntu-latest with Python 3.12. If cross-platform or cross-version coverage becomes a priority, a matrix can be added later.
+- **No deploy / no release hooks.** Task 17 is strictly about testing.
+
+- [ ] **Step 2: Verify the workflow syntax is valid**
+
+Locally (no install needed):
+
+```bash
+# Quick structural check — Python yaml reads it without errors.
+uv run python -c "import yaml; yaml.safe_load(open('.github/workflows/ui-tests.yml'))"
+```
+
+Expected: no output (successful parse).
+
+Also run `gh workflow list` after pushing to confirm GitHub registered the workflow (Task 17 verification step; runs on the PR that introduces this file).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add .github/workflows/ui-tests.yml
+git commit -m "UI Phase 2: GitHub Actions CI for UI tests on PRs"
+```
+
+- [ ] **Step 4: First PR verification**
+
+When this branch is pushed and a PR opened, the workflow will run automatically. Verify:
+
+- Actions tab shows the `UI tests` workflow as required on the PR.
+- Workflow completes green.
+- `playwright install` step takes 60–90 s (one-time browser download per runner cache).
+- `Run UI tests` step completes in <30 s.
+
+If the workflow fails on the first run, the likely causes are:
+- Missing Python version — ensure `pyproject.toml` says `requires-python = ">=3.12"`.
+- Missing browser dep — `--with-deps` should cover this; if not, add `sudo apt-get install -y libnss3 libnspr4` before the Playwright install step.
+- Path filter too narrow — if the PR only changes the workflow file itself, the workflow still runs because `.github/workflows/ui-tests.yml` is in its own path filter.
+
+---
+
 ## Self-Review Checklist
 
 Before handoff, walk through spec §4 point by point.
@@ -2758,3 +3061,7 @@ Before handoff, walk through spec §4 point by point.
 | Empty states for each stage | 6, 7 |
 
 All spec §4 items have a corresponding task. Deferred items (merge logic, promotion workflow, ConsolidationService) are explicitly called out in the plan's Scope section and land in Phases 3 and 7.
+
+**Beyond spec §4:**
+- Task 16 ships a Playwright browser-test harness so JS-driven behavior (starting with only-one-expanded) has automated regression coverage. Future UI-heavy phases (5–9) extend with their own browser tests.
+- Task 17 adds GitHub Actions CI running `pytest tests/ui/` on every PR touching UI paths.
