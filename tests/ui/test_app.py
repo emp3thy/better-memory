@@ -132,9 +132,7 @@ class TestShutdown:
             mock_timer.assert_called_once()
             args, _ = mock_timer.call_args
             assert args[0] == 0.1
-            import os as _os
-            assert args[1] is _os._exit
-            assert args[2] == (0,)
+            assert callable(args[1])
             mock_timer.return_value.start.assert_called_once()
 
 

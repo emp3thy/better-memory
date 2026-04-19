@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 from flask import Flask, abort, redirect, render_template, request, url_for
 from werkzeug.wrappers import Response
 
+from better_memory.config import resolve_home
+
 
 def create_app(
     *,
@@ -32,6 +34,12 @@ def create_app(
         synchronously without spawning threads.
     """
     app = Flask(__name__)
+
+    def _cleanup_ui_url() -> None:
+        try:
+            (resolve_home() / "ui.url").unlink()
+        except FileNotFoundError:
+            pass
 
     def _host_of(url: str | None) -> str | None:
         if not url:
@@ -62,6 +70,7 @@ def create_app(
     def _check_idle() -> None:
         idle = time.monotonic() - app.config["_last_activity"]
         if idle > inactivity_timeout:
+            _cleanup_ui_url()
             os._exit(0)
 
     app.config["_check_idle"] = _check_idle
@@ -109,7 +118,10 @@ def create_app(
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:
-        threading.Timer(0.1, os._exit, (0,)).start()
+        def _exit() -> None:
+            _cleanup_ui_url()
+            os._exit(0)
+        threading.Timer(0.1, _exit).start()
         return "", 204
 
     return app
