@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import threading
 from urllib.parse import urlparse
 
 from flask import Flask, abort, redirect, render_template, request, url_for
@@ -69,7 +71,7 @@ def create_app() -> Flask:
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:
-        # Real shutdown comes in Task 7.
+        threading.Timer(0.1, os._exit, (0,)).start()
         return "", 204
 
     return app

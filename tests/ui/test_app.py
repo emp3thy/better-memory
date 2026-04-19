@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from flask.testing import FlaskClient
 
 
@@ -112,3 +114,21 @@ class TestStaticAssets:
         assert response.status_code == 200
         assert response.content_type.startswith("text/css")
         assert b".app-header" in response.data
+
+
+class TestShutdown:
+    def test_shutdown_schedules_exit_via_timer(
+        self, client: FlaskClient
+    ) -> None:
+        with patch("better_memory.ui.app.threading.Timer") as mock_timer:
+            response = client.post(
+                "/shutdown", headers={"Origin": "http://localhost"}
+            )
+            assert response.status_code == 204
+            mock_timer.assert_called_once()
+            args, _ = mock_timer.call_args
+            assert args[0] == 0.1
+            import os as _os
+            assert args[1] is _os._exit
+            assert args[2] == (0,)
+            mock_timer.return_value.start.assert_called_once()
