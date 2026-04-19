@@ -167,23 +167,58 @@ def create_app(
 
     @app.post("/candidates/<id>/approve")
     def candidate_approve(id: str) -> str:
-        return ""  # Task 10 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status != "pending_review":
+            abort(404)
+        service.update(id, status="confirmed")
+        return ""
 
     @app.post("/candidates/<id>/reject")
     def candidate_reject(id: str) -> str:
-        return ""  # Task 10 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status != "pending_review":
+            abort(404)
+        service.update(id, status="retired")
+        return ""
 
     @app.get("/candidates/<id>/edit")
     def candidate_edit(id: str) -> str:
-        return ""  # Task 10 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status != "pending_review":
+            abort(404)
+        return render_template(
+            "fragments/insight_edit_form.html",
+            row=existing,
+            save_url=url_for("candidate_edit_save", id=id),
+            cancel_url=url_for("candidate_compact_card", id=id),
+        )
 
     @app.post("/candidates/<id>/edit")
     def candidate_edit_save(id: str) -> str:
-        return ""  # Task 10 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status != "pending_review":
+            abort(404)
+        title = request.form.get("title", existing.title)
+        content = request.form.get("content", existing.content)
+        service.update(id, title=title, content=content)
+        updated = service.get(id)
+        return render_template(
+            "fragments/candidate_card_compact.html", c=updated
+        )
 
     @app.get("/candidates/<id>/compact")
     def candidate_compact_card(id: str) -> str:
-        return ""  # Task 10 implements (used by collapse)
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status != "pending_review":
+            abort(404)
+        return render_template(
+            "fragments/candidate_card_compact.html", c=existing
+        )
 
     @app.get("/candidates/<id>/merge")
     def candidate_merge_picker(id: str) -> str:

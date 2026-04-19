@@ -196,3 +196,64 @@ class TestExpandedCards:
     def test_missing_card_returns_404(self, client: FlaskClient) -> None:
         response = client.get("/candidates/does-not-exist/card")
         assert response.status_code == 404
+
+
+class TestCandidateActions:
+    def test_approve_moves_candidate_to_confirmed(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+
+        response = client.post(
+            "/candidates/c1/approve",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.data.strip() == b""
+        row = conn.execute(
+            "SELECT status FROM insights WHERE id = 'c1'"
+        ).fetchone()
+        assert row["status"] == "confirmed"
+
+    def test_reject_moves_candidate_to_retired(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+
+        response = client.post(
+            "/candidates/c1/reject",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        row = conn.execute(
+            "SELECT status FROM insights WHERE id = 'c1'"
+        ).fetchone()
+        assert row["status"] == "retired"
+
+    def test_edit_form_then_save(self, client: FlaskClient) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+
+        form_response = client.get("/candidates/c1/edit")
+        assert form_response.status_code == 200
+        assert b"<form" in form_response.data
+        assert b"title-c1" in form_response.data
+
+        save_response = client.post(
+            "/candidates/c1/edit",
+            data={"title": "new title", "content": "new content"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert save_response.status_code == 200
+        assert b"new title" in save_response.data
+
+        row = conn.execute(
+            "SELECT title, content FROM insights WHERE id = 'c1'"
+        ).fetchone()
+        assert row["title"] == "new title"
+        assert row["content"] == "new content"
