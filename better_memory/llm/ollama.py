@@ -70,11 +70,18 @@ class OllamaChat:
                 last_exc = exc
                 await self._sleep_for_attempt(attempt)
                 continue
+            except httpx.HTTPError as exc:
+                # Non-transport httpx errors (InvalidURL, etc.) — don't retry;
+                # wrap into ChatError for a single catch surface.
+                raise ChatError(f"Ollama chat failed: {exc}") from exc
 
             if 500 <= resp.status_code < 600:
-                last_exc = ChatError(
+                err = ChatError(
                     f"Ollama returned {resp.status_code}: {resp.text[:200]}"
                 )
+                if attempt + 1 >= self._max_retries:
+                    raise err
+                last_exc = err
                 await self._sleep_for_attempt(attempt)
                 continue
 
@@ -99,6 +106,7 @@ class OllamaChat:
             await asyncio.sleep(self._backoff_base * (2**attempt))
 
     async def aclose(self) -> None:
+        """Close the underlying client if this instance created it."""
         if self._owns_client:
             await self._client.aclose()
 
