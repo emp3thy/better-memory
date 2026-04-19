@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, abort, redirect, render_template, request, url_for
+from markupsafe import escape
 from werkzeug.wrappers import Response
 
 from better_memory.config import resolve_home
@@ -272,7 +273,7 @@ def create_app(
         except ValueError as exc:
             return (
                 f'<div class="card card-error">'
-                f"<p>{exc}</p>"
+                f"<p>{escape(exc)}</p>"
                 "</div>"
             ), 200
         return "", 200
@@ -389,7 +390,7 @@ def create_app(
             abort(404)
         except ValueError as exc:
             return (
-                f'<div class="card card-error"><p>{exc}</p></div>',
+                f'<div class="card card-error"><p>{escape(exc)}</p></div>',
                 400,
                 {},
             )

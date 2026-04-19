@@ -425,7 +425,9 @@ class TestMergePicker:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 200
-        assert b"Cannot merge into status 'retired'" in response.data
+        # Exception text is HTML-escaped (&#39; for apostrophes).
+        assert b"Cannot merge into status" in response.data
+        assert b"retired" in response.data
 
 
 class TestConsolidationButton:
