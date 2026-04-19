@@ -16,6 +16,9 @@ _lock = threading.Lock()
 _current_job_id: str | None = None
 _jobs: dict[str, "JobState"] = {}
 
+# TODO(phase3): cap _jobs dict size when Phase 3 makes the stub a real
+# long-running job. Simple LRU eviction of ~100 entries is sufficient.
+
 
 @dataclass
 class JobState:
@@ -41,7 +44,14 @@ def start_phase3_stub_job() -> JobState:
         existing_id = _current_job_id
         if existing_id is not None and existing_id in _jobs:
             return _jobs[existing_id]
-        # Shouldn't happen: lock held but no job recorded. Fall through.
+        # Lock held but no job recorded — shouldn't happen, but return an
+        # error state rather than falling through to try/finally (which
+        # would crash on release-without-acquire).
+        return JobState(
+            id="unknown",
+            status="failed",
+            message="Consolidation is busy but no job is recorded. Retry in a moment.",
+        )
     try:
         job_id = uuid4().hex
         state = JobState(
