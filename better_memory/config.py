@@ -25,7 +25,7 @@ _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 _DEFAULT_EMBED_MODEL = "nomic-embed-text"
 
 
-def _resolve_home() -> Path:
+def resolve_home() -> Path:
     """Return ``BETTER_MEMORY_HOME`` (or its default) with ``~`` expanded."""
     raw = os.environ.get("BETTER_MEMORY_HOME", _DEFAULT_HOME)
     return Path(raw).expanduser()
@@ -62,7 +62,7 @@ def get_config() -> Config:
 
     Called each time so tests can override env vars between calls.
     """
-    home = _resolve_home()
+    home = resolve_home()
     return Config(
         home=home,
         memory_db=home / "memory.db",
