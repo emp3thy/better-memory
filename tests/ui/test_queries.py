@@ -10,7 +10,16 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.ui.queries import KanbanCounts, kanban_counts
+from better_memory.services.insight import Insight
+from better_memory.ui.queries import (
+    KanbanCounts,
+    ObservationListRow,
+    kanban_counts,
+    list_candidates,
+    list_insights,
+    list_observations,
+    list_promoted,
+)
 
 
 @pytest.fixture
@@ -87,3 +96,54 @@ class TestKanbanCounts:
             insights=1,
             promoted=1,
         )
+
+
+class TestListObservations:
+    def test_empty_returns_empty_list(self, conn: sqlite3.Connection) -> None:
+        assert list_observations(conn, project="empty") == []
+
+    def test_returns_active_only_ordered_recent_first(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        # created_at defaults to CURRENT_TIMESTAMP, so insert in order.
+        _insert_observation(conn, id="old", project="p")
+        _insert_observation(conn, id="new", project="p")
+        _insert_observation(conn, id="arc", project="p", status="archived")
+        rows = list_observations(conn, project="p")
+        ids = [r.id for r in rows]
+        assert ids == ["new", "old"]  # DESC by created_at
+        assert all(isinstance(r, ObservationListRow) for r in rows)
+
+    def test_respects_limit(self, conn: sqlite3.Connection) -> None:
+        for i in range(5):
+            _insert_observation(conn, id=f"o{i}", project="p")
+        rows = list_observations(conn, project="p", limit=2)
+        assert len(rows) == 2
+
+
+class TestListInsightsByStatus:
+    def test_list_candidates(self, conn: sqlite3.Connection) -> None:
+        _insert_insight(conn, id="c1", project="p", status="pending_review")
+        _insert_insight(conn, id="c2", project="p", status="pending_review")
+        _insert_insight(conn, id="i1", project="p", status="confirmed")
+        candidates = list_candidates(conn, project="p")
+        assert [i.id for i in candidates] == ["c2", "c1"]  # newest first
+        assert all(isinstance(i, Insight) for i in candidates)
+
+    def test_list_insights_returns_confirmed_only(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_insight(conn, id="c1", project="p", status="pending_review")
+        _insert_insight(conn, id="i1", project="p", status="confirmed")
+        _insert_insight(conn, id="pr1", project="p", status="promoted")
+        result = list_insights(conn, project="p")
+        assert [i.id for i in result] == ["i1"]
+
+    def test_list_promoted_returns_promoted_only(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_insight(conn, id="i1", project="p", status="confirmed")
+        _insert_insight(conn, id="pr1", project="p", status="promoted")
+        _insert_insight(conn, id="pr2", project="p", status="promoted")
+        result = list_promoted(conn, project="p")
+        assert sorted(i.id for i in result) == ["pr1", "pr2"]
