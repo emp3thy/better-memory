@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from types import TracebackType
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -22,6 +22,12 @@ from better_memory.config import get_config
 
 class ChatError(RuntimeError):
     """Raised when chat generation fails."""
+
+
+class ChatCompleter(Protocol):
+    """Duck-typed interface the ConsolidationService depends on."""
+
+    async def complete(self, prompt: str) -> str: ...
 
 
 class OllamaChat:
