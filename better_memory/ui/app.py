@@ -14,6 +14,12 @@ from werkzeug.wrappers import Response
 from better_memory.config import resolve_home
 from better_memory.db.connection import connect
 from better_memory.services.insight import InsightService
+from better_memory.ui import queries
+
+
+def _project_name() -> str:
+    """Return the current project — cwd name, matching service convention."""
+    return Path.cwd().name
 
 
 def create_app(
@@ -117,7 +123,10 @@ def create_app(
 
     @app.get("/pipeline/badge")
     def pipeline_badge() -> str:
-        return render_template("fragments/badge.html", count=0)
+        counts = queries.kanban_counts(
+            app.extensions["db_connection"], project=_project_name()
+        )
+        return render_template("fragments/badge.html", count=counts.candidates)
 
     @app.get("/sweep")
     def sweep() -> str:

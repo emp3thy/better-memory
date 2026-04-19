@@ -219,3 +219,35 @@ class TestBadgeFragment:
         with client.application.app_context():
             out = render_template("fragments/badge.html", count=7)
             assert out == "7"
+
+
+class TestBadgeRealCount:
+    def test_badge_shows_candidate_count_from_db(
+        self, client: FlaskClient, tmp_db: Path
+    ) -> None:
+        # Insert candidates directly via the app's connection so the
+        # project name matches cwd (same as the kanban query).
+        from pathlib import Path as _Path
+        import sqlite3 as _sqlite3
+        conn: _sqlite3.Connection = client.application.extensions["db_connection"]
+        project = _Path.cwd().name
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('c1', 't', 'c', ?, 'pending_review', 'neutral')",
+            (project,),
+        )
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('c2', 't', 'c', ?, 'pending_review', 'neutral')",
+            (project,),
+        )
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('x', 't', 'c', ?, 'confirmed', 'neutral')",
+            (project,),
+        )
+        conn.commit()
+
+        response = client.get("/pipeline/badge")
+        assert response.status_code == 200
+        assert response.data.strip() == b"2"
