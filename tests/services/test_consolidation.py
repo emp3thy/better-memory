@@ -458,3 +458,32 @@ class TestSweepDryRun:
         svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
         cands = await svc.sweep_dry_run(project="p", stale_days=30)
         assert cands == []
+
+
+class TestApplySweep:
+    def _insert_observation_stale(
+        self, conn: sqlite3.Connection, id: str
+    ) -> None:
+        past = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, status, used_count, validated_true, "
+            "last_retrieved) VALUES (?, ?, 'p', 'active', 0, 0, ?)",
+            (id, f"c-{id}", past),
+        )
+        conn.commit()
+
+    async def test_archives_observation(self, conn: sqlite3.Connection) -> None:
+        self._insert_observation_stale(conn, "old1")
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        await svc.apply_sweep("old1")
+
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'old1'"
+        ).fetchone()
+        assert row["status"] == "archived"
+
+    async def test_rejects_nonexistent(self, conn: sqlite3.Connection) -> None:
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        with pytest.raises(ValueError, match="not found"):
+            await svc.apply_sweep("missing")

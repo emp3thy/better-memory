@@ -367,3 +367,19 @@ class ConsolidationService:
         conn.execute("RELEASE SAVEPOINT apply_branch")
         conn.commit()
         return insight_id
+
+    async def apply_sweep(self, observation_id: str) -> None:
+        """Archive a single observation after human approval."""
+        conn = self._conn
+        existing = conn.execute(
+            "SELECT status FROM observations WHERE id = ?", (observation_id,)
+        ).fetchone()
+        if existing is None:
+            raise ValueError(f"Observation not found: {observation_id}")
+        if existing["status"] != "active":
+            return  # Idempotent: already archived or consolidated.
+        conn.execute(
+            "UPDATE observations SET status = 'archived' WHERE id = ?",
+            (observation_id,),
+        )
+        conn.commit()
