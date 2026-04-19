@@ -13,6 +13,8 @@ from werkzeug.wrappers import Response
 
 from better_memory.config import resolve_home
 from better_memory.db.connection import connect
+from better_memory.llm.ollama import ChatCompleter, OllamaChat
+from better_memory.services.consolidation import ConsolidationService
 from better_memory.services.insight import InsightService
 from better_memory.ui import jobs, queries
 
@@ -28,6 +30,7 @@ def create_app(
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
     db_path: Path | None = None,
+    chat: ChatCompleter | None = None,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -51,6 +54,12 @@ def create_app(
 
     app.extensions["db_connection"] = db_conn
     app.extensions["insight_service"] = InsightService(conn=db_conn)
+    app.extensions["_db_path"] = resolved_db
+    resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
+    app.extensions["chat"] = resolved_chat
+    app.extensions["consolidation_service"] = ConsolidationService(
+        conn=db_conn, chat=resolved_chat
+    )
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:
