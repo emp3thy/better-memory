@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -28,6 +29,30 @@ _current_job_id: str | None = None
 _jobs: dict[str, "JobState"] = {}
 
 # TODO(phase4): cap _jobs dict size once long-running jobs become common.
+
+
+def _run_sync_or_in_worker(work_fn: Callable[[], None]) -> None:
+    """Run ``work_fn`` on the current thread, or on a fresh worker thread if
+    an asyncio event loop is already active on the caller's thread.
+
+    Why: Flask is sync and our service methods are async, so sync handlers
+    call ``asyncio.run`` internally. ``asyncio.run`` raises ``RuntimeError``
+    if invoked while a loop is already running (pytest-asyncio auto-mode,
+    Jupyter, embedded asyncio contexts). Delegating to a fresh thread in
+    those cases gives ``work_fn`` a clean thread with no running loop.
+
+    ``work_fn`` is responsible for creating any thread-bound resources
+    (e.g. ``sqlite3.Connection``) inside its own body so they are created
+    on the thread that uses them.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        work_fn()
+        return
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(work_fn).result()
 
 
 @dataclass
@@ -70,25 +95,32 @@ def apply_job(
         # earlier candidates are already committed but state.applied stays False.
         # Retries may produce duplicate pending_review rows until apply_branch is
         # made fully transactional across all candidates.
-        conn = connect(db_path)
-        try:
-            svc = ConsolidationService(conn=conn, chat=chat)
 
-            async def _do_apply() -> tuple[int, int]:
-                for c in result.branch:
-                    await svc.apply_branch(c)
-                for s in result.sweep:
-                    await svc.apply_sweep(s.observation_id)
-                return len(result.branch), len(result.sweep)
+        def _work() -> None:
+            # Create the connection on whichever thread ends up running this —
+            # SQLite connections are thread-bound, and ``_work`` may execute on
+            # a worker thread when an asyncio loop is already active on the
+            # caller's thread (pytest-asyncio auto-mode, embedded contexts).
+            conn = connect(db_path)
+            try:
+                svc = ConsolidationService(conn=conn, chat=chat)
 
-            branch_count, sweep_count = asyncio.run(_do_apply())
-        finally:
-            conn.close()
+                async def _do_apply() -> None:
+                    for c in result.branch:
+                        await svc.apply_branch(c)
+                    for s in result.sweep:
+                        await svc.apply_sweep(s.observation_id)
+
+                asyncio.run(_do_apply())
+            finally:
+                conn.close()
+
+        _run_sync_or_in_worker(_work)
 
         state.applied = True
         state.message = (
-            f"Applied {branch_count} candidate(s) to review queue, "
-            f"archived {sweep_count} observation(s)."
+            f"Applied {len(result.branch)} candidate(s) to review queue, "
+            f"archived {len(result.sweep)} observation(s)."
         )
         return state
 

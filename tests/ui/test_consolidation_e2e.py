@@ -12,8 +12,6 @@ from pathlib import Path
 
 from flask.testing import FlaskClient
 
-import better_memory.ui.jobs as _jobs_module
-
 
 def _seed_cluster(
     conn: sqlite3.Connection, project: str, component: str, n: int
@@ -53,28 +51,10 @@ def _run_consolidation(client: FlaskClient, draft_text: str) -> str:
             assert not t.is_alive(), "consolidation thread did not exit"
 
     # Apply the dry-run result so approvable candidates exist.
-    # Run jobs.apply_job() in a daemon thread so it can call asyncio.run()
-    # without hitting "cannot be called from a running event loop": pytest-
-    # playwright's session-scoped playwright fixture keeps a loop running on
-    # the main thread for the entire session, and test_browser.py sorts before
-    # this file alphabetically.  apply_job() opens its own sqlite3.Connection,
-    # so running it in a daemon thread is thread-safe.
-    db_path = client.application.extensions["_db_path"]
-    chat = client.application.extensions["chat"]
-    exc_box: list[BaseException] = []
-
-    def _do_apply() -> None:
-        try:
-            _jobs_module.apply_job(job_id, db_path=db_path, chat=chat)
-        except Exception as exc:  # noqa: BLE001
-            exc_box.append(exc)
-
-    t = threading.Thread(target=_do_apply, daemon=True, name="apply-job-compat")
-    t.start()
-    t.join(timeout=10.0)
-    assert not t.is_alive(), "apply_job thread did not exit in time"
-    if exc_box:
-        raise exc_box[0]
+    apply_resp = client.post(
+        f"/jobs/{job_id}/apply", headers={"Origin": "http://localhost"}
+    )
+    assert apply_resp.status_code == 200, apply_resp.data
     return job_id
 
 
