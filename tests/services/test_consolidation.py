@@ -15,6 +15,7 @@ from better_memory.llm.fake import FakeChat
 from better_memory.services.consolidation import (
     BranchCandidate,
     ConsolidationService,
+    DryRunResult,
     ObservationCluster,
     ObservationForPrompt,
     SweepCandidate,
@@ -487,3 +488,35 @@ class TestApplySweep:
         svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
         with pytest.raises(ValueError, match="not found"):
             await svc.apply_sweep("missing")
+
+
+class TestDryRun:
+    async def test_combines_branch_and_sweep(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        # One cluster for branch pass
+        for i in range(3):
+            _insert_observation(
+                conn, id=f"a{i}", project="p",
+                component="api", theme="retry", validated_true=1,
+            )
+        # One stale observation for sweep pass
+        past = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, status, used_count, validated_true, "
+            "last_retrieved, component) VALUES "
+            "('stale1', 'c', 'p', 'active', 0, 0, ?, 'unused')",
+            (past,),
+        )
+        conn.commit()
+
+        chat = FakeChat(responses=["drafted pattern"])
+        svc = ConsolidationService(conn=conn, chat=chat)
+        result = await svc.dry_run(project="p")
+
+        assert isinstance(result, DryRunResult)
+        assert len(result.branch) == 1
+        assert result.branch[0].observation_ids == ["a0", "a1", "a2"]
+        assert len(result.sweep) == 1
+        assert result.sweep[0].observation_id == "stale1"

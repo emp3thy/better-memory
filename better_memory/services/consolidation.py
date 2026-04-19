@@ -200,6 +200,14 @@ class SweepCandidate:
     reason: str  # "stale" (Phase 3); richer reasons in Phase 3.5
 
 
+@dataclass(frozen=True)
+class DryRunResult:
+    """Preview of what consolidation would produce for a project."""
+
+    branch: list[BranchCandidate]
+    sweep: list[SweepCandidate]
+
+
 class ConsolidationService:
     """Consolidation engine: branch pass, sweep pass, merge.
 
@@ -314,6 +322,14 @@ class ConsolidationService:
             )
             for r in rows
         ]
+
+    async def dry_run(
+        self, *, project: str, stale_days: int = 30
+    ) -> DryRunResult:
+        """Run both branch and sweep dry-runs and return a combined result."""
+        branch = await self.branch_dry_run(project=project)
+        sweep = await self.sweep_dry_run(project=project, stale_days=stale_days)
+        return DryRunResult(branch=branch, sweep=sweep)
 
     async def apply_branch(self, candidate: BranchCandidate) -> str:
         """Persist ``candidate`` — create the insight, link sources, mark
