@@ -94,7 +94,7 @@ def _list_insights_by_status(
         """
         SELECT * FROM insights
         WHERE project = ? AND status = ?
-        ORDER BY created_at DESC, id DESC
+        ORDER BY created_at DESC, rowid DESC
         LIMIT ?
         """,
         (project, status, limit),
