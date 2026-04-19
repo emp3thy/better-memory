@@ -27,11 +27,6 @@ class JobState:
     message: str
 
 
-def current_job_id() -> str | None:
-    """Return the currently-running job id, if any."""
-    return _current_job_id
-
-
 def start_phase3_stub_job() -> JobState:
     """Start a placeholder job that records a Phase-3-not-ready message.
 
@@ -65,8 +60,11 @@ def start_phase3_stub_job() -> JobState:
         # Phase 3 will make this async and clear _current_job_id on thread exit.
         return state
     finally:
-        _lock.release()
+        # Clear the id BEFORE releasing the lock so another thread entering
+        # start_phase3_stub_job cannot set its own id and then have this
+        # finally clause overwrite it back to None.
         _current_job_id = None  # Phase 2: job is done by the time we return.
+        _lock.release()
 
 
 def get_job(job_id: str) -> JobState | None:
