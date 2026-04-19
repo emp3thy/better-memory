@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from flask import Flask, redirect, render_template, url_for
+from urllib.parse import urlparse
+
+from flask import Flask, abort, redirect, render_template, request, url_for
 from werkzeug.wrappers import Response
 
 
@@ -13,6 +15,25 @@ def create_app() -> Flask:
     fresh instances in isolation.
     """
     app = Flask(__name__)
+
+    def _host_of(url: str | None) -> str | None:
+        if not url:
+            return None
+        try:
+            return urlparse(url).netloc or None
+        except ValueError:
+            return None
+
+    @app.before_request
+    def _origin_check() -> None:
+        if request.method == "GET":
+            return
+        expected_host = request.host  # e.g. "localhost" or "127.0.0.1:54321"
+        origin_host = _host_of(request.headers.get("Origin"))
+        referer_host = _host_of(request.headers.get("Referer"))
+        if origin_host == expected_host or referer_host == expected_host:
+            return
+        abort(403)
 
     @app.get("/healthz")
     def healthz() -> tuple[str, int]:

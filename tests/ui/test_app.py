@@ -54,3 +54,44 @@ class TestEmptyViews:
         response = client.get("/graph")
         assert response.status_code == 200
         assert b"<h1>Graph</h1>" in response.data
+
+
+class TestOriginCheck:
+    def test_post_without_origin_or_referer_is_rejected(
+        self, client: FlaskClient
+    ) -> None:
+        response = client.post("/shutdown")
+        assert response.status_code == 403
+
+    def test_post_with_matching_origin_is_accepted(
+        self, client: FlaskClient
+    ) -> None:
+        # Flask test client "serves" on http://localhost (no port) —
+        # SERVER_NAME is localhost by default.
+        response = client.post(
+            "/shutdown",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 204
+
+    def test_post_with_matching_referer_is_accepted(
+        self, client: FlaskClient
+    ) -> None:
+        response = client.post(
+            "/shutdown",
+            headers={"Referer": "http://localhost/pipeline"},
+        )
+        assert response.status_code == 204
+
+    def test_post_with_foreign_origin_is_rejected(
+        self, client: FlaskClient
+    ) -> None:
+        response = client.post(
+            "/shutdown",
+            headers={"Origin": "http://evil.example.com"},
+        )
+        assert response.status_code == 403
+
+    def test_get_without_origin_is_allowed(self, client: FlaskClient) -> None:
+        response = client.get("/pipeline")
+        assert response.status_code == 200
