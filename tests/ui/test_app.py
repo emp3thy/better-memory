@@ -53,4 +53,4 @@ class TestEmptyViews:
     def test_graph_renders_own_placeholder(self, client: FlaskClient) -> None:
         response = client.get("/graph")
         assert response.status_code == 200
-        assert b"Graph" in response.data
+        assert b"<h1>Graph</h1>" in response.data
