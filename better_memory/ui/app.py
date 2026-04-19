@@ -157,7 +157,13 @@ def create_app(
 
     @app.get("/candidates/<id>/card")
     def candidate_card(id: str) -> str:
-        return ""  # Task 8 implements
+        service = app.extensions["insight_service"]
+        c = service.get(id)
+        if c is None or c.status != "pending_review":
+            abort(404)
+        return render_template(
+            "fragments/candidate_card_expanded.html", c=c
+        )
 
     @app.post("/candidates/<id>/approve")
     def candidate_approve(id: str) -> str:
@@ -167,9 +173,35 @@ def create_app(
     def candidate_reject(id: str) -> str:
         return ""  # Task 10 implements
 
+    @app.get("/candidates/<id>/edit")
+    def candidate_edit(id: str) -> str:
+        return ""  # Task 10 implements
+
+    @app.post("/candidates/<id>/edit")
+    def candidate_edit_save(id: str) -> str:
+        return ""  # Task 10 implements
+
+    @app.get("/candidates/<id>/compact")
+    def candidate_compact_card(id: str) -> str:
+        return ""  # Task 10 implements (used by collapse)
+
+    @app.get("/candidates/<id>/merge")
+    def candidate_merge_picker(id: str) -> str:
+        return ""  # Task 12 implements
+
+    @app.post("/candidates/<id>/merge")
+    def candidate_merge(id: str) -> str:
+        return ""  # Task 12 implements
+
     @app.get("/insights/<id>/card")
     def insight_card(id: str) -> str:
-        return ""  # Task 8 implements
+        service = app.extensions["insight_service"]
+        i = service.get(id)
+        if i is None or i.status not in ("confirmed", "promoted"):
+            abort(404)
+        return render_template(
+            "fragments/insight_card_expanded.html", i=i
+        )
 
     @app.get("/insights/<id>/promote")
     def insight_promote(id: str) -> str:
@@ -181,6 +213,22 @@ def create_app(
 
     @app.post("/insights/<id>/demote")
     def insight_demote(id: str) -> str:
+        return ""  # Task 11 implements
+
+    @app.get("/insights/<id>/edit")
+    def insight_edit(id: str) -> str:
+        return ""  # Task 11 implements
+
+    @app.post("/insights/<id>/edit")
+    def insight_edit_save(id: str) -> str:
+        return ""  # Task 11 implements
+
+    @app.get("/insights/<id>/compact")
+    def insight_compact_card(id: str) -> str:
+        return ""  # Task 11 implements (used by collapse)
+
+    @app.get("/insights/<id>/sources")
+    def insight_sources(id: str) -> str:
         return ""  # Task 11 implements
 
     @app.post("/pipeline/consolidate")

@@ -151,3 +151,48 @@ class TestPromotedPanel:
         assert "title-pr1" in body
         assert "View doc" in body
         assert "Demote" in body
+
+
+class TestExpandedCards:
+    def test_candidate_expanded_shows_full_content_and_all_actions(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+
+        response = client.get("/candidates/c1/card")
+        assert response.status_code == 200
+        body = response.data.decode()
+        assert "title-c1" in body
+        assert "content-c1" in body
+        # All four actions: Approve, Reject, Edit, Merge
+        assert "Approve" in body
+        assert "Reject" in body
+        assert "Edit" in body
+        assert "Merge" in body
+        assert 'data-expanded="true"' in body
+
+    def test_insight_expanded_shows_edit_and_view_sources(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('i1', 'title-i1', 'content-i1', ?, 'confirmed', 'neutral')",
+            (project,),
+        )
+        conn.commit()
+
+        response = client.get("/insights/i1/card")
+        body = response.data.decode()
+        assert "content-i1" in body
+        assert "Promote" in body
+        assert "Retire" in body
+        assert "Edit" in body
+        assert "View sources" in body
+
+    def test_missing_card_returns_404(self, client: FlaskClient) -> None:
+        response = client.get("/candidates/does-not-exist/card")
+        assert response.status_code == 404
