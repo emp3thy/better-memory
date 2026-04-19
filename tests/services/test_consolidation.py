@@ -318,3 +318,72 @@ class TestBranchDryRun:
         candidates = await svc.branch_dry_run(project="p")
         assert len(candidates) == 1
         assert candidates[0].polarity == "do"
+
+
+class TestApplyBranch:
+    async def test_creates_insight_links_sources_updates_observations(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        for i in range(3):
+            _insert_observation(
+                conn, id=f"a{i}", project="p",
+                component="api", theme="retry", validated_true=1,
+            )
+        candidate = BranchCandidate(
+            project="p",
+            component="api",
+            theme="retry",
+            title="Retry policy",
+            content="Retry 5xx with exponential backoff.",
+            polarity="do",
+            observation_ids=["a0", "a1", "a2"],
+            confidence="medium",
+        )
+
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        insight_id = await svc.apply_branch(candidate)
+        assert insight_id  # non-empty
+
+        row = conn.execute(
+            "SELECT status, title, polarity, confidence FROM insights WHERE id = ?",
+            (insight_id,),
+        ).fetchone()
+        assert row["status"] == "pending_review"
+        assert row["title"] == "Retry policy"
+        assert row["polarity"] == "do"
+        assert row["confidence"] == "medium"
+
+        sources = {
+            r["observation_id"]
+            for r in conn.execute(
+                "SELECT observation_id FROM insight_sources WHERE insight_id = ?",
+                (insight_id,),
+            ).fetchall()
+        }
+        assert sources == {"a0", "a1", "a2"}
+
+        for obs_id in ["a0", "a1", "a2"]:
+            s = conn.execute(
+                "SELECT status FROM observations WHERE id = ?", (obs_id,)
+            ).fetchone()
+            assert s["status"] == "consolidated"
+
+    async def test_rollback_on_failure(self, conn: sqlite3.Connection) -> None:
+        _insert_observation(conn, id="a0", project="p",
+                            component="api", theme="retry", validated_true=1)
+        candidate = BranchCandidate(
+            project="p", component="api", theme="retry",
+            title="t", content="c", polarity="do",
+            observation_ids=["a0", "does-not-exist"],
+            confidence="low",
+        )
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        with pytest.raises(sqlite3.IntegrityError):
+            await svc.apply_branch(candidate)
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM insights"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT status FROM observations WHERE id = 'a0'"
+        ).fetchone()["status"] == "active"

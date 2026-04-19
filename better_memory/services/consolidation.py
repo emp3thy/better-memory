@@ -266,3 +266,56 @@ class ConsolidationService:
                 )
             )
         return out
+
+    async def apply_branch(self, candidate: BranchCandidate) -> str:
+        """Persist ``candidate`` — create the insight, link sources, mark
+        observations consolidated. Atomic. Returns the new insight id."""
+        from uuid import uuid4
+
+        insight_id = uuid4().hex
+        now = self._clock().isoformat()
+        conn = self._conn
+        conn.execute("SAVEPOINT apply_branch")
+        try:
+            conn.execute(
+                """
+                INSERT INTO insights
+                    (id, title, content, project, component, status,
+                     confidence, polarity, evidence_count,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending_review',
+                        ?, ?, ?,
+                        ?, ?)
+                """,
+                (
+                    insight_id,
+                    candidate.title,
+                    candidate.content,
+                    candidate.project,
+                    candidate.component,
+                    candidate.confidence,
+                    candidate.polarity,
+                    len(candidate.observation_ids),
+                    now,
+                    now,
+                ),
+            )
+            for obs_id in candidate.observation_ids:
+                conn.execute(
+                    "INSERT INTO insight_sources (insight_id, observation_id) "
+                    "VALUES (?, ?)",
+                    (insight_id, obs_id),
+                )
+            placeholders = ",".join("?" * len(candidate.observation_ids))
+            conn.execute(
+                f"UPDATE observations SET status = 'consolidated' "
+                f"WHERE id IN ({placeholders})",
+                candidate.observation_ids,
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT apply_branch")
+            conn.execute("RELEASE SAVEPOINT apply_branch")
+            raise
+        conn.execute("RELEASE SAVEPOINT apply_branch")
+        conn.commit()
+        return insight_id
