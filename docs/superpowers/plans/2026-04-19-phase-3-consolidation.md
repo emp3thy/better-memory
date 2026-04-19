@@ -2439,12 +2439,147 @@ git commit -m "Phase 3: real merge endpoint backed by ConsolidationService.merge
 
 ---
 
-## Task 16: Phase-2 deferred smoke tests — Approve/Reject/Retire/Demote end-to-end
+## Task 15b: Apply endpoint — persist dry-run candidates to review queue
+
+**Files:**
+- Modify: `better_memory/ui/jobs.py` (add `applied` flag + `apply_job` helper)
+- Modify: `better_memory/ui/app.py` (add `POST /jobs/<id>/apply` route)
+- Modify: `better_memory/ui/templates/fragments/consolidation_job.html` (add Apply button)
+- Create: `tests/ui/test_apply_job.py`
+
+**Context:** `dry_run()` is preview-only — it returns `DryRunResult` in memory and does not persist. For the Phase 2 approve/reject/retire buttons to act on real candidates, something has to move the drafts from the preview into the `insights` table (status='pending_review') and archive the swept observations. This task wires that step: after a completed dry-run, the user clicks "Apply" to commit both branch candidates (via `apply_branch`) and sweep candidates (via `apply_sweep`). Double-apply is guarded via an `applied` flag on `JobState`.
+
+- [ ] **Step 1: Extend `JobState` and add `apply_job` helper**
+
+In `better_memory/ui/jobs.py`:
+
+```python
+@dataclass
+class JobState:
+    id: str
+    status: str  # "running" | "complete" | "failed"
+    message: str = ""
+    result: DryRunResult | None = None
+    error: str | None = None
+    applied: bool = False  # True after apply_job() persists the drafts.
+
+
+def apply_job(
+    job_id: str,
+    *,
+    db_path: Path,
+    chat: ChatCompleter,
+) -> JobState:
+    """Persist a completed job's drafts: create insights (pending_review)
+    and archive swept observations. Idempotent: second call is a no-op.
+
+    Returns the updated ``JobState``. Raises ``LookupError`` if the job
+    is unknown, ``ValueError`` if it is not ``complete`` or has no result.
+    """
+    state = _jobs.get(job_id)
+    if state is None:
+        raise LookupError(job_id)
+    if state.status != "complete" or state.result is None:
+        raise ValueError(f"Cannot apply job in status {state.status!r}")
+    if state.applied:
+        return state
+
+    conn = connect(db_path)
+    try:
+        svc = ConsolidationService(conn=conn, chat=chat)
+
+        async def _do_apply() -> tuple[int, int]:
+            branch_count = 0
+            for c in state.result.branch:  # type: ignore[union-attr]
+                await svc.apply_branch(c)
+                branch_count += 1
+            sweep_count = 0
+            for s in state.result.sweep:  # type: ignore[union-attr]
+                await svc.apply_sweep(s.observation_id)
+                sweep_count += 1
+            return branch_count, sweep_count
+
+        branch_count, sweep_count = asyncio.run(_do_apply())
+    finally:
+        conn.close()
+
+    state.applied = True
+    state.message = (
+        f"Applied {branch_count} candidate(s) to review queue, "
+        f"archived {sweep_count} observation(s)."
+    )
+    return state
+```
+
+- [ ] **Step 2: Add `POST /jobs/<id>/apply` route**
+
+In `better_memory/ui/app.py`, register the route near `jobs_get`:
+
+```python
+@app.post("/jobs/<id>/apply")
+def jobs_apply(id: str) -> tuple[str, int, dict[str, str]]:
+    db_path = app.extensions["_db_path"]
+    chat = app.extensions["chat"]
+    try:
+        state = jobs.apply_job(id, db_path=db_path, chat=chat)
+    except LookupError:
+        abort(404)
+    except ValueError as exc:
+        return (
+            f'<div class="card card-error"><p>{exc}</p></div>',
+            400,
+            {},
+        )
+    rendered = render_template("fragments/consolidation_job.html", job=state)
+    # Tell the pipeline badge to refresh — new pending_review items landed.
+    return rendered, 200, {"HX-Trigger": "job-complete"}
+```
+
+- [ ] **Step 3: Update the fragment template**
+
+Modify `better_memory/ui/templates/fragments/consolidation_job.html` — add an Apply form after `job.message` rendering, visible only when `status=='complete'` and `not applied`:
+
+```html
+  {% if job.status == 'complete' and not job.applied and job.result and (job.result.branch or job.result.sweep) %}
+    <form hx-post="{{ url_for('jobs_apply', id=job.id) }}"
+          hx-target="closest .consolidation-job" hx-swap="outerHTML">
+      <button type="submit" class="btn-primary">Apply to review queue</button>
+    </form>
+  {% endif %}
+```
+
+- [ ] **Step 4: Write tests**
+
+Create `tests/ui/test_apply_job.py` with at least:
+
+- `test_apply_persists_branch_candidates` — seed cluster, POST /pipeline/consolidate, join thread, POST /jobs/<id>/apply, assert `insights` has `pending_review` rows matching the cluster
+- `test_apply_archives_sweep_candidates` — seed stale observation, run consolidation, apply, assert observation status is `archived`
+- `test_apply_is_idempotent` — apply twice, second call returns same state, no duplicate inserts
+- `test_apply_rejects_running_job` — apply before thread joins → 400 (or the test uses a synthetic JobState)
+- `test_apply_unknown_job_returns_404` — POST /jobs/nonexistent/apply → 404
+
+Use the same `threading.enumerate()` + `join(timeout=5.0)` pattern Task 14 established for deterministic sync.
+
+- [ ] **Step 5: Run tests**
+
+Run: `uv run pytest tests/ui -v`
+Expected: All PASS (new tests + prior UI tests untouched).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add better_memory/ui/jobs.py better_memory/ui/app.py better_memory/ui/templates/fragments/consolidation_job.html tests/ui/test_apply_job.py
+git commit -m "Phase 3: /jobs/<id>/apply — persist dry-run drafts to review queue"
+```
+
+---
+
+## Task 16: Phase-2 deferred smoke tests — Approve/Reject/Retire end-to-end
 
 **Files:**
 - Create: `tests/ui/test_consolidation_e2e.py`
 
-**Context:** Phase 2 deferred smoke tests because the action buttons need real consolidation-generated data. Phase 3 now produces it. One end-to-end test that exercises the full flow: seed observations → run consolidation → approve a candidate → retire an insight.
+**Context:** Phase 2 deferred smoke tests because the action buttons need real consolidation-generated data. Phase 3 now produces it. One end-to-end test that exercises the full flow: seed observations → run consolidation → **apply** to persist drafts → approve/reject/retire a candidate. Uses the apply endpoint added in Task 15b.
 
 - [ ] **Step 1: Write the test**
 
@@ -2484,7 +2619,8 @@ def _seed_cluster(
 
 
 def _run_consolidation(client: FlaskClient, draft_text: str) -> str:
-    """Run /pipeline/consolidate, join the worker thread, return job_id."""
+    """Run /pipeline/consolidate, join the worker thread, apply the
+    result so candidates land in the review queue, then return job_id."""
     import threading
 
     fake = client.application.config["_fake_chat"]
@@ -2502,6 +2638,12 @@ def _run_consolidation(client: FlaskClient, draft_text: str) -> str:
         if t.name.startswith("consolidation-"):
             t.join(timeout=5.0)
             assert not t.is_alive(), "consolidation thread did not exit"
+
+    # Apply the dry-run result so approvable candidates exist.
+    apply_resp = client.post(
+        f"/jobs/{job_id}/apply", headers={"Origin": "http://localhost"}
+    )
+    assert apply_resp.status_code == 200, apply_resp.data
     return job_id
 
 
