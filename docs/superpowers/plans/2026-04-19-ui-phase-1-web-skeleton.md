@@ -50,10 +50,11 @@ tests/ui/
 
 ---
 
-## Task 1: Add `flask` dependency and create empty UI package
+## Task 1: Add `flask` dependency, promote `resolve_home`, create empty UI package
 
 **Files:**
 - Modify: `pyproject.toml`
+- Modify: `better_memory/config.py`
 - Create: `better_memory/ui/__init__.py`
 - Create: `tests/ui/__init__.py`
 
@@ -76,7 +77,36 @@ dependencies = [
 Run: `uv sync`
 Expected: Installs Flask and Werkzeug; no other changes.
 
-- [ ] **Step 3: Create empty package markers**
+- [ ] **Step 3: Rename `_resolve_home` to `resolve_home` (public)**
+
+`__main__.py` in the UI package (Task 9) needs to read `$BETTER_MEMORY_HOME`, and cross-module callers shouldn't reach into a leading-underscore helper. Promote it to a public function.
+
+Edit `better_memory/config.py`. Change the definition:
+
+```python
+def resolve_home() -> Path:
+    """Return ``BETTER_MEMORY_HOME`` (or its default) with ``~`` expanded."""
+    raw = os.environ.get("BETTER_MEMORY_HOME", _DEFAULT_HOME)
+    return Path(raw).expanduser()
+```
+
+Update the one internal caller in the same file (inside `get_config()`):
+
+```python
+    home = resolve_home()
+```
+
+Verify nothing else references the old name:
+
+Run: `grep -rn "_resolve_home" better_memory tests`
+Expected: No output. Only the new `resolve_home` (no leading underscore) should appear in the tree.
+
+Run the existing suite to confirm nothing regressed:
+
+Run: `uv run pytest tests/test_config.py -v`
+Expected: All PASS.
+
+- [ ] **Step 4: Create empty package markers**
 
 Create `better_memory/ui/__init__.py` with a single line:
 
@@ -89,11 +119,11 @@ Create `tests/ui/__init__.py` empty:
 ```python
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add pyproject.toml uv.lock better_memory/ui/__init__.py tests/ui/__init__.py
-git commit -m "UI Phase 1: add flask dependency and ui package scaffold"
+git add pyproject.toml uv.lock better_memory/config.py better_memory/ui/__init__.py tests/ui/__init__.py
+git commit -m "UI Phase 1: flask dep, promote resolve_home to public, ui package scaffold"
 ```
 
 ---
@@ -1006,7 +1036,7 @@ git commit -m "UI Phase 1: inactivity watchdog with synchronously-testable check
 4. Call `server.serve_forever()`.
 5. On exit (normal or via `os._exit` from shutdown/inactivity), best-effort delete `ui.url`.
 
-`BETTER_MEMORY_HOME` resolution reuses `better_memory.config._resolve_home()` (private but safe to call — it's `os.environ.get(...)` with an expanduser). Tests set `BETTER_MEMORY_HOME` to a tmpdir.
+`BETTER_MEMORY_HOME` resolution reuses `better_memory.config.resolve_home()` (promoted to public in Task 1). Tests set `BETTER_MEMORY_HOME` to a tmpdir.
 
 - [ ] **Step 1: Write the failing integration test**
 
@@ -1144,12 +1174,12 @@ from pathlib import Path
 
 from werkzeug.serving import make_server
 
-from better_memory.config import _resolve_home
+from better_memory.config import resolve_home
 from better_memory.ui.app import create_app
 
 
 def _ui_url_path() -> Path:
-    return _resolve_home() / "ui.url"
+    return resolve_home() / "ui.url"
 
 
 def _write_url_atomically(url: str, dest: Path) -> None:
@@ -1200,7 +1230,7 @@ Edit `better_memory/ui/app.py`. Add these imports at top:
 ```python
 from pathlib import Path
 
-from better_memory.config import _resolve_home
+from better_memory.config import resolve_home
 ```
 
 Define a helper inside `create_app()` (before the routes):
@@ -1208,7 +1238,7 @@ Define a helper inside `create_app()` (before the routes):
 ```python
     def _cleanup_ui_url() -> None:
         try:
-            (_resolve_home() / "ui.url").unlink()
+            (resolve_home() / "ui.url").unlink()
         except FileNotFoundError:
             pass
 ```
