@@ -102,6 +102,10 @@ class TestOriginCheck:
         response = client.get("/pipeline")
         assert response.status_code == 200
 
+    def test_head_without_origin_is_allowed(self, client: FlaskClient) -> None:
+        response = client.head("/pipeline")
+        assert response.status_code == 200
+
 
 class TestStaticAssets:
     def test_htmx_js_is_served(self, client: FlaskClient) -> None:
