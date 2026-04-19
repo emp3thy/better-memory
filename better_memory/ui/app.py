@@ -30,22 +30,21 @@ def create_app() -> Flask:
     def pipeline_badge() -> str:
         return ""
 
-    # Stubs — Task 4 gives each its own template.
     @app.get("/sweep")
     def sweep() -> str:
-        return render_template("pipeline.html", active_tab="sweep")
+        return render_template("sweep.html", active_tab="sweep")
 
     @app.get("/knowledge")
     def knowledge() -> str:
-        return render_template("pipeline.html", active_tab="knowledge")
+        return render_template("knowledge.html", active_tab="knowledge")
 
     @app.get("/audit")
     def audit() -> str:
-        return render_template("pipeline.html", active_tab="audit")
+        return render_template("audit.html", active_tab="audit")
 
     @app.get("/graph")
     def graph() -> str:
-        return render_template("pipeline.html", active_tab="graph")
+        return render_template("graph.html", active_tab="graph")
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:
