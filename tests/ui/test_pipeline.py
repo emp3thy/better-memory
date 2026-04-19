@@ -257,3 +257,97 @@ class TestCandidateActions:
         ).fetchone()
         assert row["title"] == "new title"
         assert row["content"] == "new content"
+
+
+class TestInsightActions:
+    def _insert_insight(
+        self, conn: sqlite3.Connection, project: str, id: str,
+        status: str = "confirmed"
+    ) -> None:
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES (?, ?, ?, ?, ?, 'neutral')",
+            (id, f"title-{id}", f"content-{id}", project, status),
+        )
+        conn.commit()
+
+    def test_retire_moves_insight_to_retired(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        self._insert_insight(conn, project, "i1")
+
+        response = client.post(
+            "/insights/i1/retire",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.data.strip() == b""
+        row = conn.execute(
+            "SELECT status FROM insights WHERE id = 'i1'"
+        ).fetchone()
+        assert row["status"] == "retired"
+
+    def test_demote_promoted_to_confirmed(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        self._insert_insight(conn, project, "pr1", status="promoted")
+
+        response = client.post(
+            "/insights/pr1/demote",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        row = conn.execute(
+            "SELECT status FROM insights WHERE id = 'pr1'"
+        ).fetchone()
+        assert row["status"] == "confirmed"
+
+    def test_edit_form_and_save(self, client: FlaskClient) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        self._insert_insight(conn, project, "i1")
+
+        form_response = client.get("/insights/i1/edit")
+        assert form_response.status_code == 200
+        assert b"<form" in form_response.data
+
+        save_response = client.post(
+            "/insights/i1/edit",
+            data={"title": "new", "content": "new-content"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert save_response.status_code == 200
+        assert b"new" in save_response.data
+        row = conn.execute(
+            "SELECT title FROM insights WHERE id = 'i1'"
+        ).fetchone()
+        assert row["title"] == "new"
+
+    def test_view_sources_returns_linked_observations(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        self._insert_insight(conn, project, "i1")
+        _insert_observation(conn, project, "oA")
+        conn.execute(
+            "INSERT INTO insight_sources (insight_id, observation_id) "
+            "VALUES ('i1', 'oA')"
+        )
+        conn.commit()
+
+        response = client.get("/insights/i1/sources")
+        assert response.status_code == 200
+        assert b"obs-oA" in response.data
+
+    def test_view_sources_empty(self, client: FlaskClient) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        self._insert_insight(conn, project, "i1")
+        response = client.get("/insights/i1/sources")
+        assert response.status_code == 200
+        assert b"No source observations" in response.data

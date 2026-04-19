@@ -1,0 +1,12 @@
+<div class="insight-sources">
+  <h4>Source observations ({{ rows|length }})</h4>
+  {% if not rows %}
+    <p class="muted">No source observations linked.</p>
+  {% else %}
+    <div class="card-list">
+      {% for obs in rows %}
+        {% include "fragments/observation_card_compact.html" %}
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>

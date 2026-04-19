@@ -124,3 +124,30 @@ def list_promoted(
     return _list_insights_by_status(
         conn, project=project, status="promoted", limit=limit
     )
+
+
+def list_insight_sources(
+    conn: sqlite3.Connection, *, insight_id: str
+) -> list[ObservationListRow]:
+    """Return the observations linked to ``insight_id`` via insight_sources."""
+    rows = conn.execute(
+        """
+        SELECT o.id, o.content, o.component, o.theme, o.outcome, o.created_at
+        FROM insight_sources s
+        JOIN observations o ON o.id = s.observation_id
+        WHERE s.insight_id = ?
+        ORDER BY o.created_at DESC, o.id DESC
+        """,
+        (insight_id,),
+    ).fetchall()
+    return [
+        ObservationListRow(
+            id=r["id"],
+            content=r["content"],
+            component=r["component"],
+            theme=r["theme"],
+            outcome=r["outcome"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]

@@ -244,27 +244,76 @@ def create_app(
 
     @app.post("/insights/<id>/retire")
     def insight_retire(id: str) -> str:
-        return ""  # Task 11 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status not in ("confirmed", "promoted"):
+            abort(404)
+        service.update(id, status="retired")
+        return ""
 
     @app.post("/insights/<id>/demote")
     def insight_demote(id: str) -> str:
-        return ""  # Task 11 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status != "promoted":
+            abort(404)
+        service.update(id, status="confirmed")
+        return ""
 
     @app.get("/insights/<id>/edit")
     def insight_edit(id: str) -> str:
-        return ""  # Task 11 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status not in ("confirmed", "promoted"):
+            abort(404)
+        return render_template(
+            "fragments/insight_edit_form.html",
+            row=existing,
+            save_url=url_for("insight_edit_save", id=id),
+            cancel_url=url_for("insight_compact_card", id=id),
+        )
 
     @app.post("/insights/<id>/edit")
     def insight_edit_save(id: str) -> str:
-        return ""  # Task 11 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status not in ("confirmed", "promoted"):
+            abort(404)
+        title = request.form.get("title", existing.title)
+        content = request.form.get("content", existing.content)
+        service.update(id, title=title, content=content)
+        updated = service.get(id)
+        template = (
+            "fragments/insight_card_compact.html"
+            if updated.status == "confirmed"
+            else "fragments/promoted_card_compact.html"
+        )
+        return render_template(template, i=updated, p=updated)
 
     @app.get("/insights/<id>/compact")
     def insight_compact_card(id: str) -> str:
-        return ""  # Task 11 implements (used by collapse)
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status not in ("confirmed", "promoted"):
+            abort(404)
+        template = (
+            "fragments/insight_card_compact.html"
+            if existing.status == "confirmed"
+            else "fragments/promoted_card_compact.html"
+        )
+        return render_template(template, i=existing, p=existing)
 
     @app.get("/insights/<id>/sources")
     def insight_sources(id: str) -> str:
-        return ""  # Task 11 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None:
+            abort(404)
+        conn = app.extensions["db_connection"]
+        rows = queries.list_insight_sources(conn, insight_id=id)
+        if not rows:
+            return '<div class="insight-sources"><p class="muted">No source observations linked.</p></div>'
+        return render_template("fragments/insight_sources.html", rows=rows)
 
     @app.post("/pipeline/consolidate")
     def pipeline_consolidate() -> str:
