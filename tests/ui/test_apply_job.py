@@ -7,10 +7,9 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
 from flask.testing import FlaskClient
 
-from better_memory.ui import jobs
+import better_memory.ui.jobs as jobs
 
 
 def _seed_branch_observations(conn, project: str) -> None:
