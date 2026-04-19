@@ -36,10 +36,58 @@ class JobState:
     message: str = ""
     result: DryRunResult | None = None
     error: str | None = None
+    applied: bool = False
 
 
 def get_job(job_id: str) -> JobState | None:
     return _jobs.get(job_id)
+
+
+def apply_job(
+    job_id: str,
+    *,
+    db_path: Path,
+    chat: ChatCompleter,
+) -> JobState:
+    """Persist a completed job's drafts: create insights (pending_review)
+    and archive swept observations. Idempotent: second call is a no-op.
+
+    Returns the updated ``JobState``. Raises ``LookupError`` if the job
+    is unknown, ``ValueError`` if it is not ``complete`` or has no result.
+    """
+    state = _jobs.get(job_id)
+    if state is None:
+        raise LookupError(job_id)
+    if state.status != "complete" or state.result is None:
+        raise ValueError(f"Cannot apply job in status {state.status!r}")
+    if state.applied:
+        return state
+
+    conn = connect(db_path)
+    try:
+        svc = ConsolidationService(conn=conn, chat=chat)
+
+        async def _do_apply() -> tuple[int, int]:
+            branch_count = 0
+            for c in state.result.branch:  # type: ignore[union-attr]
+                await svc.apply_branch(c)
+                branch_count += 1
+            sweep_count = 0
+            for s in state.result.sweep:  # type: ignore[union-attr]
+                await svc.apply_sweep(s.observation_id)
+                sweep_count += 1
+            return branch_count, sweep_count
+
+        branch_count, sweep_count = asyncio.run(_do_apply())
+    finally:
+        conn.close()
+
+    state.applied = True
+    state.message = (
+        f"Applied {branch_count} candidate(s) to review queue, "
+        f"archived {sweep_count} observation(s)."
+    )
+    return state
 
 
 def start_consolidation_job(

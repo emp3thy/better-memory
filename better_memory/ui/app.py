@@ -404,6 +404,23 @@ def create_app(
             headers["HX-Trigger"] = "job-complete"
         return rendered, 200, headers
 
+    @app.post("/jobs/<id>/apply")
+    def jobs_apply(id: str) -> tuple[str, int, dict[str, str]]:
+        db_path = app.extensions["_db_path"]
+        chat = app.extensions["chat"]
+        try:
+            state = jobs.apply_job(id, db_path=db_path, chat=chat)
+        except LookupError:
+            abort(404)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error"><p>{exc}</p></div>',
+                400,
+                {},
+            )
+        rendered = render_template("fragments/consolidation_job.html", job=state)
+        return rendered, 200, {"HX-Trigger": "job-complete"}
+
     @app.get("/jobs/<id>")
     def jobs_get(id: str) -> tuple[str, int, dict[str, str]]:
         state = jobs.get_job(id)

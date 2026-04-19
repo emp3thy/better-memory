@@ -16,6 +16,12 @@
   </div>
   {% if job.message %}<div class="job-message">{{ job.message }}</div>{% endif %}
   {% if job.error %}<pre class="job-error">{{ job.error }}</pre>{% endif %}
+  {% if job.status == 'complete' and not job.applied and job.result and (job.result.branch or job.result.sweep) %}
+    <form hx-post="{{ url_for('jobs_apply', id=job.id) }}"
+          hx-target="closest .consolidation-job" hx-swap="outerHTML">
+      <button type="submit" class="btn-primary">Apply to review queue</button>
+    </form>
+  {% endif %}
   {% if job.result %}
     {% if job.result.branch %}
       <h4>Candidate insights ({{ job.result.branch|length }})</h4>
