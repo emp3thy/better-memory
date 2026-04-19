@@ -222,11 +222,27 @@ def create_app(
 
     @app.get("/candidates/<id>/merge")
     def candidate_merge_picker(id: str) -> str:
-        return ""  # Task 12 implements
+        service = app.extensions["insight_service"]
+        source = service.get(id)
+        if source is None or source.status != "pending_review":
+            abort(404)
+        conn = app.extensions["db_connection"]
+        project = _project_name()
+        all_candidates = queries.list_candidates(conn, project=project)
+        targets = [t for t in all_candidates if t.id != id]
+        return render_template(
+            "fragments/merge_picker.html", source=source, targets=targets
+        )
 
     @app.post("/candidates/<id>/merge")
     def candidate_merge(id: str) -> str:
-        return ""  # Task 12 implements
+        # Phase 3 ships the real merge logic (ConsolidationService).
+        return (
+            '<div class="card card-error">'
+            "<p>Merge cannot run: ConsolidationService ships in <strong>Phase 3</strong>. "
+            "The picker is live; the logic isn't. Retry after Phase 3 lands.</p>"
+            "</div>"
+        )
 
     @app.get("/insights/<id>/card")
     def insight_card(id: str) -> str:
@@ -240,7 +256,11 @@ def create_app(
 
     @app.get("/insights/<id>/promote")
     def insight_promote(id: str) -> str:
-        return ""  # Task 12 implements
+        service = app.extensions["insight_service"]
+        existing = service.get(id)
+        if existing is None or existing.status != "confirmed":
+            abort(404)
+        return render_template("fragments/promotion_stub_modal.html")
 
     @app.post("/insights/<id>/retire")
     def insight_retire(id: str) -> str:

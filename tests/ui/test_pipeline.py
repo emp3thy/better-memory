@@ -351,3 +351,54 @@ class TestInsightActions:
         response = client.get("/insights/i1/sources")
         assert response.status_code == 200
         assert b"No source observations" in response.data
+
+
+class TestPromoteStub:
+    def test_promote_renders_deferred_message(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('i1', 't', 'c', ?, 'confirmed', 'neutral')",
+            (project,),
+        )
+        conn.commit()
+
+        response = client.get("/insights/i1/promote")
+        assert response.status_code == 200
+        assert b"Phase 7" in response.data
+
+
+class TestMergePicker:
+    def test_picker_lists_other_pending_candidates(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+        _insert_candidate(conn, project, "c2")
+        _insert_candidate(conn, project, "c3")
+
+        response = client.get("/candidates/c1/merge")
+        assert response.status_code == 200
+        body = response.data.decode()
+        assert "c2" in body
+        assert "c3" in body
+        assert "id=\"merge-target-c1\"" not in body
+
+    def test_merge_post_returns_phase3_stub(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+        _insert_candidate(conn, project, "c2")
+
+        response = client.post(
+            "/candidates/c1/merge?target=c2",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert b"Phase 3" in response.data

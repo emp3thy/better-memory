@@ -1,0 +1,20 @@
+<div class="card card-merge-picker" data-id="{{ source.id }}">
+  <h4>Merge <em>{{ source.title }}</em> into…</h4>
+  {% if not targets %}
+    <p class="muted">No other pending candidates in this project.</p>
+    <button hx-get="{{ url_for('candidate_compact_card', id=source.id) }}"
+            hx-target="closest .card" hx-swap="outerHTML">Cancel</button>
+  {% else %}
+    <ul class="merge-target-list">
+      {% for target in targets %}
+        <li id="merge-target-{{ target.id }}">
+          <span>{{ target.title }}</span>
+          <button hx-post="{{ url_for('candidate_merge', id=source.id) }}?target={{ target.id }}"
+                  hx-target="closest .card" hx-swap="outerHTML">Merge into this</button>
+        </li>
+      {% endfor %}
+    </ul>
+    <button hx-get="{{ url_for('candidate_compact_card', id=source.id) }}"
+            hx-target="closest .card" hx-swap="outerHTML">Cancel</button>
+  {% endif %}
+</div>
