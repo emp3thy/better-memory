@@ -95,3 +95,20 @@ class TestOriginCheck:
     def test_get_without_origin_is_allowed(self, client: FlaskClient) -> None:
         response = client.get("/pipeline")
         assert response.status_code == 200
+
+
+class TestStaticAssets:
+    def test_htmx_js_is_served(self, client: FlaskClient) -> None:
+        response = client.get("/static/htmx.min.js")
+        assert response.status_code == 200
+        assert response.content_type.startswith("application/javascript") or \
+               response.content_type.startswith("text/javascript")
+        # HTMX's minified bundle begins with a standard UMD-ish header;
+        # assert something from the real file rather than an exact hash.
+        assert b"htmx" in response.data.lower()
+
+    def test_app_css_is_served(self, client: FlaskClient) -> None:
+        response = client.get("/static/app.css")
+        assert response.status_code == 200
+        assert response.content_type.startswith("text/css")
+        assert b".app-header" in response.data
