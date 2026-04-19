@@ -138,8 +138,50 @@ def create_app(
                 "fragments/panel_observations.html",
                 rows=queries.list_observations(conn, project=project),
             )
-        # Other stages land in Task 7.
+        if stage == "candidates":
+            return render_template(
+                "fragments/panel_candidates.html",
+                rows=queries.list_candidates(conn, project=project),
+            )
+        if stage == "insights":
+            return render_template(
+                "fragments/panel_insights.html",
+                rows=queries.list_insights(conn, project=project),
+            )
+        if stage == "promoted":
+            return render_template(
+                "fragments/panel_promoted.html",
+                rows=queries.list_promoted(conn, project=project),
+            )
         abort(404)
+
+    @app.get("/candidates/<id>/card")
+    def candidate_card(id: str) -> str:
+        return ""  # Task 8 implements
+
+    @app.post("/candidates/<id>/approve")
+    def candidate_approve(id: str) -> str:
+        return ""  # Task 10 implements
+
+    @app.post("/candidates/<id>/reject")
+    def candidate_reject(id: str) -> str:
+        return ""  # Task 10 implements
+
+    @app.get("/insights/<id>/card")
+    def insight_card(id: str) -> str:
+        return ""  # Task 8 implements
+
+    @app.get("/insights/<id>/promote")
+    def insight_promote(id: str) -> str:
+        return ""  # Task 12 implements
+
+    @app.post("/insights/<id>/retire")
+    def insight_retire(id: str) -> str:
+        return ""  # Task 11 implements
+
+    @app.post("/insights/<id>/demote")
+    def insight_demote(id: str) -> str:
+        return ""  # Task 11 implements
 
     @app.post("/pipeline/consolidate")
     def pipeline_consolidate() -> str:

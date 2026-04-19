@@ -81,3 +81,73 @@ class TestObservationsPanel:
         assert "obs-oldest" in body
         # Newest appears before oldest in the rendered HTML
         assert body.index("obs-newest") < body.index("obs-oldest")
+
+
+class TestCandidatesPanel:
+    def test_empty_shows_run_consolidation_message(
+        self, client: FlaskClient
+    ) -> None:
+        response = client.get("/pipeline/panel/candidates")
+        assert response.status_code == 200
+        assert b"No candidates" in response.data
+
+    def test_lists_candidates_with_approve_reject(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        _insert_candidate(conn, project, "c1")
+
+        response = client.get("/pipeline/panel/candidates")
+        body = response.data.decode()
+        assert "title-c1" in body
+        assert "Approve" in body
+        assert "Reject" in body
+
+
+class TestInsightsPanel:
+    def test_empty(self, client: FlaskClient) -> None:
+        response = client.get("/pipeline/panel/insights")
+        assert response.status_code == 200
+        assert b"No insights" in response.data
+
+    def test_lists_insights_with_promote_retire(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('i1', 'title-i1', 'c', ?, 'confirmed', 'neutral')",
+            (project,),
+        )
+        conn.commit()
+        response = client.get("/pipeline/panel/insights")
+        body = response.data.decode()
+        assert "title-i1" in body
+        assert "Promote" in body
+        assert "Retire" in body
+
+
+class TestPromotedPanel:
+    def test_empty(self, client: FlaskClient) -> None:
+        response = client.get("/pipeline/panel/promoted")
+        assert response.status_code == 200
+        assert b"No promoted" in response.data
+
+    def test_lists_promoted_with_view_doc_demote(
+        self, client: FlaskClient
+    ) -> None:
+        conn = client.application.extensions["db_connection"]
+        project = Path.cwd().name
+        conn.execute(
+            "INSERT INTO insights (id, title, content, project, status, polarity) "
+            "VALUES ('pr1', 'title-pr1', 'c', ?, 'promoted', 'neutral')",
+            (project,),
+        )
+        conn.commit()
+        response = client.get("/pipeline/panel/promoted")
+        body = response.data.decode()
+        assert "title-pr1" in body
+        assert "View doc" in body
+        assert "Demote" in body
