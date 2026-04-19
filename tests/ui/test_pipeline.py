@@ -402,3 +402,37 @@ class TestMergePicker:
         )
         assert response.status_code == 200
         assert b"Phase 3" in response.data
+
+
+class TestConsolidationButton:
+    def test_click_returns_job_fragment_with_phase3_message(
+        self, client: FlaskClient
+    ) -> None:
+        response = client.post(
+            "/pipeline/consolidate",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert b"Phase 3" in response.data
+        # Response carries HX-Trigger: job-complete so the candidates
+        # panel listener refreshes.
+        assert response.headers.get("HX-Trigger") == "job-complete"
+
+    def test_jobs_endpoint_returns_fragment(
+        self, client: FlaskClient
+    ) -> None:
+        import re
+
+        response = client.post(
+            "/pipeline/consolidate",
+            headers={"Origin": "http://localhost"},
+        )
+        # Extract the job-id from the rendered fragment's data attribute.
+        match = re.search(rb'data-job-id="([a-f0-9]+)"', response.data)
+        assert match is not None, "consolidation response must render a job fragment"
+        job_id = match.group(1).decode()
+
+        # GET /jobs/<id> returns the job's fragment (Phase 3 message).
+        get_resp = client.get(f"/jobs/{job_id}")
+        assert get_resp.status_code == 200
+        assert b"Phase 3" in get_resp.data

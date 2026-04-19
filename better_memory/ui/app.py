@@ -14,7 +14,7 @@ from werkzeug.wrappers import Response
 from better_memory.config import resolve_home
 from better_memory.db.connection import connect
 from better_memory.services.insight import InsightService
-from better_memory.ui import queries
+from better_memory.ui import jobs, queries
 
 
 def _project_name() -> str:
@@ -336,9 +336,17 @@ def create_app(
         return render_template("fragments/insight_sources.html", rows=rows)
 
     @app.post("/pipeline/consolidate")
-    def pipeline_consolidate() -> str:
-        # Task 13 implements this.
-        return ""
+    def pipeline_consolidate() -> tuple[str, int, dict[str, str]]:
+        state = jobs.start_phase3_stub_job()
+        rendered = render_template("fragments/consolidation_job.html", job=state)
+        return rendered, 200, {"HX-Trigger": "job-complete"}
+
+    @app.get("/jobs/<id>")
+    def jobs_get(id: str) -> str:
+        state = jobs.get_job(id)
+        if state is None:
+            abort(404)
+        return render_template("fragments/consolidation_job.html", job=state)
 
     @app.get("/pipeline/badge")
     def pipeline_badge() -> str:
