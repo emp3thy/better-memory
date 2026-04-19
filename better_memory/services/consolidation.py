@@ -190,6 +190,16 @@ def existing_insight_for_cluster(
     return row_to_insight(row)
 
 
+@dataclass(frozen=True)
+class SweepCandidate:
+    """An observation the sweep flagged for human review before archive."""
+
+    observation_id: str
+    content: str
+    project: str
+    reason: str  # "stale" (Phase 3); richer reasons in Phase 3.5
+
+
 class ConsolidationService:
     """Consolidation engine: branch pass, sweep pass, merge.
 
@@ -266,6 +276,44 @@ class ConsolidationService:
                 )
             )
         return out
+
+    async def sweep_dry_run(
+        self, *, project: str, stale_days: int = 30
+    ) -> list[SweepCandidate]:
+        """Return observations that look stale and low-value.
+
+        Criteria (spec §9): ``last_retrieved`` older than ``stale_days``,
+        AND ``used_count = 0`` AND ``validated_true = 0`` AND
+        ``status = 'active'``. Observations that have never been retrieved
+        (``last_retrieved IS NULL``) are NOT flagged — we let them live
+        until they cross the stale threshold.
+
+        Phase 3 does not attempt contradiction detection; the UI shows
+        every candidate as "stale" and the human decides.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, content, project
+            FROM observations
+            WHERE status = 'active'
+              AND project = ?
+              AND used_count = 0
+              AND validated_true = 0
+              AND last_retrieved IS NOT NULL
+              AND julianday(last_retrieved) < julianday('now', ?)
+            ORDER BY last_retrieved ASC, rowid ASC
+            """,
+            (project, f"-{stale_days} days"),
+        ).fetchall()
+        return [
+            SweepCandidate(
+                observation_id=r["id"],
+                content=r["content"],
+                project=r["project"],
+                reason="stale",
+            )
+            for r in rows
+        ]
 
     async def apply_branch(self, candidate: BranchCandidate) -> str:
         """Persist ``candidate`` — create the insight, link sources, mark

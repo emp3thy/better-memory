@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from better_memory.services.consolidation import (
     ConsolidationService,
     ObservationCluster,
     ObservationForPrompt,
+    SweepCandidate,
     build_draft_prompt,
     existing_insight_for_cluster,
     find_clusters,
@@ -387,3 +389,72 @@ class TestApplyBranch:
         assert conn.execute(
             "SELECT status FROM observations WHERE id = 'a0'"
         ).fetchone()["status"] == "active"
+
+
+class TestSweepDryRun:
+    def _insert_stale(
+        self, conn: sqlite3.Connection, id: str, project: str,
+        *, last_retrieved_days_ago: int
+    ) -> None:
+        past = (
+            datetime.now(UTC) - timedelta(days=last_retrieved_days_ago)
+        ).isoformat()
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, status, used_count, validated_true, "
+            "last_retrieved) "
+            "VALUES (?, ?, ?, 'active', 0, 0, ?)",
+            (id, f"stale-{id}", project, past),
+        )
+        conn.commit()
+
+    async def test_finds_stale_observations(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        self._insert_stale(conn, "old1", project="p",
+                           last_retrieved_days_ago=40)
+        self._insert_stale(conn, "old2", project="p",
+                           last_retrieved_days_ago=60)
+
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        cands = await svc.sweep_dry_run(project="p", stale_days=30)
+        assert {c.observation_id for c in cands} == {"old1", "old2"}
+        assert all(c.reason == "stale" for c in cands)
+
+    async def test_skips_recently_retrieved(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        self._insert_stale(conn, "recent", project="p",
+                           last_retrieved_days_ago=5)
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        cands = await svc.sweep_dry_run(project="p", stale_days=30)
+        assert cands == []
+
+    async def test_skips_with_used_count(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        past = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, status, used_count, validated_true, "
+            "last_retrieved) VALUES "
+            "('used', 'c', 'p', 'active', 1, 0, ?)",
+            (past,),
+        )
+        conn.commit()
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        cands = await svc.sweep_dry_run(project="p", stale_days=30)
+        assert cands == []
+
+    async def test_skips_never_retrieved(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, status, used_count, validated_true) "
+            "VALUES ('new', 'c', 'p', 'active', 0, 0)"
+        )
+        conn.commit()
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        cands = await svc.sweep_dry_run(project="p", stale_days=30)
+        assert cands == []
