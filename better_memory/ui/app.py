@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from flask import Flask, redirect, render_template, url_for
+from flask import Flask, Response, redirect, render_template, url_for
 
 
 def create_app() -> Flask:
-    """Build and return a configured Flask app."""
+    """Build and return a configured Flask app.
+
+    A factory rather than a module-level ``app`` so tests can spin up
+    fresh instances in isolation.
+    """
     app = Flask(__name__)
 
     @app.get("/healthz")
@@ -14,7 +18,7 @@ def create_app() -> Flask:
         return "ok", 200
 
     @app.get("/")
-    def root():
+    def root() -> Response:
         return redirect(url_for("pipeline"))
 
     @app.get("/pipeline")
@@ -23,7 +27,7 @@ def create_app() -> Flask:
 
     @app.get("/pipeline/badge")
     def pipeline_badge() -> str:
-        return "0"
+        return ""
 
     # Stubs — Task 4 gives each its own template.
     @app.get("/sweep")
