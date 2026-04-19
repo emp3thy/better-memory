@@ -1085,11 +1085,18 @@ Append to `better_memory/services/consolidation.py`:
 
 ```python
 from collections import Counter
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Literal
 
 from better_memory.llm.ollama import ChatCompleter
 
 Polarity = Literal["do", "dont", "neutral"]
+
+
+def _default_clock() -> datetime:
+    """UTC-aware ``now``. Module-level so tests can patch for determinism."""
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -1140,9 +1147,12 @@ class ConsolidationService:
         self,
         conn: sqlite3.Connection,
         chat: ChatCompleter,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
         self._chat = chat
+        self._clock: Callable[[], datetime] = clock or _default_clock
 
     async def branch_dry_run(
         self, *, project: str
@@ -1321,6 +1331,7 @@ Append to `ConsolidationService` in `better_memory/services/consolidation.py`:
         from uuid import uuid4
 
         insight_id = uuid4().hex
+        now = self._clock().isoformat()
         conn = self._conn
         conn.execute("SAVEPOINT apply_branch")
         try:
@@ -1332,7 +1343,7 @@ Append to `ConsolidationService` in `better_memory/services/consolidation.py`:
                      created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, 'pending_review',
                         ?, ?, ?,
-                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ?, ?)
                 """,
                 (
                     insight_id,
@@ -1343,6 +1354,8 @@ Append to `ConsolidationService` in `better_memory/services/consolidation.py`:
                     candidate.confidence,
                     candidate.polarity,
                     len(candidate.observation_ids),
+                    now,
+                    now,
                 ),
             )
             for obs_id in candidate.observation_ids:
@@ -1870,6 +1883,7 @@ Append to `ConsolidationService`:
                 f"Cannot merge into status {tgt['status']!r}"
             )
 
+        now = self._clock().isoformat()
         conn.execute("SAVEPOINT consolidation_merge")
         try:
             # Move source's observation links to target (dedupe via
@@ -1893,14 +1907,14 @@ Append to `ConsolidationService`:
             ).fetchone()[0]
             conn.execute(
                 "UPDATE insights SET evidence_count = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (new_count, target_id),
+                "updated_at = ? WHERE id = ?",
+                (new_count, now, target_id),
             )
             # Retire the source.
             conn.execute(
                 "UPDATE insights SET status = 'retired', "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (source_id,),
+                "updated_at = ? WHERE id = ?",
+                (now, source_id),
             )
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT consolidation_merge")
