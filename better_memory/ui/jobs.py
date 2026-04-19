@@ -169,7 +169,12 @@ def start_consolidation_job(
                     f"{len(result.sweep)} sweep item(s)."
                 )
             finally:
-                conn.close()
+                # Suppress close errors so they can't overwrite a successful
+                # state with "failed" via the outer except.
+                try:
+                    conn.close()
+                except Exception:
+                    pass
         except Exception:
             state.status = "failed"
             state.error = traceback.format_exc()

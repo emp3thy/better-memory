@@ -178,7 +178,8 @@ class TestApplyIncompleteJob:
                 f"/jobs/{job_id}/apply",
                 headers={"Origin": "http://localhost"},
             )
-            assert resp.status_code == 400
+            assert resp.status_code == 200
             assert b"Cannot apply job" in resp.data
+            assert b"card-error" in resp.data
         finally:
             del jobs._jobs[job_id]

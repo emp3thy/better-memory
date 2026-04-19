@@ -391,7 +391,7 @@ def create_app(
         except ValueError as exc:
             return (
                 f'<div class="card card-error"><p>{escape(exc)}</p></div>',
-                400,
+                200,
                 {},
             )
         rendered = render_template("fragments/consolidation_job.html", job=state)
