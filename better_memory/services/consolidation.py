@@ -145,7 +145,9 @@ class BranchCandidate:
 
 
 def _infer_polarity(outcomes: list[str]) -> Polarity:
-    """Majority-vote outcome → polarity mapping."""
+    """Majority-vote outcome → polarity mapping. Empty list → neutral."""
+    if not outcomes:
+        return "neutral"
     counts = Counter(outcomes)
     top, _ = counts.most_common(1)[0]
     if top == "success":

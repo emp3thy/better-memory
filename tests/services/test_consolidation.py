@@ -239,6 +239,24 @@ class TestExistingInsightForCluster:
         assert result is not None
         assert result.id == "pr1"
 
+    def test_matches_across_themes_by_design(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Dedup is scoped to (project, component). A confirmed insight
+        on one theme blocks consolidation on other themes under the
+        same component. This is by design per Task 6 of the plan — the
+        insights schema has no theme column. If the schema ever gains
+        one, this test documents the behavior that would change."""
+        _insert_insight(conn, id="i-auth", project="p", component="api",
+                        status="confirmed")
+        cluster = ObservationCluster(
+            project="p", component="api", theme="retry",
+            observation_ids=["o1"], total_validated_true=0,
+        )
+        result = existing_insight_for_cluster(conn, cluster)
+        assert result is not None
+        assert result.id == "i-auth"
+
 
 class TestBranchDryRun:
     async def test_drafts_candidates_for_each_accepted_cluster(
