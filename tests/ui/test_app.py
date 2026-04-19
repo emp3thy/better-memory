@@ -174,7 +174,7 @@ class TestInactivityTimeout:
 
     def test_watchdog_thread_started_by_default(self) -> None:
         before = sum(1 for t in threading.enumerate() if t.name == "ui-watchdog")
-        app = create_app()
+        create_app()
         after = sum(1 for t in threading.enumerate() if t.name == "ui-watchdog")
         assert after == before + 1
 

@@ -13,7 +13,7 @@ from better_memory.ui.app import create_app
 @pytest.fixture
 def client() -> Iterator[FlaskClient]:
     """Yield a Flask test client for a freshly created app."""
-    app = create_app()
+    app = create_app(start_watchdog=False)
     app.config["TESTING"] = True
     with app.test_client() as c:
         yield c
