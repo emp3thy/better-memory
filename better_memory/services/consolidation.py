@@ -399,3 +399,68 @@ class ConsolidationService:
             (observation_id,),
         )
         conn.commit()
+
+    async def merge(self, *, source_id: str, target_id: str) -> None:
+        """Merge ``source_id`` into ``target_id``.
+
+        - Source must be ``pending_review``.
+        - Target must be ``pending_review`` OR ``confirmed`` (merging into
+          a live insight upgrades its evidence).
+        - Target must not be ``retired``, ``contradicted``, or ``promoted``.
+        """
+        conn = self._conn
+        src = conn.execute(
+            "SELECT status FROM insights WHERE id = ?", (source_id,)
+        ).fetchone()
+        if src is None:
+            raise ValueError(f"Source insight not found: {source_id}")
+        if src["status"] != "pending_review":
+            raise ValueError(
+                f"Source must be pending_review, got {src['status']!r}"
+            )
+
+        tgt = conn.execute(
+            "SELECT status, evidence_count FROM insights WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if tgt is None:
+            raise ValueError(f"Target insight not found: {target_id}")
+        if tgt["status"] not in ("pending_review", "confirmed"):
+            raise ValueError(
+                f"Cannot merge into status {tgt['status']!r}"
+            )
+
+        now = self._clock().isoformat()
+        conn.execute("SAVEPOINT consolidation_merge")
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO insight_sources "
+                "(insight_id, observation_id) "
+                "SELECT ?, observation_id FROM insight_sources "
+                "WHERE insight_id = ?",
+                (target_id, source_id),
+            )
+            conn.execute(
+                "DELETE FROM insight_sources WHERE insight_id = ?",
+                (source_id,),
+            )
+            new_count = conn.execute(
+                "SELECT COUNT(*) FROM insight_sources WHERE insight_id = ?",
+                (target_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE insights SET evidence_count = ?, "
+                "updated_at = ? WHERE id = ?",
+                (new_count, now, target_id),
+            )
+            conn.execute(
+                "UPDATE insights SET status = 'retired', "
+                "updated_at = ? WHERE id = ?",
+                (now, source_id),
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT consolidation_merge")
+            conn.execute("RELEASE SAVEPOINT consolidation_merge")
+            raise
+        conn.execute("RELEASE SAVEPOINT consolidation_merge")
+        conn.commit()

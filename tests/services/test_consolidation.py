@@ -520,3 +520,89 @@ class TestDryRun:
         assert result.branch[0].observation_ids == ["a0", "a1", "a2"]
         assert len(result.sweep) == 1
         assert result.sweep[0].observation_id == "stale1"
+
+
+class TestMerge:
+    async def test_merges_two_pending_candidates(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_observation(conn, id="oA", project="p")
+        _insert_observation(conn, id="oB", project="p")
+        _insert_insight(conn, id="src", project="p", component="api",
+                        status="pending_review")
+        _insert_insight(conn, id="tgt", project="p", component="api",
+                        status="pending_review")
+        conn.execute(
+            "INSERT INTO insight_sources (insight_id, observation_id) "
+            "VALUES ('src', 'oA')"
+        )
+        conn.execute(
+            "INSERT INTO insight_sources (insight_id, observation_id) "
+            "VALUES ('tgt', 'oB')"
+        )
+        conn.commit()
+
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        await svc.merge(source_id="src", target_id="tgt")
+
+        src = conn.execute(
+            "SELECT status FROM insights WHERE id = 'src'"
+        ).fetchone()
+        assert src["status"] == "retired"
+
+        sources = {
+            r["observation_id"]
+            for r in conn.execute(
+                "SELECT observation_id FROM insight_sources "
+                "WHERE insight_id = 'tgt'"
+            ).fetchall()
+        }
+        assert sources == {"oA", "oB"}
+
+        tgt = conn.execute(
+            "SELECT evidence_count FROM insights WHERE id = 'tgt'"
+        ).fetchone()
+        assert tgt["evidence_count"] == 2
+
+    async def test_merge_into_confirmed_allowed(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_observation(conn, id="oA", project="p")
+        _insert_insight(conn, id="src", project="p", component="api",
+                        status="pending_review")
+        _insert_insight(conn, id="tgt", project="p", component="api",
+                        status="confirmed")
+        conn.execute(
+            "INSERT INTO insight_sources VALUES ('src', 'oA')"
+        )
+        conn.commit()
+
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        await svc.merge(source_id="src", target_id="tgt")
+
+        src = conn.execute(
+            "SELECT status FROM insights WHERE id = 'src'"
+        ).fetchone()
+        assert src["status"] == "retired"
+
+    async def test_merge_into_retired_blocked(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_insight(conn, id="src", project="p", component="api",
+                        status="pending_review")
+        _insert_insight(conn, id="tgt", project="p", component="api",
+                        status="retired")
+
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        with pytest.raises(ValueError, match="retired"):
+            await svc.merge(source_id="src", target_id="tgt")
+
+    async def test_merge_unknown_source(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _insert_insight(conn, id="tgt", project="p", component="api",
+                        status="pending_review")
+
+        svc = ConsolidationService(conn=conn, chat=FakeChat(responses=[]))
+        with pytest.raises(ValueError, match="not found"):
+            await svc.merge(source_id="missing", target_id="tgt")
