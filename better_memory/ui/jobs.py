@@ -9,6 +9,7 @@ polls ``/jobs/<id>`` until ``state.status == 'complete'`` (or
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import threading
 import traceback
 from collections.abc import Callable
@@ -50,7 +51,6 @@ def _run_sync_or_in_worker(work_fn: Callable[[], None]) -> None:
     except RuntimeError:
         work_fn()
         return
-    import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(work_fn).result()
 

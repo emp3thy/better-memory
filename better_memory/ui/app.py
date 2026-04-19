@@ -255,9 +255,9 @@ def create_app(
         db_path = app.extensions["_db_path"]
         chat = app.extensions["chat"]
         try:
-            import asyncio
-
             def _do_merge() -> None:
+                import asyncio
+
                 # Fresh connection on the worker thread (SQLite is thread-bound).
                 conn = connect(db_path)
                 try:
