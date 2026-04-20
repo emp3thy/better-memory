@@ -141,12 +141,12 @@ PRIMARY KEY (reflection_id, observation_id)
 
 ```
 project         TEXT NOT NULL
-tech            TEXT            -- nullable; matches the filter used
+tech            TEXT NOT NULL DEFAULT ''   -- '' = "no tech filter"
 last_run_at     TEXT NOT NULL
 PRIMARY KEY (project, tech)
 ```
 
-Used to scope "observations since last synthesis" on next run.
+Used to scope "observations since last synthesis" on next run. `tech` is `NOT NULL DEFAULT ''` rather than nullable because SQLite treats each NULL as distinct for uniqueness; a nullable `tech` in a composite PK would allow unlimited `(project, NULL)` duplicates and silently fragment the watermark. Callers pass `''` to mean "no tech filter".
 
 ### `insights_legacy` (snapshot)
 
