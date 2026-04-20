@@ -298,7 +298,7 @@ def test_fts_delete_trigger_on_insights(tmp_memory_db: Path) -> None:
 
 
 def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
-    """Running :func:`apply_migrations` twice applies 0001 exactly once."""
+    """Running :func:`apply_migrations` twice applies each file exactly once."""
     conn = connect(tmp_memory_db)
     try:
         apply_migrations(conn)
@@ -307,7 +307,7 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         versions = [r["version"] for r in rows]
-        assert versions == ["0001"]
+        assert versions == ["0001", "0002"]
     finally:
         conn.close()
 
