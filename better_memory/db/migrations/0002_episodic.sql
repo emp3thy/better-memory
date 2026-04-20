@@ -51,3 +51,19 @@ CREATE TABLE episodes (
 CREATE INDEX idx_episodes_project_ended ON episodes(project, ended_at);
 CREATE INDEX idx_episodes_project_outcome ON episodes(project, outcome);
 CREATE INDEX idx_episodes_tech ON episodes(tech);
+
+----------------------------------------------------------------------
+-- Episode-sessions join: an episode may span multiple sessions
+-- (user picks `continuing` at reconciliation).
+----------------------------------------------------------------------
+
+CREATE TABLE episode_sessions (
+    episode_id  TEXT NOT NULL REFERENCES episodes(id),
+    session_id  TEXT NOT NULL,
+    joined_at   TEXT NOT NULL,
+    left_at     TEXT,
+    PRIMARY KEY (episode_id, session_id)
+);
+
+CREATE INDEX idx_episode_sessions_session ON episode_sessions(session_id);
+CREATE INDEX idx_episode_sessions_open ON episode_sessions(session_id, left_at);

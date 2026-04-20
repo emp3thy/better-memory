@@ -306,3 +306,53 @@ def test_episodes_valid_insert(tmp_memory_db: Path) -> None:
         assert row["project"] == "proj-a"
     finally:
         conn.close()
+
+
+def test_episode_sessions_exists_with_columns(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        cols = _column_names(conn, "episode_sessions")
+        assert {"episode_id", "session_id", "joined_at", "left_at"}.issubset(cols)
+    finally:
+        conn.close()
+
+
+def test_episode_sessions_composite_primary_key(tmp_memory_db: Path) -> None:
+    """Duplicate (episode_id, session_id) insert raises IntegrityError."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-a", "p", "2026-04-20T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO episode_sessions (episode_id, session_id, joined_at) "
+            "VALUES (?, ?, ?)",
+            ("ep-a", "sess-1", "2026-04-20T10:00:00Z"),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO episode_sessions (episode_id, session_id, joined_at) "
+                "VALUES (?, ?, ?)",
+                ("ep-a", "sess-1", "2026-04-20T11:00:00Z"),
+            )
+    finally:
+        conn.close()
+
+
+def test_episode_sessions_fk_enforced(tmp_memory_db: Path) -> None:
+    """Inserting into episode_sessions without a matching episode row fails."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO episode_sessions (episode_id, session_id, joined_at) "
+                "VALUES (?, ?, ?)",
+                ("no-such-ep", "sess-1", "2026-04-20T10:00:00Z"),
+            )
+    finally:
+        conn.close()
