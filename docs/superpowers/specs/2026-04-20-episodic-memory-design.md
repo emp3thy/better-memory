@@ -70,7 +70,7 @@ Observations from `no_outcome` episodes stay in the database for audit and direc
 
 ## 4. Data model
 
-SQLite. Migration `0003_episodic_memory.sql` (exact filename subject to naming convention).
+SQLite. Migration `0002_episodic.sql`.
 
 ### `episodes` (new)
 
@@ -99,12 +99,15 @@ left_at         TEXT            -- null while still active in this session
 PRIMARY KEY (episode_id, session_id)
 ```
 
-### `observations` (existing, modified)
+### `observations` (existing, rebuilt)
 
-Add columns:
-- `episode_id TEXT` (FK → episodes.id; nullable — `NULL` for pre-migration rows or observations written before session-start hook fires).
-- `tech TEXT` (nullable; lowercase-normalised on write).
-- `status` (existing) gains new valid values: `consumed_into_reflection`, `consumed_without_reflection`.
+Phase 1 drops and recreates the table (all pre-existing data dumped per the clean-slate decision — see §10). The new shape:
+
+- `episode_id TEXT NOT NULL REFERENCES episodes(id)` — every observation must bind to an active episode. `memory.observe` opens a background episode if none is active.
+- `tech TEXT` (nullable; lowercase-normalised on write by the service layer).
+- `status` (existing) gains new valid values at the service level: `consumed_into_reflection`, `consumed_without_reflection`. No CHECK added in Phase 1.
+
+All 19 original columns carry over unchanged.
 
 Indexes: add `(episode_id)`, `(tech)`.
 
@@ -148,17 +151,13 @@ PRIMARY KEY (project, tech)
 
 Used to scope "observations since last synthesis" on next run. `tech` is `NOT NULL DEFAULT ''` rather than nullable because SQLite treats each NULL as distinct for uniqueness; a nullable `tech` in a composite PK would allow unlimited `(project, NULL)` duplicates and silently fragment the watermark. Callers pass `''` to mean "no tech filter".
 
-### `insights_legacy` (snapshot)
-
-A one-off table storing a snapshot of the pre-migration `insights` and `insight_sources` rows for safety. Not written to after migration completes.
-
 ### Tables retained unchanged
 
 `audit_log`, `knowledge_*`. Audit data continues to accrue; it simply has no dedicated UI tab.
 
 ### Tables dropped
 
-`insights`, `insight_sources`, `insight_relations` — after content is migrated into `reflections`/`reflection_sources` and snapshotted into `insights_legacy`.
+`insights`, `insight_sources`, `insight_relations` — plus their FTS5 and embeddings virtual tables. Data is dumped per the clean-slate decision; no snapshot retained.
 
 ## 5. Synthesis flow
 
@@ -314,15 +313,12 @@ Retention runs as an MCP tool (`memory.run_retention`) the user can invoke; no a
 
 ## 10. Migration
 
-A one-off migration script runs when the new schema ships:
+Per the clean-slate decision, Phase 1 drops **all** existing observation and insight data rather than migrating it. No `insights_legacy` snapshot is preserved — the trade-off is simpler migration code in exchange for starting with an empty episode/observation/reflection set.
 
-1. Apply SQL migration (create `episodes`, `episode_sessions`, `reflections`, `reflection_sources`, `synthesis_runs`, `insights_legacy`; add `episode_id` and `tech` columns to `observations`).
-2. Snapshot existing `insights` and `insight_sources` rows into `insights_legacy`.
-3. Run a one-shot LLM synthesis pass per project: for each project, pass the existing insights + their source observations to the LLM using the same synthesis prompt shape (with "existing reflections" = empty). The LLM produces reflections. Insert with `status='pending_review'` so the user can sanity-check.
-4. Observations: `episode_id` and `tech` remain `NULL` for pre-migration rows. Optional backfill — cluster existing observations into synthetic episodes by session_id + time range — is out of scope; `NULL` is acceptable and simply means the observation predates episodic capture.
-5. Drop `insights`, `insight_sources`, `insight_relations` tables after the LLM-migration step succeeds.
+1. Apply SQL migration `0002_episodic.sql`: create `episodes`, `episode_sessions`, `reflections`, `reflection_sources`, `synthesis_runs`; drop and recreate `observations` with `episode_id NOT NULL` + `tech`; drop `insights`, `insight_sources`, `insight_relations` (including their FTS5 + embeddings virtual tables and triggers).
+2. Start recording new observations under the episodic model. Prior audit_log entries remain for historical reference; they are not replayed.
 
-If the LLM migration step fails for any project, it can be re-run. `insights_legacy` is never dropped automatically.
+There is no LLM migration step, no data snapshot, and no rollback-to-legacy path. If you need the prior data, branch from before the migration.
 
 ## 11. Testing
 
@@ -350,7 +346,7 @@ If the LLM migration step fails for any project, it can be re-run. `insights_leg
 - **Reconciliation friction.** Users may find the session-start prompt annoying. Mitigation: the prompt is skippable with one key; default on skip is `abandoned`, which still produces useful (negative) synthesis signal rather than losing data.
 - **Git hook install.** Users without the post-commit hook get no auto-close on commit; episodes fall through to reconciliation. Mitigation: bundled install command; reconcile prompt catches the gap.
 - **Tech tag fragmentation.** Free-text `tech` normalised only to lowercase may still fragment (`py` vs `python`, `pg` vs `postgres`). Mitigation: accept fragmentation initially; introduce a controlled vocabulary later if it becomes a problem.
-- **Migration loss.** LLM migration of existing insights is best-effort. Mitigation: `insights_legacy` retains the originals; all migrated reflections land as `pending_review` so nothing confirmed is lost silently.
+- **Data loss at migration.** Phase 1 drops all existing observations and insights. Mitigation: none by design — clean slate was a deliberate user decision. If prior data is needed for a post-mortem, check out the pre-migration branch (`phase-3-consolidation` or earlier).
 - **Multi-project contamination.** An observation written under project A could, after a `tech` match, influence a reflection retrieved under project B. Mitigation: reflections always carry `project`; cross-project retrieval requires an explicit flag on `memory.retrieve`, off by default. Tech-tagged cross-project reflections are opt-in.
 
 ## 13. Out of scope
@@ -367,7 +363,7 @@ If the LLM migration step fails for any project, it can be re-run. `insights_leg
 
 The detailed implementation plan is the next artefact. High-level phases:
 
-1. Schema migration (new tables, observation columns, `insights_legacy` snapshot).
+1. Schema migration (new tables, observation rebuild, drop legacy insight tables — all data dumped).
 2. Episode lifecycle service + `start_episode` / `close_episode` / `reconcile_episodes` / `list_episodes` MCP tools.
 3. Session-start hook integration: background-episode open on session start; reconcile prompt on next session start.
 4. Git post-commit hook + plan-complete integration.
