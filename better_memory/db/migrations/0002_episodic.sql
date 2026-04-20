@@ -208,3 +208,16 @@ CREATE VIRTUAL TABLE reflection_embeddings USING vec0(
     reflection_id TEXT PRIMARY KEY,
     embedding FLOAT[768]
 );
+
+----------------------------------------------------------------------
+-- Reflection → observation link table.
+----------------------------------------------------------------------
+
+CREATE TABLE reflection_sources (
+    reflection_id   TEXT NOT NULL REFERENCES reflections(id),
+    observation_id  TEXT NOT NULL REFERENCES observations(id),
+    PRIMARY KEY (reflection_id, observation_id)
+);
+
+CREATE INDEX idx_reflection_sources_observation
+    ON reflection_sources(observation_id);

@@ -622,3 +622,72 @@ def test_reflections_delete_trigger(tmp_memory_db: Path) -> None:
         assert len(rows) == 0
     finally:
         conn.close()
+
+
+def test_reflection_sources_exists(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        cols = _column_names(conn, "reflection_sources")
+        assert {"reflection_id", "observation_id"}.issubset(cols)
+    finally:
+        conn.close()
+
+
+def test_reflection_sources_composite_pk_and_fks(tmp_memory_db: Path) -> None:
+    """Composite PK enforced; both FKs enforced."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-rs", "p", "2026-04-20T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id) "
+            "VALUES (?, ?, ?, ?)",
+            ("obs-rs", "c", "p", "ep-rs"),
+        )
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            " confidence, evidence_count, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("refl-rs", "t", "p", "general", "do", "uc", "[]",
+             0.5, 0, "2026-04-20", "2026-04-20"),
+        )
+        conn.commit()
+
+        # Valid link inserts cleanly.
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES (?, ?)",
+            ("refl-rs", "obs-rs"),
+        )
+        conn.commit()
+
+        # Duplicate (composite PK) rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflection_sources (reflection_id, observation_id) "
+                "VALUES (?, ?)",
+                ("refl-rs", "obs-rs"),
+            )
+
+        # Unknown reflection FK rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflection_sources (reflection_id, observation_id) "
+                "VALUES (?, ?)",
+                ("no-such-refl", "obs-rs"),
+            )
+
+        # Unknown observation FK rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflection_sources (reflection_id, observation_id) "
+                "VALUES (?, ?)",
+                ("refl-rs", "no-such-obs"),
+            )
+    finally:
+        conn.close()
