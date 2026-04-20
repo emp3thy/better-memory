@@ -67,3 +67,82 @@ CREATE TABLE episode_sessions (
 
 CREATE INDEX idx_episode_sessions_session ON episode_sessions(session_id);
 CREATE INDEX idx_episode_sessions_open ON episode_sessions(session_id, left_at);
+
+----------------------------------------------------------------------
+-- Rebuild observations with episode_id (NOT NULL, FK) and tech.
+-- Existing rows are dumped per design decision; the new schema requires
+-- an active episode at write time, so backfilling with NULL would violate
+-- the invariant.
+----------------------------------------------------------------------
+
+DROP TRIGGER IF EXISTS observations_au;
+DROP TRIGGER IF EXISTS observations_ad;
+DROP TRIGGER IF EXISTS observations_ai;
+DROP TABLE IF EXISTS observation_embeddings;
+DROP TABLE IF EXISTS observation_fts;
+DROP TABLE IF EXISTS observations;
+
+CREATE TABLE observations (
+    id                  TEXT PRIMARY KEY,
+    content             TEXT NOT NULL,
+    project             TEXT NOT NULL,
+    component           TEXT,
+    theme               TEXT,
+    session_id          TEXT,
+    trigger_type        TEXT,
+    status              TEXT DEFAULT 'active',
+    retrieved_count     INTEGER DEFAULT 0,
+    used_count          INTEGER DEFAULT 0,
+    validated_true      INTEGER DEFAULT 0,
+    validated_false     INTEGER DEFAULT 0,
+    last_retrieved      TIMESTAMP,
+    last_used           TIMESTAMP,
+    last_validated      TIMESTAMP,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    outcome             TEXT NOT NULL DEFAULT 'neutral'
+                        CHECK(outcome IN ('success', 'failure', 'neutral')),
+    reinforcement_score REAL NOT NULL DEFAULT 0.0,
+    scope_path          TEXT,
+    -- Episodic columns (Phase 1):
+    episode_id          TEXT NOT NULL REFERENCES episodes(id),
+    tech                TEXT
+);
+
+CREATE INDEX idx_observations_project_component_outcome
+    ON observations(project, component, outcome);
+CREATE INDEX idx_observations_scope_outcome
+    ON observations(scope_path, outcome);
+CREATE INDEX idx_observations_episode
+    ON observations(episode_id);
+CREATE INDEX idx_observations_tech
+    ON observations(tech);
+
+CREATE VIRTUAL TABLE observation_fts USING fts5(
+    content,
+    component,
+    theme,
+    content='observations',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER observations_ai AFTER INSERT ON observations BEGIN
+    INSERT INTO observation_fts(rowid, content, component, theme)
+    VALUES (new.rowid, new.content, new.component, new.theme);
+END;
+
+CREATE TRIGGER observations_ad AFTER DELETE ON observations BEGIN
+    INSERT INTO observation_fts(observation_fts, rowid, content, component, theme)
+    VALUES ('delete', old.rowid, old.content, old.component, old.theme);
+END;
+
+CREATE TRIGGER observations_au AFTER UPDATE ON observations BEGIN
+    INSERT INTO observation_fts(observation_fts, rowid, content, component, theme)
+    VALUES ('delete', old.rowid, old.content, old.component, old.theme);
+    INSERT INTO observation_fts(rowid, content, component, theme)
+    VALUES (new.rowid, new.content, new.component, new.theme);
+END;
+
+CREATE VIRTUAL TABLE observation_embeddings USING vec0(
+    observation_id TEXT PRIMARY KEY,
+    embedding FLOAT[768]
+);

@@ -87,11 +87,15 @@ def test_observations_outcome_check_constraint(tmp_memory_db: Path) -> None:
     conn = connect(tmp_memory_db)
     try:
         apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-oc", "proj-a", "2026-04-20T10:00:00Z"),
+        )
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
-                "INSERT INTO observations (id, content, project, outcome) "
-                "VALUES (?, ?, ?, ?)",
-                ("obs-bad", "bogus outcome test", "proj-a", "bogus"),
+                "INSERT INTO observations (id, content, project, outcome, episode_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("obs-bad", "bogus outcome test", "proj-a", "bogus", "ep-oc"),
             )
     finally:
         conn.close()
@@ -102,11 +106,15 @@ def test_observations_outcome_accepts_valid_values(tmp_memory_db: Path) -> None:
     conn = connect(tmp_memory_db)
     try:
         apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-ov", "proj-a", "2026-04-20T10:00:00Z"),
+        )
         for i, outcome in enumerate(("success", "failure", "neutral")):
             conn.execute(
-                "INSERT INTO observations (id, content, project, outcome) "
-                "VALUES (?, ?, ?, ?)",
-                (f"obs-{i}", f"content {i}", "proj-a", outcome),
+                "INSERT INTO observations (id, content, project, outcome, episode_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (f"obs-{i}", f"content {i}", "proj-a", outcome, "ep-ov"),
             )
         conn.commit()
         n = conn.execute("SELECT COUNT(*) AS c FROM observations").fetchone()["c"]
@@ -121,14 +129,20 @@ def test_fts_triggers_index_observations(tmp_memory_db: Path) -> None:
     try:
         apply_migrations(conn)
         conn.execute(
-            "INSERT INTO observations (id, content, project, component, theme) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-fi", "proj-a", "2026-04-20T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, component, theme, episode_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "obs-1",
                 "flamingo migration failed under cold weather",
                 "proj-a",
                 "migrations",
                 "zoology",
+                "ep-fi",
             ),
         )
         conn.commit()
@@ -147,8 +161,13 @@ def test_fts_update_trigger_on_observations(tmp_memory_db: Path) -> None:
     try:
         apply_migrations(conn)
         conn.execute(
-            "INSERT INTO observations (id, content, project) VALUES (?, ?, ?)",
-            ("obs-u", "flamingo marker", "proj-a"),
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-fu", "proj-a", "2026-04-20T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id) "
+            "VALUES (?, ?, ?, ?)",
+            ("obs-u", "flamingo marker", "proj-a", "ep-fu"),
         )
         conn.commit()
         conn.execute(
@@ -176,8 +195,13 @@ def test_fts_delete_trigger_on_observations(tmp_memory_db: Path) -> None:
     try:
         apply_migrations(conn)
         conn.execute(
-            "INSERT INTO observations (id, content, project) VALUES (?, ?, ?)",
-            ("obs-d", "heron marker", "proj-a"),
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-fd", "proj-a", "2026-04-20T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id) "
+            "VALUES (?, ?, ?, ?)",
+            ("obs-d", "heron marker", "proj-a", "ep-fd"),
         )
         conn.commit()
         conn.execute("DELETE FROM observations WHERE id = ?", ("obs-d",))
@@ -354,5 +378,74 @@ def test_episode_sessions_fk_enforced(tmp_memory_db: Path) -> None:
                 "VALUES (?, ?, ?)",
                 ("no-such-ep", "sess-1", "2026-04-20T10:00:00Z"),
             )
+    finally:
+        conn.close()
+
+
+def test_observations_has_episodic_fk_columns(tmp_memory_db: Path) -> None:
+    """observations has episode_id (not null) and tech (nullable)."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        rows = conn.execute("PRAGMA table_info(observations)").fetchall()
+        by_name = {r["name"]: r for r in rows}
+        assert "episode_id" in by_name
+        assert by_name["episode_id"]["notnull"] == 1, "episode_id must be NOT NULL"
+        assert "tech" in by_name
+        assert by_name["tech"]["notnull"] == 0, "tech must be nullable"
+    finally:
+        conn.close()
+
+
+def test_observations_requires_episode_id(tmp_memory_db: Path) -> None:
+    """Inserting an observation without episode_id raises IntegrityError."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO observations (id, content, project) VALUES (?, ?, ?)",
+                ("obs-x", "content", "proj-a"),
+            )
+    finally:
+        conn.close()
+
+
+def test_observations_episode_fk_enforced(tmp_memory_db: Path) -> None:
+    """Inserting an observation with unknown episode_id raises IntegrityError."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO observations (id, content, project, episode_id) "
+                "VALUES (?, ?, ?, ?)",
+                ("obs-y", "c", "p", "no-such-episode"),
+            )
+    finally:
+        conn.close()
+
+
+def test_observations_valid_insert_with_episode(tmp_memory_db: Path) -> None:
+    """A valid observation linked to a real episode inserts cleanly."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-o", "proj-a", "2026-04-20T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id, tech) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("obs-ok", "hello", "proj-a", "ep-o", "python"),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT episode_id, tech FROM observations WHERE id = ?",
+            ("obs-ok",),
+        ).fetchone()
+        assert row["episode_id"] == "ep-o"
+        assert row["tech"] == "python"
     finally:
         conn.close()
