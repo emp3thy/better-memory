@@ -221,3 +221,17 @@ CREATE TABLE reflection_sources (
 
 CREATE INDEX idx_reflection_sources_observation
     ON reflection_sources(observation_id);
+
+----------------------------------------------------------------------
+-- Synthesis watermark: tracks the last time synthesis ran for a
+-- (project, tech) pair, so subsequent runs can scope "observations since".
+-- tech defaults to '' so the composite PK remains clean under SQLite's
+-- NULL-in-uniqueness semantics.
+----------------------------------------------------------------------
+
+CREATE TABLE synthesis_runs (
+    project       TEXT NOT NULL,
+    tech          TEXT NOT NULL DEFAULT '',
+    last_run_at   TEXT NOT NULL,
+    PRIMARY KEY (project, tech)
+);

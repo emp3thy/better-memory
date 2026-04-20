@@ -691,3 +691,57 @@ def test_reflection_sources_composite_pk_and_fks(tmp_memory_db: Path) -> None:
             )
     finally:
         conn.close()
+
+
+def test_synthesis_runs_exists(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        cols = _column_names(conn, "synthesis_runs")
+        assert {"project", "tech", "last_run_at"}.issubset(cols)
+    finally:
+        conn.close()
+
+
+def test_synthesis_runs_composite_pk(tmp_memory_db: Path) -> None:
+    """(project, tech) is a primary key; tech defaults to '' (not NULL)."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        # Two rows with same project but different tech — both succeed.
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at) "
+            "VALUES (?, ?, ?)",
+            ("p", "python", "2026-04-20T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at) "
+            "VALUES (?, ?, ?)",
+            ("p", "sqlite", "2026-04-20T10:00:00Z"),
+        )
+        conn.commit()
+
+        # Default tech is '' — project without tech is a distinct PK.
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, last_run_at) VALUES (?, ?)",
+            ("p", "2026-04-20T10:00:00Z"),
+        )
+        conn.commit()
+
+        # Duplicate (project, tech) rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO synthesis_runs (project, tech, last_run_at) "
+                "VALUES (?, ?, ?)",
+                ("p", "python", "2026-04-20T11:00:00Z"),
+            )
+
+        # tech NOT NULL — explicit NULL rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO synthesis_runs (project, tech, last_run_at) "
+                "VALUES (?, ?, ?)",
+                ("p2", None, "2026-04-20T10:00:00Z"),
+            )
+    finally:
+        conn.close()
