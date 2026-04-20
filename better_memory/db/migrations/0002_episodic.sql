@@ -146,3 +146,65 @@ CREATE VIRTUAL TABLE observation_embeddings USING vec0(
     observation_id TEXT PRIMARY KEY,
     embedding FLOAT[768]
 );
+
+----------------------------------------------------------------------
+-- Reflections: generalised lessons synthesised from observations.
+-- Replaces the old insights table.
+----------------------------------------------------------------------
+
+CREATE TABLE reflections (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL,
+    project         TEXT NOT NULL,
+    tech            TEXT,
+    phase           TEXT NOT NULL
+                    CHECK(phase IN ('planning', 'implementation', 'general')),
+    polarity        TEXT NOT NULL
+                    CHECK(polarity IN ('do', 'dont', 'neutral')),
+    use_cases       TEXT NOT NULL,
+    hints           TEXT NOT NULL,
+    confidence      REAL NOT NULL
+                    CHECK(confidence >= 0.1 AND confidence <= 1.0),
+    status          TEXT NOT NULL DEFAULT 'pending_review'
+                    CHECK(status IN (
+                        'pending_review', 'confirmed', 'retired', 'superseded'
+                    )),
+    superseded_by   TEXT REFERENCES reflections(id),
+    evidence_count  INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX idx_reflections_project_status ON reflections(project, status);
+CREATE INDEX idx_reflections_tech ON reflections(tech);
+CREATE INDEX idx_reflections_phase_polarity ON reflections(phase, polarity);
+
+CREATE VIRTUAL TABLE reflection_fts USING fts5(
+    title,
+    use_cases,
+    hints,
+    content='reflections',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER reflections_ai AFTER INSERT ON reflections BEGIN
+    INSERT INTO reflection_fts(rowid, title, use_cases, hints)
+    VALUES (new.rowid, new.title, new.use_cases, new.hints);
+END;
+
+CREATE TRIGGER reflections_ad AFTER DELETE ON reflections BEGIN
+    INSERT INTO reflection_fts(reflection_fts, rowid, title, use_cases, hints)
+    VALUES ('delete', old.rowid, old.title, old.use_cases, old.hints);
+END;
+
+CREATE TRIGGER reflections_au AFTER UPDATE ON reflections BEGIN
+    INSERT INTO reflection_fts(reflection_fts, rowid, title, use_cases, hints)
+    VALUES ('delete', old.rowid, old.title, old.use_cases, old.hints);
+    INSERT INTO reflection_fts(rowid, title, use_cases, hints)
+    VALUES (new.rowid, new.title, new.use_cases, new.hints);
+END;
+
+CREATE VIRTUAL TABLE reflection_embeddings USING vec0(
+    reflection_id TEXT PRIMARY KEY,
+    embedding FLOAT[768]
+);

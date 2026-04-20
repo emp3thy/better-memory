@@ -449,3 +449,176 @@ def test_observations_valid_insert_with_episode(tmp_memory_db: Path) -> None:
         assert row["tech"] == "python"
     finally:
         conn.close()
+
+
+def test_reflections_table_exists_with_columns(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        cols = _column_names(conn, "reflections")
+        expected = {
+            "id", "title", "project", "tech", "phase", "polarity",
+            "use_cases", "hints", "confidence", "status", "superseded_by",
+            "evidence_count", "created_at", "updated_at",
+        }
+        assert expected.issubset(cols), f"Missing: {expected - cols}"
+    finally:
+        conn.close()
+
+
+def test_reflections_phase_check_constraint(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflections "
+                "(id, title, project, phase, polarity, use_cases, hints, "
+                " confidence, evidence_count, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("r-bad", "t", "p", "bogus_phase", "do",
+                 "uc", "[]", 0.5, 0, "2026-04-20", "2026-04-20"),
+            )
+    finally:
+        conn.close()
+
+
+def test_reflections_polarity_check_constraint(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflections "
+                "(id, title, project, phase, polarity, use_cases, hints, "
+                " confidence, evidence_count, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("r-bad", "t", "p", "general", "bogus_pol",
+                 "uc", "[]", 0.5, 0, "2026-04-20", "2026-04-20"),
+            )
+    finally:
+        conn.close()
+
+
+def test_reflections_confidence_range(tmp_memory_db: Path) -> None:
+    """confidence must be in [0.1, 1.0]."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflections "
+                "(id, title, project, phase, polarity, use_cases, hints, "
+                " confidence, evidence_count, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("r-hi", "t", "p", "general", "do", "uc", "[]",
+                 1.5, 0, "2026-04-20", "2026-04-20"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflections "
+                "(id, title, project, phase, polarity, use_cases, hints, "
+                " confidence, evidence_count, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("r-lo", "t", "p", "general", "do", "uc", "[]",
+                 0.05, 0, "2026-04-20", "2026-04-20"),
+            )
+    finally:
+        conn.close()
+
+
+def test_reflections_status_check_constraint(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO reflections "
+                "(id, title, project, phase, polarity, use_cases, hints, "
+                " confidence, status, evidence_count, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("r-st", "t", "p", "general", "do", "uc", "[]", 0.5,
+                 "bogus_status", 0, "2026-04-20", "2026-04-20"),
+            )
+    finally:
+        conn.close()
+
+
+def test_reflections_valid_insert_and_fts(tmp_memory_db: Path) -> None:
+    """Valid reflection inserts and is indexed by FTS."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            " confidence, evidence_count, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("r-1", "Pelican preference", "proj-a", "general", "do",
+             "when handling pelicans", '["use wide runways"]',
+             0.7, 0, "2026-04-20", "2026-04-20"),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT rowid FROM reflection_fts WHERE reflection_fts MATCH ?",
+            ("pelican",),
+        ).fetchone()
+        assert row is not None, "FTS did not index inserted reflection"
+    finally:
+        conn.close()
+
+
+def test_reflections_update_trigger(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            " confidence, evidence_count, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("r-u", "flamingo", "proj-a", "general", "do",
+             "uc", "[]", 0.5, 0, "2026-04-20", "2026-04-20"),
+        )
+        conn.commit()
+        conn.execute(
+            "UPDATE reflections SET title = ? WHERE id = ?",
+            ("pelican", "r-u"),
+        )
+        conn.commit()
+        flamingo = conn.execute(
+            "SELECT rowid FROM reflection_fts WHERE reflection_fts MATCH ?",
+            ("flamingo",),
+        ).fetchall()
+        pelican = conn.execute(
+            "SELECT rowid FROM reflection_fts WHERE reflection_fts MATCH ?",
+            ("pelican",),
+        ).fetchall()
+        assert len(flamingo) == 0
+        assert len(pelican) == 1
+    finally:
+        conn.close()
+
+
+def test_reflections_delete_trigger(tmp_memory_db: Path) -> None:
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            " confidence, evidence_count, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("r-d", "heron", "proj-a", "general", "do",
+             "uc", "[]", 0.5, 0, "2026-04-20", "2026-04-20"),
+        )
+        conn.commit()
+        conn.execute("DELETE FROM reflections WHERE id = ?", ("r-d",))
+        conn.commit()
+        rows = conn.execute(
+            "SELECT rowid FROM reflection_fts WHERE reflection_fts MATCH ?",
+            ("heron",),
+        ).fetchall()
+        assert len(rows) == 0
+    finally:
+        conn.close()
