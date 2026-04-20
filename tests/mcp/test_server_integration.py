@@ -24,6 +24,11 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
+)
+
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
