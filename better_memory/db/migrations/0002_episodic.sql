@@ -7,9 +7,6 @@
 -- dependency order: drops → episodes → episode_sessions → observations
 -- → reflections → reflection_sources → synthesis_runs.
 
--- Marker statement so executescript has at least one statement to run.
-SELECT 1;
-
 ----------------------------------------------------------------------
 -- Drop old insight aggregation schema (data dumped per design decision).
 ----------------------------------------------------------------------
@@ -22,3 +19,35 @@ DROP TABLE IF EXISTS insight_fts;
 DROP TABLE IF EXISTS insight_relations;
 DROP TABLE IF EXISTS insight_sources;
 DROP TABLE IF EXISTS insights;
+
+----------------------------------------------------------------------
+-- Episodes: goal-bounded arcs that group observations.
+----------------------------------------------------------------------
+
+CREATE TABLE episodes (
+    id            TEXT PRIMARY KEY,
+    project       TEXT NOT NULL,
+    tech          TEXT,
+    goal          TEXT,
+    started_at    TEXT NOT NULL,
+    hardened_at   TEXT,
+    ended_at      TEXT,
+    close_reason  TEXT CHECK(close_reason IN (
+        'goal_complete',
+        'plan_complete',
+        'abandoned',
+        'superseded',
+        'session_end_reconciled'
+    )),
+    outcome       TEXT CHECK(outcome IN (
+        'success',
+        'partial',
+        'abandoned',
+        'no_outcome'
+    )),
+    summary       TEXT
+);
+
+CREATE INDEX idx_episodes_project_ended ON episodes(project, ended_at);
+CREATE INDEX idx_episodes_project_outcome ON episodes(project, outcome);
+CREATE INDEX idx_episodes_tech ON episodes(tech);

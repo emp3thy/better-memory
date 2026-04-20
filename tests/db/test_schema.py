@@ -243,3 +243,66 @@ def test_insight_tables_dropped(tmp_memory_db: Path) -> None:
         assert rows == [], f"Leftover insight objects: {[r['name'] for r in rows]}"
     finally:
         conn.close()
+
+
+def test_episodes_table_exists_with_columns(tmp_memory_db: Path) -> None:
+    """episodes has all expected columns."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        cols = _column_names(conn, "episodes")
+        expected = {
+            "id", "project", "tech", "goal",
+            "started_at", "hardened_at", "ended_at",
+            "close_reason", "outcome", "summary",
+        }
+        assert expected.issubset(cols), f"Missing: {expected - cols}"
+    finally:
+        conn.close()
+
+
+def test_episodes_close_reason_check_constraint(tmp_memory_db: Path) -> None:
+    """Inserting episode with bogus close_reason raises IntegrityError."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO episodes (id, project, started_at, close_reason) "
+                "VALUES (?, ?, ?, ?)",
+                ("ep-bad", "proj-a", "2026-04-20T10:00:00Z", "bogus_reason"),
+            )
+    finally:
+        conn.close()
+
+
+def test_episodes_outcome_check_constraint(tmp_memory_db: Path) -> None:
+    """Inserting episode with bogus outcome raises IntegrityError."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO episodes (id, project, started_at, outcome) "
+                "VALUES (?, ?, ?, ?)",
+                ("ep-bad2", "proj-a", "2026-04-20T10:00:00Z", "bogus_outcome"),
+            )
+    finally:
+        conn.close()
+
+
+def test_episodes_valid_insert(tmp_memory_db: Path) -> None:
+    """A minimal valid episode row inserts cleanly."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at) VALUES (?, ?, ?)",
+            ("ep-1", "proj-a", "2026-04-20T10:00:00Z"),
+        )
+        conn.commit()
+        row = conn.execute("SELECT id, project FROM episodes").fetchone()
+        assert row["id"] == "ep-1"
+        assert row["project"] == "proj-a"
+    finally:
+        conn.close()
