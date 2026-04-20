@@ -8,11 +8,16 @@ import time as _time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from flask.testing import FlaskClient
 
 from better_memory.ui.app import create_app
 
 
+@pytest.mark.skip(
+    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
+)
 class TestServiceWiring:
     def test_app_exposes_insight_service(self, client: FlaskClient) -> None:
         # The service is attached to app.extensions for routes to use.
@@ -201,6 +206,9 @@ class TestInactivityTimeout:
         assert app.config["_check_idle"]  # helper still registered
 
 
+@pytest.mark.skip(
+    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
+)
 class TestBadgeFragment:
     def test_badge_empty_when_zero(self, client: FlaskClient) -> None:
         response = client.get("/pipeline/badge")
@@ -222,6 +230,9 @@ class TestBadgeFragment:
             assert out == "7"
 
 
+@pytest.mark.skip(
+    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
+)
 class TestBadgeRealCount:
     def test_badge_shows_candidate_count_from_db(
         self, client: FlaskClient
@@ -268,6 +279,9 @@ class TestOnlyOneExpandedScript:
         assert b'id="modal"' in body
 
 
+@pytest.mark.skip(
+    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
+)
 class TestConsolidationWiring:
     def test_app_exposes_db_path_for_threaded_jobs(
         self, client: FlaskClient

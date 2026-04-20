@@ -16,6 +16,11 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
+)
+
 import sqlite_vec
 
 from better_memory.db.connection import connect

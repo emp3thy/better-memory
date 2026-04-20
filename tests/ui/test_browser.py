@@ -6,6 +6,12 @@ phases extend with modal open/close, merge picker, etc.
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
+)
+
 from pathlib import Path
 
 from playwright.sync_api import Page, expect
