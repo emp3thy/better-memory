@@ -225,8 +225,12 @@ CREATE INDEX idx_reflection_sources_observation
 ----------------------------------------------------------------------
 -- Synthesis watermark: tracks the last time synthesis ran for a
 -- (project, tech) pair, so subsequent runs can scope "observations since".
--- tech defaults to '' so the composite PK remains clean under SQLite's
--- NULL-in-uniqueness semantics.
+--
+-- INVARIANT: tech is NOT NULL with default ''. Do NOT relax this.
+-- SQLite treats each NULL as distinct for uniqueness, so a nullable
+-- tech column in a composite PK would allow unlimited (project, NULL)
+-- duplicate rows and silently fragment the watermark. The empty string
+-- '' is the sentinel for "no tech filter". See test_synthesis_runs_composite_pk.
 ----------------------------------------------------------------------
 
 CREATE TABLE synthesis_runs (
