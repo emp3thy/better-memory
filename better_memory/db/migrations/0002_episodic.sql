@@ -9,3 +9,16 @@
 
 -- Marker statement so executescript has at least one statement to run.
 SELECT 1;
+
+----------------------------------------------------------------------
+-- Drop old insight aggregation schema (data dumped per design decision).
+----------------------------------------------------------------------
+
+DROP TRIGGER IF EXISTS insights_au;
+DROP TRIGGER IF EXISTS insights_ad;
+DROP TRIGGER IF EXISTS insights_ai;
+DROP TABLE IF EXISTS insight_embeddings;
+DROP TABLE IF EXISTS insight_fts;
+DROP TABLE IF EXISTS insight_relations;
+DROP TABLE IF EXISTS insight_sources;
+DROP TABLE IF EXISTS insights;

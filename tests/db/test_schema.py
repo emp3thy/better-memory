@@ -46,9 +46,6 @@ def test_apply_migrations_creates_core_tables(tmp_memory_db: Path) -> None:
         tables = _table_names(conn)
         expected = {
             "observations",
-            "insights",
-            "insight_sources",
-            "insight_relations",
             "audit_log",
             "hook_events",
             "schema_migrations",
@@ -67,8 +64,6 @@ def test_apply_migrations_creates_virtual_tables(tmp_memory_db: Path) -> None:
         expected = {
             "observation_fts",
             "observation_embeddings",
-            "insight_fts",
-            "insight_embeddings",
         }
         assert expected.issubset(virtual), f"Missing virtual tables: {expected - virtual}"
     finally:
@@ -87,17 +82,6 @@ def test_observations_has_episodic_columns(tmp_memory_db: Path) -> None:
         conn.close()
 
 
-def test_insights_has_polarity_column(tmp_memory_db: Path) -> None:
-    """The ``insights`` table includes the ``polarity`` column."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        cols = _column_names(conn, "insights")
-        assert "polarity" in cols
-    finally:
-        conn.close()
-
-
 def test_observations_outcome_check_constraint(tmp_memory_db: Path) -> None:
     """Inserting an observation with a bogus outcome raises IntegrityError."""
     conn = connect(tmp_memory_db)
@@ -108,21 +92,6 @@ def test_observations_outcome_check_constraint(tmp_memory_db: Path) -> None:
                 "INSERT INTO observations (id, content, project, outcome) "
                 "VALUES (?, ?, ?, ?)",
                 ("obs-bad", "bogus outcome test", "proj-a", "bogus"),
-            )
-    finally:
-        conn.close()
-
-
-def test_insights_polarity_check_constraint(tmp_memory_db: Path) -> None:
-    """Inserting an insight with a bogus polarity raises IntegrityError."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO insights (id, title, content, polarity) "
-                "VALUES (?, ?, ?, ?)",
-                ("ins-bad", "t", "c", "bogus"),
             )
     finally:
         conn.close()
@@ -168,31 +137,6 @@ def test_fts_triggers_index_observations(tmp_memory_db: Path) -> None:
             ("flamingo",),
         ).fetchone()
         assert row is not None, "FTS did not index inserted observation"
-    finally:
-        conn.close()
-
-
-def test_fts_triggers_index_insights(tmp_memory_db: Path) -> None:
-    """Inserting into insights populates insight_fts via triggers."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        conn.execute(
-            "INSERT INTO insights (id, title, content, component) "
-            "VALUES (?, ?, ?, ?)",
-            (
-                "ins-1",
-                "Pelican preference",
-                "Pelicans prefer wide runways",
-                "birds",
-            ),
-        )
-        conn.commit()
-        row = conn.execute(
-            "SELECT rowid FROM insight_fts WHERE insight_fts MATCH ?",
-            ("pelican",),
-        ).fetchone()
-        assert row is not None, "FTS did not index inserted insight"
     finally:
         conn.close()
 
@@ -247,56 +191,6 @@ def test_fts_delete_trigger_on_observations(tmp_memory_db: Path) -> None:
         conn.close()
 
 
-def test_fts_update_trigger_on_insights(tmp_memory_db: Path) -> None:
-    """Updating insights.title/content re-indexes the FTS row."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        conn.execute(
-            "INSERT INTO insights (id, title, content) VALUES (?, ?, ?)",
-            ("ins-u", "flamingo marker", "flamingo marker"),
-        )
-        conn.commit()
-        conn.execute(
-            "UPDATE insights SET title = ?, content = ? WHERE id = ?",
-            ("pelican marker", "pelican marker", "ins-u"),
-        )
-        conn.commit()
-        flamingo = conn.execute(
-            "SELECT rowid FROM insight_fts WHERE insight_fts MATCH ?",
-            ("flamingo",),
-        ).fetchall()
-        pelican = conn.execute(
-            "SELECT rowid FROM insight_fts WHERE insight_fts MATCH ?",
-            ("pelican",),
-        ).fetchall()
-        assert len(flamingo) == 0, "UPDATE trigger left stale FTS row"
-        assert len(pelican) == 1, "UPDATE trigger did not index new content"
-    finally:
-        conn.close()
-
-
-def test_fts_delete_trigger_on_insights(tmp_memory_db: Path) -> None:
-    """Deleting an insight removes the FTS row."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        conn.execute(
-            "INSERT INTO insights (id, title, content) VALUES (?, ?, ?)",
-            ("ins-d", "heron marker", "heron marker"),
-        )
-        conn.commit()
-        conn.execute("DELETE FROM insights WHERE id = ?", ("ins-d",))
-        conn.commit()
-        rows = conn.execute(
-            "SELECT rowid FROM insight_fts WHERE insight_fts MATCH ?",
-            ("heron",),
-        ).fetchall()
-        assert len(rows) == 0, "DELETE trigger left FTS row behind"
-    finally:
-        conn.close()
-
-
 def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
     """Running :func:`apply_migrations` twice applies each file exactly once."""
     conn = connect(tmp_memory_db)
@@ -323,5 +217,29 @@ def test_episodic_indexes_exist(tmp_memory_db: Path) -> None:
         names = {r["name"] for r in rows}
         assert "idx_observations_project_component_outcome" in names
         assert "idx_observations_scope_outcome" in names
+    finally:
+        conn.close()
+
+
+def test_insight_tables_dropped(tmp_memory_db: Path) -> None:
+    """All insight-related tables, virtual tables, and triggers are gone."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        rows = conn.execute(
+            "SELECT name, type FROM sqlite_master "
+            "WHERE name IN (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "insights",
+                "insight_sources",
+                "insight_relations",
+                "insight_fts",
+                "insight_embeddings",
+                "insights_ai",
+                "insights_ad",
+                "insights_au",
+            ),
+        ).fetchall()
+        assert rows == [], f"Leftover insight objects: {[r['name'] for r in rows]}"
     finally:
         conn.close()
