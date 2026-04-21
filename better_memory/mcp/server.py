@@ -212,6 +212,23 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="memory.start_episode",
+            description=(
+                "Declare a goal for the current session. Opens a new "
+                "foreground episode or hardens the existing background "
+                "episode. Returns the active episode id."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["goal"],
+                "additionalProperties": False,
+                "properties": {
+                    "goal": {"type": "string"},
+                    "tech": {"type": "string"},
+                },
+            },
+        ),
     ]
 
 
@@ -434,6 +451,23 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                             )
                         }
                     ),
+                )
+            ]
+
+        if name == "memory.start_episode":
+            # Phase 2 scope: open/harden foreground episode only — reflection
+            # synthesis is Phase 5. Session id is resolved from the
+            # ObservationService's session (same id the observation path uses).
+            episode_id = episodes.start_foreground(
+                session_id=observations._session_id,
+                project=Path.cwd().name,
+                goal=args["goal"],
+                tech=args.get("tech"),
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"episode_id": episode_id}),
                 )
             ]
 
