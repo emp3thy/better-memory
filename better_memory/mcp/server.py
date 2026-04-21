@@ -7,8 +7,9 @@ as MCP tools over stdio. On startup, the knowledge-base is reindexed
 Tools
 -----
 * ``memory.observe``       — create a new observation; returns ``{"id": ...}``.
-* ``memory.retrieve``      — three outcome buckets + insights + knowledge.
-                             Drains the spool before searching.
+* ``memory.retrieve``      — three outcome buckets + knowledge. Drains
+                             the spool before searching. (Reflection
+                             retrieval is planned for Phase 6.)
 * ``memory.record_use``    — record re-use (optionally with outcome).
 * ``knowledge.search``     — BM25 search against the knowledge-base FTS.
 * ``knowledge.list``       — list indexed knowledge documents.
@@ -131,8 +132,9 @@ def _tool_definitions() -> list[Tool]:
         Tool(
             name="memory.retrieve",
             description=(
-                "Retrieve observations, insights and knowledge relevant to "
-                "the current task, bucketed by outcome (do / dont / neutral)."
+                "Retrieve observations and knowledge relevant to the current "
+                "task, bucketed by outcome (do / dont / neutral). Reflection "
+                "retrieval is planned for Phase 6."
             ),
             inputSchema={
                 "type": "object",
