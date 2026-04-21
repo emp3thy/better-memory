@@ -54,6 +54,7 @@ from better_memory.search.hybrid import (
 )
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services import audit
+from better_memory.services.episode import EpisodeService
 
 Outcome = Literal["success", "failure", "neutral"]
 UseOutcome = Literal["success", "failure"]
@@ -99,6 +100,7 @@ class ObservationService:
         scope_resolver: Callable[[], str | None] | None = None,
         session_id: str | None = None,
         audit_log_retrieved: bool | None = None,
+        episodes: EpisodeService | None = None,
     ) -> None:
         self._conn = conn
         self._embedder = embedder
@@ -117,6 +119,7 @@ class ObservationService:
             if audit_log_retrieved is not None
             else get_config().audit_log_retrieved
         )
+        self._episodes = episodes
 
     # ------------------------------------------------------------------ public
     async def create(
@@ -129,15 +132,32 @@ class ObservationService:
         outcome: Outcome = "neutral",
         scope_path: str | None = None,
         project: str | None = None,
+        tech: str | None = None,
     ) -> str:
         """Insert a new observation, embedding and audit row; return its id."""
         obs_id = uuid4().hex
 
         resolved_project = project if project is not None else self._project_resolver()
         resolved_scope = scope_path if scope_path is not None else self._scope_resolver()
+        tech_normalised = tech.lower() if tech else None
 
-        # Fail fast: compute the embedding BEFORE opening a write transaction
-        # so a slow / broken Ollama server does not leave a pending SAVEPOINT.
+        # Resolve episode_id. ObservationService requires an EpisodeService
+        # now that episode_id is NOT NULL on observations (Phase 1 schema).
+        if self._episodes is None:
+            raise RuntimeError(
+                "ObservationService.create requires an EpisodeService "
+                "(episodes=...). Wire one at construction time."
+            )
+        active = self._episodes.active_episode(self._session_id)
+        if active is None:
+            episode_id = self._episodes.open_background(
+                session_id=self._session_id,
+                project=resolved_project,
+            )
+        else:
+            episode_id = active.id
+
+        # Fail fast: compute the embedding BEFORE opening a write transaction.
         vector = await self._embedder.embed(content)
         vec_blob = sqlite_vec.serialize_float32(vector)
 
@@ -151,8 +171,8 @@ class ObservationService:
                 INSERT INTO observations (
                     id, content, project, component, theme, session_id,
                     trigger_type, outcome, reinforcement_score, scope_path,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?)
+                    created_at, episode_id, tech
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?)
                 """,
                 (
                     obs_id,
@@ -165,6 +185,8 @@ class ObservationService:
                     outcome,
                     resolved_scope,
                     now,
+                    episode_id,
+                    tech_normalised,
                 ),
             )
 
@@ -181,6 +203,8 @@ class ObservationService:
                     "outcome": outcome,
                     "scope_path": resolved_scope,
                     "component": component,
+                    "episode_id": episode_id,
+                    "tech": tech_normalised,
                 },
             )
         except Exception:

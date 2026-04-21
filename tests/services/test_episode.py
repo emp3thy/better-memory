@@ -460,3 +460,68 @@ class TestListEpisodes:
 
         result = svc.list_episodes()
         assert [e.id for e in result] == [second, first]
+
+
+class TestObservationServiceEpisodeIntegration:
+    """The observation write path must produce a valid episode_id.
+
+    These are integration-level tests against ObservationService + EpisodeService;
+    the pure-ObservationService unit tests live in tests/services/test_observation.py.
+    """
+
+    async def test_observation_write_opens_background_episode_lazily(self, conn, fixed_clock):
+        from better_memory.services.observation import ObservationService
+
+        class _StubEmbedder:
+            async def embed(self, text):
+                return [0.0] * 768
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        obs_svc = ObservationService(
+            conn,
+            _StubEmbedder(),
+            clock=fixed_clock,
+            project_resolver=lambda: "proj-a",
+            session_id="sess-1",
+            episodes=epsvc,
+        )
+
+        obs_id = await obs_svc.create(content="first observation")
+
+        row = conn.execute(
+            "SELECT episode_id, tech FROM observations WHERE id = ?",
+            (obs_id,),
+        ).fetchone()
+        assert row["episode_id"] is not None
+        assert row["tech"] is None
+
+        # Subsequent writes reuse the same background episode.
+        obs_id2 = await obs_svc.create(content="second")
+        row2 = conn.execute(
+            "SELECT episode_id FROM observations WHERE id = ?", (obs_id2,)
+        ).fetchone()
+        assert row2["episode_id"] == row["episode_id"]
+
+    async def test_observation_accepts_tech_parameter(self, conn, fixed_clock):
+        from better_memory.services.observation import ObservationService
+
+        class _StubEmbedder:
+            async def embed(self, text):
+                return [0.0] * 768
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        obs_svc = ObservationService(
+            conn,
+            _StubEmbedder(),
+            clock=fixed_clock,
+            project_resolver=lambda: "proj-a",
+            session_id="sess-1",
+            episodes=epsvc,
+        )
+
+        obs_id = await obs_svc.create(content="x", tech="Python")
+        row = conn.execute(
+            "SELECT tech FROM observations WHERE id = ?", (obs_id,)
+        ).fetchone()
+        # tech is lowercased by the service.
+        assert row["tech"] == "python"

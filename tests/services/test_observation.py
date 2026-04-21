@@ -16,13 +16,10 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import EmbeddingError
+from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import ObservationService
 
 # Deterministic 768-length vector used by the mock embedder.
@@ -81,6 +78,7 @@ def service(conn: sqlite3.Connection, fixed_clock: Any) -> ObservationService:
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
         session_id="sess-abc",
+        episodes=EpisodeService(conn),
     )
 
 
@@ -152,6 +150,7 @@ async def test_create_uses_scope_resolver_when_arg_not_given(
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: "auto/scope",
         session_id="sess-abc",
+        episodes=EpisodeService(conn),
     )
     obs_id = await svc.create("auto-scoped")
     row = conn.execute(
@@ -174,7 +173,7 @@ async def test_create_defaults_project_to_cwd_name_when_no_resolver(
     conn: sqlite3.Connection, fixed_clock: Any
 ) -> None:
     embedder = _StubEmbedder()
-    svc = ObservationService(conn, embedder, clock=fixed_clock, session_id="s")
+    svc = ObservationService(conn, embedder, clock=fixed_clock, session_id="s", episodes=EpisodeService(conn))
     obs_id = await svc.create("no resolver")
     row = conn.execute(
         "SELECT project FROM observations WHERE id = ?", (obs_id,)
@@ -244,6 +243,7 @@ async def test_create_rolls_back_on_embedder_failure(
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
         session_id="sess-abc",
+        episodes=EpisodeService(conn),
     )
 
     with pytest.raises(EmbeddingError):
