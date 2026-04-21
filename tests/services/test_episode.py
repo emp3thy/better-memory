@@ -525,3 +525,27 @@ class TestObservationServiceEpisodeIntegration:
         ).fetchone()
         # tech is lowercased by the service.
         assert row["tech"] == "python"
+
+    async def test_observation_empty_tech_stored_as_null(self, conn, fixed_clock):
+        """tech='' is coerced to NULL on observation writes (matches EpisodeService)."""
+        from better_memory.services.observation import ObservationService
+
+        class _StubEmbedder:
+            async def embed(self, text):
+                return [0.0] * 768
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        obs_svc = ObservationService(
+            conn,
+            _StubEmbedder(),
+            clock=fixed_clock,
+            project_resolver=lambda: "proj-a",
+            session_id="sess-1",
+            episodes=epsvc,
+        )
+
+        obs_id = await obs_svc.create(content="x", tech="")
+        row = conn.execute(
+            "SELECT tech FROM observations WHERE id = ?", (obs_id,)
+        ).fetchone()
+        assert row["tech"] is None

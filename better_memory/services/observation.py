@@ -12,12 +12,28 @@ Transactional behaviour
 The SQLite connection uses Python's default deferred-transaction mode. A call
 to :meth:`ObservationService.create`:
 
-    1. Calls the embedder *before* any DB write (fail-fast).
-    2. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
+    1. Resolves the active episode via the injected :class:`EpisodeService`,
+       opening a background episode if none is active. This call commits on
+       success (background episode creation is its own transaction). See the
+       caveat below.
+    2. Calls the embedder. A slow / broken Ollama server causes this step to
+       fail; steps 3+ do not run.
+    3. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
        FTS content-linked virtual table), inserts the embedding into the
        ``vec0`` table, and writes an audit row. All four statements succeed
        together or the SAVEPOINT rolls them all back.
-    3. Commits the transaction.
+    4. Commits the transaction.
+
+Fail-fast caveat
+----------------
+If the embedder fails in step 2, a background episode may have been
+committed in step 1 and left with zero observations attached. Subsequent
+successful ``create`` calls on the same session will reuse that background
+episode (via ``active_episode``), so the stranding is bounded to "one
+orphan background episode per session that hit embed failure before any
+successful write". Phase 2 accepts this trade-off; a future refactor of
+``EpisodeService.open_background`` to support an "in-savepoint" mode
+could restore the stricter guarantee.
 
 If the SAVEPOINT is rolled back on error, the FTS trigger's side-effects are
 undone along with the base-table row because SQLite FTS5 triggers participate
@@ -88,6 +104,11 @@ class ObservationService:
     authority from the caller and either commit uncommitted work or discard it.
     This contract may be revisited when higher-level orchestration lands in a
     later phase.
+
+    An injected :class:`EpisodeService` is expected to share the same
+    connection as this service and use its own SAVEPOINT+commit envelope
+    for episode writes (its ``open_background``, ``start_foreground``, and
+    ``close_active`` methods all commit before returning).
     """
 
     def __init__(
@@ -157,7 +178,10 @@ class ObservationService:
         else:
             episode_id = active.id
 
-        # Fail fast: compute the embedding BEFORE opening a write transaction.
+        # Compute the embedding BEFORE opening the observation SAVEPOINT so a
+        # slow / broken Ollama server does not hold an open SAVEPOINT. Note
+        # that the episode lookup / background-open above has already
+        # committed if a new background was created — see module docstring.
         vector = await self._embedder.embed(content)
         vec_blob = sqlite_vec.serialize_float32(vector)
 

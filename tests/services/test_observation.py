@@ -259,6 +259,25 @@ async def test_create_rolls_back_on_embedder_failure(
     assert emb_count == 0
     assert audit_count == 0
 
+    # Fail-fast contract (Phase 2 caveat): episode lazy-open commits before
+    # the embed call, so a background episode and its episode_sessions row
+    # may be present after an embed-failure. Lock the shape so a future
+    # refactor that tightens the contract (no DB artifacts at all) surfaces
+    # this test failing loudly.
+    episodes_rows = conn.execute("SELECT goal, ended_at FROM episodes").fetchall()
+    # Exactly one background episode (goal NULL, ended_at NULL) may exist.
+    assert len(episodes_rows) <= 1
+    if episodes_rows:
+        assert episodes_rows[0]["goal"] is None
+        assert episodes_rows[0]["ended_at"] is None
+
+    session_rows = conn.execute(
+        "SELECT left_at FROM episode_sessions"
+    ).fetchall()
+    assert len(session_rows) <= 1
+    if session_rows:
+        assert session_rows[0]["left_at"] is None
+
 
 # ---------------------------------------------------------------------------
 # record_use()
