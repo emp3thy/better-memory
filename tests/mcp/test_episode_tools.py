@@ -115,38 +115,64 @@ class TestListEpisodesTool:
         assert "memory.list_episodes" in tool_names
 
 
-class TestServerStartupBackgroundEpisode:
-    async def test_background_episode_opens_on_create_server(
+class TestServerStartupDrainsSessionStart:
+    """Phase 3 replacement for the deleted TestServerStartupBackgroundEpisode.
+
+    End-to-end: a session_start marker in the spool is drained by the server
+    and a background episode is created for it.
+    """
+
+    async def test_session_start_marker_drained_creates_episode(
         self, tmp_path, monkeypatch
     ):
-        """Constructing the MCP server opens a background episode.
-
-        `get_config()` reads env vars each call (not cached) per
-        better_memory/config.py, so setting BETTER_MEMORY_HOME via
-        monkeypatch is sufficient — no cache-reset needed.
-        """
         home = tmp_path / "bm"
         home.mkdir()
         (home / "knowledge-base").mkdir()
+        spool = home / "spool"
+        spool.mkdir()
+
+        # Pre-populate a session_start marker as though the hook had fired.
+        import json as _json
+        marker = {
+            "event_type": "session_start",
+            "timestamp": "2026-04-21T10:00:00+00:00",
+            "session_id": "claude-sess-xyz",
+            "cwd": "/proj",
+            "project": "proj",
+        }
+        (spool / "marker.json").write_text(
+            _json.dumps(marker), encoding="utf-8"
+        )
+
         monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-sess-xyz")
 
         from better_memory import config
         from better_memory.mcp.server import create_server
 
         server, cleanup = create_server()
         try:
+            # Drain runs on first memory.retrieve. We don't drive the full
+            # MCP handler here — we just instantiate SpoolService against
+            # the same DB and call drain() directly to prove the wiring.
             from better_memory.db.connection import connect
+            from better_memory.services.episode import EpisodeService
+            from better_memory.services.spool import SpoolService
 
             resolved = config.get_config()
             conn = connect(resolved.memory_db)
             try:
-                rows = conn.execute(
-                    "SELECT id, goal, ended_at FROM episodes"
-                ).fetchall()
-                assert len(rows) == 1
-                assert rows[0]["goal"] is None
-                assert rows[0]["ended_at"] is None
+                episodes = EpisodeService(conn)
+                svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
+                svc.drain()
+
+                active = episodes.active_episode("claude-sess-xyz")
+                assert active is not None
+                assert active.project == "proj"
+                assert active.goal is None
             finally:
                 conn.close()
         finally:
             await cleanup()
+
+

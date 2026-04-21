@@ -404,21 +404,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
         knowledge_conn,
         knowledge_base=config.knowledge_base,
     )
-    spool = SpoolService(memory_conn, config.spool_dir)
-
-    # Session-start behaviour: open a background episode for this server's
-    # session so observations written before the LLM declares a goal still
-    # bind to an episode. Phase 3's session-start hook will eventually
-    # trigger this externally; Phase 2 does it at factory time.
-    try:
-        episodes.open_background(
-            session_id=observations._session_id,
-            project=Path.cwd().name,
-        )
-    except Exception:  # noqa: BLE001 — best-effort startup hook
-        # Don't block server startup; lazy-open in ObservationService.create
-        # catches the gap.
-        pass
+    spool = SpoolService(memory_conn, config.spool_dir, episodes=episodes)
 
     # Session-start behaviour: reindex knowledge at startup. mtime-only, so
     # the cost is O(files) stat calls on an already-indexed corpus. We

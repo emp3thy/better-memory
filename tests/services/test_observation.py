@@ -388,3 +388,62 @@ async def test_multiple_successes_accumulate_score(
     assert row["validated_false"] == 1
     # 1.0 + 1.0 - 1.0 = 1.0
     assert row["reinforcement_score"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE_SESSION_ID env-var resolution
+# ---------------------------------------------------------------------------
+
+
+def test_session_id_resolves_from_env_var(
+    conn: sqlite3.Connection, fixed_clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When CLAUDE_SESSION_ID is set and no session_id kwarg, use the env var."""
+    from better_memory.services.episode import EpisodeService
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-sess-abc")
+    embedder = _StubEmbedder()
+    svc = ObservationService(
+        conn,
+        embedder,
+        clock=fixed_clock,
+        project_resolver=lambda: "test-project",
+        episodes=EpisodeService(conn),
+    )
+    assert svc._session_id == "claude-sess-abc"
+
+
+def test_session_id_kwarg_overrides_env_var(
+    conn: sqlite3.Connection, fixed_clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit session_id kwarg beats the env var."""
+    from better_memory.services.episode import EpisodeService
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-sess-abc")
+    embedder = _StubEmbedder()
+    svc = ObservationService(
+        conn,
+        embedder,
+        clock=fixed_clock,
+        project_resolver=lambda: "test-project",
+        session_id="explicit-sess",
+        episodes=EpisodeService(conn),
+    )
+    assert svc._session_id == "explicit-sess"
+
+
+def test_session_id_falls_back_to_uuid_when_no_env(
+    conn: sqlite3.Connection, fixed_clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without CLAUDE_SESSION_ID or explicit kwarg, generate a uuid4."""
+    from better_memory.services.episode import EpisodeService
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    embedder = _StubEmbedder()
+    svc = ObservationService(
+        conn,
+        embedder,
+        clock=fixed_clock,
+        project_resolver=lambda: "test-project",
+        episodes=EpisodeService(conn),
+    )
+    assert svc._session_id  # non-empty
+    assert svc._session_id != "claude-sess-abc"  # random, unpredictable
+    assert len(svc._session_id) == 32  # uuid4().hex length
