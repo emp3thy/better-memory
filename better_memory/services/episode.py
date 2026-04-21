@@ -297,6 +297,39 @@ class EpisodeService:
             out.append(_row_to_episode(r))
         return out
 
+    def list_episodes(
+        self,
+        *,
+        project: str | None = None,
+        outcome: str | None = None,
+        only_open: bool = False,
+    ) -> list[Episode]:
+        """Return episodes matching the filters, newest-first.
+
+        Args:
+            project: filter by project, None = all projects.
+            outcome: filter by outcome; None = no filter.
+            only_open: if True, only ``ended_at IS NULL`` episodes.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if project is not None:
+            clauses.append("project = ?")
+            params.append(project)
+        if outcome is not None:
+            clauses.append("outcome = ?")
+            params.append(outcome)
+        if only_open:
+            clauses.append("ended_at IS NULL")
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = (
+            f"SELECT * FROM episodes {where} "
+            f"ORDER BY started_at DESC, rowid DESC"
+        )
+        rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_episode(r) for r in rows]
+
     def _active_episode_row(self, session_id: str) -> sqlite3.Row | None:
         """Internal helper: returns the raw active episode Row (not Episode)."""
         return self._conn.execute(

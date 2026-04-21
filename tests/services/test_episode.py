@@ -392,3 +392,71 @@ class TestUnclosedEpisodes:
         )
 
         assert svc.unclosed_episodes() == []
+
+
+class TestListEpisodes:
+    def test_empty_when_nothing(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        assert svc.list_episodes() == []
+
+    def test_filter_by_project(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="s1", project="proj-a")
+        svc.open_background(session_id="s2", project="proj-b")
+
+        result = svc.list_episodes(project="proj-a")
+        assert len(result) == 1
+        assert result[0].project == "proj-a"
+
+    def test_filter_by_outcome(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.start_foreground(
+            session_id="s1", project="p", goal="won"
+        )
+        svc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        svc.start_foreground(
+            session_id="s2", project="p", goal="lost"
+        )
+        svc.close_active(
+            session_id="s2", outcome="abandoned", close_reason="abandoned"
+        )
+
+        result = svc.list_episodes(outcome="success")
+        assert len(result) == 1
+        assert result[0].goal == "won"
+
+    def test_only_open(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="s-open", project="p")
+        svc.start_foreground(
+            session_id="s-closed", project="p", goal="done"
+        )
+        svc.close_active(
+            session_id="s-closed",
+            outcome="success",
+            close_reason="goal_complete",
+        )
+
+        result = svc.list_episodes(only_open=True)
+        assert len(result) == 1
+        # The still-open background has ended_at IS NULL.
+        assert result[0].ended_at is None
+
+    def test_orders_newest_first(self, conn):
+        from datetime import UTC, datetime
+        svc = EpisodeService(
+            conn,
+            clock=lambda: datetime(2026, 4, 21, 10, 0, 0, tzinfo=UTC),
+        )
+        first = svc.open_background(session_id="s1", project="p")
+
+        svc_later = EpisodeService(
+            conn,
+            clock=lambda: datetime(2026, 4, 21, 11, 0, 0, tzinfo=UTC),
+        )
+        second = svc_later.open_background(session_id="s2", project="p")
+
+        result = svc.list_episodes()
+        assert [e.id for e in result] == [second, first]
