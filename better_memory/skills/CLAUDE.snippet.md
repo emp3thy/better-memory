@@ -28,3 +28,29 @@ Every observation has an `outcome`: `success`, `failure`, or `neutral`.
 - `memory.record_use(id, outcome?)`
 - `knowledge.search(query, project?)`
 - `knowledge.list(project?)`
+
+## Session-start reconciliation
+
+After the mandatory better-memory retrieve at session start, call
+`memory.reconcile_episodes()` to check for episodes left open by prior
+sessions. The tool returns a list of unclosed episodes, each with
+`episode_id`, `project`, `tech`, `goal`, and `started_at`.
+
+**For each returned episode**, prompt the user in chat:
+
+> Your prior session left an episode open:
+> - goal: "{goal}" (or "background session" if null)
+> - project: {project}, tech: {tech or "none"}
+> - started: {started_at}
+>
+> How did it end? (success / abandoned / partial / no_outcome / continuing)
+
+Apply the user's answer via `memory.close_episode(outcome=..., summary=...)`
+— EXCEPT for `continuing`, which is a no-op at the service layer (the
+episode stays open and subsequent observations bind to it). If the user
+ignores the prompt or proceeds without answering, default to `abandoned`
+— it still feeds synthesis as a negative signal, so nothing is lost.
+
+**Non-blocking:** do not gate regular work on getting through the
+reconciliation queue. Ask about one or two and move on; the Episodes
+UI surface (Phase 8+) will eventually let users reconcile in bulk.
