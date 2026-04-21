@@ -77,3 +77,22 @@ class TestCloseEpisodeTool:
 
         tool_names = {t.name for t in _tool_definitions()}
         assert "memory.close_episode" in tool_names
+
+
+class TestReconcileEpisodesTool:
+    def test_returns_unclosed_from_other_sessions(self, conn):
+        svc = EpisodeService(conn)
+        svc.open_background(session_id="sess-prior", project="p")
+        svc.open_background(session_id="sess-current", project="p")
+
+        unclosed = svc.unclosed_episodes(
+            exclude_session_ids={"sess-current"}
+        )
+        assert len(unclosed) == 1
+        assert unclosed[0].project == "p"
+
+    def test_tool_is_registered_in_factory(self):
+        from better_memory.mcp.server import _tool_definitions
+
+        tool_names = {t.name for t in _tool_definitions()}
+        assert "memory.reconcile_episodes" in tool_names

@@ -263,6 +263,18 @@ def _tool_definitions() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="memory.reconcile_episodes",
+            description=(
+                "List episodes that are still open from prior sessions, "
+                "for the LLM to prompt the user about."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -527,6 +539,22 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                     text=json.dumps({"closed_episode_id": closed_id}),
                 )
             ]
+
+        if name == "memory.reconcile_episodes":
+            open_episodes = episodes.unclosed_episodes(
+                exclude_session_ids={observations._session_id}
+            )
+            payload = [
+                {
+                    "episode_id": e.id,
+                    "project": e.project,
+                    "tech": e.tech,
+                    "goal": e.goal,
+                    "started_at": e.started_at,
+                }
+                for e in open_episodes
+            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
 
         raise ValueError(f"Unknown tool: {name}")
 
