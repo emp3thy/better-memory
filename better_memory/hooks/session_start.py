@@ -45,6 +45,8 @@ def _safe_timestamp(raw: str | None) -> str:
 
 def _synthesise_marker() -> dict[str, str]:
     """Build a minimal ``session_start`` payload from env + clock + cwd."""
+    # PWD is stale when subprocess.run cwd= is used (Windows/git-bash sets PWD
+    # in the parent shell and doesn't propagate); os.getcwd() is authoritative.
     try:
         cwd = os.getcwd()
     except Exception:
@@ -92,6 +94,8 @@ def main() -> None:
                 os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex
             )
         if "cwd" not in data or not data["cwd"]:
+            # PWD is stale when subprocess.run cwd= is used (Windows/git-bash sets PWD
+            # in the parent shell and doesn't propagate); os.getcwd() is authoritative.
             try:
                 data["cwd"] = os.getcwd()
             except Exception:
