@@ -13,12 +13,9 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import BucketedResults, ObservationService
 
 _VEC_DIM = 768
@@ -74,6 +71,7 @@ def service(
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
         session_id="sess-abc",
+        episodes=EpisodeService(conn),
     )
 
 

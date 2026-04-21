@@ -12,12 +12,28 @@ Transactional behaviour
 The SQLite connection uses Python's default deferred-transaction mode. A call
 to :meth:`ObservationService.create`:
 
-    1. Calls the embedder *before* any DB write (fail-fast).
-    2. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
+    1. Resolves the active episode via the injected :class:`EpisodeService`,
+       opening a background episode if none is active. This call commits on
+       success (background episode creation is its own transaction). See the
+       caveat below.
+    2. Calls the embedder. A slow / broken Ollama server causes this step to
+       fail; steps 3+ do not run.
+    3. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
        FTS content-linked virtual table), inserts the embedding into the
        ``vec0`` table, and writes an audit row. All four statements succeed
        together or the SAVEPOINT rolls them all back.
-    3. Commits the transaction.
+    4. Commits the transaction.
+
+Fail-fast caveat
+----------------
+If the embedder fails in step 2, a background episode may have been
+committed in step 1 and left with zero observations attached. Subsequent
+successful ``create`` calls on the same session will reuse that background
+episode (via ``active_episode``), so the stranding is bounded to "one
+orphan background episode per session that hit embed failure before any
+successful write". Phase 2 accepts this trade-off; a future refactor of
+``EpisodeService.open_background`` to support an "in-savepoint" mode
+could restore the stricter guarantee.
 
 If the SAVEPOINT is rolled back on error, the FTS trigger's side-effects are
 undone along with the base-table row because SQLite FTS5 triggers participate
@@ -54,6 +70,7 @@ from better_memory.search.hybrid import (
 )
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services import audit
+from better_memory.services.episode import EpisodeService
 
 Outcome = Literal["success", "failure", "neutral"]
 UseOutcome = Literal["success", "failure"]
@@ -87,6 +104,11 @@ class ObservationService:
     authority from the caller and either commit uncommitted work or discard it.
     This contract may be revisited when higher-level orchestration lands in a
     later phase.
+
+    An injected :class:`EpisodeService` is expected to share the same
+    connection as this service and use its own SAVEPOINT+commit envelope
+    for episode writes (its ``open_background``, ``start_foreground``, and
+    ``close_active`` methods all commit before returning).
     """
 
     def __init__(
@@ -99,6 +121,7 @@ class ObservationService:
         scope_resolver: Callable[[], str | None] | None = None,
         session_id: str | None = None,
         audit_log_retrieved: bool | None = None,
+        episodes: EpisodeService | None = None,
     ) -> None:
         self._conn = conn
         self._embedder = embedder
@@ -117,6 +140,7 @@ class ObservationService:
             if audit_log_retrieved is not None
             else get_config().audit_log_retrieved
         )
+        self._episodes = episodes
 
     # ------------------------------------------------------------------ public
     async def create(
@@ -129,15 +153,35 @@ class ObservationService:
         outcome: Outcome = "neutral",
         scope_path: str | None = None,
         project: str | None = None,
+        tech: str | None = None,
     ) -> str:
         """Insert a new observation, embedding and audit row; return its id."""
         obs_id = uuid4().hex
 
         resolved_project = project if project is not None else self._project_resolver()
         resolved_scope = scope_path if scope_path is not None else self._scope_resolver()
+        tech_normalised = tech.lower() if tech else None
 
-        # Fail fast: compute the embedding BEFORE opening a write transaction
-        # so a slow / broken Ollama server does not leave a pending SAVEPOINT.
+        # Resolve episode_id. ObservationService requires an EpisodeService
+        # now that episode_id is NOT NULL on observations (Phase 1 schema).
+        if self._episodes is None:
+            raise RuntimeError(
+                "ObservationService.create requires an EpisodeService "
+                "(episodes=...). Wire one at construction time."
+            )
+        active = self._episodes.active_episode(self._session_id)
+        if active is None:
+            episode_id = self._episodes.open_background(
+                session_id=self._session_id,
+                project=resolved_project,
+            )
+        else:
+            episode_id = active.id
+
+        # Compute the embedding BEFORE opening the observation SAVEPOINT so a
+        # slow / broken Ollama server does not hold an open SAVEPOINT. Note
+        # that the episode lookup / background-open above has already
+        # committed if a new background was created — see module docstring.
         vector = await self._embedder.embed(content)
         vec_blob = sqlite_vec.serialize_float32(vector)
 
@@ -151,8 +195,8 @@ class ObservationService:
                 INSERT INTO observations (
                     id, content, project, component, theme, session_id,
                     trigger_type, outcome, reinforcement_score, scope_path,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?)
+                    created_at, episode_id, tech
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?)
                 """,
                 (
                     obs_id,
@@ -165,6 +209,8 @@ class ObservationService:
                     outcome,
                     resolved_scope,
                     now,
+                    episode_id,
+                    tech_normalised,
                 ),
             )
 
@@ -181,6 +227,8 @@ class ObservationService:
                     "outcome": outcome,
                     "scope_path": resolved_scope,
                     "component": component,
+                    "episode_id": episode_id,
+                    "tech": tech_normalised,
                 },
             )
         except Exception:

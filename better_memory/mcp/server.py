@@ -7,8 +7,9 @@ as MCP tools over stdio. On startup, the knowledge-base is reindexed
 Tools
 -----
 * ``memory.observe``       — create a new observation; returns ``{"id": ...}``.
-* ``memory.retrieve``      — three outcome buckets + insights + knowledge.
-                             Drains the spool before searching.
+* ``memory.retrieve``      — three outcome buckets + knowledge. Drains
+                             the spool before searching. (Reflection
+                             retrieval is planned for Phase 6.)
 * ``memory.record_use``    — record re-use (optionally with outcome).
 * ``knowledge.search``     — BM25 search against the knowledge-base FTS.
 * ``knowledge.list``       — list indexed knowledge documents.
@@ -50,7 +51,7 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.search.hybrid import SearchResult
-from better_memory.services.insight import InsightSearchResult, InsightService
+from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
     KnowledgeSearchResult,
@@ -124,14 +125,16 @@ def _tool_definitions() -> list[Tool]:
                         "type": "string",
                         "enum": ["success", "failure", "neutral"],
                     },
+                    "tech": {"type": "string"},
                 },
             },
         ),
         Tool(
             name="memory.retrieve",
             description=(
-                "Retrieve observations, insights and knowledge relevant to "
-                "the current task, bucketed by outcome (do / dont / neutral)."
+                "Retrieve observations and knowledge relevant to the current "
+                "task, bucketed by outcome (do / dont / neutral). Reflection "
+                "retrieval is planned for Phase 6."
             ),
             inputSchema={
                 "type": "object",
@@ -211,6 +214,93 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="memory.start_episode",
+            description=(
+                "Declare a goal for the current session. Opens a new "
+                "foreground episode or hardens the existing background "
+                "episode. Returns the active episode id."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["goal"],
+                "additionalProperties": False,
+                "properties": {
+                    "goal": {"type": "string"},
+                    "tech": {"type": "string"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.close_episode",
+            description=(
+                "Close the current session's active episode. outcome is one "
+                "of success / partial / abandoned / no_outcome."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["outcome"],
+                "additionalProperties": False,
+                "properties": {
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "success",
+                            "partial",
+                            "abandoned",
+                            "no_outcome",
+                        ],
+                    },
+                    "close_reason": {
+                        "type": "string",
+                        "enum": [
+                            "goal_complete",
+                            "plan_complete",
+                            "abandoned",
+                            "superseded",
+                            "session_end_reconciled",
+                        ],
+                    },
+                    "summary": {"type": "string"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.reconcile_episodes",
+            description=(
+                "List episodes that are still open from prior sessions, "
+                "for the LLM to prompt the user about."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="memory.list_episodes",
+            description=(
+                "List episodes with optional filters. For UI and LLM "
+                "introspection."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {"type": "string"},
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "success",
+                            "partial",
+                            "abandoned",
+                            "no_outcome",
+                        ],
+                    },
+                    "only_open": {"type": "boolean"},
+                },
+            },
+        ),
     ]
 
 
@@ -257,18 +347,6 @@ def _serialize_result(result: SearchResult) -> dict[str, Any]:
         "reinforcement_score": result.reinforcement_score,
         "created_at": result.created_at,
         "final_score": result.final_score,
-    }
-
-
-def _serialize_insight(result: InsightSearchResult) -> dict[str, Any]:
-    insight = result.insight
-    return {
-        "id": insight.id,
-        "title": insight.title,
-        "content": insight.content,
-        "polarity": insight.polarity,
-        "status": insight.status,
-        "rank": result.rank,
     }
 
 
@@ -320,13 +398,27 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
     # succeed on their next call without a restart.
     _probe_ollama(config.ollama_host)
 
-    observations = ObservationService(memory_conn, embedder)
-    insights = InsightService(memory_conn, embedder=embedder)
+    episodes = EpisodeService(memory_conn)
+    observations = ObservationService(memory_conn, embedder, episodes=episodes)
     knowledge = KnowledgeService(
         knowledge_conn,
         knowledge_base=config.knowledge_base,
     )
     spool = SpoolService(memory_conn, config.spool_dir)
+
+    # Session-start behaviour: open a background episode for this server's
+    # session so observations written before the LLM declares a goal still
+    # bind to an episode. Phase 3's session-start hook will eventually
+    # trigger this externally; Phase 2 does it at factory time.
+    try:
+        episodes.open_background(
+            session_id=observations._session_id,
+            project=Path.cwd().name,
+        )
+    except Exception:  # noqa: BLE001 — best-effort startup hook
+        # Don't block server startup; lazy-open in ObservationService.create
+        # catches the gap.
+        pass
 
     # Session-start behaviour: reindex knowledge at startup. mtime-only, so
     # the cost is O(files) stat calls on an already-indexed corpus. We
@@ -357,6 +449,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 theme=args.get("theme"),
                 trigger_type=args.get("trigger_type"),
                 outcome=args.get("outcome", "neutral"),
+                tech=args.get("tech"),
             )
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
@@ -381,13 +474,12 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 scope_path=scope_path,
             )
 
+            # Insights table was dropped in Phase 1. Reflection retrieval
+            # replaces this path in Phase 6; for now, return [] so clients
+            # continue to receive the payload shape they expect.
             insight_hits: list[dict[str, Any]] = []
             knowledge_hits: list[dict[str, Any]] = []
             if query:
-                insight_hits = [
-                    _serialize_insight(r)
-                    for r in insights.search(query, limit=5)
-                ]
                 knowledge_hits = [
                     _serialize_knowledge_search(r)
                     for r in knowledge.search(query, limit=5)
@@ -447,6 +539,85 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                     ),
                 )
             ]
+
+        if name == "memory.start_episode":
+            # Phase 2 scope: open/harden foreground episode only — reflection
+            # synthesis is Phase 5. Session id is resolved from the
+            # ObservationService's session (same id the observation path uses).
+            episode_id = episodes.start_foreground(
+                session_id=observations._session_id,
+                project=Path.cwd().name,
+                goal=args["goal"],
+                tech=args.get("tech"),
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"episode_id": episode_id}),
+                )
+            ]
+
+        if name == "memory.close_episode":
+            outcome = args["outcome"]
+            # Default close_reason: match outcome for the common paths.
+            default_reasons = {
+                "success": "goal_complete",
+                "partial": "superseded",
+                "abandoned": "abandoned",
+                "no_outcome": "session_end_reconciled",
+            }
+            close_reason = args.get("close_reason") or default_reasons[outcome]
+            closed_id = episodes.close_active(
+                session_id=observations._session_id,
+                outcome=outcome,
+                close_reason=close_reason,
+                summary=args.get("summary"),
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"closed_episode_id": closed_id}),
+                )
+            ]
+
+        if name == "memory.reconcile_episodes":
+            open_episodes = episodes.unclosed_episodes(
+                exclude_session_ids={observations._session_id}
+            )
+            payload = [
+                {
+                    "episode_id": e.id,
+                    "project": e.project,
+                    "tech": e.tech,
+                    "goal": e.goal,
+                    "started_at": e.started_at,
+                }
+                for e in open_episodes
+            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.list_episodes":
+            rows = episodes.list_episodes(
+                project=args.get("project"),
+                outcome=args.get("outcome"),
+                only_open=args.get("only_open", False),
+            )
+            payload = [
+                {
+                    "episode_id": e.id,
+                    "project": e.project,
+                    "tech": e.tech,
+                    "goal": e.goal,
+                    "started_at": e.started_at,
+                    "hardened_at": e.hardened_at,
+                    "ended_at": e.ended_at,
+                    "close_reason": e.close_reason,
+                    "outcome": e.outcome,
+                    "summary": e.summary,
+                }
+                for e in rows
+            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
 
         raise ValueError(f"Unknown tool: {name}")
 
