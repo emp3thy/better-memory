@@ -352,3 +352,43 @@ class TestCloseActive:
         assert row["hardened_at"] is None
         assert row["ended_at"] == "2026-04-21T10:00:00+00:00"
         assert row["outcome"] == "no_outcome"
+
+
+class TestUnclosedEpisodes:
+    def test_empty_when_no_episodes(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        assert svc.unclosed_episodes() == []
+
+    def test_returns_open_episodes_across_sessions(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="sess-a", project="p")
+        svc.start_foreground(
+            session_id="sess-b", project="p", goal="pending"
+        )
+
+        result = svc.unclosed_episodes()
+        assert len(result) == 2
+
+    def test_excludes_specified_sessions(self, conn, fixed_clock):
+        """Current session's episode is filtered so the LLM doesn't prompt itself."""
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="sess-old", project="p")
+        svc.open_background(session_id="sess-current", project="p")
+
+        result = svc.unclosed_episodes(exclude_session_ids={"sess-current"})
+        assert len(result) == 1
+        # Only the old one should remain.
+        assert result[0].project == "p"
+
+    def test_excludes_closed_episodes(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.start_foreground(
+            session_id="sess-a", project="p", goal="done"
+        )
+        svc.close_active(
+            session_id="sess-a",
+            outcome="success",
+            close_reason="goal_complete",
+        )
+
+        assert svc.unclosed_episodes() == []

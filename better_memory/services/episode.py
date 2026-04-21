@@ -257,6 +257,46 @@ class EpisodeService:
         conn.commit()
         return active["id"]
 
+    def unclosed_episodes(
+        self,
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> list[Episode]:
+        """Return all episodes with ``ended_at IS NULL``, ordered oldest-first.
+
+        ``exclude_session_ids`` drops any episode that has an *open* binding
+        (``left_at IS NULL``) to one of those sessions — typically the caller's
+        current session, so the LLM doesn't prompt itself about its own
+        still-running episode.
+        """
+        exclude = exclude_session_ids or set()
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT e.*
+            FROM episodes e
+            JOIN episode_sessions s ON s.episode_id = e.id
+            WHERE e.ended_at IS NULL
+            ORDER BY e.started_at ASC, e.id ASC
+            """
+        ).fetchall()
+
+        if not exclude:
+            return [_row_to_episode(r) for r in rows]
+
+        # Filter out episodes that have an active binding to any excluded session.
+        out: list[Episode] = []
+        for r in rows:
+            active_sessions = self._conn.execute(
+                "SELECT session_id FROM episode_sessions "
+                "WHERE episode_id = ? AND left_at IS NULL",
+                (r["id"],),
+            ).fetchall()
+            active_set = {row["session_id"] for row in active_sessions}
+            if active_set & exclude:
+                continue
+            out.append(_row_to_episode(r))
+        return out
+
     def _active_episode_row(self, session_id: str) -> sqlite3.Row | None:
         """Internal helper: returns the raw active episode Row (not Episode)."""
         return self._conn.execute(
