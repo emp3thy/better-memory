@@ -134,11 +134,25 @@ class EpisodeService:
         Returns the resulting episode id (the hardened/new one).
         """
         now = self._clock().isoformat()
-        tech_normalised = tech.lower() if tech is not None else None
+        tech_normalised = tech.lower() if tech else None
+
+        # Same-goal resume: if the active foreground episode already has
+        # this exact goal, treat the call as a no-op (spec §5 short-circuit).
+        # Guard placed before the SAVEPOINT so that the common resume case
+        # avoids opening a useless savepoint entirely.
+        active = self._active_episode_row(session_id)
+        if (
+            active is not None
+            and active["goal"] is not None
+            and active["goal"] == goal
+        ):
+            return active["id"]
 
         conn = self._conn
         conn.execute("SAVEPOINT episode_start_foreground")
         try:
+            # Re-fetch inside the savepoint — the guard above was read-only and
+            # handles the common no-op case without opening a savepoint.
             active = self._active_episode_row(session_id)
 
             if active is not None and active["goal"] is None:
@@ -154,6 +168,11 @@ class EpisodeService:
                 # Supersede any prior active foreground (active with a goal),
                 # then open a new foreground.
                 if active is not None:
+                    # Supersede close: spec §3 distinguishes partial vs
+                    # no_outcome based on success signals (commit / plan-
+                    # complete). Phase 2 has no hook infrastructure yet, so
+                    # we always write no_outcome. Phase 4 introduces the
+                    # hooks and upgrades this to 'partial' when signals fired.
                     conn.execute(
                         "UPDATE episodes "
                         "SET ended_at = ?, close_reason = 'superseded', "

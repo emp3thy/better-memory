@@ -157,6 +157,21 @@ class TestStartForeground:
         assert second_row["tech"] == "sqlite"
         assert second_row["hardened_at"] == "2026-04-21T10:00:00+00:00"
 
+        # Session bindings: old episode's left_at stamped, new episode's left_at NULL.
+        first_session = conn.execute(
+            "SELECT left_at FROM episode_sessions "
+            "WHERE episode_id = ? AND session_id = ?",
+            (first, "sess-1"),
+        ).fetchone()
+        assert first_session["left_at"] == "2026-04-21T10:00:00+00:00"
+
+        second_session = conn.execute(
+            "SELECT left_at FROM episode_sessions "
+            "WHERE episode_id = ? AND session_id = ?",
+            (second, "sess-1"),
+        ).fetchone()
+        assert second_session["left_at"] is None
+
     def test_opens_new_foreground_when_no_background_exists(self, conn, fixed_clock):
         svc = EpisodeService(conn, clock=fixed_clock)
         # No prior open_background call.
@@ -195,3 +210,50 @@ class TestStartForeground:
             "SELECT tech FROM episodes WHERE id = ?", (episode_id,)
         ).fetchone()
         assert row["tech"] == "python"
+
+    def test_same_goal_resume_returns_same_episode(self, conn, fixed_clock):
+        """Calling start_foreground twice with the same goal preserves the episode."""
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="sess-1", project="proj-a")
+        first = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="ongoing work",
+            tech="python",
+        )
+        # Second call with IDENTICAL goal.
+        second = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="ongoing work",
+            tech="python",
+        )
+        assert second == first
+
+        # No superseded close happened.
+        row = conn.execute(
+            "SELECT ended_at, close_reason FROM episodes WHERE id = ?",
+            (first,),
+        ).fetchone()
+        assert row["ended_at"] is None
+        assert row["close_reason"] is None
+
+        # Still only one episode row in the DB.
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM episodes"
+        ).fetchone()["c"]
+        assert count == 1
+
+    def test_empty_tech_stored_as_null(self, conn, fixed_clock):
+        """tech='' is coerced to NULL, not stored as empty string."""
+        svc = EpisodeService(conn, clock=fixed_clock)
+        episode_id = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="no tech",
+            tech="",
+        )
+        row = conn.execute(
+            "SELECT tech FROM episodes WHERE id = ?", (episode_id,)
+        ).fetchone()
+        assert row["tech"] is None
