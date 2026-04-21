@@ -50,7 +50,6 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.search.hybrid import SearchResult
-from better_memory.services.insight import InsightSearchResult, InsightService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
     KnowledgeSearchResult,
@@ -260,18 +259,6 @@ def _serialize_result(result: SearchResult) -> dict[str, Any]:
     }
 
 
-def _serialize_insight(result: InsightSearchResult) -> dict[str, Any]:
-    insight = result.insight
-    return {
-        "id": insight.id,
-        "title": insight.title,
-        "content": insight.content,
-        "polarity": insight.polarity,
-        "status": insight.status,
-        "rank": result.rank,
-    }
-
-
 def _serialize_knowledge_search(result: KnowledgeSearchResult) -> dict[str, Any]:
     doc = result.document
     return {
@@ -321,7 +308,6 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
     _probe_ollama(config.ollama_host)
 
     observations = ObservationService(memory_conn, embedder)
-    insights = InsightService(memory_conn, embedder=embedder)
     knowledge = KnowledgeService(
         knowledge_conn,
         knowledge_base=config.knowledge_base,
@@ -381,13 +367,12 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 scope_path=scope_path,
             )
 
+            # Insights table was dropped in Phase 1. Reflection retrieval
+            # replaces this path in Phase 6; for now, return [] so clients
+            # continue to receive the payload shape they expect.
             insight_hits: list[dict[str, Any]] = []
             knowledge_hits: list[dict[str, Any]] = []
             if query:
-                insight_hits = [
-                    _serialize_insight(r)
-                    for r in insights.search(query, limit=5)
-                ]
                 knowledge_hits = [
                     _serialize_knowledge_search(r)
                     for r in knowledge.search(query, limit=5)
