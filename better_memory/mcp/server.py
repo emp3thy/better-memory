@@ -404,7 +404,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
         knowledge_conn,
         knowledge_base=config.knowledge_base,
     )
-    spool = SpoolService(memory_conn, config.spool_dir)
+    spool = SpoolService(memory_conn, config.spool_dir, episodes=episodes)
 
     # Session-start behaviour: reindex knowledge at startup. mtime-only, so
     # the cost is O(files) stat calls on an already-indexed corpus. We
