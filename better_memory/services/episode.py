@@ -110,7 +110,88 @@ class EpisodeService:
         ``episode_sessions`` row with ``left_at IS NULL``. One-active-per-
         session is an invariant the lifecycle methods maintain.
         """
-        row = self._conn.execute(
+        row = self._active_episode_row(session_id)
+        return _row_to_episode(row) if row is not None else None
+
+    def start_foreground(
+        self,
+        *,
+        session_id: str,
+        project: str,
+        goal: str,
+        tech: str | None = None,
+    ) -> str:
+        """Harden a background episode, or supersede prior foreground.
+
+        Semantics (spec §3):
+        - If an active background episode exists for this session
+          (goal IS NULL), stamp goal/tech/hardened_at on it.
+        - Else if an active foreground episode exists with a different
+          goal, close it as ``close_reason='superseded'``,
+          ``outcome='no_outcome'`` and open a new foreground.
+        - Else open a new foreground from scratch (started_at = now).
+
+        Returns the resulting episode id (the hardened/new one).
+        """
+        now = self._clock().isoformat()
+        tech_normalised = tech.lower() if tech is not None else None
+
+        conn = self._conn
+        conn.execute("SAVEPOINT episode_start_foreground")
+        try:
+            active = self._active_episode_row(session_id)
+
+            if active is not None and active["goal"] is None:
+                # Harden the background episode.
+                conn.execute(
+                    "UPDATE episodes "
+                    "SET goal = ?, tech = ?, hardened_at = ? "
+                    "WHERE id = ?",
+                    (goal, tech_normalised, now, active["id"]),
+                )
+                result_id = active["id"]
+            else:
+                # Supersede any prior active foreground (active with a goal),
+                # then open a new foreground.
+                if active is not None:
+                    conn.execute(
+                        "UPDATE episodes "
+                        "SET ended_at = ?, close_reason = 'superseded', "
+                        "    outcome = 'no_outcome' "
+                        "WHERE id = ?",
+                        (now, active["id"]),
+                    )
+                    conn.execute(
+                        "UPDATE episode_sessions "
+                        "SET left_at = ? "
+                        "WHERE episode_id = ? AND session_id = ?",
+                        (now, active["id"], session_id),
+                    )
+
+                result_id = uuid4().hex
+                conn.execute(
+                    "INSERT INTO episodes "
+                    "(id, project, tech, goal, started_at, hardened_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (result_id, project, tech_normalised, goal, now, now),
+                )
+                conn.execute(
+                    "INSERT INTO episode_sessions "
+                    "(episode_id, session_id, joined_at) VALUES (?, ?, ?)",
+                    (result_id, session_id, now),
+                )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT episode_start_foreground")
+            conn.execute("RELEASE SAVEPOINT episode_start_foreground")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT episode_start_foreground")
+        conn.commit()
+        return result_id
+
+    def _active_episode_row(self, session_id: str) -> sqlite3.Row | None:
+        """Internal helper: returns the raw active episode Row (not Episode)."""
+        return self._conn.execute(
             """
             SELECT e.*
             FROM episodes e
@@ -122,4 +203,3 @@ class EpisodeService:
             """,
             (session_id,),
         ).fetchone()
-        return _row_to_episode(row) if row is not None else None

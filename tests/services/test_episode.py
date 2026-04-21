@@ -96,3 +96,102 @@ class TestActiveEpisode:
         svc = EpisodeService(conn, clock=fixed_clock)
         svc.open_background(session_id="sess-1", project="proj-a")
         assert svc.active_episode("sess-other") is None
+
+
+class TestStartForeground:
+    def test_hardens_existing_background_episode(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        background_id = svc.open_background(
+            session_id="sess-1", project="proj-a"
+        )
+
+        foreground_id = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="implement phase 2",
+            tech="python",
+        )
+
+        assert foreground_id == background_id  # hardened, not replaced
+        row = conn.execute(
+            "SELECT goal, tech, hardened_at, ended_at FROM episodes WHERE id = ?",
+            (background_id,),
+        ).fetchone()
+        assert row["goal"] == "implement phase 2"
+        assert row["tech"] == "python"
+        assert row["hardened_at"] == "2026-04-21T10:00:00+00:00"
+        assert row["ended_at"] is None
+
+    def test_supersedes_prior_foreground_when_goal_differs(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="sess-1", project="proj-a")
+        first = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="first goal",
+            tech="python",
+        )
+
+        # New goal comes in while first is still active.
+        second = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="second goal",
+            tech="sqlite",
+        )
+
+        assert second != first
+        first_row = conn.execute(
+            "SELECT ended_at, close_reason, outcome FROM episodes WHERE id = ?",
+            (first,),
+        ).fetchone()
+        assert first_row["ended_at"] == "2026-04-21T10:00:00+00:00"
+        assert first_row["close_reason"] == "superseded"
+        assert first_row["outcome"] == "no_outcome"
+
+        second_row = conn.execute(
+            "SELECT goal, tech, hardened_at FROM episodes WHERE id = ?",
+            (second,),
+        ).fetchone()
+        assert second_row["goal"] == "second goal"
+        assert second_row["tech"] == "sqlite"
+        assert second_row["hardened_at"] == "2026-04-21T10:00:00+00:00"
+
+    def test_opens_new_foreground_when_no_background_exists(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        # No prior open_background call.
+        foreground_id = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="brand new work",
+        )
+
+        row = conn.execute(
+            "SELECT goal, hardened_at, started_at FROM episodes WHERE id = ?",
+            (foreground_id,),
+        ).fetchone()
+        assert row["goal"] == "brand new work"
+        assert row["hardened_at"] == "2026-04-21T10:00:00+00:00"
+        # For a net-new foreground, started_at == hardened_at.
+        assert row["started_at"] == "2026-04-21T10:00:00+00:00"
+
+        # And the session is bound.
+        session_row = conn.execute(
+            "SELECT left_at FROM episode_sessions "
+            "WHERE episode_id = ? AND session_id = ?",
+            (foreground_id, "sess-1"),
+        ).fetchone()
+        assert session_row["left_at"] is None
+
+    def test_tech_is_lowercased_on_write(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        episode_id = svc.start_foreground(
+            session_id="sess-1",
+            project="proj-a",
+            goal="lowercase me",
+            tech="Python",
+        )
+        row = conn.execute(
+            "SELECT tech FROM episodes WHERE id = ?", (episode_id,)
+        ).fetchone()
+        assert row["tech"] == "python"
