@@ -1251,21 +1251,38 @@ For each of these three files, remove the module-level skip marker. The existing
 
 - [ ] **Step 6: Update the un-skipped tests to construct `ObservationService` with an `EpisodeService`**
 
-The un-skipped tests construct `ObservationService` in many places; each construction site needs an `episodes=EpisodeService(conn)` kwarg. Run the tests to see where the constructions are:
+There are exactly **7 construction sites** across the three files (audit verified by grep). Three are shared fixtures/helpers; four are ad-hoc inline constructions. Update each:
 
-```bash
-uv run pytest tests/services/test_observation.py tests/services/test_observation_retrieve.py tests/services/test_audit_trail.py -v 2>&1 | head -40
+**`tests/services/test_observation.py`** (4 sites):
+- Line ~73: the `service` pytest fixture — add `episodes=EpisodeService(conn)` kwarg.
+- Line ~144: in `test_create_uses_scope_resolver_when_arg_not_given`, the ad-hoc `svc = ObservationService(...)`.
+- Line ~173: in the minimal-construction test, `ObservationService(conn, embedder, clock=fixed_clock, session_id="s")` — add `episodes=EpisodeService(conn)`.
+- Line ~236: the bad-embedder test.
+
+Add the import at the top of the file:
+
+```python
+from better_memory.services.episode import EpisodeService
 ```
 
-For every `ObservationService(` construction site in those three files, add `episodes=EpisodeService(conn)` (importing `EpisodeService` at the top of the file as needed). If helper fixtures build the service, update the fixture.
+**`tests/services/test_observation_retrieve.py`** (1 site):
+- Line ~66: the fixture. Same pattern + same import.
 
-Run tests iteratively until green:
+**`tests/services/test_audit_trail.py`** (2 sites):
+- Line ~64: the `_make_service` helper function — add the kwarg once and both call sites inherit it.
+- Line ~204: one direct construction.
+
+Add the import.
+
+**Detail-shape note:** Task 6 extends `ObservationService.create`'s audit detail to include `"episode_id"` and `"tech"` (see Step 3). Existing audit assertions in `test_audit_trail.py` check individual keys (e.g. `created_detail["outcome"] == "success"`) rather than full-dict equality, so the extra keys do not break them. The one full-dict equality test is against the `record_use` detail, which Task 6 does not modify.
+
+Run tests iteratively:
 
 ```bash
 uv run pytest tests/services/test_observation.py tests/services/test_observation_retrieve.py tests/services/test_audit_trail.py -v
 ```
 
-Expected: all tests PASS after construction-site updates.
+Expected: all tests PASS after the 7 construction-site updates. If a test still fails, read the traceback carefully — either it's a missed construction site, or a schema-related assumption from the pre-episodic era (rare; schema Phase 1 preserved all original columns).
 
 - [ ] **Step 7: Run the full suite — confirm no regressions**
 
@@ -1302,32 +1319,51 @@ In `better_memory/mcp/server.py`, find the block starting `if name == "memory.re
 
 - [ ] **Step 2: Replace the insight search with an empty list + reminder comment**
 
-Replace the insight-search block (around lines 384-390) with:
+Three specific edits to `better_memory/mcp/server.py`. Grep confirmed the exact locations:
 
-```python
-            # Insights table was dropped in Phase 1. Reflection retrieval
-            # replaces this path in Phase 6; for now, return [] so clients
-            # continue to receive the payload shape they expect.
-            insight_hits: list[dict[str, Any]] = []
-            knowledge_hits: list[dict[str, Any]] = []
-            if query:
-                knowledge_hits = [
-                    _serialize_knowledge_search(r)
-                    for r in knowledge.search(query, limit=5)
-                ]
-```
+1. **Line ~53** — remove the entire import line:
+   ```python
+   from better_memory.services.insight import InsightSearchResult, InsightService
+   ```
 
-Also remove the `insights` service construction at the factory level (`insights = InsightService(memory_conn, embedder=embedder)`) and the `from better_memory.services.insight import ...` imports at the top — they were used only by this handler. Leave the `InsightSearchResult` import out too.
+2. **Line ~263** — remove the entire `_serialize_insight` function (6 lines including the blank line above/below):
+   ```python
+   def _serialize_insight(result: InsightSearchResult) -> dict[str, Any]:
+       insight = result.insight
+       return {
+           "id": insight.id,
+           "title": insight.title,
+           ...
+       }
+   ```
 
-After the edit, the top of `server.py` should no longer import from `better_memory.services.insight`.
+3. **Line ~324** — remove the line:
+   ```python
+       insights = InsightService(memory_conn, embedder=embedder)
+   ```
 
-Build the updated file and run the parse test:
+4. **Lines ~384-394** (the `memory.retrieve` handler) — replace the insight + knowledge block with:
+   ```python
+               # Insights table was dropped in Phase 1. Reflection retrieval
+               # replaces this path in Phase 6; for now, return [] so clients
+               # continue to receive the payload shape they expect.
+               insight_hits: list[dict[str, Any]] = []
+               knowledge_hits: list[dict[str, Any]] = []
+               if query:
+                   knowledge_hits = [
+                       _serialize_knowledge_search(r)
+                       for r in knowledge.search(query, limit=5)
+                   ]
+   ```
+
+After the edits, verify the file still imports cleanly and no references to `InsightService` / `InsightSearchResult` / `_serialize_insight` / `insights` (the local variable) remain:
 
 ```bash
 uv run python -c "import better_memory.mcp.server; print('import ok')"
+grep -n "InsightService\|InsightSearchResult\|_serialize_insight\|\binsights\b" better_memory/mcp/server.py
 ```
 
-Expected: `import ok`.
+Expected: `import ok`; grep returns only the payload-key string `"insights"` on the `payload = {...}` line, no code references.
 
 - [ ] **Step 3: Run the `test_parse_window` file (the one non-skipped file in tests/mcp/)**
 
@@ -1441,122 +1477,73 @@ Adds the new tool. No reflection synthesis — returns `{episode_id}` only (Phas
 - Modify: `better_memory/mcp/server.py`
 - Create: `tests/mcp/test_episode_tools.py`
 
-- [ ] **Step 1: Write the failing MCP integration test**
+- [ ] **Step 1: Write the failing tests**
+
+Skip the MCP-handler introspection pattern — it's fragile across MCP-SDK versions. Use direct service-level tests plus a factory-wiring smoke test that asserts the new tool is registered.
 
 Create `tests/mcp/test_episode_tools.py`:
 
 ```python
 """Integration tests for the episode MCP tools.
 
-These call the handler function directly (without stdio transport) to keep
-the tests fast and deterministic. They exercise the factory wiring and the
-tool payload shapes.
+Rather than invoking the registered handlers via MCP framework internals
+(which vary across SDK versions), these tests exercise the same code path
+by constructing the services directly and also verifying the factory
+registers the tool by name.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from better_memory.mcp.server import create_server
+from better_memory.db.connection import connect
+from better_memory.db.schema import apply_migrations
+from better_memory.services.episode import EpisodeService
 
 
 @pytest.fixture
-def server_factory(tmp_path, monkeypatch):
-    """Yield a factory that builds a fresh server + cleanup.
-
-    Sets BETTER_MEMORY_HOME to tmp_path so each test has an isolated DB
-    and knowledge base.
-    """
-    home = tmp_path / "bm"
-    home.mkdir()
-    (home / "knowledge-base").mkdir()
-    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
-
-    # Clear the cached config so the new env var takes effect.
-    from better_memory import config
-
-    config._cached_config = None
-    yield create_server
+def conn(tmp_memory_db: Path):
+    c = connect(tmp_memory_db)
+    apply_migrations(c)
+    try:
+        yield c
+    finally:
+        c.close()
 
 
 class TestStartEpisodeTool:
-    @pytest.mark.asyncio
-    async def test_returns_episode_id(self, server_factory):
-        server, cleanup = server_factory()
-        try:
-            # Access the call_tool handler via the server's registered handlers.
-            # mcp.server.Server stores handlers on the request type decorators.
-            # The simplest path is to import the module-level _call_tool function
-            # — but we registered it as a closure, so we go via the server's
-            # request_handlers mapping, which stores the async fn under the
-            # `CallToolRequest` key. Tests use the same helper hook as production.
-            from mcp.server.lowlevel.server import Server as LowLevelServer  # noqa: F401
+    def test_start_episode_via_service(self, conn):
+        """The tool is a thin wrapper; verify the service call shape."""
+        svc = EpisodeService(conn)
+        episode_id = svc.start_foreground(
+            session_id="sess-1",
+            project="proj",
+            goal="test goal",
+            tech="python",
+        )
+        row = conn.execute(
+            "SELECT goal, tech FROM episodes WHERE id = ?",
+            (episode_id,),
+        ).fetchone()
+        assert row["goal"] == "test goal"
+        assert row["tech"] == "python"
 
-            # Find the call_tool handler by scanning request handlers.
-            handler = None
-            for key, fn in server.request_handlers.items():
-                if "CallTool" in key.__name__:
-                    handler = fn
-                    break
-            assert handler is not None, "call_tool handler not found"
+    def test_tool_is_registered_in_factory(self, tmp_path, monkeypatch):
+        """The MCP server registers memory.start_episode by name."""
+        home = tmp_path / "bm"
+        home.mkdir()
+        (home / "knowledge-base").mkdir()
+        monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
 
-            # Build a CallToolRequest manually.
-            from mcp.types import CallToolRequest, CallToolRequestParams
+        from better_memory.mcp.server import _tool_definitions
 
-            req = CallToolRequest(
-                method="tools/call",
-                params=CallToolRequestParams(
-                    name="memory.start_episode",
-                    arguments={
-                        "goal": "test goal",
-                        "tech": "python",
-                    },
-                ),
-            )
-            response = await handler(req)
-            content = response.root.content[0]
-            payload = json.loads(content.text)
-            assert "episode_id" in payload
-            assert isinstance(payload["episode_id"], str)
-            assert len(payload["episode_id"]) > 0
-        finally:
-            await cleanup()
+        tool_names = {t.name for t in _tool_definitions()}
+        assert "memory.start_episode" in tool_names
 ```
 
-If the above introspection is too fragile, simplify by testing the handler at the service level instead — construct `EpisodeService` directly and call `start_foreground` to assert the return shape is as the MCP tool would serialise. Delete the MCP-level handler-call complexity if needed; the direct service tests from Task 2 already cover the behaviour.
-
-Fallback test (replaces the body of `test_returns_episode_id` if the handler introspection fails):
-
-```python
-    def test_start_episode_integration_via_direct_service(self, tmp_path):
-        """End-to-end: the factory wires EpisodeService correctly."""
-        import sqlite3
-        from better_memory.db.connection import connect
-        from better_memory.db.schema import apply_migrations
-        from better_memory.services.episode import EpisodeService
-
-        db = tmp_path / "memory.db"
-        conn = connect(db)
-        apply_migrations(conn)
-        try:
-            svc = EpisodeService(conn)
-            eid = svc.start_foreground(
-                session_id="sess-1",
-                project="proj",
-                goal="test",
-            )
-            row = conn.execute(
-                "SELECT goal FROM episodes WHERE id = ?", (eid,)
-            ).fetchone()
-            assert row["goal"] == "test"
-        finally:
-            conn.close()
-```
-
-Pick whichever style works first-try; document the choice in the commit message.
+This sidesteps the MCP framework entirely and pins the two things that matter: (1) the service logic the handler calls, and (2) the tool is registered with the expected name.
 
 - [ ] **Step 2: Run the new test — it should fail**
 
@@ -1953,16 +1940,18 @@ class TestServerStartupBackgroundEpisode:
     async def test_background_episode_opens_on_create_server(
         self, tmp_path, monkeypatch
     ):
-        """Constructing the MCP server opens a background episode."""
+        """Constructing the MCP server opens a background episode.
+
+        `get_config()` reads env vars each call (not cached) per
+        better_memory/config.py, so setting BETTER_MEMORY_HOME via
+        monkeypatch is sufficient — no cache-reset needed.
+        """
         home = tmp_path / "bm"
         home.mkdir()
         (home / "knowledge-base").mkdir()
         monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
 
         from better_memory import config
-
-        config._cached_config = None
-
         from better_memory.mcp.server import create_server
 
         server, cleanup = create_server()
