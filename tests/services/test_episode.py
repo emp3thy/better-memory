@@ -257,3 +257,98 @@ class TestStartForeground:
             "SELECT tech FROM episodes WHERE id = ?", (episode_id,)
         ).fetchone()
         assert row["tech"] is None
+
+
+class TestCloseActive:
+    def test_closes_foreground_with_success(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="sess-1", project="proj-a")
+        fg = svc.start_foreground(
+            session_id="sess-1", project="proj-a", goal="ship it"
+        )
+
+        closed_id = svc.close_active(
+            session_id="sess-1",
+            outcome="success",
+            close_reason="goal_complete",
+        )
+
+        assert closed_id == fg
+        row = conn.execute(
+            "SELECT ended_at, close_reason, outcome, summary "
+            "FROM episodes WHERE id = ?",
+            (fg,),
+        ).fetchone()
+        assert row["ended_at"] == "2026-04-21T10:00:00+00:00"
+        assert row["close_reason"] == "goal_complete"
+        assert row["outcome"] == "success"
+        assert row["summary"] is None
+
+    def test_abandoned_close_records_summary(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        svc.open_background(session_id="sess-1", project="proj-a")
+        svc.start_foreground(
+            session_id="sess-1", project="proj-a", goal="rejected work"
+        )
+
+        svc.close_active(
+            session_id="sess-1",
+            outcome="abandoned",
+            close_reason="abandoned",
+            summary="user asked me to stop and change direction",
+        )
+
+        row = conn.execute(
+            "SELECT outcome, summary FROM episodes WHERE ended_at IS NOT NULL"
+        ).fetchone()
+        assert row["outcome"] == "abandoned"
+        assert row["summary"] == "user asked me to stop and change direction"
+
+    def test_marks_episode_session_left_at(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        fg = svc.start_foreground(
+            session_id="sess-1", project="proj-a", goal="x"
+        )
+
+        svc.close_active(
+            session_id="sess-1",
+            outcome="success",
+            close_reason="goal_complete",
+        )
+
+        row = conn.execute(
+            "SELECT left_at FROM episode_sessions "
+            "WHERE episode_id = ? AND session_id = ?",
+            (fg, "sess-1"),
+        ).fetchone()
+        assert row["left_at"] == "2026-04-21T10:00:00+00:00"
+
+    def test_raises_when_no_active_episode(self, conn, fixed_clock):
+        svc = EpisodeService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="No active episode"):
+            svc.close_active(
+                session_id="sess-nobody",
+                outcome="success",
+                close_reason="goal_complete",
+            )
+
+    def test_closes_background_episode_too(self, conn, fixed_clock):
+        """Closing a background (unhardened) episode is valid (e.g. reconciliation with no_outcome)."""
+        svc = EpisodeService(conn, clock=fixed_clock)
+        bg = svc.open_background(session_id="sess-1", project="proj-a")
+
+        closed_id = svc.close_active(
+            session_id="sess-1",
+            outcome="no_outcome",
+            close_reason="session_end_reconciled",
+        )
+
+        assert closed_id == bg
+        row = conn.execute(
+            "SELECT goal, hardened_at, ended_at, outcome FROM episodes WHERE id = ?",
+            (bg,),
+        ).fetchone()
+        assert row["goal"] is None
+        assert row["hardened_at"] is None
+        assert row["ended_at"] == "2026-04-21T10:00:00+00:00"
+        assert row["outcome"] == "no_outcome"

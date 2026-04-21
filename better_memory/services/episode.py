@@ -208,6 +208,55 @@ class EpisodeService:
         conn.commit()
         return result_id
 
+    def close_active(
+        self,
+        *,
+        session_id: str,
+        outcome: str,
+        close_reason: str,
+        summary: str | None = None,
+    ) -> str:
+        """Close the currently-active episode bound to ``session_id``.
+
+        Raises ``ValueError`` if no active episode exists. Works on both
+        background and foreground episodes (reconciliation may close a
+        background that never hardened).
+
+        Returns the id of the closed episode.
+        """
+        # Look up active episode BEFORE opening the SAVEPOINT so the
+        # "no active episode" error path doesn't leave a dangling SAVEPOINT.
+        active = self._active_episode_row(session_id)
+        if active is None:
+            raise ValueError(
+                f"No active episode for session_id={session_id!r}"
+            )
+
+        now = self._clock().isoformat()
+        conn = self._conn
+        conn.execute("SAVEPOINT episode_close_active")
+        try:
+            conn.execute(
+                "UPDATE episodes "
+                "SET ended_at = ?, close_reason = ?, outcome = ?, summary = ? "
+                "WHERE id = ?",
+                (now, close_reason, outcome, summary, active["id"]),
+            )
+            conn.execute(
+                "UPDATE episode_sessions "
+                "SET left_at = ? "
+                "WHERE episode_id = ? AND session_id = ? AND left_at IS NULL",
+                (now, active["id"], session_id),
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT episode_close_active")
+            conn.execute("RELEASE SAVEPOINT episode_close_active")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT episode_close_active")
+        conn.commit()
+        return active["id"]
+
     def _active_episode_row(self, session_id: str) -> sqlite3.Row | None:
         """Internal helper: returns the raw active episode Row (not Episode)."""
         return self._conn.execute(
