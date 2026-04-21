@@ -229,6 +229,40 @@ def _tool_definitions() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="memory.close_episode",
+            description=(
+                "Close the current session's active episode. outcome is one "
+                "of success / partial / abandoned / no_outcome."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["outcome"],
+                "additionalProperties": False,
+                "properties": {
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "success",
+                            "partial",
+                            "abandoned",
+                            "no_outcome",
+                        ],
+                    },
+                    "close_reason": {
+                        "type": "string",
+                        "enum": [
+                            "goal_complete",
+                            "plan_complete",
+                            "abandoned",
+                            "superseded",
+                            "session_end_reconciled",
+                        ],
+                    },
+                    "summary": {"type": "string"},
+                },
+            },
+        ),
     ]
 
 
@@ -468,6 +502,29 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 TextContent(
                     type="text",
                     text=json.dumps({"episode_id": episode_id}),
+                )
+            ]
+
+        if name == "memory.close_episode":
+            outcome = args["outcome"]
+            # Default close_reason: match outcome for the common paths.
+            default_reasons = {
+                "success": "goal_complete",
+                "partial": "superseded",
+                "abandoned": "abandoned",
+                "no_outcome": "session_end_reconciled",
+            }
+            close_reason = args.get("close_reason") or default_reasons[outcome]
+            closed_id = episodes.close_active(
+                session_id=observations._session_id,
+                outcome=outcome,
+                close_reason=close_reason,
+                summary=args.get("summary"),
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"closed_episode_id": closed_id}),
                 )
             ]
 
