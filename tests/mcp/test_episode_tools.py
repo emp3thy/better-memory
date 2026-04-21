@@ -96,3 +96,20 @@ class TestReconcileEpisodesTool:
 
         tool_names = {t.name for t in _tool_definitions()}
         assert "memory.reconcile_episodes" in tool_names
+
+
+class TestListEpisodesTool:
+    def test_filters_work_via_service(self, conn):
+        svc = EpisodeService(conn)
+        svc.open_background(session_id="s1", project="proj-a")
+        svc.open_background(session_id="s2", project="proj-b")
+
+        result = svc.list_episodes(project="proj-a")
+        assert len(result) == 1
+        assert result[0].project == "proj-a"
+
+    def test_tool_is_registered_in_factory(self):
+        from better_memory.mcp.server import _tool_definitions
+
+        tool_names = {t.name for t in _tool_definitions()}
+        assert "memory.list_episodes" in tool_names

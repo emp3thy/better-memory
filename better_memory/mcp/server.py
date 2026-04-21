@@ -275,6 +275,30 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="memory.list_episodes",
+            description=(
+                "List episodes with optional filters. For UI and LLM "
+                "introspection."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {"type": "string"},
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "success",
+                            "partial",
+                            "abandoned",
+                            "no_outcome",
+                        ],
+                    },
+                    "only_open": {"type": "boolean"},
+                },
+            },
+        ),
     ]
 
 
@@ -553,6 +577,29 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                     "started_at": e.started_at,
                 }
                 for e in open_episodes
+            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.list_episodes":
+            rows = episodes.list_episodes(
+                project=args.get("project"),
+                outcome=args.get("outcome"),
+                only_open=args.get("only_open", False),
+            )
+            payload = [
+                {
+                    "episode_id": e.id,
+                    "project": e.project,
+                    "tech": e.tech,
+                    "goal": e.goal,
+                    "started_at": e.started_at,
+                    "hardened_at": e.hardened_at,
+                    "ended_at": e.ended_at,
+                    "close_reason": e.close_reason,
+                    "outcome": e.outcome,
+                    "summary": e.summary,
+                }
+                for e in rows
             ]
             return [TextContent(type="text", text=json.dumps(payload))]
 
