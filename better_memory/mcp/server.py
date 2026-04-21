@@ -50,6 +50,7 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.search.hybrid import SearchResult
+from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
     KnowledgeSearchResult,
@@ -123,6 +124,7 @@ def _tool_definitions() -> list[Tool]:
                         "type": "string",
                         "enum": ["success", "failure", "neutral"],
                     },
+                    "tech": {"type": "string"},
                 },
             },
         ),
@@ -307,7 +309,8 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
     # succeed on their next call without a restart.
     _probe_ollama(config.ollama_host)
 
-    observations = ObservationService(memory_conn, embedder)
+    episodes = EpisodeService(memory_conn)
+    observations = ObservationService(memory_conn, embedder, episodes=episodes)
     knowledge = KnowledgeService(
         knowledge_conn,
         knowledge_base=config.knowledge_base,
@@ -343,6 +346,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 theme=args.get("theme"),
                 trigger_type=args.get("trigger_type"),
                 outcome=args.get("outcome", "neutral"),
+                tech=args.get("tech"),
             )
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
