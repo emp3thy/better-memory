@@ -52,6 +52,7 @@ hand, is NOT trigger-populated and must be written manually.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -132,7 +133,15 @@ class ObservationService:
         self._scope_resolver: Callable[[], str | None] = (
             scope_resolver if scope_resolver is not None else (lambda: None)
         )
-        self._session_id = session_id if session_id is not None else uuid4().hex
+        # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var > uuid4().
+        # The env var makes hook-written events (which read CLAUDE_SESSION_ID)
+        # and MCP-written observations share the same session id.
+        if session_id is not None:
+            self._session_id = session_id
+        else:
+            self._session_id = (
+                os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex
+            )
         # ``None`` defers to the resolved config value so tests can inject
         # ``False`` without having to monkeypatch the environment.
         self._audit_log_retrieved: bool = (
