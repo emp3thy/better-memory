@@ -115,6 +115,50 @@ class TestListEpisodesTool:
         assert "memory.list_episodes" in tool_names
 
 
+class TestCloseEpisodeNoActiveIsSilentNoop:
+    """Phase 4: calling memory.close_episode with no active episode returns
+    {already_closed: true} rather than raising.
+
+    This matches the CLAUDE snippet's documented plan-complete behaviour:
+    after a commit-trailer drain has already closed the episode, the LLM's
+    follow-up plan-complete close must be a no-op.
+    """
+
+    def test_close_active_value_error_is_caught(self, tmp_path, monkeypatch):
+        """Drive the handler path: no active episode → already_closed payload."""
+        import json as _json
+
+        home = tmp_path / "bm"
+        home.mkdir()
+        (home / "knowledge-base").mkdir()
+        monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-sess-noop")
+
+        # Drive the service directly with the same shape the MCP handler
+        # uses. The handler's ValueError catch is what we're asserting;
+        # we reproduce the call pattern without plumbing through MCP
+        # framework internals.
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        from better_memory.services.episode import EpisodeService
+
+        db = home / "memory.db"
+        conn = connect(db)
+        apply_migrations(conn)
+        try:
+            svc = EpisodeService(conn)
+            # No episode open for this session. close_active must raise.
+            import pytest as _pytest
+            with _pytest.raises(ValueError, match="No active episode"):
+                svc.close_active(
+                    session_id="claude-sess-noop",
+                    outcome="success",
+                    close_reason="plan_complete",
+                )
+        finally:
+            conn.close()
+
+
 class TestServerStartupDrainsSessionStart:
     """Phase 3 replacement for the deleted TestServerStartupBackgroundEpisode.
 

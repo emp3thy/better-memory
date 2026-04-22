@@ -94,6 +94,82 @@ Claude Code), the system still works:
 No data is lost — only the reconciliation prompt becomes unreliable
 because session ids change every process.
 
+## Post-commit hook (opt-in episode close)
+
+Unlike the session_start / observer / Stop hooks above (which are Claude
+Code hooks registered in `settings.json`), the post-commit hook is a
+**git-native hook** — a shell script at `.git/hooks/post-commit` in each
+repository where you want episode close-on-commit behaviour.
+
+### Why it's opt-in-per-commit
+
+A git repo typically sees many commits per goal — phased work, review
+fixes, WIP pushes. Auto-closing on every commit would churn episodes.
+Instead, the hook only fires when a commit message carries a
+`Closes-Episode: true` trailer. Normal commits are no-ops.
+
+### Installing per repo
+
+Create `.git/hooks/post-commit` in your project with executable
+permissions:
+
+```bash
+#!/bin/sh
+# Writes a commit_close marker to the better-memory spool iff the
+# just-committed message contains `Closes-Episode: <truthy>`. Never
+# raises; exits 0 regardless.
+exec uv run python -m better_memory.hooks.post_commit
+```
+
+Make it executable:
+
+```bash
+chmod +x .git/hooks/post-commit
+```
+
+Verify it runs without side-effects (no trailer → no marker written):
+
+```bash
+git commit --allow-empty -m "test: no trailer"
+ls ~/.better-memory/spool/
+```
+
+Expected: no new `*commit_close*.json` file.
+
+Now test the opt-in path:
+
+```bash
+git commit --allow-empty -m "test: close it
+
+Closes-Episode: true"
+ls ~/.better-memory/spool/
+```
+
+Expected: one new `*commit_close*.json` file. The next MCP retrieve
+(or a direct `uv run python -c 'from better_memory.services.spool import SpoolService; ...'`
+drain) will consume it.
+
+### Cross-platform notes
+
+- **Windows + git-bash / git-cmd:** the shebang `#!/bin/sh` is handled
+  by git's bundled bash. The `uv run` command must be on PATH for the
+  hook to find it.
+- **Windows + PowerShell:** no action needed; git always uses its
+  bundled bash for hook execution, not the parent shell.
+
+### Integrating plan-complete close
+
+The post-commit hook covers "I made a commit that closes the episode".
+The complementary path — "I just finished a multi-step plan run and
+want to close the episode cleanly" — stays LLM-invoked:
+
+```
+memory.close_episode(outcome="success", close_reason="plan_complete")
+```
+
+See the "Closing episodes on git commit + plan completion" section of
+the CLAUDE snippet for the LLM-side guidance.
+
 ## Verifying the hooks work
 
 After registering, start a Claude Code session and run:

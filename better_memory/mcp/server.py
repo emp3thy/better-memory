@@ -553,16 +553,32 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 "no_outcome": "session_end_reconciled",
             }
             close_reason = args.get("close_reason") or default_reasons[outcome]
-            closed_id = episodes.close_active(
-                session_id=observations._session_id,
-                outcome=outcome,
-                close_reason=close_reason,
-                summary=args.get("summary"),
-            )
+            try:
+                closed_id = episodes.close_active(
+                    session_id=observations._session_id,
+                    outcome=outcome,
+                    close_reason=close_reason,
+                    summary=args.get("summary"),
+                )
+            except ValueError:
+                # No active episode — already closed (e.g. by a prior commit-
+                # trailer drain) or never opened. Matches the "safe no-op"
+                # contract documented in the CLAUDE snippet's plan-complete
+                # section.
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {"closed_episode_id": None, "already_closed": True}
+                        ),
+                    )
+                ]
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"closed_episode_id": closed_id}),
+                    text=json.dumps(
+                        {"closed_episode_id": closed_id, "already_closed": False}
+                    ),
                 )
             ]
 

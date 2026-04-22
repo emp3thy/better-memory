@@ -54,3 +54,51 @@ ignores the prompt or proceeds without answering, default to `abandoned`
 **Non-blocking:** do not gate regular work on getting through the
 reconciliation queue. Ask about one or two and move on; the Episodes
 UI surface (Phase 8+) will eventually let users reconcile in bulk.
+
+## Closing episodes on git commit + plan completion
+
+### Git commits that complete the episode's goal
+
+When you are about to make a commit that **completes the goal of the
+currently-active episode**, add this trailer to the commit message:
+
+```
+Closes-Episode: true
+```
+
+Example:
+
+```
+Fix hook-to-drain race condition
+
+Closes-Episode: true
+```
+
+The post-commit hook (if installed — see `docs/hooks-setup.md`) writes a
+spool marker; SpoolService.drain closes the active episode as
+`outcome=success`, `close_reason=goal_complete` on the next drain.
+
+**Only add the trailer when the commit actually ends the goal.** Normal
+mid-plan commits, review-fix commits, and WIP commits should NOT carry
+the trailer — the episode stays open and continues to accrue
+observations across later commits.
+
+Truthy values: `true`, `yes`, `1` (case-insensitive). Anything else,
+including absence, is a no-op.
+
+### Plan-complete close
+
+When the `superpowers:executing-plans` workflow (or any equivalent
+multi-step plan run) finishes, close the active episode directly:
+
+```
+memory.close_episode(outcome="success", close_reason="plan_complete")
+```
+
+Do this INSTEAD of the commit trailer if the final commit of the plan
+doesn't itself map 1:1 to the plan's goal (e.g. the plan comprises
+several logically-separate commits and the final one isn't the
+"completion" commit). If the last commit of the plan already carries
+`Closes-Episode: true`, the plan-complete call is a no-op (the episode
+is already closed) — still safe to call; the drain layer swallows the
+no-active-episode ValueError.
