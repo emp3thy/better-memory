@@ -1158,3 +1158,104 @@ class TestShortCircuit:
             svc.synthesize(goal="g", tech=None, project="p")
         )
         assert len(fake.calls) == 1
+
+
+class TestRetrieveReflections:
+    def test_returns_buckets_for_project(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p", polarity="do",
+            status="confirmed", confidence=0.9,
+        )
+        _insert_reflection(
+            conn, refl_id="r2", project="p", polarity="dont",
+            status="pending_review", confidence=0.6,
+        )
+        _insert_reflection(
+            conn, refl_id="r3", project="p", polarity="neutral",
+            status="confirmed", confidence=0.3,
+        )
+        _insert_reflection(
+            conn, refl_id="r4", project="other", polarity="do",
+            status="confirmed", confidence=0.8,
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p")
+        assert {r["id"] for r in result["do"]} == {"r1"}
+        assert {r["id"] for r in result["dont"]} == {"r2"}
+        assert {r["id"] for r in result["neutral"]} == {"r3"}
+
+    def test_excludes_retired_and_superseded(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r-ok", project="p", polarity="do",
+            status="confirmed", confidence=0.5,
+        )
+        _insert_reflection(
+            conn, refl_id="r-retired", project="p", polarity="do",
+            status="retired", confidence=0.5,
+        )
+        _insert_reflection(
+            conn, refl_id="r-superseded", project="p", polarity="do",
+            status="superseded", confidence=0.5,
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p")
+        assert {r["id"] for r in result["do"]} == {"r-ok"}
+
+    def test_filter_by_phase(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r-plan", project="p", phase="planning",
+            status="confirmed", polarity="do",
+        )
+        _insert_reflection(
+            conn, refl_id="r-impl", project="p", phase="implementation",
+            status="confirmed", polarity="do",
+        )
+        _insert_reflection(
+            conn, refl_id="r-gen", project="p", phase="general",
+            status="confirmed", polarity="do",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p", phase="planning")
+        assert {r["id"] for r in result["do"]} == {"r-plan"}
+
+    def test_filter_by_polarity(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r-do", project="p", polarity="do",
+            status="confirmed",
+        )
+        _insert_reflection(
+            conn, refl_id="r-dont", project="p", polarity="dont",
+            status="confirmed",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p", polarity="dont")
+        assert result["do"] == []
+        assert {r["id"] for r in result["dont"]} == {"r-dont"}
+        assert result["neutral"] == []
+
+    def test_orders_by_confidence_desc(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r-high", project="p", polarity="do",
+            status="confirmed", confidence=0.9,
+        )
+        _insert_reflection(
+            conn, refl_id="r-low", project="p", polarity="do",
+            status="confirmed", confidence=0.2,
+        )
+        _insert_reflection(
+            conn, refl_id="r-mid", project="p", polarity="do",
+            status="confirmed", confidence=0.5,
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p")
+        assert [r["id"] for r in result["do"]] == ["r-high", "r-mid", "r-low"]

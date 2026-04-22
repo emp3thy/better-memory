@@ -936,3 +936,65 @@ class ReflectionSynthesisService:
             }
             buckets[r["polarity"]].append(entry)
         return buckets
+
+    # --------------------------------------------------------- retrieve_reflections
+    def retrieve_reflections(
+        self,
+        *,
+        project: str,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+    ) -> dict[str, list[dict]]:
+        """Return reflections bucketed by polarity, ordered by confidence DESC.
+
+        Filters:
+        - ``project``: required.
+        - ``tech``: matches same-tech rows OR cross-tech (tech IS NULL) rows.
+        - ``phase``: optional exact match.
+        - ``polarity``: optional exact match; non-matching buckets remain empty.
+
+        Excludes retired and superseded reflections. Includes pending_review
+        + confirmed.
+        """
+        clauses = [
+            "project = ?",
+            "status IN ('pending_review', 'confirmed')",
+        ]
+        params: list[object] = [project]
+        if tech is not None:
+            clauses.append("(tech = ? OR tech IS NULL)")
+            params.append(tech)
+        if phase is not None:
+            clauses.append("phase = ?")
+            params.append(phase)
+        if polarity is not None:
+            clauses.append("polarity = ?")
+            params.append(polarity)
+
+        where = " AND ".join(clauses)
+        rows = self._conn.execute(
+            f"""
+            SELECT id, title, phase, polarity, use_cases, hints,
+                   confidence, tech, evidence_count
+            FROM reflections
+            WHERE {where}
+            ORDER BY confidence DESC, updated_at DESC
+            """,
+            params,
+        ).fetchall()
+
+        buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
+        for r in rows:
+            entry = {
+                "id": r["id"],
+                "title": r["title"],
+                "phase": r["phase"],
+                "use_cases": r["use_cases"],
+                "hints": json.loads(r["hints"]),
+                "confidence": r["confidence"],
+                "tech": r["tech"],
+                "evidence_count": r["evidence_count"],
+            }
+            buckets[r["polarity"]].append(entry)
+        return buckets
