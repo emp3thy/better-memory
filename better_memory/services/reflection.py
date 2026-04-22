@@ -517,3 +517,69 @@ class ReflectionSynthesisService:
         return SynthesisResponse(
             new=new, augment=augment, merge=merge, ignore=ignore
         )
+
+    # ---------------------------------------------------------------- _apply_new
+    def _apply_new(
+        self, actions: list[NewAction], *, project: str
+    ) -> None:
+        """Insert new reflections + their source links + consume observations.
+
+        Idempotency: observation ids in ``source_observation_ids`` that
+        don't exist in the DB are dropped. Entries whose entire source
+        list turns out to be invalid are skipped silently.
+        """
+        from uuid import uuid4
+
+        now = self._clock().isoformat()
+        for action in actions:
+            valid_sources = self._filter_existing_observations(
+                action.source_observation_ids
+            )
+            if not valid_sources:
+                continue
+
+            confidence = max(0.1, min(1.0, action.confidence))
+            reflection_id = uuid4().hex
+
+            self._conn.execute(
+                """
+                INSERT INTO reflections (
+                    id, title, project, tech, phase, polarity, use_cases,
+                    hints, confidence, status, evidence_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_review', ?, ?, ?)
+                """,
+                (
+                    reflection_id, action.title, project, action.tech,
+                    action.phase, action.polarity, action.use_cases,
+                    json.dumps(action.hints), confidence,
+                    len(valid_sources), now, now,
+                ),
+            )
+            for obs_id in valid_sources:
+                self._conn.execute(
+                    "INSERT INTO reflection_sources "
+                    "(reflection_id, observation_id) VALUES (?, ?)",
+                    (reflection_id, obs_id),
+                )
+            placeholders = ",".join("?" * len(valid_sources))
+            self._conn.execute(
+                f"UPDATE observations SET status = 'consumed_into_reflection' "
+                f"WHERE id IN ({placeholders})",
+                valid_sources,
+            )
+
+    def _filter_existing_observations(
+        self, ids: list[str]
+    ) -> list[str]:
+        """Return the subset of ``ids`` that exist in ``observations``."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn.execute(
+            f"SELECT id FROM observations WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        existing = {r["id"] for r in rows}
+        # Preserve original order for determinism.
+        return [i for i in ids if i in existing]

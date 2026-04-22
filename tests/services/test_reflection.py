@@ -402,3 +402,139 @@ class TestParseResponse:
                 '"confidence": 0.5, "source_observation_ids": []}], '
                 '"augment": [], "merge": [], "ignore": []}'
             )
+
+
+class TestApplyNew:
+    def test_applies_single_new_reflection(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = NewAction(
+            title="Always test", phase="general", polarity="do",
+            use_cases="when writing code", hints=["write tests first"],
+            tech="python", confidence=0.6,
+            source_observation_ids=["obs-1"],
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+
+        refl = conn.execute(
+            "SELECT title, phase, polarity, confidence, tech, status, "
+            "evidence_count, hints, use_cases "
+            "FROM reflections WHERE title = ?",
+            ("Always test",),
+        ).fetchone()
+        assert refl is not None
+        assert refl["phase"] == "general"
+        assert refl["polarity"] == "do"
+        assert refl["confidence"] == 0.6
+        assert refl["tech"] == "python"
+        assert refl["status"] == "pending_review"
+        assert refl["evidence_count"] == 1
+        import json as _json
+        assert _json.loads(refl["hints"]) == ["write tests first"]
+
+        obs = conn.execute(
+            "SELECT status FROM observations WHERE id = ?", ("obs-1",)
+        ).fetchone()
+        assert obs["status"] == "consumed_into_reflection"
+
+    def test_clamps_confidence_above_1(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = NewAction(
+            title="t", phase="general", polarity="do",
+            use_cases="uc", hints=[], tech=None,
+            confidence=1.5,  # above max
+            source_observation_ids=["obs-1"],
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+        row = conn.execute(
+            "SELECT confidence FROM reflections WHERE title = ?", ("t",)
+        ).fetchone()
+        assert row["confidence"] == 1.0
+
+    def test_clamps_confidence_below_0_1(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = NewAction(
+            title="t", phase="general", polarity="do",
+            use_cases="uc", hints=[], tech=None,
+            confidence=0.05,  # below min
+            source_observation_ids=["obs-1"],
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+        row = conn.execute(
+            "SELECT confidence FROM reflections WHERE title = ?", ("t",)
+        ).fetchone()
+        assert row["confidence"] == 0.1
+
+    def test_drops_unknown_source_observations(self, conn, fixed_clock):
+        """Unknown obs ids are dropped; reflection still created as long as >=1 source survives."""
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = NewAction(
+            title="t", phase="general", polarity="do",
+            use_cases="uc", hints=[], tech=None, confidence=0.5,
+            source_observation_ids=["obs-1", "obs-bogus"],  # one real, one fake
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+
+        # Reflection exists, evidence_count == 1 (only real source counted).
+        refl = conn.execute(
+            "SELECT evidence_count FROM reflections WHERE title = ?", ("t",)
+        ).fetchone()
+        assert refl["evidence_count"] == 1
+
+        # Only obs-1 linked; obs-bogus was silently dropped.
+        sources = conn.execute(
+            "SELECT observation_id FROM reflection_sources "
+            "JOIN reflections ON reflections.id = reflection_sources.reflection_id "
+            "WHERE reflections.title = ?",
+            ("t",),
+        ).fetchall()
+        assert {s["observation_id"] for s in sources} == {"obs-1"}
+
+    def test_skips_entry_when_all_sources_invalid(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = NewAction(
+            title="t", phase="general", polarity="do",
+            use_cases="uc", hints=[], tech=None, confidence=0.5,
+            source_observation_ids=["obs-bogus"],
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM reflections"
+        ).fetchone()["c"]
+        assert count == 0
