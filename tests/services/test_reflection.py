@@ -289,7 +289,6 @@ from better_memory.services.reflection import (  # noqa: E402
     AugmentAction,
     MergeAction,
     NewAction,
-    SynthesisResponse,
     SynthesisResponseError,
 )
 
@@ -938,7 +937,7 @@ class TestSynthesizeOrchestrator:
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             svc.synthesize(goal="g2", tech=None, project="p")
         )
 
@@ -982,7 +981,7 @@ class TestSynthesizeOrchestrator:
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
         with pytest.raises(SynthesisResponseError):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 svc.synthesize(goal="g", tech=None, project="p")
             )
 
@@ -1010,7 +1009,7 @@ class TestSynthesizeOrchestrator:
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             svc.synthesize(goal="g", tech=None, project="p")
         )
         wm = conn.execute(
@@ -1028,7 +1027,7 @@ class TestSynthesizeOrchestrator:
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             svc.synthesize(goal="g", tech=None, project="p")
         )
         wm = conn.execute(
@@ -1036,6 +1035,73 @@ class TestSynthesizeOrchestrator:
         ).fetchone()
         assert wm is not None
         assert wm["last_goal"] == "g"
+
+    def test_savepoint_rolls_back_on_apply_failure(self, conn, fixed_clock, monkeypatch):
+        """If an apply method raises mid-synthesis, all state must roll back.
+
+        This is the true SAVEPOINT-rollback test: the exception fires INSIDE
+        the SAVEPOINT (from _apply_merge), not before it opens. Verifies
+        that _apply_new's effects also roll back — the SAVEPOINT covers
+        all four apply methods + watermark as a unit.
+        """
+        import json as _json
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        # Response has a new action (succeeds) + a merge action (forced to raise).
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [
+                    {
+                        "title": "Would be created",
+                        "phase": "general", "polarity": "do",
+                        "use_cases": "uc", "hints": [], "tech": None,
+                        "confidence": 0.5,
+                        "source_observation_ids": ["obs-1"],
+                    }
+                ],
+                "augment": [],
+                "merge": [
+                    {"source_id": "irrelevant", "target_id": "also",
+                     "justification": "forced-fail"}
+                ],
+                "ignore": [],
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("forced apply failure")
+
+        monkeypatch.setattr(svc, "_apply_merge", boom)
+
+        import asyncio
+        with pytest.raises(RuntimeError, match="forced apply failure"):
+            asyncio.run(svc.synthesize(goal="g", tech=None, project="p"))
+
+        # Nothing from _apply_new persists.
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM reflections"
+        ).fetchone()["c"]
+        assert count == 0
+
+        # Watermark not written (upsert is inside SAVEPOINT, after apply).
+        wm_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM synthesis_runs"
+        ).fetchone()["c"]
+        assert wm_count == 0
+
+        # obs-1 not marked consumed (the _apply_new consumed update was rolled back).
+        obs = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-1'"
+        ).fetchone()
+        assert obs["status"] == "active"
 
 
 class TestShortCircuit:
@@ -1058,7 +1124,7 @@ class TestShortCircuit:
         fake = FakeChat(responses=[])
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             svc.synthesize(goal="resume goal", tech=None, project="p")
         )
 
@@ -1085,7 +1151,7 @@ class TestShortCircuit:
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             svc.synthesize(goal="new goal", tech=None, project="p")
         )
         # LLM WAS called — different goal.
@@ -1108,7 +1174,7 @@ class TestShortCircuit:
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             svc.synthesize(goal="same goal", tech=None, project="p")
         )
         assert len(fake.calls) == 1
@@ -1140,7 +1206,7 @@ class TestShortCircuit:
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             svc.synthesize(goal="resume", tech=None, project="p")
         )
         assert len(fake.calls) == 1
@@ -1154,7 +1220,7 @@ class TestShortCircuit:
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             svc.synthesize(goal="g", tech=None, project="p")
         )
         assert len(fake.calls) == 1

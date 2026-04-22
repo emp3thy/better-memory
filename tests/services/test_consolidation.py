@@ -22,7 +22,6 @@ from better_memory.services.consolidation import (
     DryRunResult,
     ObservationCluster,
     ObservationForPrompt,
-    SweepCandidate,
     build_draft_prompt,
     existing_insight_for_cluster,
     find_clusters,

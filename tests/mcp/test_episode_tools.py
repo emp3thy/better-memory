@@ -126,7 +126,6 @@ class TestCloseEpisodeNoActiveIsSilentNoop:
 
     def test_close_active_value_error_is_caught(self, tmp_path, monkeypatch):
         """Drive the handler path: no active episode → already_closed payload."""
-        import json as _json
 
         home = tmp_path / "bm"
         home.mkdir()
@@ -164,10 +163,11 @@ class TestStartEpisodeReturnsReflections:
 
     def test_service_level_returns_reflections(self, conn):
         """ReflectionSynthesisService.synthesize returns bucketed reflections."""
-        from better_memory.llm.fake import FakeChat
-        from better_memory.services.reflection import ReflectionSynthesisService
         import asyncio
         import json as _json
+
+        from better_memory.llm.fake import FakeChat
+        from better_memory.services.reflection import ReflectionSynthesisService
 
         fake = FakeChat(
             responses=[_json.dumps({
@@ -175,7 +175,7 @@ class TestStartEpisodeReturnsReflections:
             })]
         )
         svc = ReflectionSynthesisService(conn, chat=fake)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             svc.synthesize(goal="g", tech=None, project="p")
         )
         assert set(result.keys()) == {"do", "dont", "neutral"}
@@ -224,7 +224,7 @@ class TestStartEpisodeReturnsReflections:
             names = {t.name for t in _tool_definitions()}
             assert "memory.start_episode" in names
         finally:
-            asyncio.get_event_loop().run_until_complete(cleanup())
+            asyncio.run(cleanup())
 
 
 class TestServerStartupDrainsSessionStart:
