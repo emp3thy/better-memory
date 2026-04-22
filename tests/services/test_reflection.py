@@ -283,3 +283,122 @@ class TestBuildPrompt:
         a = svc.build_prompt(goal="g", tech=None, context=ctx)
         b = svc.build_prompt(goal="g", tech=None, context=ctx)
         assert a == b
+
+
+from better_memory.services.reflection import (  # noqa: E402
+    AugmentAction,
+    MergeAction,
+    NewAction,
+    SynthesisResponse,
+    SynthesisResponseError,
+)
+
+
+class TestParseResponse:
+    def test_empty_response_returns_empty_buckets(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        resp = svc.parse_response(
+            '{"new": [], "augment": [], "merge": [], "ignore": []}'
+        )
+        assert resp.new == []
+        assert resp.augment == []
+        assert resp.merge == []
+        assert resp.ignore == []
+
+    def test_valid_new_action(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        resp = svc.parse_response(
+            '{"new": [{"title": "t", "phase": "general", "polarity": "do", '
+            '"use_cases": "uc", "hints": ["h1"], "tech": null, '
+            '"confidence": 0.7, "source_observation_ids": ["o1", "o2"]}], '
+            '"augment": [], "merge": [], "ignore": []}'
+        )
+        assert len(resp.new) == 1
+        n = resp.new[0]
+        assert n.title == "t"
+        assert n.phase == "general"
+        assert n.polarity == "do"
+        assert n.use_cases == "uc"
+        assert n.hints == ["h1"]
+        assert n.tech is None
+        assert n.confidence == 0.7
+        assert n.source_observation_ids == ["o1", "o2"]
+
+    def test_valid_augment_action(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        resp = svc.parse_response(
+            '{"new": [], "augment": [{"reflection_id": "r1", '
+            '"add_hints": ["x"], "rewrite_use_cases": null, '
+            '"confidence_delta": 0.1, "add_source_observation_ids": ["o1"]}], '
+            '"merge": [], "ignore": []}'
+        )
+        assert len(resp.augment) == 1
+        a = resp.augment[0]
+        assert a.reflection_id == "r1"
+        assert a.add_hints == ["x"]
+        assert a.rewrite_use_cases is None
+        assert a.confidence_delta == 0.1
+        assert a.add_source_observation_ids == ["o1"]
+
+    def test_valid_merge_action(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        resp = svc.parse_response(
+            '{"new": [], "augment": [], "merge": [{"source_id": "s", '
+            '"target_id": "t", "justification": "dupes"}], "ignore": []}'
+        )
+        assert len(resp.merge) == 1
+        m = resp.merge[0]
+        assert m.source_id == "s"
+        assert m.target_id == "t"
+        assert m.justification == "dupes"
+
+    def test_valid_ignore(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        resp = svc.parse_response(
+            '{"new": [], "augment": [], "merge": [], "ignore": ["o1", "o2"]}'
+        )
+        assert resp.ignore == ["o1", "o2"]
+
+    def test_malformed_json_raises(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        with pytest.raises(SynthesisResponseError):
+            svc.parse_response("not json")
+
+    def test_missing_top_level_key_raises(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        with pytest.raises(SynthesisResponseError):
+            svc.parse_response('{"new": []}')  # missing augment/merge/ignore
+
+    def test_wrong_top_level_type_raises(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        with pytest.raises(SynthesisResponseError):
+            svc.parse_response('["not", "an", "object"]')
+
+    def test_unknown_extra_field_silently_dropped(self, conn, fixed_clock):
+        """LLMs may add commentary — we drop unknown keys rather than reject."""
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        resp = svc.parse_response(
+            '{"new": [], "augment": [], "merge": [], "ignore": [], '
+            '"rationale": "some extra commentary from the LLM"}'
+        )
+        assert resp.new == []
+        assert resp.augment == []
+        assert resp.merge == []
+        assert resp.ignore == []
+
+    def test_new_missing_required_field_raises(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        with pytest.raises(SynthesisResponseError):
+            svc.parse_response(
+                '{"new": [{"title": "t"}], "augment": [], "merge": [], "ignore": []}'
+            )
+
+    def test_new_invalid_enum_raises(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        with pytest.raises(SynthesisResponseError):
+            svc.parse_response(
+                '{"new": [{"title": "t", "phase": "bogus", "polarity": "do", '
+                '"use_cases": "uc", "hints": [], "tech": null, '
+                '"confidence": 0.5, "source_observation_ids": []}], '
+                '"augment": [], "merge": [], "ignore": []}'
+            )

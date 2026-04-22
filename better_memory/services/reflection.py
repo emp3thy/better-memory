@@ -25,6 +25,7 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -74,6 +75,164 @@ class SynthesisContext:
     reflections: list[ReflectionForPrompt]
     observations: list[ObservationForPrompt]
     last_run_at: str | None  # ISO-8601 timestamp of the last synthesis, or None
+
+
+class SynthesisResponseError(ValueError):
+    """Raised when the LLM response is malformed, wrong-shape, or invalid."""
+
+
+_VALID_PHASES = {"planning", "implementation", "general"}
+_VALID_POLARITIES = {"do", "dont", "neutral"}
+
+
+@dataclass(frozen=True)
+class NewAction:
+    title: str
+    phase: str
+    polarity: str
+    use_cases: str
+    hints: list[str]
+    tech: str | None
+    confidence: float
+    source_observation_ids: list[str]
+
+
+@dataclass(frozen=True)
+class AugmentAction:
+    reflection_id: str
+    add_hints: list[str]
+    rewrite_use_cases: str | None
+    confidence_delta: float
+    add_source_observation_ids: list[str]
+
+
+@dataclass(frozen=True)
+class MergeAction:
+    source_id: str
+    target_id: str
+    justification: str
+
+
+@dataclass(frozen=True)
+class SynthesisResponse:
+    new: list[NewAction]
+    augment: list[AugmentAction]
+    merge: list[MergeAction]
+    ignore: list[str]
+
+
+def _require(d: dict, key: str, kind: type, what: str) -> object:
+    """Fetch ``d[key]`` and validate its type. Raise otherwise."""
+    if key not in d:
+        raise SynthesisResponseError(f"{what}: missing required field '{key}'")
+    value = d[key]
+    if not isinstance(value, kind):
+        raise SynthesisResponseError(
+            f"{what}.{key}: expected {kind.__name__}, got {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str(d: dict, key: str, what: str) -> str:
+    v = _require(d, key, str, what)
+    assert isinstance(v, str)
+    return v
+
+
+def _require_list_of_str(d: dict, key: str, what: str) -> list[str]:
+    raw = _require(d, key, list, what)
+    assert isinstance(raw, list)
+    out: list[str] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, str):
+            raise SynthesisResponseError(
+                f"{what}.{key}[{i}]: expected str, got {type(item).__name__}"
+            )
+        out.append(item)
+    return out
+
+
+def _require_number(d: dict, key: str, what: str) -> float:
+    if key not in d:
+        raise SynthesisResponseError(f"{what}: missing required field '{key}'")
+    v = d[key]
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise SynthesisResponseError(
+            f"{what}.{key}: expected number, got {type(v).__name__}"
+        )
+    return float(v)
+
+
+def _parse_new(item: object) -> NewAction:
+    if not isinstance(item, dict):
+        raise SynthesisResponseError(
+            f"new entry must be object, got {type(item).__name__}"
+        )
+    what = "new entry"
+    phase = _require_str(item, "phase", what)
+    if phase not in _VALID_PHASES:
+        raise SynthesisResponseError(
+            f"{what}.phase: expected one of {sorted(_VALID_PHASES)}, got {phase!r}"
+        )
+    polarity = _require_str(item, "polarity", what)
+    if polarity not in _VALID_POLARITIES:
+        raise SynthesisResponseError(
+            f"{what}.polarity: expected one of {sorted(_VALID_POLARITIES)}, "
+            f"got {polarity!r}"
+        )
+    tech_raw = item.get("tech")
+    if tech_raw is not None and not isinstance(tech_raw, str):
+        raise SynthesisResponseError(
+            f"{what}.tech: expected str or null, got {type(tech_raw).__name__}"
+        )
+    return NewAction(
+        title=_require_str(item, "title", what),
+        phase=phase,
+        polarity=polarity,
+        use_cases=_require_str(item, "use_cases", what),
+        hints=_require_list_of_str(item, "hints", what),
+        tech=tech_raw,
+        confidence=_require_number(item, "confidence", what),
+        source_observation_ids=_require_list_of_str(
+            item, "source_observation_ids", what
+        ),
+    )
+
+
+def _parse_augment(item: object) -> AugmentAction:
+    if not isinstance(item, dict):
+        raise SynthesisResponseError(
+            f"augment entry must be object, got {type(item).__name__}"
+        )
+    what = "augment entry"
+    rewrite_raw = item.get("rewrite_use_cases")
+    if rewrite_raw is not None and not isinstance(rewrite_raw, str):
+        raise SynthesisResponseError(
+            f"{what}.rewrite_use_cases: expected str or null, "
+            f"got {type(rewrite_raw).__name__}"
+        )
+    return AugmentAction(
+        reflection_id=_require_str(item, "reflection_id", what),
+        add_hints=_require_list_of_str(item, "add_hints", what),
+        rewrite_use_cases=rewrite_raw,
+        confidence_delta=_require_number(item, "confidence_delta", what),
+        add_source_observation_ids=_require_list_of_str(
+            item, "add_source_observation_ids", what
+        ),
+    )
+
+
+def _parse_merge(item: object) -> MergeAction:
+    if not isinstance(item, dict):
+        raise SynthesisResponseError(
+            f"merge entry must be object, got {type(item).__name__}"
+        )
+    what = "merge entry"
+    return MergeAction(
+        source_id=_require_str(item, "source_id", what),
+        target_id=_require_str(item, "target_id", what),
+        justification=_require_str(item, "justification", what),
+    )
 
 
 class ReflectionSynthesisService:
@@ -307,3 +466,54 @@ class ReflectionSynthesisService:
         lines.append("}")
 
         return "\n".join(lines)
+
+    # ----------------------------------------------------------- parse_response
+    def parse_response(self, raw: str) -> SynthesisResponse:
+        """Parse and validate the LLM response JSON.
+
+        Shape check:
+        - Top level must be an object with keys ``new``, ``augment``,
+          ``merge``, ``ignore`` (all arrays). Missing keys → error.
+        - Each array entry must match its dataclass shape. Missing
+          required fields or invalid enum values → error.
+        - Extra fields at any level are silently dropped (LLMs may
+          emit narrative commentary).
+
+        Idempotency (dropping unknown observation/reflection ids)
+        happens in the apply methods, not here, because it needs
+        DB access.
+        """
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SynthesisResponseError(f"invalid JSON: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise SynthesisResponseError(
+                "top-level response must be a JSON object"
+            )
+
+        for key in ("new", "augment", "merge", "ignore"):
+            if key not in data:
+                raise SynthesisResponseError(
+                    f"missing required top-level key: {key}"
+                )
+            if not isinstance(data[key], list):
+                raise SynthesisResponseError(
+                    f"top-level key {key} must be a list"
+                )
+
+        new = [_parse_new(item) for item in data["new"]]
+        augment = [_parse_augment(item) for item in data["augment"]]
+        merge = [_parse_merge(item) for item in data["merge"]]
+        ignore: list[str] = []
+        for item in data["ignore"]:
+            if not isinstance(item, str):
+                raise SynthesisResponseError(
+                    f"ignore entry must be a string, got {type(item).__name__}"
+                )
+            ignore.append(item)
+
+        return SynthesisResponse(
+            new=new, augment=augment, merge=merge, ignore=ignore
+        )
