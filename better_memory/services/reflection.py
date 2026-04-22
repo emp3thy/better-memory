@@ -760,3 +760,121 @@ class ReflectionSynthesisService:
                 "SET evidence_count = ?, updated_at = ? WHERE id = ?",
                 (new_count, now, action.target_id),
             )
+
+    # ------------------------------------------------------------ _apply_ignore
+    def _apply_ignore(self, observation_ids: list[str]) -> None:
+        """Mark observations as consumed_without_reflection.
+
+        Idempotency: ids that don't exist are silently dropped by the
+        IN filter.
+        """
+        valid = self._filter_existing_observations(observation_ids)
+        if not valid:
+            return
+        placeholders = ",".join("?" * len(valid))
+        self._conn.execute(
+            f"UPDATE observations SET status = 'consumed_without_reflection' "
+            f"WHERE id IN ({placeholders})",
+            valid,
+        )
+
+    # --------------------------------------------------------- _upsert_watermark
+    def _upsert_watermark(
+        self, *, project: str, tech: str | None, goal: str
+    ) -> None:
+        """Record that synthesis just ran for (project, tech) with the given goal."""
+        tech_key = tech if tech is not None else ""
+        now = self._clock().isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(project, tech) DO UPDATE SET
+                last_run_at = excluded.last_run_at,
+                last_goal   = excluded.last_goal
+            """,
+            (project, tech_key, now, goal),
+        )
+
+    # ----------------------------------------------------------------- synthesize
+    async def synthesize(
+        self, *, goal: str, tech: str | None, project: str
+    ) -> dict[str, list[dict]]:
+        """End-to-end: load context, prompt, parse, apply atomically, return.
+
+        All four apply methods run within a single SAVEPOINT; any
+        exception rolls the whole synthesis back. Watermark is upserted
+        inside the SAVEPOINT so a parse/apply failure also rolls back
+        the watermark (the next ``synthesize`` call will re-attempt).
+        """
+        context = self.load_context(project=project, tech=tech)
+        prompt = self.build_prompt(goal=goal, tech=tech, context=context)
+        raw = await self._chat.complete(prompt)
+        response = self.parse_response(raw)
+
+        conn = self._conn
+        conn.execute("SAVEPOINT reflection_synthesize")
+        try:
+            self._apply_new(response.new, project=project)
+            self._apply_augment(response.augment)
+            self._apply_merge(response.merge)
+            self._apply_ignore(response.ignore)
+            self._upsert_watermark(project=project, tech=tech, goal=goal)
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT reflection_synthesize")
+            conn.execute("RELEASE SAVEPOINT reflection_synthesize")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT reflection_synthesize")
+        conn.commit()
+
+        return self._bucketed_reflections(project=project, tech=tech)
+
+    def _bucketed_reflections(
+        self, *, project: str, tech: str | None
+    ) -> dict[str, list[dict]]:
+        """Return current reflections for (project, tech?) bucketed by polarity.
+
+        Ordered by confidence DESC, updated_at DESC per spec §5.5.
+        Includes pending_review + confirmed; retired/superseded excluded.
+        """
+        if tech is None:
+            rows = self._conn.execute(
+                """
+                SELECT id, title, phase, polarity, use_cases, hints,
+                       confidence, tech, evidence_count
+                FROM reflections
+                WHERE project = ?
+                  AND status IN ('pending_review', 'confirmed')
+                ORDER BY confidence DESC, updated_at DESC
+                """,
+                (project,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT id, title, phase, polarity, use_cases, hints,
+                       confidence, tech, evidence_count
+                FROM reflections
+                WHERE project = ?
+                  AND status IN ('pending_review', 'confirmed')
+                  AND (tech = ? OR tech IS NULL)
+                ORDER BY confidence DESC, updated_at DESC
+                """,
+                (project, tech),
+            ).fetchall()
+
+        buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
+        for r in rows:
+            entry = {
+                "id": r["id"],
+                "title": r["title"],
+                "phase": r["phase"],
+                "use_cases": r["use_cases"],
+                "hints": json.loads(r["hints"]),
+                "confidence": r["confidence"],
+                "tech": r["tech"],
+                "evidence_count": r["evidence_count"],
+            }
+            buckets[r["polarity"]].append(entry)
+        return buckets

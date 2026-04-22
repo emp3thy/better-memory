@@ -878,3 +878,161 @@ class TestApplyMerge:
             "SELECT COUNT(*) AS c FROM reflection_sources WHERE reflection_id = 'r1'"
         ).fetchone()["c"]
         assert src_count == 1
+
+
+class TestApplyIgnore:
+    def test_marks_observations_consumed_without_reflection(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        _insert_obs(conn, obs_id="obs-2", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc._apply_ignore(["obs-1", "obs-2", "obs-bogus"])
+        conn.commit()
+
+        rows = conn.execute(
+            "SELECT id, status FROM observations ORDER BY id"
+        ).fetchall()
+        by_id = {r["id"]: r["status"] for r in rows}
+        assert by_id["obs-1"] == "consumed_without_reflection"
+        assert by_id["obs-2"] == "consumed_without_reflection"
+
+
+class TestSynthesizeOrchestrator:
+    def test_end_to_end_with_fake_chat(self, conn, fixed_clock):
+        import json as _json
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        # FakeChat response: create one new reflection from obs-1.
+        fake = FakeChat(
+            responses=[
+                _json.dumps({
+                    "new": [
+                        {
+                            "title": "A new lesson",
+                            "phase": "general",
+                            "polarity": "do",
+                            "use_cases": "uc",
+                            "hints": ["do X"],
+                            "tech": None,
+                            "confidence": 0.7,
+                            "source_observation_ids": ["obs-1"],
+                        }
+                    ],
+                    "augment": [],
+                    "merge": [],
+                    "ignore": [],
+                })
+            ]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="g2", tech=None, project="p")
+        )
+
+        # Reflection was created.
+        refl = conn.execute(
+            "SELECT title FROM reflections"
+        ).fetchone()
+        assert refl["title"] == "A new lesson"
+
+        # obs-1 consumed into reflection.
+        obs = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-1'"
+        ).fetchone()
+        assert obs["status"] == "consumed_into_reflection"
+
+        # Watermark upserted.
+        wm = conn.execute(
+            "SELECT last_run_at, last_goal FROM synthesis_runs "
+            "WHERE project = 'p' AND tech = ''"
+        ).fetchone()
+        assert wm is not None
+        assert wm["last_goal"] == "g2"
+
+        # Result: dict[do, dont, neutral] with the new reflection in `do`.
+        assert len(result["do"]) == 1
+        assert result["do"][0]["title"] == "A new lesson"
+        assert result["dont"] == []
+        assert result["neutral"] == []
+
+    def test_atomic_rollback_on_parse_error(self, conn, fixed_clock):
+        """Malformed LLM response → nothing committed, no watermark."""
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        fake = FakeChat(responses=["not json"])
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        with pytest.raises(SynthesisResponseError):
+            asyncio.get_event_loop().run_until_complete(
+                svc.synthesize(goal="g", tech=None, project="p")
+            )
+
+        # No reflection, no watermark, obs unchanged.
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM reflections"
+        ).fetchone()["c"]
+        assert count == 0
+        wm = conn.execute(
+            "SELECT COUNT(*) AS c FROM synthesis_runs"
+        ).fetchone()["c"]
+        assert wm == 0
+        obs = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-1'"
+        ).fetchone()
+        assert obs["status"] == "active"
+
+    def test_tech_defaults_to_empty_string_in_watermark(self, conn, fixed_clock):
+        """tech=None → synthesis_runs.tech=''."""
+        import json as _json
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [], "ignore": []
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="g", tech=None, project="p")
+        )
+        wm = conn.execute(
+            "SELECT tech FROM synthesis_runs WHERE project = 'p'"
+        ).fetchone()
+        assert wm["tech"] == ""
+
+    def test_empty_response_still_updates_watermark(self, conn, fixed_clock):
+        """No actions → still record that synthesis ran."""
+        import json as _json
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [], "ignore": []
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="g", tech=None, project="p")
+        )
+        wm = conn.execute(
+            "SELECT last_run_at, last_goal FROM synthesis_runs WHERE project = 'p'"
+        ).fetchone()
+        assert wm is not None
+        assert wm["last_goal"] == "g"
