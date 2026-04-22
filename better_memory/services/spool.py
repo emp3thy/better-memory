@@ -62,6 +62,12 @@ class SpoolService:
     already has an active episode. Guarded by per-event try/except so the
     side-effect can never cause drain to lose data. ``episodes=None`` (the
     default) preserves Phase 1/2 behaviour exactly.
+
+    For ``commit_close`` events (Phase 4: opt-in post-commit hook), drain
+    calls ``episodes.close_active(session_id=..., outcome='success',
+    close_reason='goal_complete')``. Idempotent: if no active episode exists
+    for the session the ValueError is swallowed so drain stays resilient
+    against stale or duplicate markers.
     """
 
     def __init__(
@@ -130,15 +136,18 @@ class SpoolService:
         # subsequent drain will re-read those files and retry.
         self._conn.commit()
 
-        # ---- Pass 2.5: Phase 3 side-effects on committed payloads ---------
+        # ---- Pass 2.5: Phase 3/4 side-effects on committed payloads -------
         # Runs AFTER the batch commit so the hook_events rows are durable
         # before any episode-lifecycle side-effect fires. Each side-effect
         # is guarded individually so one bad payload cannot block the rest
         # of the batch from being unlinked.
         if self._episodes is not None:
             for payload in inserted_payloads:
-                if payload.get("event_type") == "session_start":
+                event_type = payload.get("event_type")
+                if event_type == "session_start":
                     self._maybe_open_episode_for_session_start(payload)
+                elif event_type == "commit_close":
+                    self._maybe_close_episode_for_commit(payload)
 
         # ---- Pass 3: unlink committed files -------------------------------
         # Only reached if commit() succeeded. Every file in ``inserted`` now
@@ -217,6 +226,34 @@ class SpoolService:
                 self._episodes.open_background(
                     session_id=session_id, project=project
                 )
+        except Exception:  # noqa: BLE001 — drain side-effects must not fail drain
+            pass
+
+    def _maybe_close_episode_for_commit(
+        self, payload: dict[str, object]
+    ) -> None:
+        """Close the active episode for a drained commit_close event.
+
+        Uses ``EpisodeService.close_active`` with ``outcome='success'``
+        and ``close_reason='goal_complete'`` per spec §3. Swallows the
+        ValueError that close_active raises when no active episode
+        exists — a stale or duplicate commit_close marker must not
+        fail drain.
+        """
+        if self._episodes is None:
+            return
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        try:
+            self._episodes.close_active(
+                session_id=session_id,
+                outcome="success",
+                close_reason="goal_complete",
+            )
+        except ValueError:
+            # No active episode for this session — stale/duplicate marker.
+            pass
         except Exception:  # noqa: BLE001 — drain side-effects must not fail drain
             pass
 
