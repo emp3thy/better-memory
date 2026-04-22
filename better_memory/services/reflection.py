@@ -200,3 +200,110 @@ class ReflectionSynthesisService:
             observations=observations,
             last_run_at=last_run_at,
         )
+
+    # ------------------------------------------------------------- build_prompt
+    def build_prompt(
+        self,
+        *,
+        goal: str,
+        tech: str | None,
+        context: SynthesisContext,
+    ) -> str:
+        """Render the synthesis prompt per spec §5.2.
+
+        Deterministic in its inputs — same goal/tech/context always
+        produces the same prompt. Safe to cache.
+        """
+        lines: list[str] = []
+        lines.append(
+            "You are evaluating memory consolidation for a coding project."
+        )
+        lines.append("")
+        lines.append(f"GOAL: {goal}")
+        lines.append(f"TECH: {tech if tech else '(unspecified)'}")
+        lines.append("")
+
+        # Existing reflections section.
+        lines.append(
+            "EXISTING REFLECTIONS (you may augment or merge these):"
+        )
+        if not context.reflections:
+            lines.append("  (none)")
+        else:
+            for r in context.reflections:
+                tech_str = r.tech if r.tech else "any-tech"
+                lines.append(
+                    f"- id={r.id} [{r.polarity}/{r.phase}/{tech_str}] "
+                    f"(confidence {r.confidence}, status {r.status})"
+                )
+                lines.append(f"  title: {r.title}")
+                lines.append(f"  use_cases: {r.use_cases}")
+                lines.append(f"  hints: {r.hints}")
+        lines.append("")
+
+        # New observations section.
+        lines.append(
+            "NEW OBSERVATIONS since last synthesis (summarise "
+            "into new reflections, augment existing, merge duplicates, "
+            "or ignore):"
+        )
+        if not context.observations:
+            lines.append("  (none)")
+        else:
+            for o in context.observations:
+                tech_str = o.tech if o.tech else "any-tech"
+                lines.append(
+                    f"- id={o.id} (outcome={o.outcome}, "
+                    f"component={o.component or '-'}, "
+                    f"theme={o.theme or '-'}, tech={tech_str})"
+                )
+                lines.append(
+                    f'  episode goal="{o.episode_goal or ""}" '
+                    f"episode outcome={o.episode_outcome or ''}"
+                )
+                lines.append(f"  content: {o.content}")
+        lines.append("")
+
+        # Response-shape instructions.
+        lines.append(
+            "Respond ONLY with a JSON object matching this exact shape:"
+        )
+        lines.append("{")
+        lines.append('  "new": [')
+        lines.append(
+            "    {"
+            '"title": "...", '
+            '"phase": "planning"|"implementation"|"general", '
+            '"polarity": "do"|"dont"|"neutral", '
+            '"use_cases": "...", '
+            '"hints": ["..."], '
+            '"tech": "..." or null, '
+            '"confidence": 0.1..1.0, '
+            '"source_observation_ids": ["..."]'
+            "}"
+        )
+        lines.append("  ],")
+        lines.append('  "augment": [')
+        lines.append(
+            "    {"
+            '"reflection_id": "...", '
+            '"add_hints": ["..."], '
+            '"rewrite_use_cases": "..." or null, '
+            '"confidence_delta": 0.0, '
+            '"add_source_observation_ids": ["..."]'
+            "}"
+        )
+        lines.append("  ],")
+        lines.append('  "merge": [')
+        lines.append(
+            "    {"
+            '"source_id": "...", '
+            '"target_id": "...", '
+            '"justification": "..."'
+            "}"
+        )
+        lines.append("  ],")
+        lines.append('  "ignore": ["observation_id", ...]')
+        lines.append("}")
+
+        return "\n".join(lines)

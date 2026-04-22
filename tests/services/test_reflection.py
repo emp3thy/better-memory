@@ -216,3 +216,70 @@ class TestLoadContext:
         assert obs.tech == "python"
         assert obs.episode_goal == "ship it"
         assert obs.episode_outcome == "success"
+
+
+class TestBuildPrompt:
+    def test_prompt_contains_goal_and_tech(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        ctx = SynthesisContext(reflections=[], observations=[], last_run_at=None)
+        prompt = svc.build_prompt(goal="ship it", tech="python", context=ctx)
+        assert "ship it" in prompt
+        assert "python" in prompt
+
+    def test_prompt_renders_no_tech_as_any(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        ctx = SynthesisContext(reflections=[], observations=[], last_run_at=None)
+        prompt = svc.build_prompt(goal="ship it", tech=None, context=ctx)
+        assert "TECH: (unspecified)" in prompt
+
+    def test_prompt_renders_existing_reflections(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        refl = ReflectionForPrompt(
+            id="r-abc", title="Always SAVEPOINT", tech="python",
+            phase="implementation", polarity="do",
+            use_cases="when writing multi-statement transactions",
+            hints='["wrap in SAVEPOINT", "commit once at end"]',
+            confidence=0.8, status="confirmed",
+        )
+        ctx = SynthesisContext(reflections=[refl], observations=[], last_run_at=None)
+        prompt = svc.build_prompt(goal="g", tech=None, context=ctx)
+        assert "r-abc" in prompt
+        assert "Always SAVEPOINT" in prompt
+        assert "when writing multi-statement" in prompt
+        assert "0.8" in prompt
+
+    def test_prompt_renders_new_observations_with_episode_context(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        obs = ObservationForPrompt(
+            id="obs-1", content="fix drain race", outcome="success",
+            component="spool", theme="refactor", tech="python",
+            created_at="2026-04-22T10:00:00+00:00",
+            episode_goal="Phase 3 hook", episode_outcome="success",
+        )
+        ctx = SynthesisContext(reflections=[], observations=[obs], last_run_at=None)
+        prompt = svc.build_prompt(goal="g", tech="python", context=ctx)
+        assert "obs-1" in prompt
+        assert "fix drain race" in prompt
+        assert "episode goal=\"Phase 3 hook\"" in prompt
+        assert "episode outcome=success" in prompt
+
+    def test_prompt_includes_schema_instructions(self, conn, fixed_clock):
+        """Response-shape keys must appear verbatim in the instructions."""
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        ctx = SynthesisContext(reflections=[], observations=[], last_run_at=None)
+        prompt = svc.build_prompt(goal="g", tech=None, context=ctx)
+        for key in (
+            '"new"', '"augment"', '"merge"', '"ignore"',
+            "title", "phase", "polarity", "use_cases", "hints", "confidence",
+            "source_observation_ids", "reflection_id", "add_hints",
+            "confidence_delta", "source_id", "target_id", "justification",
+        ):
+            assert key in prompt, f"prompt missing schema token: {key}"
+
+    def test_prompt_is_deterministic(self, conn, fixed_clock):
+        """Same inputs → byte-identical prompt."""
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        ctx = SynthesisContext(reflections=[], observations=[], last_run_at=None)
+        a = svc.build_prompt(goal="g", tech=None, context=ctx)
+        b = svc.build_prompt(goal="g", tech=None, context=ctx)
+        assert a == b
