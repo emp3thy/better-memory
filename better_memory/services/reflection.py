@@ -244,6 +244,8 @@ class ReflectionSynthesisService:
     outer transaction with other services.
     """
 
+    _SHORT_CIRCUIT_WINDOW_MINUTES = 10
+
     def __init__(
         self,
         conn: sqlite3.Connection,
@@ -796,17 +798,73 @@ class ReflectionSynthesisService:
             (project, tech_key, now, goal),
         )
 
+    # ----------------------------------------------------- _should_short_circuit
+    def _should_short_circuit(
+        self, *, project: str, tech: str | None, goal: str
+    ) -> bool:
+        """Return True if this call exactly matches a recent synthesis.
+
+        Conditions (all must hold):
+        1. A synthesis_runs row exists for (project, tech).
+        2. last_goal == goal.
+        3. now - last_run_at < SHORT_CIRCUIT_WINDOW_MINUTES.
+        4. No observations have been written after last_run_at for (project, tech).
+        """
+        from datetime import timedelta
+        tech_key = tech if tech is not None else ""
+        row = self._conn.execute(
+            "SELECT last_run_at, last_goal FROM synthesis_runs "
+            "WHERE project = ? AND tech = ?",
+            (project, tech_key),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["last_goal"] != goal:
+            return False
+
+        # Within the short-circuit window?
+        try:
+            last_run_dt = datetime.fromisoformat(row["last_run_at"])
+        except (TypeError, ValueError):
+            return False
+        if last_run_dt.tzinfo is None:
+            last_run_dt = last_run_dt.replace(tzinfo=UTC)
+        elapsed = self._clock() - last_run_dt
+        if elapsed >= timedelta(minutes=self._SHORT_CIRCUIT_WINDOW_MINUTES):
+            return False
+
+        # Any new observations since last_run_at?
+        # Use the same outcome filter as load_context to stay consistent.
+        new_count = self._conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM observations o
+            JOIN episodes e ON e.id = o.episode_id
+            WHERE o.project = ?
+              AND e.outcome IN ('success', 'partial', 'abandoned')
+              AND o.created_at > ?
+            """,
+            (project, row["last_run_at"]),
+        ).fetchone()["c"]
+        return new_count == 0
+
     # ----------------------------------------------------------------- synthesize
     async def synthesize(
         self, *, goal: str, tech: str | None, project: str
     ) -> dict[str, list[dict]]:
-        """End-to-end: load context, prompt, parse, apply atomically, return.
+        """End-to-end synthesis. Short-circuits on same-goal resume.
 
-        All four apply methods run within a single SAVEPOINT; any
-        exception rolls the whole synthesis back. Watermark is upserted
-        inside the SAVEPOINT so a parse/apply failure also rolls back
-        the watermark (the next ``synthesize`` call will re-attempt).
+        Short-circuit conditions (spec §5):
+        - Prior synthesis run exists for (project, tech) with last_goal == goal.
+        - Now - last_run_at < 10 minutes.
+        - No new observations since last_run_at.
+
+        When short-circuiting, returns the current reflection buckets
+        without calling the LLM.
         """
+        if self._should_short_circuit(project=project, tech=tech, goal=goal):
+            return self._bucketed_reflections(project=project, tech=tech)
+
         context = self.load_context(project=project, tech=tech)
         prompt = self.build_prompt(goal=goal, tech=tech, context=context)
         raw = await self._chat.complete(prompt)

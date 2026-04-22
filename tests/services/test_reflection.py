@@ -1036,3 +1036,125 @@ class TestSynthesizeOrchestrator:
         ).fetchone()
         assert wm is not None
         assert wm["last_goal"] == "g"
+
+
+class TestShortCircuit:
+    def test_same_goal_within_window_skips_llm(self, conn, fixed_clock):
+        """Same goal + tech + no new obs within 10 min → no LLM call."""
+        # Pre-seed a recent synthesis_runs row + one existing reflection.
+        _insert_reflection(
+            conn, refl_id="r1", project="p", tech=None,
+            status="confirmed", confidence=0.5,
+        )
+        # last_run_at = 5 min before the clock's fixed time (10:00).
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
+            "VALUES (?, ?, ?, ?)",
+            ("p", "", "2026-04-22T09:55:00+00:00", "resume goal"),
+        )
+        conn.commit()
+
+        # Empty responses list — if LLM is called, FakeChat raises.
+        fake = FakeChat(responses=[])
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="resume goal", tech=None, project="p")
+        )
+
+        # FakeChat was never called.
+        assert fake.calls == []
+
+        # Result still returns the existing reflection.
+        assert len(result["do"]) == 1
+        assert result["do"][0]["id"] == "r1"
+
+    def test_different_goal_does_not_short_circuit(self, conn, fixed_clock):
+        import json as _json
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
+            "VALUES (?, ?, ?, ?)",
+            ("p", "", "2026-04-22T09:55:00+00:00", "old goal"),
+        )
+        conn.commit()
+
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [], "ignore": []
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="new goal", tech=None, project="p")
+        )
+        # LLM WAS called — different goal.
+        assert len(fake.calls) == 1
+
+    def test_outside_window_does_not_short_circuit(self, conn, fixed_clock):
+        """Same goal but more than 10 min since last run → synthesis runs."""
+        import json as _json
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
+            "VALUES (?, ?, ?, ?)",
+            ("p", "", "2026-04-22T09:30:00+00:00", "same goal"),  # 30 min ago
+        )
+        conn.commit()
+
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [], "ignore": []
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="same goal", tech=None, project="p")
+        )
+        assert len(fake.calls) == 1
+
+    def test_new_observations_invalidate_short_circuit(self, conn, fixed_clock):
+        """Same goal, within window, but new obs arrived → synthesis runs."""
+        import json as _json
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
+            "VALUES (?, ?, ?, ?)",
+            ("p", "", "2026-04-22T09:55:00+00:00", "resume"),
+        )
+        # Observation timestamp AFTER last_run_at.
+        _insert_obs(
+            conn, obs_id="new-obs", project="p", episode_id=ep,
+            created_at="2026-04-22T09:57:00+00:00",
+        )
+        conn.commit()
+
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [], "ignore": []
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="resume", tech=None, project="p")
+        )
+        assert len(fake.calls) == 1
+
+    def test_no_prior_run_does_not_short_circuit(self, conn, fixed_clock):
+        import json as _json
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [], "ignore": []
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            svc.synthesize(goal="g", tech=None, project="p")
+        )
+        assert len(fake.calls) == 1
