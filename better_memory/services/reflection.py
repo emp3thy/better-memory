@@ -583,3 +583,104 @@ class ReflectionSynthesisService:
         existing = {r["id"] for r in rows}
         # Preserve original order for determinism.
         return [i for i in ids if i in existing]
+
+    # ----------------------------------------------------------- _apply_augment
+    def _apply_augment(self, actions: list[AugmentAction]) -> None:
+        """Apply augment actions: append hints, rewrite use_cases, bump
+        confidence, link new sources, recompute evidence count.
+
+        Idempotency:
+        - Unknown ``reflection_id`` → entry skipped.
+        - Reflection with status in ``{retired, superseded}`` →
+          entry skipped (cannot modify a retired lesson).
+        - ``add_source_observation_ids`` filtered to existing obs;
+          ``INSERT OR IGNORE`` dedupes against existing source rows.
+        """
+        now = self._clock().isoformat()
+        for action in actions:
+            row = self._conn.execute(
+                "SELECT hints, confidence, status FROM reflections "
+                "WHERE id = ?",
+                (action.reflection_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            if row["status"] in ("retired", "superseded"):
+                continue
+
+            # Append + dedup hints, preserving order.
+            existing_hints = json.loads(row["hints"])
+            merged_hints: list[str] = list(existing_hints)
+            for h in action.add_hints:
+                if h not in merged_hints:
+                    merged_hints.append(h)
+
+            # Clamp new confidence.
+            new_confidence = max(
+                0.1, min(1.0, row["confidence"] + action.confidence_delta)
+            )
+
+            # Add source links, filtering to existing observations.
+            valid_sources = self._filter_existing_observations(
+                action.add_source_observation_ids
+            )
+            for obs_id in valid_sources:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO reflection_sources "
+                    "(reflection_id, observation_id) VALUES (?, ?)",
+                    (action.reflection_id, obs_id),
+                )
+
+            # Mark added observations consumed.
+            if valid_sources:
+                placeholders = ",".join("?" * len(valid_sources))
+                self._conn.execute(
+                    f"UPDATE observations "
+                    f"SET status = 'consumed_into_reflection' "
+                    f"WHERE id IN ({placeholders})",
+                    valid_sources,
+                )
+
+            # Recompute evidence_count from actual source count.
+            new_count = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM reflection_sources "
+                "WHERE reflection_id = ?",
+                (action.reflection_id,),
+            ).fetchone()["c"]
+
+            # Update the reflection. Branch on rewrite_use_cases — two
+            # explicit UPDATE statements are clearer and less error-prone
+            # than a dynamically-assembled SET clause.
+            if action.rewrite_use_cases is not None:
+                self._conn.execute(
+                    """
+                    UPDATE reflections
+                       SET use_cases = ?, hints = ?, confidence = ?,
+                           evidence_count = ?, updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        action.rewrite_use_cases,
+                        json.dumps(merged_hints),
+                        new_confidence,
+                        new_count,
+                        now,
+                        action.reflection_id,
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE reflections
+                       SET hints = ?, confidence = ?,
+                           evidence_count = ?, updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        json.dumps(merged_hints),
+                        new_confidence,
+                        new_count,
+                        now,
+                        action.reflection_id,
+                    ),
+                )

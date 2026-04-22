@@ -538,3 +538,177 @@ class TestApplyNew:
             "SELECT COUNT(*) AS c FROM reflections"
         ).fetchone()["c"]
         assert count == 0
+
+
+class TestApplyAugment:
+    def test_appends_hints_deduped(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p",
+            hints='["old-hint"]', confidence=0.5, evidence_count=1,
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = AugmentAction(
+            reflection_id="r1",
+            add_hints=["old-hint", "new-hint-1", "new-hint-2"],
+            rewrite_use_cases=None,
+            confidence_delta=0.0,
+            add_source_observation_ids=[],
+        )
+        svc._apply_augment([action])
+        conn.commit()
+        row = conn.execute(
+            "SELECT hints FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        import json as _json
+        hints = _json.loads(row["hints"])
+        # Order preserved: existing first, then new ones; duplicates dropped.
+        assert hints == ["old-hint", "new-hint-1", "new-hint-2"]
+
+    def test_rewrites_use_cases_when_provided(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p", use_cases="old uc",
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = AugmentAction(
+            reflection_id="r1", add_hints=[],
+            rewrite_use_cases="new uc",
+            confidence_delta=0.0, add_source_observation_ids=[],
+        )
+        svc._apply_augment([action])
+        conn.commit()
+        row = conn.execute(
+            "SELECT use_cases FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        assert row["use_cases"] == "new uc"
+
+    def test_leaves_use_cases_when_rewrite_is_null(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p", use_cases="keep me",
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = AugmentAction(
+            reflection_id="r1", add_hints=[],
+            rewrite_use_cases=None,
+            confidence_delta=0.0, add_source_observation_ids=[],
+        )
+        svc._apply_augment([action])
+        conn.commit()
+        row = conn.execute(
+            "SELECT use_cases FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        assert row["use_cases"] == "keep me"
+
+    def test_applies_confidence_delta_and_clamps(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p", confidence=0.8,
+        )
+        _insert_reflection(
+            conn, refl_id="r2", project="p", confidence=0.2,
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc._apply_augment(
+            [
+                AugmentAction(
+                    reflection_id="r1", add_hints=[],
+                    rewrite_use_cases=None,
+                    confidence_delta=0.5,  # 0.8+0.5=1.3 → clamp to 1.0
+                    add_source_observation_ids=[],
+                ),
+                AugmentAction(
+                    reflection_id="r2", add_hints=[],
+                    rewrite_use_cases=None,
+                    confidence_delta=-0.5,  # 0.2-0.5=-0.3 → clamp to 0.1
+                    add_source_observation_ids=[],
+                ),
+            ]
+        )
+        conn.commit()
+        r1 = conn.execute(
+            "SELECT confidence FROM reflections WHERE id = 'r1'"
+        ).fetchone()
+        r2 = conn.execute(
+            "SELECT confidence FROM reflections WHERE id = 'r2'"
+        ).fetchone()
+        assert r1["confidence"] == 1.0
+        assert r2["confidence"] == 0.1
+
+    def test_adds_source_links_and_recomputes_evidence_count(
+        self, conn, fixed_clock
+    ):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-A", project="p", episode_id=ep)
+        _insert_obs(conn, obs_id="obs-B", project="p", episode_id=ep)
+        _insert_reflection(
+            conn, refl_id="r1", project="p", evidence_count=1,
+        )
+        # Existing source link for obs-A.
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES (?, ?)", ("r1", "obs-A"),
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = AugmentAction(
+            reflection_id="r1", add_hints=[],
+            rewrite_use_cases=None,
+            confidence_delta=0.0,
+            add_source_observation_ids=["obs-A", "obs-B"],  # A already linked
+        )
+        svc._apply_augment([action])
+        conn.commit()
+
+        # Evidence count = actual COUNT = 2 (A + B).
+        row = conn.execute(
+            "SELECT evidence_count FROM reflections WHERE id = 'r1'"
+        ).fetchone()
+        assert row["evidence_count"] == 2
+
+        # obs-B marked consumed. obs-A might already be consumed from prior path;
+        # here we just assert the two observations are in the consumed state.
+        statuses = conn.execute(
+            "SELECT status FROM observations WHERE id IN ('obs-A', 'obs-B')"
+        ).fetchall()
+        # Both should be consumed_into_reflection after augment.
+        assert {s["status"] for s in statuses} == {"consumed_into_reflection"}
+
+    def test_drops_unknown_reflection_id(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = AugmentAction(
+            reflection_id="nope", add_hints=["h"],
+            rewrite_use_cases=None, confidence_delta=0.0,
+            add_source_observation_ids=[],
+        )
+        svc._apply_augment([action])  # should not raise
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM reflections"
+        ).fetchone()["c"]
+        assert count == 0
+
+    def test_skips_retired_reflection(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p", status="retired", confidence=0.5,
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = AugmentAction(
+            reflection_id="r1", add_hints=["h"],
+            rewrite_use_cases=None, confidence_delta=0.3,
+            add_source_observation_ids=[],
+        )
+        svc._apply_augment([action])
+        conn.commit()
+        row = conn.execute(
+            "SELECT confidence, hints FROM reflections WHERE id = 'r1'"
+        ).fetchone()
+        assert row["confidence"] == 0.5  # unchanged
+        assert row["hints"] == "[]"  # unchanged
