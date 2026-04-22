@@ -50,6 +50,7 @@ from better_memory.config import get_config
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.llm.ollama import OllamaChat
 from better_memory.search.hybrid import SearchResult
 from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
@@ -58,6 +59,7 @@ from better_memory.services.knowledge import (
     KnowledgeService,
 )
 from better_memory.services.observation import ObservationService
+from better_memory.services.reflection import ReflectionSynthesisService
 from better_memory.services.spool import SpoolService
 
 # Module-level migration directories. Packaged alongside the code so
@@ -400,6 +402,12 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
 
     episodes = EpisodeService(memory_conn)
     observations = ObservationService(memory_conn, embedder, episodes=episodes)
+
+    # LLM client for reflection synthesis. Uses the same OllamaChat wrapper
+    # the legacy ConsolidationService used — Phase 5 reuses the pattern.
+    chat = OllamaChat(host=config.ollama_host, model=config.consolidate_model)
+    reflections = ReflectionSynthesisService(memory_conn, chat=chat)
+
     knowledge = KnowledgeService(
         knowledge_conn,
         knowledge_base=config.knowledge_base,
@@ -527,19 +535,24 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             ]
 
         if name == "memory.start_episode":
-            # Phase 2 scope: open/harden foreground episode only — reflection
-            # synthesis is Phase 5. Session id is resolved from the
-            # ObservationService's session (same id the observation path uses).
+            project = Path.cwd().name
             episode_id = episodes.start_foreground(
                 session_id=observations._session_id,
-                project=Path.cwd().name,
+                project=project,
                 goal=args["goal"],
                 tech=args.get("tech"),
+            )
+            buckets = await reflections.synthesize(
+                goal=args["goal"],
+                tech=args.get("tech"),
+                project=project,
             )
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"episode_id": episode_id}),
+                    text=json.dumps(
+                        {"episode_id": episode_id, "reflections": buckets}
+                    ),
                 )
             ]
 
@@ -646,6 +659,10 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             pass
         try:
             await embedder.aclose()
+        except Exception:  # noqa: BLE001 — best-effort shutdown
+            pass
+        try:
+            await chat.aclose()
         except Exception:  # noqa: BLE001 — best-effort shutdown
             pass
 
