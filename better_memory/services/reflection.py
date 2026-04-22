@@ -684,3 +684,79 @@ class ReflectionSynthesisService:
                         action.reflection_id,
                     ),
                 )
+
+    # ------------------------------------------------------------- _apply_merge
+    def _apply_merge(self, actions: list[MergeAction]) -> None:
+        """Merge source reflection into target, dropping unknown ids.
+
+        Semantics per spec §5:
+        - Move source's ``reflection_sources`` rows into target
+          (INSERT OR IGNORE dedups against existing target sources).
+        - DELETE source's ``reflection_sources`` rows.
+        - Recompute target.evidence_count from actual COUNT(*).
+        - Set source.status='superseded', superseded_by=target.
+        - Bump both updated_at.
+
+        Idempotency:
+        - Unknown source_id or target_id → entry skipped.
+        - Source with status in ``{retired, superseded}`` → skipped.
+        - source_id == target_id → skipped (would DELETE the target's
+          sources and supersede the reflection in place; double damage).
+        """
+        now = self._clock().isoformat()
+        for action in actions:
+            # Reject self-merge: same id on both sides would (a) DELETE the
+            # reflection's own source rows because the INSERT OR IGNORE from
+            # self is a no-op, and (b) mark the reflection superseded against
+            # itself. Neither is a valid user intent.
+            if action.source_id == action.target_id:
+                continue
+
+            src = self._conn.execute(
+                "SELECT status FROM reflections WHERE id = ?",
+                (action.source_id,),
+            ).fetchone()
+            if src is None:
+                continue
+            if src["status"] in ("retired", "superseded"):
+                continue
+
+            tgt = self._conn.execute(
+                "SELECT id FROM reflections WHERE id = ?",
+                (action.target_id,),
+            ).fetchone()
+            if tgt is None:
+                continue
+
+            # Move source's sources into target.
+            self._conn.execute(
+                "INSERT OR IGNORE INTO reflection_sources "
+                "(reflection_id, observation_id) "
+                "SELECT ?, observation_id FROM reflection_sources "
+                "WHERE reflection_id = ?",
+                (action.target_id, action.source_id),
+            )
+            # Delete source's source rows.
+            self._conn.execute(
+                "DELETE FROM reflection_sources WHERE reflection_id = ?",
+                (action.source_id,),
+            )
+            # Recompute target evidence count.
+            new_count = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM reflection_sources "
+                "WHERE reflection_id = ?",
+                (action.target_id,),
+            ).fetchone()["c"]
+
+            # Update source + target.
+            self._conn.execute(
+                "UPDATE reflections "
+                "SET status = 'superseded', superseded_by = ?, updated_at = ? "
+                "WHERE id = ?",
+                (action.target_id, now, action.source_id),
+            )
+            self._conn.execute(
+                "UPDATE reflections "
+                "SET evidence_count = ?, updated_at = ? WHERE id = ?",
+                (new_count, now, action.target_id),
+            )

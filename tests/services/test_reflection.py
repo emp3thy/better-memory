@@ -712,3 +712,169 @@ class TestApplyAugment:
         ).fetchone()
         assert row["confidence"] == 0.5  # unchanged
         assert row["hints"] == "[]"  # unchanged
+
+
+class TestApplyMerge:
+    def test_merges_two_reflections(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-A", project="p", episode_id=ep)
+        _insert_obs(conn, obs_id="obs-B", project="p", episode_id=ep)
+        _insert_reflection(
+            conn, refl_id="src", project="p", evidence_count=1,
+        )
+        _insert_reflection(
+            conn, refl_id="tgt", project="p", evidence_count=1,
+        )
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES (?, ?)", ("src", "obs-A"),
+        )
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES (?, ?)", ("tgt", "obs-B"),
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        action = MergeAction(
+            source_id="src", target_id="tgt",
+            justification="dupes",
+        )
+        svc._apply_merge([action])
+        conn.commit()
+
+        src_row = conn.execute(
+            "SELECT status, superseded_by FROM reflections WHERE id = 'src'"
+        ).fetchone()
+        assert src_row["status"] == "superseded"
+        assert src_row["superseded_by"] == "tgt"
+
+        tgt_row = conn.execute(
+            "SELECT evidence_count FROM reflections WHERE id = 'tgt'"
+        ).fetchone()
+        assert tgt_row["evidence_count"] == 2
+
+        src_sources = conn.execute(
+            "SELECT COUNT(*) AS c FROM reflection_sources WHERE reflection_id = 'src'"
+        ).fetchone()
+        assert src_sources["c"] == 0
+
+        tgt_sources = conn.execute(
+            "SELECT observation_id FROM reflection_sources WHERE reflection_id = 'tgt' "
+            "ORDER BY observation_id"
+        ).fetchall()
+        assert [s["observation_id"] for s in tgt_sources] == ["obs-A", "obs-B"]
+
+    def test_merge_dedupes_shared_sources(self, conn, fixed_clock):
+        """If both reflections already link the same observation, target count is still correct."""
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-X", project="p", episode_id=ep)
+        _insert_reflection(conn, refl_id="src", project="p")
+        _insert_reflection(conn, refl_id="tgt", project="p")
+        for rid in ("src", "tgt"):
+            conn.execute(
+                "INSERT INTO reflection_sources (reflection_id, observation_id) "
+                "VALUES (?, ?)", (rid, "obs-X"),
+            )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc._apply_merge(
+            [MergeAction(source_id="src", target_id="tgt", justification="")]
+        )
+        conn.commit()
+
+        tgt_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM reflection_sources WHERE reflection_id = 'tgt'"
+        ).fetchone()["c"]
+        assert tgt_count == 1
+
+    def test_drops_unknown_source(self, conn, fixed_clock):
+        _insert_reflection(conn, refl_id="tgt", project="p")
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc._apply_merge(
+            [MergeAction(source_id="nope", target_id="tgt", justification="")]
+        )
+        conn.commit()
+        # Nothing changed.
+        status = conn.execute(
+            "SELECT status FROM reflections WHERE id = 'tgt'"
+        ).fetchone()
+        assert status["status"] == "pending_review"  # unchanged
+
+    def test_drops_unknown_target(self, conn, fixed_clock):
+        _insert_reflection(conn, refl_id="src", project="p")
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc._apply_merge(
+            [MergeAction(source_id="src", target_id="nope", justification="")]
+        )
+        conn.commit()
+        src = conn.execute(
+            "SELECT status FROM reflections WHERE id = 'src'"
+        ).fetchone()
+        assert src["status"] == "pending_review"  # unchanged
+
+    def test_skips_already_superseded_source(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="src", project="p", status="superseded",
+        )
+        _insert_reflection(conn, refl_id="tgt", project="p")
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc._apply_merge(
+            [MergeAction(source_id="src", target_id="tgt", justification="")]
+        )
+        conn.commit()
+        # Source already superseded → target unchanged.
+        tgt_count = conn.execute(
+            "SELECT evidence_count FROM reflections WHERE id = 'tgt'"
+        ).fetchone()["evidence_count"]
+        assert tgt_count == 0
+
+    def test_self_merge_is_rejected(self, conn, fixed_clock):
+        """source_id == target_id would DELETE the target's sources — reject it.
+
+        Without this guard: INSERT OR IGNORE from self → no-op, then DELETE
+        FROM reflection_sources WHERE reflection_id = source_id would wipe
+        the target's sources (source and target are the same row). Then the
+        reflection is marked superseded. Double damage. Guard at the top.
+        """
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-X", project="p", episode_id=ep)
+        _insert_reflection(conn, refl_id="r1", project="p", evidence_count=1)
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES (?, ?)", ("r1", "obs-X"),
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc._apply_merge(
+            [MergeAction(source_id="r1", target_id="r1", justification="bogus")]
+        )
+        conn.commit()
+
+        # Reflection still has its source row and is not superseded.
+        row = conn.execute(
+            "SELECT status, evidence_count FROM reflections WHERE id = 'r1'"
+        ).fetchone()
+        assert row["status"] == "pending_review"
+        assert row["evidence_count"] == 1
+        src_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM reflection_sources WHERE reflection_id = 'r1'"
+        ).fetchone()["c"]
+        assert src_count == 1
