@@ -126,7 +126,6 @@ class TestCloseEpisodeNoActiveIsSilentNoop:
 
     def test_close_active_value_error_is_caught(self, tmp_path, monkeypatch):
         """Drive the handler path: no active episode → already_closed payload."""
-        import json as _json
 
         home = tmp_path / "bm"
         home.mkdir()
@@ -157,6 +156,75 @@ class TestCloseEpisodeNoActiveIsSilentNoop:
                 )
         finally:
             conn.close()
+
+
+class TestStartEpisodeReturnsReflections:
+    """Phase 5: memory.start_episode returns {episode_id, reflections}."""
+
+    def test_service_level_returns_reflections(self, conn):
+        """ReflectionSynthesisService.synthesize returns bucketed reflections."""
+        import asyncio
+        import json as _json
+
+        from better_memory.llm.fake import FakeChat
+        from better_memory.services.reflection import ReflectionSynthesisService
+
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [], "ignore": []
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake)
+        result = asyncio.run(
+            svc.synthesize(goal="g", tech=None, project="p")
+        )
+        assert set(result.keys()) == {"do", "dont", "neutral"}
+
+    def test_start_episode_tool_still_registered(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool_names = {t.name for t in _tool_definitions()}
+        assert "memory.start_episode" in tool_names
+
+    def test_create_server_wires_reflection_service(self, tmp_path, monkeypatch):
+        """Factory constructs without error — full Phase 5 wiring chain.
+
+        Catches import errors, missing attributes on OllamaChat, bad kwargs
+        on service constructors, and any typo that would crash create_server()
+        before a single tool call fires. We use a monkeypatched OllamaChat
+        that never touches the network — just needs to satisfy ChatCompleter.
+        """
+        import asyncio
+
+        home = tmp_path / "bm"
+        home.mkdir()
+        (home / "knowledge-base").mkdir()
+        monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+
+        # Stub OllamaChat so create_server doesn't try to connect.
+        class _NoNetChat:
+            async def complete(self, prompt: str) -> str:
+                raise RuntimeError("test did not expect a real chat call")
+            async def aclose(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "better_memory.mcp.server.OllamaChat",
+            lambda **kw: _NoNetChat(),
+        )
+
+        from better_memory.mcp.server import create_server
+
+        server, cleanup = create_server()
+        try:
+            # Server object exists and has the expected handler-registration shape.
+            assert server is not None
+            # The tool is registered in the factory's _list_tools closure.
+            # Fetching the list exercises the registered decorator.
+            from better_memory.mcp.server import _tool_definitions
+            names = {t.name for t in _tool_definitions()}
+            assert "memory.start_episode" in names
+        finally:
+            asyncio.run(cleanup())
 
 
 class TestServerStartupDrainsSessionStart:

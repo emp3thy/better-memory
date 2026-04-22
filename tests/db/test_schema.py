@@ -225,7 +225,7 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         versions = [r["version"] for r in rows]
-        assert versions == ["0001", "0002"]
+        assert versions == ["0001", "0002", "0003"]
     finally:
         conn.close()
 
@@ -743,5 +743,47 @@ def test_synthesis_runs_composite_pk(tmp_memory_db: Path) -> None:
                 "VALUES (?, ?, ?)",
                 ("p2", None, "2026-04-20T10:00:00Z"),
             )
+    finally:
+        conn.close()
+
+
+def test_synthesis_runs_has_last_goal_column(tmp_memory_db: Path) -> None:
+    """0003 migration adds last_goal column to synthesis_runs."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        cols = _column_names(conn, "synthesis_runs")
+        assert "last_goal" in cols, f"Missing: last_goal. Got: {cols}"
+
+        # Back-compat: rows can still be inserted without last_goal.
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at) "
+            "VALUES (?, ?, ?)",
+            ("p", "python", "2026-04-22T10:00:00+00:00"),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT last_goal FROM synthesis_runs WHERE project = ?", ("p",)
+        ).fetchone()
+        assert row["last_goal"] is None  # nullable, default NULL
+    finally:
+        conn.close()
+
+
+def test_synthesis_runs_last_goal_round_trips(tmp_memory_db: Path) -> None:
+    """Explicit last_goal value stored and readable."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
+            "VALUES (?, ?, ?, ?)",
+            ("p", "python", "2026-04-22T10:00:00+00:00", "implement feature X"),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT last_goal FROM synthesis_runs WHERE project = ?", ("p",)
+        ).fetchone()
+        assert row["last_goal"] == "implement feature X"
     finally:
         conn.close()

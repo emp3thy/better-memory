@@ -533,6 +533,7 @@ class TestDrainCommitCloseEvents:
         self, tmp_memory_db: Path, tmp_path: Path
     ) -> None:
         import json as _json
+
         from better_memory.db.connection import connect
         from better_memory.db.schema import apply_migrations
         from better_memory.services.episode import EpisodeService
@@ -582,6 +583,7 @@ class TestDrainCommitCloseEvents:
     ) -> None:
         """No active episode → close_active raises ValueError → drain swallows it."""
         import json as _json
+
         from better_memory.db.connection import connect
         from better_memory.db.schema import apply_migrations
         from better_memory.services.episode import EpisodeService
@@ -627,6 +629,7 @@ class TestDrainCommitCloseEvents:
     ) -> None:
         """Closing a background (unhardened) episode is valid — matches close_active semantics."""
         import json as _json
+
         from better_memory.db.connection import connect
         from better_memory.db.schema import apply_migrations
         from better_memory.services.episode import EpisodeService
@@ -674,6 +677,7 @@ class TestDrainCommitCloseEvents:
     ) -> None:
         """Back-compat: SpoolService without episodes kwarg drains hook_events and does not attempt close."""
         import json as _json
+
         from better_memory.db.connection import connect
         from better_memory.db.schema import apply_migrations
         from better_memory.services.spool import SpoolService
