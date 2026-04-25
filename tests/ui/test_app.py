@@ -64,6 +64,20 @@ class TestLayoutShell:
         assert "Close UI" in body
 
 
+class TestNav:
+    def test_nav_shows_episodes_and_reflections(self, client: FlaskClient) -> None:
+        response = client.get("/episodes")
+        body = response.get_data(as_text=True)
+        assert ">Episodes<" in body
+        assert ">Reflections<" in body
+
+    def test_nav_hides_old_tabs(self, client: FlaskClient) -> None:
+        response = client.get("/episodes")
+        body = response.get_data(as_text=True)
+        for label in ("Pipeline", "Sweep", "Knowledge", "Audit", "Graph"):
+            assert f">{label}<" not in body
+
+
 class TestEmptyViews:
     def test_sweep_renders_own_placeholder(self, client: FlaskClient) -> None:
         response = client.get("/sweep")
