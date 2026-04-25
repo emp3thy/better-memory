@@ -171,14 +171,24 @@ class EpisodeRow:
 
 
 def episode_list_for_ui(
-    conn: sqlite3.Connection, *, project: str
+    conn: sqlite3.Connection, *, project: str, limit: int = 100
 ) -> list[EpisodeRow]:
     """Return episodes for ``project`` newest-first with attached counts.
 
+    ``observation_count`` is the number of observations directly bound to this
+    episode (``observations.episode_id = e.id``).
+
+    ``reflection_count`` is the number of *distinct* reflections seeded by any
+    observation in this episode.  A reflection that cites two observations in
+    the same episode is counted once, not twice.
+
     Counts are computed via correlated subqueries (one each for observations
-    and reflection_sources joined back through observations) — the timeline
-    is small (capped at recent activity for one project) so this is cheap
-    and avoids fan-out duplication.
+    and reflection_sources joined back through observations) — the timeline is
+    small so this is cheap and avoids fan-out duplication from a JOIN.
+
+    ``limit`` caps the number of rows returned (default 100 — slightly higher
+    than the 50 used for finer-grained objects like observations because
+    episodes are coarser-grained and there are fewer of them per project).
     """
     sql = """
         SELECT
@@ -196,7 +206,7 @@ def episode_list_for_ui(
                 WHERE o.episode_id = e.id
             ) AS observation_count,
             (
-                SELECT COUNT(DISTINCT rs.reflection_id)
+                SELECT COUNT(DISTINCT rs.reflection_id)  -- DISTINCT: a reflection citing two obs in this episode counts once
                 FROM reflection_sources rs
                 JOIN observations o ON o.id = rs.observation_id
                 WHERE o.episode_id = e.id
@@ -204,6 +214,7 @@ def episode_list_for_ui(
         FROM episodes e
         WHERE e.project = ?
         ORDER BY e.started_at DESC, e.rowid DESC
+        LIMIT ?
     """
     return [
         EpisodeRow(
@@ -219,5 +230,5 @@ def episode_list_for_ui(
             observation_count=r["observation_count"],
             reflection_count=r["reflection_count"],
         )
-        for r in conn.execute(sql, (project,)).fetchall()
+        for r in conn.execute(sql, (project, limit)).fetchall()
     ]

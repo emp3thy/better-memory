@@ -101,3 +101,41 @@ class TestEpisodeListForUi:
         [row] = episode_list_for_ui(conn, project="proj-a")
         assert row.observation_count == 2
         assert row.reflection_count == 1
+
+    def test_reflection_count_deduplicates_multi_source_reflection(self, conn):
+        """A single reflection sourced from two observations in the same
+        episode counts once, not twice — the COUNT(DISTINCT) guard."""
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        ep_id = conn.execute("SELECT id FROM episodes").fetchone()["id"]
+
+        for i in range(2):
+            conn.execute(
+                "INSERT INTO observations (id, content, project, episode_id) "
+                "VALUES (?, ?, 'proj-a', ?)",
+                (f"obs-{i}", f"content {i}", ep_id),
+            )
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            "confidence, created_at, updated_at) "
+            "VALUES ('refl-1', 't', 'proj-a', 'general', 'do', 'u', 'h', "
+            "0.8, '2026-04-25T00:00:00+00:00', '2026-04-25T00:00:00+00:00')"
+        )
+        # Same reflection sourced from BOTH observations.
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('refl-1', 'obs-0'), ('refl-1', 'obs-1')"
+        )
+        conn.commit()
+
+        [row] = episode_list_for_ui(conn, project="proj-a")
+        assert row.observation_count == 2
+        assert row.reflection_count == 1  # not 2 — DISTINCT collapses
+
+    def test_limit_truncates_results(self, conn):
+        """limit= caps the number of episodes returned."""
+        for i in range(3):
+            EpisodeService(conn).open_background(session_id=f"s{i}", project="proj-a")
+
+        rows = episode_list_for_ui(conn, project="proj-a", limit=2)
+        assert len(rows) == 2
