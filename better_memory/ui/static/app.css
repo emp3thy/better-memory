@@ -397,3 +397,133 @@ main {
 .modal-body h3 {
   margin-top: 0;
 }
+
+/* ---------- Episodes tab ---------- */
+
+.banner-unclosed {
+  background: #fff4d6;
+  border: 1px solid #e6c95a;
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.day-heading {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #666;
+  margin: 0 0 0.5rem 0;
+}
+
+.episode-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 0.6rem 0.85rem;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.episode-row:hover {
+  background: #f6f9fc;
+}
+
+.episode-row .row-main { display: flex; flex-direction: column; gap: 0.2rem; }
+.episode-row .goal { font-weight: 500; }
+.episode-row .meta { font-size: 0.85rem; color: #666; display: flex; gap: 0.5rem; }
+.episode-row .row-side { display: flex; align-items: center; gap: 0.5rem; }
+
+.outcome-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 8px;
+  text-transform: uppercase;
+}
+
+.outcome-badge.outcome-success   { background: #d6f3d6; color: #1a4f1a; }
+.outcome-badge.outcome-partial   { background: #fff0c0; color: #6f4f00; }
+.outcome-badge.outcome-abandoned { background: #f3d6d6; color: #6f1a1a; }
+.outcome-badge.outcome-no_outcome{ background: #e0e0e0; color: #444; }
+.outcome-badge.outcome-open      { background: #d6e4ff; color: #1a3a6f; }
+
+.counts { font-size: 0.8rem; color: #666; }
+
+/* ---------- Episode drawer ---------- */
+
+.episode-drawer {
+  background: #fafbfc;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  margin-top: 1.5rem;
+}
+
+.episode-drawer .drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.episode-drawer .drawer-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0.75rem 0;
+  font-size: 0.9rem;
+}
+
+.episode-drawer .drawer-meta dt { color: #666; font-weight: 500; }
+.episode-drawer .drawer-meta dd { margin: 0; }
+
+.drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.drawer-actions button {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid #c0c0c0;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.drawer-actions button:hover { background: #f0f4fa; }
+
+.drawer-section {
+  margin-top: 1rem;
+  border-top: 1px solid #e0e0e0;
+  padding-top: 0.75rem;
+}
+
+.observation-list, .reflection-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.observation-item, .reflection-item {
+  padding: 0.4rem 0;
+  border-bottom: 1px dashed #e0e0e0;
+  font-size: 0.9rem;
+}
+
+.observation-item:last-child, .reflection-item:last-child {
+  border-bottom: none;
+}
+
+.obs-meta { display: flex; gap: 0.5rem; color: #666; font-size: 0.8rem; }
+.empty-inline { color: #888; font-style: italic; }
+.placeholder { padding: 2rem; text-align: center; color: #666; }
