@@ -151,3 +151,73 @@ def list_insight_sources(
         )
         for r in rows
     ]
+
+
+@dataclass(frozen=True)
+class EpisodeRow:
+    """Read model for one row in the Episodes timeline."""
+
+    id: str
+    project: str
+    tech: str | None
+    goal: str | None
+    started_at: str
+    hardened_at: str | None
+    ended_at: str | None
+    close_reason: str | None
+    outcome: str | None
+    observation_count: int
+    reflection_count: int
+
+
+def episode_list_for_ui(
+    conn: sqlite3.Connection, *, project: str
+) -> list[EpisodeRow]:
+    """Return episodes for ``project`` newest-first with attached counts.
+
+    Counts are computed via correlated subqueries (one each for observations
+    and reflection_sources joined back through observations) — the timeline
+    is small (capped at recent activity for one project) so this is cheap
+    and avoids fan-out duplication.
+    """
+    sql = """
+        SELECT
+            e.id,
+            e.project,
+            e.tech,
+            e.goal,
+            e.started_at,
+            e.hardened_at,
+            e.ended_at,
+            e.close_reason,
+            e.outcome,
+            (
+                SELECT COUNT(*) FROM observations o
+                WHERE o.episode_id = e.id
+            ) AS observation_count,
+            (
+                SELECT COUNT(DISTINCT rs.reflection_id)
+                FROM reflection_sources rs
+                JOIN observations o ON o.id = rs.observation_id
+                WHERE o.episode_id = e.id
+            ) AS reflection_count
+        FROM episodes e
+        WHERE e.project = ?
+        ORDER BY e.started_at DESC, e.rowid DESC
+    """
+    return [
+        EpisodeRow(
+            id=r["id"],
+            project=r["project"],
+            tech=r["tech"],
+            goal=r["goal"],
+            started_at=r["started_at"],
+            hardened_at=r["hardened_at"],
+            ended_at=r["ended_at"],
+            close_reason=r["close_reason"],
+            outcome=r["outcome"],
+            observation_count=r["observation_count"],
+            reflection_count=r["reflection_count"],
+        )
+        for r in conn.execute(sql, (project,)).fetchall()
+    ]
