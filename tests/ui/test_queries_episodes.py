@@ -10,7 +10,14 @@ import pytest
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.services.episode import EpisodeService
-from better_memory.ui.queries import EpisodeRow, episode_list_for_ui
+from better_memory.ui.queries import (
+    EpisodeDetail,
+    EpisodeObservationRow,
+    EpisodeReflectionRow,
+    EpisodeRow,
+    episode_detail,
+    episode_list_for_ui,
+)
 
 
 @pytest.fixture
@@ -141,14 +148,6 @@ class TestEpisodeListForUi:
         assert len(rows) == 2
 
 
-from better_memory.ui.queries import (
-    EpisodeDetail,
-    EpisodeObservationRow,
-    EpisodeReflectionRow,
-    episode_detail,
-)
-
-
 class TestEpisodeDetail:
     def test_returns_none_for_missing_episode(self, conn):
         assert episode_detail(conn, episode_id="nope") is None
@@ -250,3 +249,46 @@ class TestEpisodeDetail:
 
         detail = episode_detail(conn, episode_id=ep_id)
         assert len(detail.reflections) == 1
+
+    def test_includes_observations_regardless_of_status(self, conn):
+        """Drawer is historical: archived observations still appear."""
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        ep_id = conn.execute("SELECT id FROM episodes").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, episode_id, status) "
+            "VALUES ('obs-arch', 'archived obs', 'proj-a', ?, 'archived')",
+            (ep_id,),
+        )
+        conn.commit()
+
+        detail = episode_detail(conn, episode_id=ep_id)
+        ids = [o.id for o in detail.observations]
+        assert "obs-arch" in ids
+
+    def test_includes_retired_reflections(self, conn):
+        """Drawer is historical: retired reflections still appear."""
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        ep_id = conn.execute("SELECT id FROM episodes").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id) "
+            "VALUES ('obs-1', 'c', 'proj-a', ?)",
+            (ep_id,),
+        )
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            "confidence, status, created_at, updated_at) "
+            "VALUES ('refl-retired', 't', 'proj-a', 'general', 'do', 'u', 'h', "
+            "0.5, 'retired', '2026-04-25T00:00:00+00:00', "
+            "'2026-04-25T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('refl-retired', 'obs-1')"
+        )
+        conn.commit()
+
+        detail = episode_detail(conn, episode_id=ep_id)
+        assert len(detail.reflections) == 1
+        assert detail.reflections[0].status == "retired"

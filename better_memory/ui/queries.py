@@ -284,8 +284,16 @@ def episode_detail(
 
     Returns ``None`` if no episode with this id exists.
 
-    Reflections are deduped (an episode's two observations seeding the
-    same reflection produces a single row).
+    The drawer is a historical record: ALL observations bound to the
+    episode are returned regardless of ``status`` (active, archived,
+    consumed_without_reflection, etc.). This deliberately differs from
+    ``list_observations`` which filters to ``status='active'`` for the
+    live pipeline view. Likewise, reflections are returned regardless
+    of ``status`` (pending_review / confirmed / retired / superseded)
+    so a closed episode's full provenance trail is visible.
+
+    Reflections are deduped — an episode's two observations seeding the
+    same reflection produces a single row in the result.
     """
     ep_row = conn.execute(
         "SELECT * FROM episodes WHERE id = ?",
