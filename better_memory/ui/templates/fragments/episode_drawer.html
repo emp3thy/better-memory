@@ -36,7 +36,8 @@
   {% if not detail.episode.ended_at %}
     <div class="drawer-actions">
       {% for outcome in ['success', 'partial', 'abandoned', 'no_outcome'] %}
-        <button class="action-close action-{{ outcome }}"
+        <button type="button"
+                class="action-close action-{{ outcome }}"
                 hx-post="{{ url_for('episode_close', id=detail.episode.id, outcome=outcome) }}"
                 hx-target="#drawer"
                 hx-swap="innerHTML">
