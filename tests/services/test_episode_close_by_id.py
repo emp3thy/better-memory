@@ -105,3 +105,34 @@ class TestCloseById:
             (episode_id,),
         ).fetchone()
         assert row["summary"] is None
+
+    def test_pre_closed_session_binding_is_left_alone(self, conn, fixed_clock):
+        """Verify the AND left_at IS NULL filter — already-closed bindings
+        keep their original left_at and are not re-stamped."""
+        svc = EpisodeService(conn, clock=fixed_clock)
+        episode_id = svc.open_background(session_id="sess-1", project="proj-a")
+        # Pre-existing closed binding from an earlier session.
+        prior_left_at = "2026-04-23T15:00:00+00:00"
+        conn.execute(
+            "INSERT INTO episode_sessions "
+            "(episode_id, session_id, joined_at, left_at) VALUES (?, ?, ?, ?)",
+            (episode_id, "sess-old", "2026-04-23T14:00:00+00:00", prior_left_at),
+        )
+        conn.commit()
+
+        svc.close_by_id(
+            episode_id=episode_id,
+            outcome="abandoned",
+            close_reason="abandoned",
+        )
+
+        rows = conn.execute(
+            "SELECT session_id, left_at FROM episode_sessions "
+            "WHERE episode_id = ? ORDER BY session_id",
+            (episode_id,),
+        ).fetchall()
+        by_session = {r["session_id"]: r["left_at"] for r in rows}
+        # The previously-closed binding keeps its original timestamp.
+        assert by_session["sess-old"] == prior_left_at
+        # The previously-open binding gets stamped at close time.
+        assert by_session["sess-1"] == "2026-04-25T12:00:00+00:00"
