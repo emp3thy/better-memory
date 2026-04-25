@@ -169,11 +169,47 @@ def create_app(
             "fragments/episode_drawer.html", detail=detail
         )
 
-    # Close-action stub — required so episode_drawer.html can resolve
-    # url_for('episode_close', ...) at render time. Task 8 replaces.
+    _DEFAULT_CLOSE_REASONS = {
+        "success": "goal_complete",
+        "partial": "superseded",
+        "abandoned": "abandoned",
+        "no_outcome": "session_end_reconciled",
+    }
+
     @app.post("/episodes/<id>/close")
-    def episode_close(id: str) -> tuple[str, int]:
-        return "", 200
+    def episode_close(id: str) -> tuple[str, int, dict[str, str]]:
+        outcome = request.args.get("outcome", "")
+        if outcome not in _DEFAULT_CLOSE_REASONS:
+            return (
+                f'<div class="card card-error">'
+                f"<p>Invalid outcome: {escape(outcome)}</p>"
+                "</div>"
+            ), 400, {}
+        conn = app.extensions["db_connection"]
+        if queries.episode_detail(conn, episode_id=id) is None:
+            abort(404)
+        try:
+            app.extensions["episode_service"].close_by_id(
+                episode_id=id,
+                outcome=outcome,
+                close_reason=_DEFAULT_CLOSE_REASONS[outcome],
+            )
+        except ValueError as exc:
+            # close_by_id raises for "already closed" or "not found".
+            # We already checked existence, so this path is the
+            # already-closed race — return 409 with an error card.
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        # Re-render the drawer (now showing the closed view) and fire
+        # episode-closed so the timeline reloads.
+        detail = queries.episode_detail(conn, episode_id=id)
+        rendered = render_template(
+            "fragments/episode_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "episode-closed"}
 
     @app.get("/pipeline")
     def pipeline() -> str:

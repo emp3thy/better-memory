@@ -138,3 +138,96 @@ class TestEpisodeDrawer:
         assert "Close as success" not in body
         assert "Continuing" not in body
         assert "success" in body  # outcome badge still rendered
+
+
+class TestEpisodeClose:
+    def test_close_as_success_marks_episode(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        ep_id = _seed(tmp_db, project="proj-a")
+
+        response = client.post(
+            f"/episodes/{ep_id}/close?outcome=success",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("HX-Trigger") == "episode-closed"
+
+        conn = connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT outcome, close_reason FROM episodes WHERE id = ?",
+                (ep_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["outcome"] == "success"
+        assert row["close_reason"] == "goal_complete"
+
+    def test_close_as_abandoned_uses_abandoned_reason(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        ep_id = _seed(tmp_db, project="proj-a")
+
+        client.post(
+            f"/episodes/{ep_id}/close?outcome=abandoned",
+            headers={"Origin": "http://localhost"},
+        )
+
+        conn = connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT close_reason FROM episodes WHERE id = ?",
+                (ep_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["close_reason"] == "abandoned"
+
+    def test_close_returns_404_for_unknown_episode(
+        self, client: FlaskClient
+    ):
+        response = client.post(
+            "/episodes/does-not-exist/close?outcome=success",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 404
+
+    def test_close_returns_400_for_invalid_outcome(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        ep_id = _seed(tmp_db, project="proj-a")
+
+        response = client.post(
+            f"/episodes/{ep_id}/close?outcome=bogus",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+
+    def test_close_returns_409_for_already_closed_episode(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        ep_id = _seed(tmp_db, project="proj-a")
+        # First close: success.
+        client.post(
+            f"/episodes/{ep_id}/close?outcome=success",
+            headers={"Origin": "http://localhost"},
+        )
+        # Second close: already closed.
+        response = client.post(
+            f"/episodes/{ep_id}/close?outcome=abandoned",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 409
