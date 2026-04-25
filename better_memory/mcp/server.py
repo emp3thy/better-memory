@@ -7,9 +7,9 @@ as MCP tools over stdio. On startup, the knowledge-base is reindexed
 Tools
 -----
 * ``memory.observe``       — create a new observation; returns ``{"id": ...}``.
-* ``memory.retrieve``      — three outcome buckets + knowledge. Drains
-                             the spool before searching. (Reflection
-                             retrieval is planned for Phase 6.)
+* ``memory.retrieve``      — reflections bucketed by polarity (do/dont/neutral),
+                             filtered by project/tech/phase/polarity, capped 20 per bucket.
+                             Drains the spool before retrieving.
 * ``memory.record_use``    — record re-use (optionally with outcome).
 * ``knowledge.search``     — BM25 search against the knowledge-base FTS.
 * ``knowledge.list``       — list indexed knowledge documents.
