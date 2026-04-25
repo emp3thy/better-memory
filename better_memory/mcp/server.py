@@ -158,6 +158,33 @@ def _tool_definitions() -> list[Tool]:
             },
         ),
         Tool(
+            name="memory.retrieve_observations",
+            description=(
+                "Retrieve raw observations matching given filters. Drill-down "
+                "tool — use memory.retrieve for the distilled-reflections "
+                "default. With ``query``, results are ranked by hybrid "
+                "FTS5 + sqlite-vec relevance; without, ordered created_at "
+                "DESC. ``episode_id`` and ``theme`` filters are ignored "
+                "in query mode."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {"type": "string"},
+                    "episode_id": {"type": "string"},
+                    "component": {"type": "string"},
+                    "theme": {"type": "string"},
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["success", "failure", "neutral"],
+                    },
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        ),
+        Tool(
             name="memory.record_use",
             description=(
                 "Record that an observation was used; optionally mark the "
@@ -468,6 +495,19 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 limit_per_bucket=limit_per_bucket,
             )
             return [TextContent(type="text", text=json.dumps(buckets))]
+
+        if name == "memory.retrieve_observations":
+            project = args.get("project") or Path.cwd().name
+            results = await observations.list_observations(
+                project=project,
+                episode_id=args.get("episode_id"),
+                component=args.get("component"),
+                theme=args.get("theme"),
+                outcome=args.get("outcome"),
+                query=args.get("query"),
+                limit=args.get("limit", 50),
+            )
+            return [TextContent(type="text", text=json.dumps(results))]
 
         if name == "memory.record_use":
             observations.record_use(

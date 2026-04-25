@@ -332,3 +332,35 @@ class TestRetrieveReturnsReflections:
         assert "component" not in props
         assert "window" not in props
         assert "scope_path" not in props
+
+
+class TestRetrieveObservationsTool:
+    """Phase 6: memory.retrieve_observations is registered with the right schema."""
+
+    def test_tool_is_registered(self):
+        from better_memory.mcp.server import _tool_definitions
+        names = {t.name for t in _tool_definitions()}
+        assert "memory.retrieve_observations" in names
+
+    def test_tool_schema_has_filter_and_query_params(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.retrieve_observations"
+        )
+        props = tool.inputSchema["properties"]
+        for key in (
+            "project", "episode_id", "component", "theme",
+            "outcome", "query", "limit",
+        ):
+            assert key in props, f"missing property: {key}"
+        assert tool.inputSchema["additionalProperties"] is False
+
+    def test_tool_outcome_enum_matches_observations_check(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.retrieve_observations"
+        )
+        outcome_prop = tool.inputSchema["properties"]["outcome"]
+        assert set(outcome_prop["enum"]) == {"success", "failure", "neutral"}
