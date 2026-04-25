@@ -447,3 +447,226 @@ def test_session_id_falls_back_to_uuid_when_no_env(
     assert svc._session_id  # non-empty
     assert svc._session_id != "claude-sess-abc"  # random, unpredictable
     assert len(svc._session_id) == 32  # uuid4().hex length
+
+
+# ---------------------------------------------------------------------------
+# list_observations()
+# ---------------------------------------------------------------------------
+
+
+class TestListObservations:
+    """Phase 6: ObservationService.list_observations for memory.retrieve_observations.
+
+    Two modes:
+    - Filter-only: simple SQL by project/episode_id/component/theme/outcome.
+    - Query mode: hybrid search via existing observations.retrieve infra.
+    """
+
+    async def test_filter_by_project_only(
+        self, conn: sqlite3.Connection, fixed_clock: Any
+    ) -> None:
+        from better_memory.services.episode import EpisodeService
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        ep_other = epsvc.start_foreground(
+            session_id="s2", project="other", goal="g"
+        )
+        epsvc.close_active(
+            session_id="s2", outcome="success", close_reason="goal_complete"
+        )
+
+        embedder = _StubEmbedder()
+        svc = ObservationService(
+            conn, embedder, clock=fixed_clock,
+            project_resolver=lambda: "p",
+            episodes=epsvc,
+        )
+
+        # Two observations in project "p", one in "other".
+        await svc.create("a", project="p")
+        await svc.create("b", project="p")
+        # Manually insert into "other" episode to avoid touching project_resolver.
+        from uuid import uuid4
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, outcome, reinforcement_score, "
+            " episode_id, created_at) "
+            "VALUES (?, ?, ?, ?, 0.0, ?, ?)",
+            (uuid4().hex, "c", "other", "neutral", ep_other, "2026-04-25T10:00:00+00:00"),
+        )
+        conn.commit()
+
+        results = await svc.list_observations(project="p")
+        assert len(results) == 2
+        assert {r["content"] for r in results} == {"a", "b"}
+
+    async def test_filter_by_episode_id(
+        self, conn: sqlite3.Connection, fixed_clock: Any
+    ) -> None:
+        from better_memory.services.episode import EpisodeService
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep1 = epsvc.start_foreground(session_id="s1", project="p", goal="g1")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        ep2 = epsvc.start_foreground(session_id="s2", project="p", goal="g2")
+        epsvc.close_active(
+            session_id="s2", outcome="success", close_reason="goal_complete"
+        )
+        # Insert two observations under ep1, one under ep2.
+        from uuid import uuid4
+        for content, ep_id in [("a", ep1), ("b", ep1), ("c", ep2)]:
+            conn.execute(
+                "INSERT INTO observations "
+                "(id, content, project, outcome, reinforcement_score, "
+                " episode_id, created_at) "
+                "VALUES (?, ?, ?, ?, 0.0, ?, ?)",
+                (uuid4().hex, content, "p", "neutral", ep_id,
+                 "2026-04-25T10:00:00+00:00"),
+            )
+        conn.commit()
+
+        embedder = _StubEmbedder()
+        svc = ObservationService(
+            conn, embedder, clock=fixed_clock,
+            project_resolver=lambda: "p",
+            episodes=epsvc,
+        )
+
+        results = await svc.list_observations(project="p", episode_id=ep1)
+        assert {r["content"] for r in results} == {"a", "b"}
+
+    async def test_filter_by_component_theme_outcome(
+        self, conn: sqlite3.Connection, fixed_clock: Any
+    ) -> None:
+        from better_memory.services.episode import EpisodeService
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        from uuid import uuid4
+        rows = [
+            ("a", "auth", "bug", "failure"),
+            ("b", "auth", "feat", "success"),
+            ("c", "db",   "bug", "success"),
+        ]
+        for content, comp, theme, oc in rows:
+            conn.execute(
+                "INSERT INTO observations "
+                "(id, content, project, component, theme, outcome, "
+                " reinforcement_score, episode_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?)",
+                (uuid4().hex, content, "p", comp, theme, oc, ep,
+                 "2026-04-25T10:00:00+00:00"),
+            )
+        conn.commit()
+
+        embedder = _StubEmbedder()
+        svc = ObservationService(
+            conn, embedder, clock=fixed_clock,
+            project_resolver=lambda: "p",
+            episodes=epsvc,
+        )
+
+        # Component filter alone.
+        result = await svc.list_observations(project="p", component="auth")
+        assert {r["content"] for r in result} == {"a", "b"}
+
+        # Theme filter alone.
+        result = await svc.list_observations(project="p", theme="bug")
+        assert {r["content"] for r in result} == {"a", "c"}
+
+        # Outcome filter alone.
+        result = await svc.list_observations(project="p", outcome="success")
+        assert {r["content"] for r in result} == {"b", "c"}
+
+        # Combined: auth + bug.
+        result = await svc.list_observations(
+            project="p", component="auth", theme="bug",
+        )
+        assert {r["content"] for r in result} == {"a"}
+
+    async def test_orders_newest_first_and_caps_at_limit(
+        self, conn: sqlite3.Connection, fixed_clock: Any
+    ) -> None:
+        from better_memory.services.episode import EpisodeService
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        from uuid import uuid4
+        # Insert 5 observations with descending timestamps.
+        timestamps = [
+            "2026-04-25T10:00:00+00:00",
+            "2026-04-25T11:00:00+00:00",
+            "2026-04-25T12:00:00+00:00",
+            "2026-04-25T13:00:00+00:00",
+            "2026-04-25T14:00:00+00:00",
+        ]
+        for i, ts in enumerate(timestamps):
+            conn.execute(
+                "INSERT INTO observations "
+                "(id, content, project, outcome, reinforcement_score, "
+                " episode_id, created_at) "
+                "VALUES (?, ?, ?, ?, 0.0, ?, ?)",
+                (uuid4().hex, f"obs-{i}", "p", "neutral", ep, ts),
+            )
+        conn.commit()
+
+        embedder = _StubEmbedder()
+        svc = ObservationService(
+            conn, embedder, clock=fixed_clock,
+            project_resolver=lambda: "p",
+            episodes=epsvc,
+        )
+
+        # Default limit is 50; here 5 rows, all returned, newest first.
+        result = await svc.list_observations(project="p")
+        assert [r["content"] for r in result] == [
+            "obs-4", "obs-3", "obs-2", "obs-1", "obs-0",
+        ]
+
+        # Explicit limit.
+        result = await svc.list_observations(project="p", limit=2)
+        assert [r["content"] for r in result] == ["obs-4", "obs-3"]
+
+    async def test_query_mode_routes_through_hybrid_search(
+        self, conn: sqlite3.Connection, fixed_clock: Any
+    ) -> None:
+        """When ``query`` is given, hybrid search ranks results by relevance."""
+        from better_memory.services.episode import EpisodeService
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+
+        embedder = _StubEmbedder()
+        svc = ObservationService(
+            conn, embedder, clock=fixed_clock,
+            project_resolver=lambda: "p",
+            episodes=epsvc,
+        )
+
+        # Insert two distinct observations via service so embeddings exist.
+        await svc.create("flamingo migration failed", project="p")
+        await svc.create("pelican lazy-init succeeded", project="p")
+        conn.commit()
+
+        # Query "flamingo" should rank obs containing "flamingo" first.
+        result = await svc.list_observations(
+            project="p", query="flamingo", limit=10,
+        )
+        assert len(result) >= 1
+        # The flamingo observation must appear in the ranked output.
+        assert any("flamingo" in r["content"] for r in result)
