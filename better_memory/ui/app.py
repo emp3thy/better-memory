@@ -16,6 +16,7 @@ from better_memory.config import resolve_home
 from better_memory.db.connection import connect
 from better_memory.llm.ollama import ChatCompleter, OllamaChat
 from better_memory.services.consolidation import ConsolidationService
+from better_memory.services.episode import EpisodeService
 from better_memory.services.insight import InsightService
 from better_memory.ui import jobs, queries
 
@@ -55,6 +56,7 @@ def create_app(
 
     app.extensions["db_connection"] = db_conn
     app.extensions["insight_service"] = InsightService(conn=db_conn)
+    app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["_db_path"] = resolved_db
     resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
     app.extensions["chat"] = resolved_chat
@@ -122,7 +124,11 @@ def create_app(
 
     @app.get("/")
     def root() -> Response:
-        return redirect(url_for("pipeline"))
+        return redirect(url_for("episodes"))
+
+    @app.get("/episodes")
+    def episodes() -> str:
+        return "episodes-placeholder"
 
     @app.get("/pipeline")
     def pipeline() -> str:

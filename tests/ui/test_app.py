@@ -40,10 +40,10 @@ class TestHealthz:
 
 
 class TestRootRedirect:
-    def test_redirects_to_pipeline(self, client: FlaskClient) -> None:
+    def test_redirects_to_episodes(self, client: FlaskClient) -> None:
         response = client.get("/")
         assert response.status_code == 302
-        assert response.headers["Location"].endswith("/pipeline")
+        assert response.headers["Location"].endswith("/episodes")
 
 
 class TestLayoutShell:
