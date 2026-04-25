@@ -4,7 +4,7 @@
 <section class="episodes">
   <div id="banner"
        hx-get="{{ url_for('episodes_banner') }}"
-       hx-trigger="load, every 30s"
+       hx-trigger="load, every 30s, episode-closed from:body"
        hx-swap="innerHTML">
   </div>
 
