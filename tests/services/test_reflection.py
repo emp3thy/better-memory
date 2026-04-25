@@ -1325,3 +1325,52 @@ class TestRetrieveReflections:
         svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
         result = svc.retrieve_reflections(project="p")
         assert [r["id"] for r in result["do"]] == ["r-high", "r-mid", "r-low"]
+
+
+class TestRetrieveReflectionsLimit:
+    """Phase 6: retrieve_reflections caps each bucket at limit_per_bucket."""
+
+    def test_limit_per_bucket_caps_each_polarity(self, conn, fixed_clock):
+        # Insert 5 'do', 5 'dont', 5 'neutral' confirmed reflections.
+        for polarity in ("do", "dont", "neutral"):
+            for i in range(5):
+                _insert_reflection(
+                    conn, refl_id=f"{polarity}-{i}", project="p",
+                    polarity=polarity, status="confirmed",
+                    confidence=0.9 - (i * 0.1),
+                )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+
+        result = svc.retrieve_reflections(project="p", limit_per_bucket=2)
+        assert len(result["do"]) == 2
+        assert len(result["dont"]) == 2
+        assert len(result["neutral"]) == 2
+
+    def test_default_limit_is_20(self, conn, fixed_clock):
+        # Insert 25 'do' reflections — default cap should trim to 20.
+        for i in range(25):
+            _insert_reflection(
+                conn, refl_id=f"r-{i}", project="p", polarity="do",
+                status="confirmed", confidence=0.9 - (i * 0.01),
+            )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p")
+        assert len(result["do"]) == 20
+
+    def test_limit_preserves_confidence_order(self, conn, fixed_clock):
+        # 5 reflections with descending confidence; limit 3 keeps top 3.
+        confidences = [0.9, 0.8, 0.7, 0.6, 0.5]
+        for i, c in enumerate(confidences):
+            _insert_reflection(
+                conn, refl_id=f"r-{i}", project="p", polarity="do",
+                status="confirmed", confidence=c,
+            )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p", limit_per_bucket=3)
+        assert [r["id"] for r in result["do"]] == ["r-0", "r-1", "r-2"]

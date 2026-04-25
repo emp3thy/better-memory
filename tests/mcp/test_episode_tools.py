@@ -288,3 +288,47 @@ class TestServerStartupDrainsSessionStart:
             await cleanup()
 
 
+class TestRetrieveReturnsReflections:
+    """Phase 6: memory.retrieve returns reflections, not observations."""
+
+    def test_retrieve_via_service_returns_reflection_buckets(self, conn):
+        from better_memory.llm.fake import FakeChat
+        from better_memory.services.reflection import ReflectionSynthesisService
+
+        # Seed two reflections.
+        from uuid import uuid4
+        for polarity, title in (("do", "Do this"), ("dont", "Don't that")):
+            conn.execute(
+                "INSERT INTO reflections "
+                "(id, title, project, phase, polarity, use_cases, hints, "
+                " confidence, status, evidence_count, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uuid4().hex, title, "p", "general", polarity,
+                 "uc", "[]", 0.5, "confirmed", 1,
+                 "2026-04-25T10:00:00+00:00", "2026-04-25T10:00:00+00:00"),
+            )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]))
+        result = svc.retrieve_reflections(project="p")
+        assert {r["title"] for r in result["do"]} == {"Do this"}
+        assert {r["title"] for r in result["dont"]} == {"Don't that"}
+
+    def test_memory_retrieve_tool_schema_takes_filter_params(self):
+        """Tool schema should expose project/tech/phase/polarity, drop legacy params."""
+        from better_memory.mcp.server import _tool_definitions
+
+        tool = next(
+            t for t in _tool_definitions() if t.name == "memory.retrieve"
+        )
+        props = tool.inputSchema["properties"]
+        # New filter params present.
+        assert "project" in props
+        assert "tech" in props
+        assert "phase" in props
+        assert "polarity" in props
+        # Legacy params removed.
+        assert "query" not in props
+        assert "component" not in props
+        assert "window" not in props
+        assert "scope_path" not in props

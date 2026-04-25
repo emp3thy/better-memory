@@ -134,24 +134,26 @@ def _tool_definitions() -> list[Tool]:
         Tool(
             name="memory.retrieve",
             description=(
-                "Retrieve observations and knowledge relevant to the current "
-                "task, bucketed by outcome (do / dont / neutral). Reflection "
-                "retrieval is planned for Phase 6."
+                "Retrieve reflections (do / dont / neutral lessons distilled "
+                "from prior observations) bucketed by polarity. Filter by "
+                "project, tech, phase, and polarity. For raw observation "
+                "lookup, use memory.retrieve_observations."
             ),
             inputSchema={
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "query": {"type": "string"},
-                    "component": {"type": "string"},
-                    "window": {
+                    "project": {"type": "string"},
+                    "tech": {"type": "string"},
+                    "phase": {
                         "type": "string",
-                        "default": "30d",
-                        "description": (
-                            "Lookback window, e.g. '30d', '24h', or 'none'."
-                        ),
+                        "enum": ["planning", "implementation", "general"],
                     },
-                    "scope_path": {"type": "string"},
+                    "polarity": {
+                        "type": "string",
+                        "enum": ["do", "dont", "neutral"],
+                    },
+                    "limit_per_bucket": {"type": "integer"},
                 },
             },
         ),
@@ -448,45 +450,24 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
         if name == "memory.retrieve":
-            # 1. Drain spool — must happen before any search so fresh hook
-            #    events are searchable. SpoolService.drain is idempotent.
+            # 1. Drain spool — must happen before any retrieval so fresh
+            #    hook events (session_start, commit_close) are processed.
+            #    SpoolService.drain is idempotent.
             try:
                 spool.drain()
             except Exception:  # noqa: BLE001 — drain is best-effort
-                # A drain failure should not prevent retrieval.
                 pass
 
-            window_days = _parse_window(args.get("window", "30d"))
-            query = args.get("query")
-            component = args.get("component")
-            scope_path = args.get("scope_path")
-
-            buckets = await observations.retrieve(
-                query=query,
-                component=component,
-                window_days=window_days,
-                scope_path=scope_path,
+            project = args.get("project") or Path.cwd().name
+            limit_per_bucket = args.get("limit_per_bucket", 20)
+            buckets = reflections.retrieve_reflections(
+                project=project,
+                tech=args.get("tech"),
+                phase=args.get("phase"),
+                polarity=args.get("polarity"),
+                limit_per_bucket=limit_per_bucket,
             )
-
-            # Insights table was dropped in Phase 1. Reflection retrieval
-            # replaces this path in Phase 6; for now, return [] so clients
-            # continue to receive the payload shape they expect.
-            insight_hits: list[dict[str, Any]] = []
-            knowledge_hits: list[dict[str, Any]] = []
-            if query:
-                knowledge_hits = [
-                    _serialize_knowledge_search(r)
-                    for r in knowledge.search(query, limit=5)
-                ]
-
-            payload = {
-                "do": [_serialize_result(r) for r in buckets.do],
-                "dont": [_serialize_result(r) for r in buckets.dont],
-                "neutral": [_serialize_result(r) for r in buckets.neutral],
-                "insights": insight_hits,
-                "knowledge": knowledge_hits,
-            }
-            return [TextContent(type="text", text=json.dumps(payload))]
+            return [TextContent(type="text", text=json.dumps(buckets))]
 
         if name == "memory.record_use":
             observations.record_use(
