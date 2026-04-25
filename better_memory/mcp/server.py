@@ -7,9 +7,9 @@ as MCP tools over stdio. On startup, the knowledge-base is reindexed
 Tools
 -----
 * ``memory.observe``       — create a new observation; returns ``{"id": ...}``.
-* ``memory.retrieve``      — three outcome buckets + knowledge. Drains
-                             the spool before searching. (Reflection
-                             retrieval is planned for Phase 6.)
+* ``memory.retrieve``      — reflections bucketed by polarity (do/dont/neutral),
+                             filtered by project/tech/phase/polarity, capped 20 per bucket.
+                             Drains the spool before retrieving.
 * ``memory.record_use``    — record re-use (optionally with outcome).
 * ``knowledge.search``     — BM25 search against the knowledge-base FTS.
 * ``knowledge.list``       — list indexed knowledge documents.
@@ -51,7 +51,6 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.llm.ollama import OllamaChat
-from better_memory.search.hybrid import SearchResult
 from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
@@ -134,24 +133,53 @@ def _tool_definitions() -> list[Tool]:
         Tool(
             name="memory.retrieve",
             description=(
-                "Retrieve observations and knowledge relevant to the current "
-                "task, bucketed by outcome (do / dont / neutral). Reflection "
-                "retrieval is planned for Phase 6."
+                "Retrieve reflections (do / dont / neutral lessons distilled "
+                "from prior observations) bucketed by polarity. Filter by "
+                "project, tech, phase, and polarity. For raw observation "
+                "lookup, use memory.retrieve_observations."
             ),
             inputSchema={
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "query": {"type": "string"},
-                    "component": {"type": "string"},
-                    "window": {
+                    "project": {"type": "string"},
+                    "tech": {"type": "string"},
+                    "phase": {
                         "type": "string",
-                        "default": "30d",
-                        "description": (
-                            "Lookback window, e.g. '30d', '24h', or 'none'."
-                        ),
+                        "enum": ["planning", "implementation", "general"],
                     },
-                    "scope_path": {"type": "string"},
+                    "polarity": {
+                        "type": "string",
+                        "enum": ["do", "dont", "neutral"],
+                    },
+                    "limit_per_bucket": {"type": "integer"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.retrieve_observations",
+            description=(
+                "Retrieve raw observations matching given filters. Drill-down "
+                "tool — use memory.retrieve for the distilled-reflections "
+                "default. With ``query``, results are ranked by hybrid "
+                "FTS5 + sqlite-vec relevance; without, ordered created_at "
+                "DESC. ``episode_id`` and ``theme`` filters are ignored "
+                "in query mode."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {"type": "string"},
+                    "episode_id": {"type": "string"},
+                    "component": {"type": "string"},
+                    "theme": {"type": "string"},
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["success", "failure", "neutral"],
+                    },
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
             },
         ),
@@ -309,49 +337,6 @@ def _tool_definitions() -> list[Tool]:
 # --------------------------------------------------------------------------- helpers
 
 
-def _parse_window(value: str | None) -> int | None:
-    """Parse a window like ``"30d"`` or ``"24h"`` into integer days.
-
-    ``None`` / ``"none"`` disables windowing entirely. ``"Xd"`` returns ``X``,
-    ``"Xh"`` rounds up to at least one day. Anything else raises ``ValueError``
-    so callers see a clear message rather than silent mis-filtering.
-    """
-    if value is None:
-        return 30
-    raw = value.strip().lower()
-    if raw in {"", "none"}:
-        return None
-    if raw.endswith("d"):
-        magnitude = raw[:-1]
-        if not magnitude.isdigit():
-            raise ValueError(f"Unrecognised window: {value!r}")
-        return int(magnitude)
-    if raw.endswith("h"):
-        magnitude = raw[:-1]
-        if not magnitude.isdigit():
-            raise ValueError(f"Unrecognised window: {value!r}")
-        hours = int(magnitude)
-        # Any sub-day window collapses to a single day because the underlying
-        # hybrid_search windowing is day-granular. We round up so a request of
-        # "1h" still matches same-day rows.
-        days = max(1, hours // 24 + (1 if hours % 24 else 0))
-        return days
-    raise ValueError(f"Unrecognised window: {value!r}")
-
-
-def _serialize_result(result: SearchResult) -> dict[str, Any]:
-    return {
-        "id": result.id,
-        "content": result.content,
-        "component": result.component,
-        "theme": result.theme,
-        "outcome": result.outcome,
-        "reinforcement_score": result.reinforcement_score,
-        "created_at": result.created_at,
-        "final_score": result.final_score,
-    }
-
-
 def _serialize_knowledge_search(result: KnowledgeSearchResult) -> dict[str, Any]:
     doc = result.document
     return {
@@ -448,45 +433,37 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
         if name == "memory.retrieve":
-            # 1. Drain spool — must happen before any search so fresh hook
-            #    events are searchable. SpoolService.drain is idempotent.
+            # 1. Drain spool — must happen before any retrieval so fresh
+            #    hook events (session_start, commit_close) are processed.
+            #    SpoolService.drain is idempotent.
             try:
                 spool.drain()
             except Exception:  # noqa: BLE001 — drain is best-effort
-                # A drain failure should not prevent retrieval.
                 pass
 
-            window_days = _parse_window(args.get("window", "30d"))
-            query = args.get("query")
-            component = args.get("component")
-            scope_path = args.get("scope_path")
-
-            buckets = await observations.retrieve(
-                query=query,
-                component=component,
-                window_days=window_days,
-                scope_path=scope_path,
+            project = args.get("project") or Path.cwd().name
+            limit_per_bucket = args.get("limit_per_bucket", 20)
+            buckets = reflections.retrieve_reflections(
+                project=project,
+                tech=args.get("tech"),
+                phase=args.get("phase"),
+                polarity=args.get("polarity"),
+                limit_per_bucket=limit_per_bucket,
             )
+            return [TextContent(type="text", text=json.dumps(buckets))]
 
-            # Insights table was dropped in Phase 1. Reflection retrieval
-            # replaces this path in Phase 6; for now, return [] so clients
-            # continue to receive the payload shape they expect.
-            insight_hits: list[dict[str, Any]] = []
-            knowledge_hits: list[dict[str, Any]] = []
-            if query:
-                knowledge_hits = [
-                    _serialize_knowledge_search(r)
-                    for r in knowledge.search(query, limit=5)
-                ]
-
-            payload = {
-                "do": [_serialize_result(r) for r in buckets.do],
-                "dont": [_serialize_result(r) for r in buckets.dont],
-                "neutral": [_serialize_result(r) for r in buckets.neutral],
-                "insights": insight_hits,
-                "knowledge": knowledge_hits,
-            }
-            return [TextContent(type="text", text=json.dumps(payload))]
+        if name == "memory.retrieve_observations":
+            project = args.get("project") or Path.cwd().name
+            results = await observations.list_observations(
+                project=project,
+                episode_id=args.get("episode_id"),
+                component=args.get("component"),
+                theme=args.get("theme"),
+                outcome=args.get("outcome"),
+                query=args.get("query"),
+                limit=args.get("limit", 50),
+            )
+            return [TextContent(type="text", text=json.dumps(results))]
 
         if name == "memory.record_use":
             observations.record_use(

@@ -19,13 +19,30 @@ Every observation has an `outcome`: `success`, `failure`, or `neutral`.
 
 ### Retrieval buckets
 
-`memory.retrieve` returns `{do, dont, neutral, insights, knowledge}`. Treat `dont` as a hard constraint list: do not repeat approaches that live there.
+`memory.retrieve` returns `{do, dont, neutral}` — distilled **reflections**
+(generalised lessons from prior observations), bucketed by polarity. Each
+bucket lists items with `{id, title, phase, use_cases, hints, confidence,
+tech, evidence_count}`, ordered by `confidence DESC, updated_at DESC`,
+capped at 20 per bucket.
+
+Treat `dont` as a hard constraint list: do not repeat approaches that
+live there.
+
+For raw observation lookup (e.g. citing specific past events), use
+`memory.retrieve_observations(project?, episode_id?, component?, theme?,
+outcome?, query?, limit?)`. With `query`, results are ranked by hybrid
+search; without, ordered newest-first.
 
 ### MCP tools
 
-- `memory.observe(content, component?, theme?, trigger_type?, outcome?)`
-- `memory.retrieve(query?, component?, window?='30d', scope_path?)`
+- `memory.observe(content, component?, theme?, trigger_type?, outcome?, tech?)`
+- `memory.retrieve(project?, tech?, phase?, polarity?, limit_per_bucket?)` — reflections, bucketed by polarity
+- `memory.retrieve_observations(project?, episode_id?, component?, theme?, outcome?, query?, limit?)` — raw observations
 - `memory.record_use(id, outcome?)`
+- `memory.start_episode(goal, tech?)` — declares a goal; returns `{episode_id, reflections}`
+- `memory.close_episode(outcome, summary?, close_reason?)` — closes the active episode
+- `memory.reconcile_episodes()` — list unclosed episodes from prior sessions
+- `memory.list_episodes(project?, outcome?, only_open?)` — episodes for UI/inspection
 - `knowledge.search(query, project?)`
 - `knowledge.list(project?)`
 

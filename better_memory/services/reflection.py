@@ -945,6 +945,7 @@ class ReflectionSynthesisService:
         tech: str | None = None,
         phase: str | None = None,
         polarity: str | None = None,
+        limit_per_bucket: int = 20,
     ) -> dict[str, list[dict]]:
         """Return reflections bucketed by polarity, ordered by confidence DESC.
 
@@ -953,6 +954,7 @@ class ReflectionSynthesisService:
         - ``tech``: matches same-tech rows OR cross-tech (tech IS NULL) rows.
         - ``phase``: optional exact match.
         - ``polarity``: optional exact match; non-matching buckets remain empty.
+        - ``limit_per_bucket``: cap each polarity bucket. Default 20 per spec §7.
 
         Excludes retired and superseded reflections. Includes pending_review
         + confirmed.
@@ -986,7 +988,10 @@ class ReflectionSynthesisService:
 
         buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
         for r in rows:
-            entry = {
+            bucket = buckets[r["polarity"]]
+            if len(bucket) >= limit_per_bucket:
+                continue
+            bucket.append({
                 "id": r["id"],
                 "title": r["title"],
                 "phase": r["phase"],
@@ -995,6 +1000,5 @@ class ReflectionSynthesisService:
                 "confidence": r["confidence"],
                 "tech": r["tech"],
                 "evidence_count": r["evidence_count"],
-            }
-            buckets[r["polarity"]].append(entry)
+            })
         return buckets

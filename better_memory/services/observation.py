@@ -437,6 +437,145 @@ class ObservationService:
         )
         conn.commit()
 
+    async def list_observations(
+        self,
+        *,
+        project: str | None = None,
+        episode_id: str | None = None,
+        component: str | None = None,
+        theme: str | None = None,
+        outcome: Outcome | None = None,
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Phase 6 read-side API for ``memory.retrieve_observations``.
+
+        Two modes:
+
+        Filter-only mode (``query`` is None or empty):
+        - Simple SQL filter on ``project``, ``episode_id``, ``component``,
+          ``theme``, ``outcome``.
+        - Order: ``created_at DESC, rowid DESC``. Cap at ``limit``.
+
+        Query mode (``query`` is given):
+        - Embed the query and route through :func:`hybrid_search`. FTS5 +
+          sqlite-vec results, RRF-fused, ranked by relevance.
+        - The simple filters that ``SearchFilters`` natively supports
+          (``project``, ``component``, ``outcome``) are honoured; ``status``
+          and ``window_days`` are disabled (drill-down should see all
+          statuses, no time cap).
+        - **Limitation:** ``episode_id`` and ``theme`` are NOT honoured in
+          query mode (they are not in :class:`SearchFilters`). Pass them
+          without ``query`` for those drill-down lookups.
+        """
+        resolved_project = project if project is not None else self._project_resolver()
+
+        if query is not None and query.strip():
+            return await self._list_observations_via_hybrid_search(
+                project=resolved_project,
+                component=component,
+                outcome=outcome,
+                query=query,
+                limit=limit,
+            )
+        return self._list_observations_via_filter(
+            project=resolved_project,
+            episode_id=episode_id,
+            component=component,
+            theme=theme,
+            outcome=outcome,
+            limit=limit,
+        )
+
+    def _list_observations_via_filter(
+        self,
+        *,
+        project: str,
+        episode_id: str | None,
+        component: str | None,
+        theme: str | None,
+        outcome: Outcome | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        clauses = ["project = ?"]
+        params: list[Any] = [project]
+        if episode_id is not None:
+            clauses.append("episode_id = ?")
+            params.append(episode_id)
+        if component is not None:
+            clauses.append("component = ?")
+            params.append(component)
+        if theme is not None:
+            clauses.append("theme = ?")
+            params.append(theme)
+        if outcome is not None:
+            clauses.append("outcome = ?")
+            params.append(outcome)
+        where = " AND ".join(clauses)
+        sql = (
+            "SELECT id, content, component, theme, outcome, "
+            "reinforcement_score, created_at FROM observations "
+            f"WHERE {where} "
+            "ORDER BY created_at DESC, rowid DESC "
+            "LIMIT ?"
+        )
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "content": r["content"],
+                "component": r["component"],
+                "theme": r["theme"],
+                "outcome": r["outcome"],
+                "reinforcement_score": r["reinforcement_score"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    async def _list_observations_via_hybrid_search(
+        self,
+        *,
+        project: str,
+        component: str | None,
+        outcome: Outcome | None,
+        query: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        # Embed the query; reuse the same embedder used for writes.
+        vector = await self._embedder.embed(query)
+        fts_query_text = sanitize_fts5_query(query) or None
+
+        # Drill-down should see ALL statuses and have no time cap.
+        filters = SearchFilters(
+            project=project,
+            component=component,
+            outcome=outcome,
+            status=None,
+            window_days=None,
+        )
+        results = hybrid_search(
+            self._conn,
+            query_text=fts_query_text,
+            query_vector=vector,
+            filters=filters,
+            limit=limit,
+            clock=self._clock,
+        )
+        return [
+            {
+                "id": r.id,
+                "content": r.content,
+                "component": r.component,
+                "theme": r.theme,
+                "outcome": r.outcome,
+                "reinforcement_score": r.reinforcement_score,
+                "created_at": r.created_at,
+            }
+            for r in results
+        ]
+
     # ----------------------------------------------------------------- helpers
     def _write_audit(
         self,
