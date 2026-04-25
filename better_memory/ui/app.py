@@ -159,11 +159,21 @@ def create_app(
             "fragments/episode_banner.html", count=count
         )
 
-    # Drawer stub — required so episode_row.html can resolve url_for()
-    # at render time. Task 7 replaces this with the real implementation.
     @app.get("/episodes/<id>/drawer")
     def episodes_drawer(id: str) -> str:
-        return ""
+        conn = app.extensions["db_connection"]
+        detail = queries.episode_detail(conn, episode_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/episode_drawer.html", detail=detail
+        )
+
+    # Close-action stub — required so episode_drawer.html can resolve
+    # url_for('episode_close', ...) at render time. Task 8 replaces.
+    @app.post("/episodes/<id>/close")
+    def episode_close(id: str) -> tuple[str, int]:
+        return "", 200
 
     @app.get("/pipeline")
     def pipeline() -> str:
