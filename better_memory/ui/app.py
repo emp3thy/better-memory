@@ -211,6 +211,10 @@ def create_app(
         )
         return rendered, 200, {"HX-Trigger": "episode-closed"}
 
+    @app.get("/reflections")
+    def reflections() -> str:
+        return render_template("reflections.html", active_tab="reflections")
+
     @app.get("/pipeline")
     def pipeline() -> str:
         counts = queries.kanban_counts(
