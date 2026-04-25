@@ -1,0 +1,30 @@
+<div class="episode-row {% if row.outcome %}outcome-{{ row.outcome }}{% endif %}"
+     hx-get="{{ url_for('episodes_drawer', id=row.id) }}"
+     hx-target="#drawer"
+     hx-swap="innerHTML">
+  <div class="row-main">
+    <span class="goal">
+      {% if row.goal %}{{ row.goal }}{% else %}background session{% endif %}
+    </span>
+    <span class="meta">
+      <span class="project">{{ row.project }}</span>
+      {% if row.tech %}<span class="tech">{{ row.tech }}</span>{% endif %}
+      <span class="time">
+        {{ row.started_at }}{% if row.ended_at %} → {{ row.ended_at }}{% endif %}
+      </span>
+    </span>
+  </div>
+  <div class="row-side">
+    {% if row.outcome %}
+      <span class="outcome-badge outcome-{{ row.outcome }}">{{ row.outcome }}</span>
+    {% else %}
+      <span class="outcome-badge outcome-open">open</span>
+    {% endif %}
+    {% if row.close_reason %}
+      <span class="close-reason">{{ row.close_reason }}</span>
+    {% endif %}
+    <span class="counts">
+      {{ row.observation_count }} obs · {{ row.reflection_count }} refl
+    </span>
+  </div>
+</div>

@@ -128,7 +128,42 @@ def create_app(
 
     @app.get("/episodes")
     def episodes() -> str:
-        return "episodes-placeholder"
+        return render_template("episodes.html", active_tab="episodes")
+
+    @app.get("/episodes/panel")
+    def episodes_panel() -> str:
+        conn = app.extensions["db_connection"]
+        rows = queries.episode_list_for_ui(conn, project=_project_name())
+        # Group by ISO date prefix (YYYY-MM-DD) of started_at, preserving
+        # newest-first ordering. itertools.groupby works because rows are
+        # already sorted by started_at DESC.
+        from itertools import groupby
+
+        days = [
+            (day, list(group))
+            for day, group in groupby(
+                rows, key=lambda r: r.started_at[:10]
+            )
+        ]
+        return render_template(
+            "fragments/panel_episodes.html", days=days
+        )
+
+    @app.get("/episodes/banner")
+    def episodes_banner() -> str:
+        conn = app.extensions["db_connection"]
+        count = queries.unclosed_episode_count(
+            conn, project=_project_name()
+        )
+        return render_template(
+            "fragments/episode_banner.html", count=count
+        )
+
+    # Drawer stub — required so episode_row.html can resolve url_for()
+    # at render time. Task 7 replaces this with the real implementation.
+    @app.get("/episodes/<id>/drawer")
+    def episodes_drawer(id: str) -> str:
+        return ""
 
     @app.get("/pipeline")
     def pipeline() -> str:
