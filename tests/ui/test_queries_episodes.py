@@ -17,6 +17,7 @@ from better_memory.ui.queries import (
     EpisodeRow,
     episode_detail,
     episode_list_for_ui,
+    unclosed_episode_count,
 )
 
 
@@ -292,3 +293,22 @@ class TestEpisodeDetail:
         detail = episode_detail(conn, episode_id=ep_id)
         assert len(detail.reflections) == 1
         assert detail.reflections[0].status == "retired"
+
+
+class TestUnclosedEpisodeCount:
+    def test_zero_when_no_open_episodes(self, conn):
+        assert unclosed_episode_count(conn, project="proj-a") == 0
+
+    def test_counts_open_episodes_for_project(self, conn):
+        # Open background for proj-a (counts).
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        # Closed background for proj-a (does NOT count).
+        svc2 = EpisodeService(conn)
+        svc2.open_background(session_id="s2", project="proj-a")
+        svc2.close_active(
+            session_id="s2", outcome="abandoned", close_reason="abandoned"
+        )
+        # Open background for proj-b (does NOT count — wrong project).
+        EpisodeService(conn).open_background(session_id="s3", project="proj-b")
+
+        assert unclosed_episode_count(conn, project="proj-a") == 1

@@ -349,3 +349,21 @@ def episode_detail(
         observations=observations,
         reflections=reflections,
     )
+
+
+def unclosed_episode_count(
+    conn: sqlite3.Connection, *, project: str
+) -> int:
+    """Return the number of unclosed episodes for ``project``.
+
+    Used by the Episodes-tab banner: any value > 0 surfaces the banner.
+    Filtering to a specific session is intentionally NOT done here — the
+    UI does not bind to a session, and the banner is meant to flag
+    "anything still open" so the user can act on it.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM episodes "
+        "WHERE project = ? AND ended_at IS NULL",
+        (project,),
+    ).fetchone()
+    return int(row["n"])
