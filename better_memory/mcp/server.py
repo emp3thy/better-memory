@@ -51,7 +51,6 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.llm.ollama import OllamaChat
-from better_memory.search.hybrid import SearchResult
 from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
@@ -336,49 +335,6 @@ def _tool_definitions() -> list[Tool]:
 
 
 # --------------------------------------------------------------------------- helpers
-
-
-def _parse_window(value: str | None) -> int | None:
-    """Parse a window like ``"30d"`` or ``"24h"`` into integer days.
-
-    ``None`` / ``"none"`` disables windowing entirely. ``"Xd"`` returns ``X``,
-    ``"Xh"`` rounds up to at least one day. Anything else raises ``ValueError``
-    so callers see a clear message rather than silent mis-filtering.
-    """
-    if value is None:
-        return 30
-    raw = value.strip().lower()
-    if raw in {"", "none"}:
-        return None
-    if raw.endswith("d"):
-        magnitude = raw[:-1]
-        if not magnitude.isdigit():
-            raise ValueError(f"Unrecognised window: {value!r}")
-        return int(magnitude)
-    if raw.endswith("h"):
-        magnitude = raw[:-1]
-        if not magnitude.isdigit():
-            raise ValueError(f"Unrecognised window: {value!r}")
-        hours = int(magnitude)
-        # Any sub-day window collapses to a single day because the underlying
-        # hybrid_search windowing is day-granular. We round up so a request of
-        # "1h" still matches same-day rows.
-        days = max(1, hours // 24 + (1 if hours % 24 else 0))
-        return days
-    raise ValueError(f"Unrecognised window: {value!r}")
-
-
-def _serialize_result(result: SearchResult) -> dict[str, Any]:
-    return {
-        "id": result.id,
-        "content": result.content,
-        "component": result.component,
-        "theme": result.theme,
-        "outcome": result.outcome,
-        "reinforcement_score": result.reinforcement_score,
-        "created_at": result.created_at,
-        "final_score": result.final_score,
-    }
 
 
 def _serialize_knowledge_search(result: KnowledgeSearchResult) -> dict[str, Any]:
