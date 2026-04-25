@@ -257,6 +257,62 @@ class EpisodeService:
         conn.commit()
         return active["id"]
 
+    def close_by_id(
+        self,
+        *,
+        episode_id: str,
+        outcome: str,
+        close_reason: str,
+        summary: str | None = None,
+    ) -> str:
+        """Close an episode by id, regardless of session binding.
+
+        Used by the UI to close prior-session or cross-session episodes
+        that ``close_active`` cannot reach (it requires a session_id and
+        only finds the open episode bound to *that* session).
+
+        Marks every still-open ``episode_sessions`` row for this episode
+        as left at ``now`` so the invariant "exactly-one-open-binding-
+        per-session" continues to hold for any session that was still
+        bound.
+
+        Raises ``ValueError`` if no episode with this id exists, or if
+        the episode is already closed.
+        """
+        row = self._conn.execute(
+            "SELECT ended_at FROM episodes WHERE id = ?",
+            (episode_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Episode not found: {episode_id}")
+        if row["ended_at"] is not None:
+            raise ValueError(f"Episode already closed: {episode_id}")
+
+        now = self._clock().isoformat()
+        conn = self._conn
+        conn.execute("SAVEPOINT episode_close_by_id")
+        try:
+            conn.execute(
+                "UPDATE episodes "
+                "SET ended_at = ?, close_reason = ?, outcome = ?, summary = ? "
+                "WHERE id = ?",
+                (now, close_reason, outcome, summary, episode_id),
+            )
+            conn.execute(
+                "UPDATE episode_sessions "
+                "SET left_at = ? "
+                "WHERE episode_id = ? AND left_at IS NULL",
+                (now, episode_id),
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT episode_close_by_id")
+            conn.execute("RELEASE SAVEPOINT episode_close_by_id")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT episode_close_by_id")
+        conn.commit()
+        return episode_id
+
     def unclosed_episodes(
         self,
         *,
