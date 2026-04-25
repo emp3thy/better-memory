@@ -139,3 +139,114 @@ class TestEpisodeListForUi:
 
         rows = episode_list_for_ui(conn, project="proj-a", limit=2)
         assert len(rows) == 2
+
+
+from better_memory.ui.queries import (
+    EpisodeDetail,
+    EpisodeObservationRow,
+    EpisodeReflectionRow,
+    episode_detail,
+)
+
+
+class TestEpisodeDetail:
+    def test_returns_none_for_missing_episode(self, conn):
+        assert episode_detail(conn, episode_id="nope") is None
+
+    def test_returns_episode_with_no_observations_or_reflections(self, conn):
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        ep_id = conn.execute("SELECT id FROM episodes").fetchone()["id"]
+
+        detail = episode_detail(conn, episode_id=ep_id)
+        assert detail is not None
+        assert detail.episode.id == ep_id
+        assert detail.observations == []
+        assert detail.reflections == []
+
+    def test_returns_observations_newest_first(self, conn):
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        ep_id = conn.execute("SELECT id FROM episodes").fetchone()["id"]
+        # Insert with explicit created_at to control ordering
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, episode_id, component, theme, outcome, "
+            "created_at) "
+            "VALUES (?, ?, 'proj-a', ?, ?, ?, ?, ?)",
+            ("obs-old", "older content", ep_id, "comp", "bug", "failure",
+             "2026-04-24T08:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, episode_id, component, theme, outcome, "
+            "created_at) "
+            "VALUES (?, ?, 'proj-a', ?, ?, ?, ?, ?)",
+            ("obs-new", "newer content", ep_id, "comp", "decision", "success",
+             "2026-04-24T10:00:00+00:00"),
+        )
+        conn.commit()
+
+        detail = episode_detail(conn, episode_id=ep_id)
+        assert [o.id for o in detail.observations] == ["obs-new", "obs-old"]
+        assert detail.observations[0].component == "comp"
+        assert detail.observations[0].theme == "decision"
+        assert detail.observations[0].outcome == "success"
+
+    def test_returns_reflections_with_owning_episode_outcome(self, conn):
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        ep_id = conn.execute("SELECT id FROM episodes").fetchone()["id"]
+
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id) "
+            "VALUES ('obs-1', 'c', 'proj-a', ?)",
+            (ep_id,),
+        )
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            "confidence, status, created_at, updated_at) "
+            "VALUES ('refl-1', 'lesson', 'proj-a', 'general', 'do', 'u', 'h', "
+            "0.8, 'pending_review', '2026-04-25T00:00:00+00:00', "
+            "'2026-04-25T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('refl-1', 'obs-1')"
+        )
+        conn.commit()
+
+        detail = episode_detail(conn, episode_id=ep_id)
+        assert len(detail.reflections) == 1
+        r = detail.reflections[0]
+        assert r.id == "refl-1"
+        assert r.title == "lesson"
+        assert r.phase == "general"
+        assert r.polarity == "do"
+        assert r.status == "pending_review"
+        assert r.confidence == 0.8
+
+    def test_dedupes_reflections_when_multiple_observations_share_one(
+        self, conn
+    ):
+        EpisodeService(conn).open_background(session_id="s1", project="proj-a")
+        ep_id = conn.execute("SELECT id FROM episodes").fetchone()["id"]
+        for i in range(2):
+            conn.execute(
+                "INSERT INTO observations (id, content, project, episode_id) "
+                "VALUES (?, ?, 'proj-a', ?)",
+                (f"obs-{i}", "c", ep_id),
+            )
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, phase, polarity, use_cases, hints, "
+            "confidence, created_at, updated_at) "
+            "VALUES ('refl-1', 't', 'proj-a', 'general', 'do', 'u', 'h', "
+            "0.8, '2026-04-25T00:00:00+00:00', '2026-04-25T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('refl-1', 'obs-0'), ('refl-1', 'obs-1')"
+        )
+        conn.commit()
+
+        detail = episode_detail(conn, episode_id=ep_id)
+        assert len(detail.reflections) == 1

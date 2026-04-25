@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from better_memory.services.episode import Episode
 from better_memory.services.insight import Insight, row_to_insight
 
 
@@ -232,3 +233,111 @@ def episode_list_for_ui(
         )
         for r in conn.execute(sql, (project, limit)).fetchall()
     ]
+
+
+def _episode_from_row(row: sqlite3.Row) -> Episode:
+    return Episode(
+        id=row["id"],
+        project=row["project"],
+        tech=row["tech"],
+        goal=row["goal"],
+        started_at=row["started_at"],
+        hardened_at=row["hardened_at"],
+        ended_at=row["ended_at"],
+        close_reason=row["close_reason"],
+        outcome=row["outcome"],
+        summary=row["summary"],
+    )
+
+
+@dataclass(frozen=True)
+class EpisodeObservationRow:
+    id: str
+    content: str
+    component: str | None
+    theme: str | None
+    outcome: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class EpisodeReflectionRow:
+    id: str
+    title: str
+    phase: str
+    polarity: str
+    confidence: float
+    status: str
+
+
+@dataclass(frozen=True)
+class EpisodeDetail:
+    episode: Episode
+    observations: list[EpisodeObservationRow]
+    reflections: list[EpisodeReflectionRow]
+
+
+def episode_detail(
+    conn: sqlite3.Connection, *, episode_id: str
+) -> EpisodeDetail | None:
+    """Return one episode with its observations and seeded reflections.
+
+    Returns ``None`` if no episode with this id exists.
+
+    Reflections are deduped (an episode's two observations seeding the
+    same reflection produces a single row).
+    """
+    ep_row = conn.execute(
+        "SELECT * FROM episodes WHERE id = ?",
+        (episode_id,),
+    ).fetchone()
+    if ep_row is None:
+        return None
+
+    obs_rows = conn.execute(
+        "SELECT id, content, component, theme, outcome, created_at "
+        "FROM observations WHERE episode_id = ? "
+        "ORDER BY created_at DESC, rowid DESC",
+        (episode_id,),
+    ).fetchall()
+    observations = [
+        EpisodeObservationRow(
+            id=r["id"],
+            content=r["content"],
+            component=r["component"],
+            theme=r["theme"],
+            outcome=r["outcome"],
+            created_at=r["created_at"],
+        )
+        for r in obs_rows
+    ]
+
+    refl_rows = conn.execute(
+        """
+        SELECT DISTINCT
+            r.id, r.title, r.phase, r.polarity, r.confidence, r.status
+        FROM reflections r
+        JOIN reflection_sources rs ON rs.reflection_id = r.id
+        JOIN observations o ON o.id = rs.observation_id
+        WHERE o.episode_id = ?
+        ORDER BY r.confidence DESC, r.id ASC
+        """,
+        (episode_id,),
+    ).fetchall()
+    reflections = [
+        EpisodeReflectionRow(
+            id=r["id"],
+            title=r["title"],
+            phase=r["phase"],
+            polarity=r["polarity"],
+            confidence=r["confidence"],
+            status=r["status"],
+        )
+        for r in refl_rows
+    ]
+
+    return EpisodeDetail(
+        episode=_episode_from_row(ep_row),
+        observations=observations,
+        reflections=reflections,
+    )
