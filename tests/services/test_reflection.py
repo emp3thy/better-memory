@@ -48,16 +48,20 @@ def _insert_obs(
     tech: str | None = None,
     created_at: str = "2026-04-22T09:00:00+00:00",
     status: str = "active",
+    status_changed_at: str | None = None,
 ) -> None:
+    if status_changed_at is None:
+        status_changed_at = created_at
     conn.execute(
         """
         INSERT INTO observations (
             id, content, project, component, theme, outcome,
-            reinforcement_score, episode_id, tech, created_at, status
-        ) VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?)
+            reinforcement_score, episode_id, tech, created_at, status,
+            status_changed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?)
         """,
         (obs_id, content, project, component, theme, outcome,
-         episode_id, tech, created_at, status),
+         episode_id, tech, created_at, status, status_changed_at),
     )
 
 
@@ -1374,3 +1378,96 @@ class TestRetrieveReflectionsLimit:
         svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
         result = svc.retrieve_reflections(project="p", limit_per_bucket=3)
         assert [r["id"] for r in result["do"]] == ["r-0", "r-1", "r-2"]
+
+
+class TestStatusChangedAtOnTransition:
+    def test_apply_new_bumps_status_changed_at(self, conn, fixed_clock):
+        """Verify _apply_new updates observations.status_changed_at to
+        clock-now (not just the status column)."""
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(
+            conn, obs_id="obs-1", project="p", episode_id=ep,
+            created_at="2026-04-01T00:00:00+00:00",
+            status_changed_at="2026-04-01T00:00:00+00:00",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+        )
+        action = NewAction(
+            title="Always test", phase="general", polarity="do",
+            use_cases="when X", hints=["do Y"], tech="python",
+            confidence=0.6, source_observation_ids=["obs-1"],
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT status, status_changed_at FROM observations "
+            "WHERE id = 'obs-1'"
+        ).fetchone()
+        assert row["status"] == "consumed_into_reflection"
+        assert row["status_changed_at"] == fixed_clock().isoformat()
+
+    def test_apply_augment_bumps_status_changed_at(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_reflection(conn, refl_id="r1", project="p")
+        _insert_obs(
+            conn, obs_id="obs-new", project="p", episode_id=ep,
+            created_at="2026-04-01T00:00:00+00:00",
+            status_changed_at="2026-04-01T00:00:00+00:00",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+        )
+        action = AugmentAction(
+            reflection_id="r1", add_hints=["another hint"],
+            rewrite_use_cases=None, confidence_delta=0.0,
+            add_source_observation_ids=["obs-new"],
+        )
+        svc._apply_augment([action])
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT status, status_changed_at FROM observations "
+            "WHERE id = 'obs-new'"
+        ).fetchone()
+        assert row["status"] == "consumed_into_reflection"
+        assert row["status_changed_at"] == fixed_clock().isoformat()
+
+    def test_apply_ignore_bumps_status_changed_at(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(
+            conn, obs_id="obs-1", project="p", episode_id=ep,
+            created_at="2026-04-01T00:00:00+00:00",
+            status_changed_at="2026-04-01T00:00:00+00:00",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+        )
+        svc._apply_ignore(["obs-1"])
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT status, status_changed_at FROM observations "
+            "WHERE id = 'obs-1'"
+        ).fetchone()
+        assert row["status"] == "consumed_without_reflection"
+        assert row["status_changed_at"] == fixed_clock().isoformat()

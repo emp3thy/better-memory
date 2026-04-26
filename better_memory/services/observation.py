@@ -204,8 +204,8 @@ class ObservationService:
                 INSERT INTO observations (
                     id, content, project, component, theme, session_id,
                     trigger_type, outcome, reinforcement_score, scope_path,
-                    created_at, episode_id, tech
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?)
+                    created_at, status_changed_at, episode_id, tech
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?)
                 """,
                 (
                     obs_id,
@@ -217,6 +217,7 @@ class ObservationService:
                     trigger_type,
                     outcome,
                     resolved_scope,
+                    now,
                     now,
                     episode_id,
                     tech_normalised,

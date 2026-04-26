@@ -670,3 +670,22 @@ class TestListObservations:
         assert len(result) >= 1
         # The flamingo observation must appear in the ranked output.
         assert any("flamingo" in r["content"] for r in result)
+
+
+class TestStatusChangedAtOnInsert:
+    @pytest.mark.asyncio
+    async def test_create_sets_status_changed_at_to_now(
+        self, conn, fixed_clock, service
+    ):
+        """ObservationService.create wraps an INSERT — verify the
+        column is populated to the same instant as created_at."""
+        obs_id = await service.create(
+            content="c", project="proj-a", component=None, theme=None
+        )
+        row = conn.execute(
+            "SELECT created_at, status_changed_at FROM observations "
+            "WHERE id = ?", (obs_id,),
+        ).fetchone()
+        assert row["status_changed_at"] is not None
+        # On a fresh insert: status_changed_at == created_at (both = now).
+        assert row["status_changed_at"] == row["created_at"]

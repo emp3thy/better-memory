@@ -566,9 +566,10 @@ class ReflectionSynthesisService:
                 )
             placeholders = ",".join("?" * len(valid_sources))
             self._conn.execute(
-                f"UPDATE observations SET status = 'consumed_into_reflection' "
+                f"UPDATE observations "
+                f"SET status = 'consumed_into_reflection', status_changed_at = ? "
                 f"WHERE id IN ({placeholders})",
-                valid_sources,
+                [now, *valid_sources],
             )
 
     def _filter_existing_observations(
@@ -635,12 +636,13 @@ class ReflectionSynthesisService:
 
             # Mark added observations consumed.
             if valid_sources:
+                now = self._clock().isoformat()
                 placeholders = ",".join("?" * len(valid_sources))
                 self._conn.execute(
                     f"UPDATE observations "
-                    f"SET status = 'consumed_into_reflection' "
+                    f"SET status = 'consumed_into_reflection', status_changed_at = ? "
                     f"WHERE id IN ({placeholders})",
-                    valid_sources,
+                    [now, *valid_sources],
                 )
 
             # Recompute evidence_count from actual source count.
@@ -773,11 +775,13 @@ class ReflectionSynthesisService:
         valid = self._filter_existing_observations(observation_ids)
         if not valid:
             return
+        now = self._clock().isoformat()
         placeholders = ",".join("?" * len(valid))
         self._conn.execute(
-            f"UPDATE observations SET status = 'consumed_without_reflection' "
+            f"UPDATE observations "
+            f"SET status = 'consumed_without_reflection', status_changed_at = ? "
             f"WHERE id IN ({placeholders})",
-            valid,
+            [now, *valid],
         )
 
     # --------------------------------------------------------- _upsert_watermark
