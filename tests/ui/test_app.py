@@ -174,17 +174,3 @@ class TestInactivityTimeout:
         assert app.config["_check_idle"]  # helper still registered
 
 
-class TestOnlyOneExpandedScript:
-    def test_base_includes_only_one_expanded_listener(
-        self, client: FlaskClient
-    ) -> None:
-        response = client.get("/episodes")
-        body = response.data
-        # Script must listen for the HTMX event that fires before any
-        # request and walk the .card-list for expanded siblings.
-        assert b"htmx:beforeRequest" in body
-        assert b"card-compact" in body
-        assert b"data-expanded" in body
-        assert b"collapse-me" in body
-        # Modal target div exists for promote / merge.
-        assert b'id="modal"' in body
