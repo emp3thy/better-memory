@@ -25,7 +25,7 @@ class ChatError(RuntimeError):
 
 
 class ChatCompleter(Protocol):
-    """Duck-typed interface the ConsolidationService depends on."""
+    """Duck-typed interface for chat completions used by ReflectionSynthesisService and the MCP server."""
 
     async def complete(self, prompt: str) -> str: ...
 

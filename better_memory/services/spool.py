@@ -31,6 +31,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from better_memory.config import get_config
+from better_memory.services.episode import EpisodeService
 
 # Fields the spool file must contain for us to consider it well-formed.
 # Everything else is optional — the schema allows NULLs on ``tool``, ``file``,
@@ -54,17 +55,33 @@ class SpoolService:
     Like the other write-path services, ``SpoolService`` owns the provided
     :class:`sqlite3.Connection` for the duration of :meth:`drain` and commits
     once the batch has been processed.
+
+    When an ``EpisodeService`` is injected via the ``episodes`` kwarg, drain
+    also calls ``episodes.open_background(session_id, project)`` for each
+    ``session_start`` event it processes. Idempotent: skipped if the session
+    already has an active episode. Guarded by per-event try/except so the
+    side-effect can never cause drain to lose data. ``episodes=None`` (the
+    default) preserves Phase 1/2 behaviour exactly.
+
+    For ``commit_close`` events (Phase 4: opt-in post-commit hook), drain
+    calls ``episodes.close_active(session_id=..., outcome='success',
+    close_reason='goal_complete')``. Idempotent: if no active episode exists
+    for the session the ValueError is swallowed so drain stays resilient
+    against stale or duplicate markers.
     """
 
     def __init__(
         self,
         conn: sqlite3.Connection,
         spool_dir: Path | None = None,
+        *,
+        episodes: EpisodeService | None = None,
     ) -> None:
         self._conn = conn
         self._spool_dir = (
             Path(spool_dir) if spool_dir is not None else get_config().spool_dir
         )
+        self._episodes = episodes
 
     # ------------------------------------------------------------------ public
     def drain(self) -> DrainReport:
@@ -100,9 +117,10 @@ class SpoolService:
         inserted: list[Path] = []
 
         # ---- Pass 1: parse + insert (no file unlinks yet) -----------------
+        inserted_payloads: list[dict[str, object]] = []
         for path in files:
             try:
-                self._insert_one(path)
+                payload = self._insert_one(path)
             except Exception:
                 # Any failure — JSON parse error, missing field, DB error —
                 # quarantines the file so the rest of the batch can drain.
@@ -110,12 +128,26 @@ class SpoolService:
                 quarantined += 1
             else:
                 inserted.append(path)
+                inserted_payloads.append(payload)
 
         # ---- Pass 2: commit once per batch --------------------------------
         # If commit raises, ``inserted`` files stay on disk; the exception
         # propagates so the caller knows the drain did not complete. A
         # subsequent drain will re-read those files and retry.
         self._conn.commit()
+
+        # ---- Pass 2.5: Phase 3/4 side-effects on committed payloads -------
+        # Runs AFTER the batch commit so the hook_events rows are durable
+        # before any episode-lifecycle side-effect fires. Each side-effect
+        # is guarded individually so one bad payload cannot block the rest
+        # of the batch from being unlinked.
+        if self._episodes is not None:
+            for payload in inserted_payloads:
+                event_type = payload.get("event_type")
+                if event_type == "session_start":
+                    self._maybe_open_episode_for_session_start(payload)
+                elif event_type == "commit_close":
+                    self._maybe_close_episode_for_commit(payload)
 
         # ---- Pass 3: unlink committed files -------------------------------
         # Only reached if commit() succeeded. Every file in ``inserted`` now
@@ -136,9 +168,11 @@ class SpoolService:
         return DrainReport(drained=drained, quarantined=quarantined)
 
     # ----------------------------------------------------------------- helpers
-    def _insert_one(self, path: Path) -> None:
+    def _insert_one(self, path: Path) -> dict[str, object]:
         """Parse ``path`` and INSERT its contents into ``hook_events``.
 
+        Returns the parsed payload so callers can inspect ``event_type``
+        for post-commit side-effects (Phase 3 session_start handling).
         Raises on any validation or DB error so the caller can quarantine.
         """
         raw = path.read_text(encoding="utf-8")
@@ -168,6 +202,60 @@ class SpoolService:
                 data["timestamp"],
             ),
         )
+        return data
+
+    def _maybe_open_episode_for_session_start(
+        self, payload: dict[str, object]
+    ) -> None:
+        """Lazy-open a background episode for a drained session_start event.
+
+        Idempotent: if the session already has an active episode, skip.
+        Guarded by try/except so domain failures do not block drain's
+        main job of inserting hook_events rows or unlinking spool files.
+        """
+        if self._episodes is None:
+            return
+        session_id = payload.get("session_id")
+        project = payload.get("project")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        if not isinstance(project, str) or not project:
+            return
+        try:
+            if self._episodes.active_episode(session_id) is None:
+                self._episodes.open_background(
+                    session_id=session_id, project=project
+                )
+        except Exception:  # noqa: BLE001 — drain side-effects must not fail drain
+            pass
+
+    def _maybe_close_episode_for_commit(
+        self, payload: dict[str, object]
+    ) -> None:
+        """Close the active episode for a drained commit_close event.
+
+        Uses ``EpisodeService.close_active`` with ``outcome='success'``
+        and ``close_reason='goal_complete'`` per spec §3. Swallows the
+        ValueError that close_active raises when no active episode
+        exists — a stale or duplicate commit_close marker must not
+        fail drain.
+        """
+        if self._episodes is None:
+            return
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        try:
+            self._episodes.close_active(
+                session_id=session_id,
+                outcome="success",
+                close_reason="goal_complete",
+            )
+        except ValueError:
+            # No active episode for this session — stale/duplicate marker.
+            pass
+        except Exception:  # noqa: BLE001 — drain side-effects must not fail drain
+            pass
 
     @staticmethod
     def _quarantine(src: Path, quarantine_dir: Path) -> None:

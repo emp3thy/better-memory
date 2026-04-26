@@ -12,12 +12,28 @@ Transactional behaviour
 The SQLite connection uses Python's default deferred-transaction mode. A call
 to :meth:`ObservationService.create`:
 
-    1. Calls the embedder *before* any DB write (fail-fast).
-    2. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
+    1. Resolves the active episode via the injected :class:`EpisodeService`,
+       opening a background episode if none is active. This call commits on
+       success (background episode creation is its own transaction). See the
+       caveat below.
+    2. Calls the embedder. A slow / broken Ollama server causes this step to
+       fail; steps 3+ do not run.
+    3. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
        FTS content-linked virtual table), inserts the embedding into the
        ``vec0`` table, and writes an audit row. All four statements succeed
        together or the SAVEPOINT rolls them all back.
-    3. Commits the transaction.
+    4. Commits the transaction.
+
+Fail-fast caveat
+----------------
+If the embedder fails in step 2, a background episode may have been
+committed in step 1 and left with zero observations attached. Subsequent
+successful ``create`` calls on the same session will reuse that background
+episode (via ``active_episode``), so the stranding is bounded to "one
+orphan background episode per session that hit embed failure before any
+successful write". Phase 2 accepts this trade-off; a future refactor of
+``EpisodeService.open_background`` to support an "in-savepoint" mode
+could restore the stricter guarantee.
 
 If the SAVEPOINT is rolled back on error, the FTS trigger's side-effects are
 undone along with the base-table row because SQLite FTS5 triggers participate
@@ -36,6 +52,7 @@ hand, is NOT trigger-populated and must be written manually.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -54,6 +71,7 @@ from better_memory.search.hybrid import (
 )
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services import audit
+from better_memory.services.episode import EpisodeService
 
 Outcome = Literal["success", "failure", "neutral"]
 UseOutcome = Literal["success", "failure"]
@@ -87,6 +105,11 @@ class ObservationService:
     authority from the caller and either commit uncommitted work or discard it.
     This contract may be revisited when higher-level orchestration lands in a
     later phase.
+
+    An injected :class:`EpisodeService` is expected to share the same
+    connection as this service and use its own SAVEPOINT+commit envelope
+    for episode writes (its ``open_background``, ``start_foreground``, and
+    ``close_active`` methods all commit before returning).
     """
 
     def __init__(
@@ -99,6 +122,7 @@ class ObservationService:
         scope_resolver: Callable[[], str | None] | None = None,
         session_id: str | None = None,
         audit_log_retrieved: bool | None = None,
+        episodes: EpisodeService | None = None,
     ) -> None:
         self._conn = conn
         self._embedder = embedder
@@ -109,7 +133,15 @@ class ObservationService:
         self._scope_resolver: Callable[[], str | None] = (
             scope_resolver if scope_resolver is not None else (lambda: None)
         )
-        self._session_id = session_id if session_id is not None else uuid4().hex
+        # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var > uuid4().
+        # The env var makes hook-written events (which read CLAUDE_SESSION_ID)
+        # and MCP-written observations share the same session id.
+        if session_id is not None:
+            self._session_id = session_id
+        else:
+            self._session_id = (
+                os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex
+            )
         # ``None`` defers to the resolved config value so tests can inject
         # ``False`` without having to monkeypatch the environment.
         self._audit_log_retrieved: bool = (
@@ -117,6 +149,7 @@ class ObservationService:
             if audit_log_retrieved is not None
             else get_config().audit_log_retrieved
         )
+        self._episodes = episodes
 
     # ------------------------------------------------------------------ public
     async def create(
@@ -129,15 +162,35 @@ class ObservationService:
         outcome: Outcome = "neutral",
         scope_path: str | None = None,
         project: str | None = None,
+        tech: str | None = None,
     ) -> str:
         """Insert a new observation, embedding and audit row; return its id."""
         obs_id = uuid4().hex
 
         resolved_project = project if project is not None else self._project_resolver()
         resolved_scope = scope_path if scope_path is not None else self._scope_resolver()
+        tech_normalised = tech.lower() if tech else None
 
-        # Fail fast: compute the embedding BEFORE opening a write transaction
-        # so a slow / broken Ollama server does not leave a pending SAVEPOINT.
+        # Resolve episode_id. ObservationService requires an EpisodeService
+        # now that episode_id is NOT NULL on observations (Phase 1 schema).
+        if self._episodes is None:
+            raise RuntimeError(
+                "ObservationService.create requires an EpisodeService "
+                "(episodes=...). Wire one at construction time."
+            )
+        active = self._episodes.active_episode(self._session_id)
+        if active is None:
+            episode_id = self._episodes.open_background(
+                session_id=self._session_id,
+                project=resolved_project,
+            )
+        else:
+            episode_id = active.id
+
+        # Compute the embedding BEFORE opening the observation SAVEPOINT so a
+        # slow / broken Ollama server does not hold an open SAVEPOINT. Note
+        # that the episode lookup / background-open above has already
+        # committed if a new background was created — see module docstring.
         vector = await self._embedder.embed(content)
         vec_blob = sqlite_vec.serialize_float32(vector)
 
@@ -151,8 +204,8 @@ class ObservationService:
                 INSERT INTO observations (
                     id, content, project, component, theme, session_id,
                     trigger_type, outcome, reinforcement_score, scope_path,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?)
+                    created_at, status_changed_at, episode_id, tech
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?)
                 """,
                 (
                     obs_id,
@@ -165,6 +218,9 @@ class ObservationService:
                     outcome,
                     resolved_scope,
                     now,
+                    now,
+                    episode_id,
+                    tech_normalised,
                 ),
             )
 
@@ -181,6 +237,8 @@ class ObservationService:
                     "outcome": outcome,
                     "scope_path": resolved_scope,
                     "component": component,
+                    "episode_id": episode_id,
+                    "tech": tech_normalised,
                 },
             )
         except Exception:
@@ -379,6 +437,145 @@ class ObservationService:
             detail={"outcome": outcome},
         )
         conn.commit()
+
+    async def list_observations(
+        self,
+        *,
+        project: str | None = None,
+        episode_id: str | None = None,
+        component: str | None = None,
+        theme: str | None = None,
+        outcome: Outcome | None = None,
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Phase 6 read-side API for ``memory.retrieve_observations``.
+
+        Two modes:
+
+        Filter-only mode (``query`` is None or empty):
+        - Simple SQL filter on ``project``, ``episode_id``, ``component``,
+          ``theme``, ``outcome``.
+        - Order: ``created_at DESC, rowid DESC``. Cap at ``limit``.
+
+        Query mode (``query`` is given):
+        - Embed the query and route through :func:`hybrid_search`. FTS5 +
+          sqlite-vec results, RRF-fused, ranked by relevance.
+        - The simple filters that ``SearchFilters`` natively supports
+          (``project``, ``component``, ``outcome``) are honoured; ``status``
+          and ``window_days`` are disabled (drill-down should see all
+          statuses, no time cap).
+        - **Limitation:** ``episode_id`` and ``theme`` are NOT honoured in
+          query mode (they are not in :class:`SearchFilters`). Pass them
+          without ``query`` for those drill-down lookups.
+        """
+        resolved_project = project if project is not None else self._project_resolver()
+
+        if query is not None and query.strip():
+            return await self._list_observations_via_hybrid_search(
+                project=resolved_project,
+                component=component,
+                outcome=outcome,
+                query=query,
+                limit=limit,
+            )
+        return self._list_observations_via_filter(
+            project=resolved_project,
+            episode_id=episode_id,
+            component=component,
+            theme=theme,
+            outcome=outcome,
+            limit=limit,
+        )
+
+    def _list_observations_via_filter(
+        self,
+        *,
+        project: str,
+        episode_id: str | None,
+        component: str | None,
+        theme: str | None,
+        outcome: Outcome | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        clauses = ["project = ?"]
+        params: list[Any] = [project]
+        if episode_id is not None:
+            clauses.append("episode_id = ?")
+            params.append(episode_id)
+        if component is not None:
+            clauses.append("component = ?")
+            params.append(component)
+        if theme is not None:
+            clauses.append("theme = ?")
+            params.append(theme)
+        if outcome is not None:
+            clauses.append("outcome = ?")
+            params.append(outcome)
+        where = " AND ".join(clauses)
+        sql = (
+            "SELECT id, content, component, theme, outcome, "
+            "reinforcement_score, created_at FROM observations "
+            f"WHERE {where} "
+            "ORDER BY created_at DESC, rowid DESC "
+            "LIMIT ?"
+        )
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "content": r["content"],
+                "component": r["component"],
+                "theme": r["theme"],
+                "outcome": r["outcome"],
+                "reinforcement_score": r["reinforcement_score"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    async def _list_observations_via_hybrid_search(
+        self,
+        *,
+        project: str,
+        component: str | None,
+        outcome: Outcome | None,
+        query: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        # Embed the query; reuse the same embedder used for writes.
+        vector = await self._embedder.embed(query)
+        fts_query_text = sanitize_fts5_query(query) or None
+
+        # Drill-down should see ALL statuses and have no time cap.
+        filters = SearchFilters(
+            project=project,
+            component=component,
+            outcome=outcome,
+            status=None,
+            window_days=None,
+        )
+        results = hybrid_search(
+            self._conn,
+            query_text=fts_query_text,
+            query_vector=vector,
+            filters=filters,
+            limit=limit,
+            clock=self._clock,
+        )
+        return [
+            {
+                "id": r.id,
+                "content": r.content,
+                "component": r.component,
+                "theme": r.theme,
+                "outcome": r.outcome,
+                "reinforcement_score": r.reinforcement_score,
+                "created_at": r.created_at,
+            }
+            for r in results
+        ]
 
     # ----------------------------------------------------------------- helpers
     def _write_audit(

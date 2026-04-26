@@ -1,0 +1,11 @@
+{# Phase 8 deviation from spec §8: this banner is informational-only.
+   Spec calls for clicking the banner to open a "reconcile drawer";
+   Phase 8 ships an informational notice and the user reconciles by
+   clicking individual rows in the timeline. A clickable bulk-reconcile
+   drawer is tracked as a follow-up. #}
+{% if count > 0 %}
+  <div class="banner-unclosed">
+    {{ count }} unclosed episode{{ 's' if count != 1 else '' }} —
+    open the row{{ 's' if count != 1 else '' }} below to reconcile.
+  </div>
+{% endif %}

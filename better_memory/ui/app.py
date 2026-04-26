@@ -14,10 +14,9 @@ from werkzeug.wrappers import Response
 
 from better_memory.config import resolve_home
 from better_memory.db.connection import connect
-from better_memory.llm.ollama import ChatCompleter, OllamaChat
-from better_memory.services.consolidation import ConsolidationService
-from better_memory.services.insight import InsightService
-from better_memory.ui import jobs, queries
+from better_memory.services.episode import EpisodeService
+from better_memory.services.reflection import ReflectionService
+from better_memory.ui import queries
 
 
 def _project_name() -> str:
@@ -31,7 +30,6 @@ def create_app(
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
     db_path: Path | None = None,
-    chat: ChatCompleter | None = None,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -54,10 +52,8 @@ def create_app(
     db_conn = connect(resolved_db)
 
     app.extensions["db_connection"] = db_conn
-    app.extensions["insight_service"] = InsightService(conn=db_conn)
-    app.extensions["_db_path"] = resolved_db
-    resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
-    app.extensions["chat"] = resolved_chat
+    app.extensions["episode_service"] = EpisodeService(conn=db_conn)
+    app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:
@@ -94,6 +90,28 @@ def create_app(
 
     app.config["_last_activity"] = time.monotonic()
 
+    import json as _json
+
+    @app.template_filter("decode_hints")
+    def _decode_hints(raw: str | None) -> list[str]:
+        """Decode the hints column for template display.
+
+        Hints are stored as ``json.dumps(list[str])`` by the synthesis
+        service and (now) the UI edit handler. This filter decodes the
+        JSON; if the column contains a plain-text legacy value (or any
+        non-JSON), falls back to a single-element list so the UI
+        renders something readable rather than crashing.
+        """
+        if not raw:
+            return []
+        try:
+            value = _json.loads(raw)
+        except (ValueError, TypeError):
+            return [raw]
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        return [str(value)]
+
     @app.before_request
     def _record_activity() -> None:
         if request.path != "/healthz":
@@ -122,311 +140,235 @@ def create_app(
 
     @app.get("/")
     def root() -> Response:
-        return redirect(url_for("pipeline"))
+        return redirect(url_for("episodes"))
 
-    @app.get("/pipeline")
-    def pipeline() -> str:
-        counts = queries.kanban_counts(
-            app.extensions["db_connection"], project=_project_name()
-        )
-        return render_template(
-            "pipeline.html",
-            active_tab="pipeline",
-            active_stage="candidates",
-            counts=counts,
-        )
+    @app.get("/episodes")
+    def episodes() -> str:
+        return render_template("episodes.html", active_tab="episodes")
 
-    @app.get("/pipeline/panel/<stage>")
-    def pipeline_panel(stage: str) -> str:
+    @app.get("/episodes/panel")
+    def episodes_panel() -> str:
         conn = app.extensions["db_connection"]
-        project = _project_name()
-        if stage == "observations":
-            return render_template(
-                "fragments/panel_observations.html",
-                rows=queries.list_observations(conn, project=project),
-            )
-        if stage == "candidates":
-            return render_template(
-                "fragments/panel_candidates.html",
-                rows=queries.list_candidates(conn, project=project),
-            )
-        if stage == "insights":
-            return render_template(
-                "fragments/panel_insights.html",
-                rows=queries.list_insights(conn, project=project),
-            )
-        if stage == "promoted":
-            return render_template(
-                "fragments/panel_promoted.html",
-                rows=queries.list_promoted(conn, project=project),
-            )
-        abort(404)
+        rows = queries.episode_list_for_ui(conn, project=_project_name())
+        # Group by ISO date prefix (YYYY-MM-DD) of started_at, preserving
+        # newest-first ordering. itertools.groupby works because rows are
+        # already sorted by started_at DESC.
+        from itertools import groupby
 
-    @app.get("/candidates/<id>/card")
-    def candidate_card(id: str) -> str:
-        service = app.extensions["insight_service"]
-        c = service.get(id)
-        if c is None or c.status != "pending_review":
-            abort(404)
+        days = [
+            (day, list(group))
+            for day, group in groupby(
+                rows, key=lambda r: r.started_at[:10]
+            )
+        ]
         return render_template(
-            "fragments/candidate_card_expanded.html", c=c
+            "fragments/panel_episodes.html", days=days
         )
 
-    @app.post("/candidates/<id>/approve")
-    def candidate_approve(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status != "pending_review":
-            abort(404)
-        service.update(id, status="confirmed")
-        return ""
-
-    @app.post("/candidates/<id>/reject")
-    def candidate_reject(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status != "pending_review":
-            abort(404)
-        service.update(id, status="retired")
-        return ""
-
-    @app.get("/candidates/<id>/edit")
-    def candidate_edit(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status != "pending_review":
-            abort(404)
-        return render_template(
-            "fragments/insight_edit_form.html",
-            row=existing,
-            save_url=url_for("candidate_edit_save", id=id),
-            cancel_url=url_for("candidate_compact_card", id=id),
-        )
-
-    @app.post("/candidates/<id>/edit")
-    def candidate_edit_save(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status != "pending_review":
-            abort(404)
-        title = request.form.get("title", existing.title)
-        content = request.form.get("content", existing.content)
-        service.update(id, title=title, content=content)
-        updated = service.get(id)
-        return render_template(
-            "fragments/candidate_card_compact.html", c=updated
-        )
-
-    @app.get("/candidates/<id>/compact")
-    def candidate_compact_card(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status != "pending_review":
-            abort(404)
-        return render_template(
-            "fragments/candidate_card_compact.html", c=existing
-        )
-
-    @app.get("/candidates/<id>/merge")
-    def candidate_merge_picker(id: str) -> str:
-        service = app.extensions["insight_service"]
-        source = service.get(id)
-        if source is None or source.status != "pending_review":
-            abort(404)
+    @app.get("/episodes/banner")
+    def episodes_banner() -> str:
         conn = app.extensions["db_connection"]
-        project = _project_name()
-        all_candidates = queries.list_candidates(conn, project=project)
-        targets = [t for t in all_candidates if t.id != id]
+        count = queries.unclosed_episode_count(
+            conn, project=_project_name()
+        )
         return render_template(
-            "fragments/merge_picker.html", source=source, targets=targets
+            "fragments/episode_banner.html", count=count
         )
 
-    @app.post("/candidates/<id>/merge")
-    def candidate_merge(id: str) -> tuple[str, int]:
-        target_id = request.args.get("target", "")
-        if not target_id:
+    @app.get("/episodes/<id>/drawer")
+    def episodes_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.episode_detail(conn, episode_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/episode_drawer.html", detail=detail
+        )
+
+    _DEFAULT_CLOSE_REASONS = {
+        "success": "goal_complete",
+        "partial": "plan_complete",
+        "abandoned": "abandoned",
+        "no_outcome": "session_end_reconciled",
+    }
+
+    @app.post("/episodes/<id>/close")
+    def episode_close(id: str) -> tuple[str, int, dict[str, str]]:
+        outcome = request.args.get("outcome", "")
+        if outcome not in _DEFAULT_CLOSE_REASONS:
             return (
-                '<div class="card card-error">'
-                "<p>Missing <code>target</code> query parameter.</p>"
+                f'<div class="card card-error">'
+                f"<p>Invalid outcome: {escape(outcome)}</p>"
                 "</div>"
-            ), 200
-        db_path = app.extensions["_db_path"]
-        chat = app.extensions["chat"]
+            ), 400, {}
+        conn = app.extensions["db_connection"]
+        if queries.episode_detail(conn, episode_id=id) is None:
+            abort(404)
         try:
-            def _do_merge() -> None:
-                import asyncio
+            app.extensions["episode_service"].close_by_id(
+                episode_id=id,
+                outcome=outcome,
+                close_reason=_DEFAULT_CLOSE_REASONS[outcome],
+            )
+        except ValueError as exc:
+            # close_by_id raises for "already closed" or "not found".
+            # We already checked existence, so this path is the
+            # already-closed race — return 409 with an error card.
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        # Re-render the drawer (now showing the closed view) and fire
+        # episode-closed so the timeline reloads.
+        detail = queries.episode_detail(conn, episode_id=id)
+        rendered = render_template(
+            "fragments/episode_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "episode-closed"}
 
-                # Fresh connection on the worker thread (SQLite is thread-bound).
-                conn = connect(db_path)
-                try:
-                    merge_svc = ConsolidationService(conn=conn, chat=chat)
-                    asyncio.run(
-                        merge_svc.merge(source_id=id, target_id=target_id)
-                    )
-                finally:
-                    conn.close()
+    @app.get("/reflections")
+    def reflections() -> str:
+        return render_template(
+            "reflections.html",
+            active_tab="reflections",
+            # The filter-form initial state mirrors the no-filter
+            # default — current project, status=active, no others.
+            initial_filters={
+                "project": _project_name(),
+                "tech": "",
+                "phase": "",
+                "polarity": "",
+                "status": "",
+                "min_confidence": "",
+            },
+        )
 
-            jobs._run_sync_or_in_worker(_do_merge)
+    @app.get("/reflections/panel")
+    def reflections_panel() -> str:
+        conn = app.extensions["db_connection"]
+        args = request.args
+
+        def _arg(name: str) -> str | None:
+            v = args.get(name, "").strip()
+            return v or None
+
+        project = _arg("project") or _project_name()
+        tech = _arg("tech")
+        phase = _arg("phase")
+        polarity = _arg("polarity")
+        status = _arg("status")
+
+        min_conf_raw = _arg("min_confidence")
+        try:
+            min_confidence = float(min_conf_raw) if min_conf_raw else 0.0
+        except ValueError:
+            min_confidence = 0.0
+
+        rows = queries.reflection_list_for_ui(
+            conn,
+            project=project,
+            tech=tech,
+            phase=phase,
+            polarity=polarity,
+            status=status,
+            min_confidence=min_confidence,
+        )
+        return render_template(
+            "fragments/panel_reflections.html", rows=rows
+        )
+
+    @app.get("/reflections/<id>/drawer")
+    def reflections_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+
+    @app.post("/reflections/<id>/confirm")
+    def reflection_confirm(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        try:
+            app.extensions["reflection_service"].confirm(reflection_id=id)
         except ValueError as exc:
             return (
                 f'<div class="card card-error">'
-                f"<p>{escape(exc)}</p>"
+                f"<p>{escape(str(exc))}</p>"
                 "</div>"
-            ), 200
-        return "", 200
-
-    @app.get("/insights/<id>/card")
-    def insight_card(id: str) -> str:
-        service = app.extensions["insight_service"]
-        i = service.get(id)
-        if i is None or i.status not in ("confirmed", "promoted"):
-            abort(404)
-        return render_template(
-            "fragments/insight_card_expanded.html", i=i
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
         )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
-    @app.get("/insights/<id>/promote")
-    def insight_promote(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status != "confirmed":
-            abort(404)
-        return render_template("fragments/promotion_stub_modal.html")
-
-    @app.post("/insights/<id>/retire")
-    def insight_retire(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status not in ("confirmed", "promoted"):
-            abort(404)
-        service.update(id, status="retired")
-        return ""
-
-    @app.post("/insights/<id>/demote")
-    def insight_demote(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status != "promoted":
-            abort(404)
-        service.update(id, status="confirmed")
-        return ""
-
-    @app.get("/insights/<id>/edit")
-    def insight_edit(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status not in ("confirmed", "promoted"):
-            abort(404)
-        return render_template(
-            "fragments/insight_edit_form.html",
-            row=existing,
-            save_url=url_for("insight_edit_save", id=id),
-            cancel_url=url_for("insight_compact_card", id=id),
-        )
-
-    @app.post("/insights/<id>/edit")
-    def insight_edit_save(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status not in ("confirmed", "promoted"):
-            abort(404)
-        title = request.form.get("title", existing.title)
-        content = request.form.get("content", existing.content)
-        service.update(id, title=title, content=content)
-        updated = service.get(id)
-        template = (
-            "fragments/insight_card_compact.html"
-            if updated.status == "confirmed"
-            else "fragments/promoted_card_compact.html"
-        )
-        return render_template(template, i=updated, p=updated)
-
-    @app.get("/insights/<id>/compact")
-    def insight_compact_card(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None or existing.status not in ("confirmed", "promoted"):
-            abort(404)
-        template = (
-            "fragments/insight_card_compact.html"
-            if existing.status == "confirmed"
-            else "fragments/promoted_card_compact.html"
-        )
-        return render_template(template, i=existing, p=existing)
-
-    @app.get("/insights/<id>/sources")
-    def insight_sources(id: str) -> str:
-        service = app.extensions["insight_service"]
-        existing = service.get(id)
-        if existing is None:
-            abort(404)
+    @app.post("/reflections/<id>/retire")
+    def reflection_retire(id: str) -> tuple[str, int, dict[str, str]]:
         conn = app.extensions["db_connection"]
-        rows = queries.list_insight_sources(conn, insight_id=id)
-        return render_template("fragments/insight_sources.html", rows=rows)
-
-    @app.post("/pipeline/consolidate")
-    def pipeline_consolidate() -> tuple[str, int, dict[str, str]]:
-        db_path = app.extensions["_db_path"]
-        chat = app.extensions["chat"]
-        state = jobs.start_consolidation_job(
-            db_path=db_path, chat=chat, project=_project_name()
-        )
-        rendered = render_template("fragments/consolidation_job.html", job=state)
-        headers = {}
-        if state.status == "complete":
-            headers["HX-Trigger"] = "job-complete"
-        return rendered, 200, headers
-
-    @app.post("/jobs/<id>/apply")
-    def jobs_apply(id: str) -> tuple[str, int, dict[str, str]]:
-        db_path = app.extensions["_db_path"]
-        chat = app.extensions["chat"]
-        try:
-            state = jobs.apply_job(id, db_path=db_path, chat=chat)
-        except LookupError:
+        if queries.reflection_detail(conn, reflection_id=id) is None:
             abort(404)
+        try:
+            app.extensions["reflection_service"].retire(reflection_id=id)
         except ValueError as exc:
             return (
-                f'<div class="card card-error"><p>{escape(exc)}</p></div>',
-                200,
-                {},
-            )
-        rendered = render_template("fragments/consolidation_job.html", job=state)
-        return rendered, 200, {"HX-Trigger": "job-complete"}
-
-    @app.get("/jobs/<id>")
-    def jobs_get(id: str) -> tuple[str, int, dict[str, str]]:
-        state = jobs.get_job(id)
-        if state is None:
-            abort(404)
-        rendered = render_template("fragments/consolidation_job.html", job=state)
-        headers = {}
-        if state.status == "complete":
-            headers["HX-Trigger"] = "job-complete"
-        return rendered, 200, headers
-
-    @app.get("/pipeline/badge")
-    def pipeline_badge() -> str:
-        counts = queries.kanban_counts(
-            app.extensions["db_connection"], project=_project_name()
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
         )
-        return render_template("fragments/badge.html", count=counts.candidates)
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
-    @app.get("/sweep")
-    def sweep() -> str:
-        return render_template("sweep.html", active_tab="sweep")
+    @app.get("/reflections/<id>/edit")
+    def reflection_edit_form(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/reflection_edit_form.html", detail=detail
+        )
 
-    @app.get("/knowledge")
-    def knowledge() -> str:
-        return render_template("knowledge.html", active_tab="knowledge")
-
-    @app.get("/audit")
-    def audit() -> str:
-        return render_template("audit.html", active_tab="audit")
-
-    @app.get("/graph")
-    def graph() -> str:
-        return render_template("graph.html", active_tab="graph")
+    @app.post("/reflections/<id>/edit")
+    def reflection_edit_save(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        use_cases = request.form.get("use_cases", "")
+        hints = request.form.get("hints", "")
+        # Validate empties at the route boundary (input-validation = 400)
+        # so the service-layer ValueError can mean only "lifecycle block"
+        # (= 409). Avoids fragile error-message string matching.
+        if not use_cases.strip() or not hints.strip():
+            return (
+                '<div class="card card-error">'
+                "<p>use_cases and hints must both be non-empty</p>"
+                "</div>"
+            ), 400, {}
+        try:
+            app.extensions["reflection_service"].update_text(
+                reflection_id=id, use_cases=use_cases, hints=hints,
+            )
+        except ValueError as exc:
+            # After the empty-check above, the only remaining ValueError
+            # path is "Cannot edit reflection in status 'retired'/'superseded'".
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:

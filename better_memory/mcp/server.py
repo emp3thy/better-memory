@@ -7,8 +7,9 @@ as MCP tools over stdio. On startup, the knowledge-base is reindexed
 Tools
 -----
 * ``memory.observe``       — create a new observation; returns ``{"id": ...}``.
-* ``memory.retrieve``      — three outcome buckets + insights + knowledge.
-                             Drains the spool before searching.
+* ``memory.retrieve``      — reflections bucketed by polarity (do/dont/neutral),
+                             filtered by project/tech/phase/polarity, capped 20 per bucket.
+                             Drains the spool before retrieving.
 * ``memory.record_use``    — record re-use (optionally with outcome).
 * ``knowledge.search``     — BM25 search against the knowledge-base FTS.
 * ``knowledge.list``       — list indexed knowledge documents.
@@ -49,14 +50,16 @@ from better_memory.config import get_config
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.search.hybrid import SearchResult
-from better_memory.services.insight import InsightSearchResult, InsightService
+from better_memory.llm.ollama import OllamaChat
+from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
     KnowledgeSearchResult,
     KnowledgeService,
 )
 from better_memory.services.observation import ObservationService
+from better_memory.services.reflection import ReflectionSynthesisService
+from better_memory.services.retention import RetentionService
 from better_memory.services.spool import SpoolService
 
 # Module-level migration directories. Packaged alongside the code so
@@ -124,29 +127,60 @@ def _tool_definitions() -> list[Tool]:
                         "type": "string",
                         "enum": ["success", "failure", "neutral"],
                     },
+                    "tech": {"type": "string"},
                 },
             },
         ),
         Tool(
             name="memory.retrieve",
             description=(
-                "Retrieve observations, insights and knowledge relevant to "
-                "the current task, bucketed by outcome (do / dont / neutral)."
+                "Retrieve reflections (do / dont / neutral lessons distilled "
+                "from prior observations) bucketed by polarity. Filter by "
+                "project, tech, phase, and polarity. For raw observation "
+                "lookup, use memory.retrieve_observations."
             ),
             inputSchema={
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "query": {"type": "string"},
-                    "component": {"type": "string"},
-                    "window": {
+                    "project": {"type": "string"},
+                    "tech": {"type": "string"},
+                    "phase": {
                         "type": "string",
-                        "default": "30d",
-                        "description": (
-                            "Lookback window, e.g. '30d', '24h', or 'none'."
-                        ),
+                        "enum": ["planning", "implementation", "general"],
                     },
-                    "scope_path": {"type": "string"},
+                    "polarity": {
+                        "type": "string",
+                        "enum": ["do", "dont", "neutral"],
+                    },
+                    "limit_per_bucket": {"type": "integer"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.retrieve_observations",
+            description=(
+                "Retrieve raw observations matching given filters. Drill-down "
+                "tool — use memory.retrieve for the distilled-reflections "
+                "default. With ``query``, results are ranked by hybrid "
+                "FTS5 + sqlite-vec relevance; without, ordered created_at "
+                "DESC. ``episode_id`` and ``theme`` filters are ignored "
+                "in query mode."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {"type": "string"},
+                    "episode_id": {"type": "string"},
+                    "component": {"type": "string"},
+                    "theme": {"type": "string"},
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["success", "failure", "neutral"],
+                    },
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
             },
         ),
@@ -211,65 +245,142 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="memory.start_episode",
+            description=(
+                "Declare a goal for the current session. Opens a new "
+                "foreground episode or hardens the existing background "
+                "episode. Returns the active episode id."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["goal"],
+                "additionalProperties": False,
+                "properties": {
+                    "goal": {"type": "string"},
+                    "tech": {"type": "string"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.close_episode",
+            description=(
+                "Close the current session's active episode. outcome is one "
+                "of success / partial / abandoned / no_outcome."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["outcome"],
+                "additionalProperties": False,
+                "properties": {
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "success",
+                            "partial",
+                            "abandoned",
+                            "no_outcome",
+                        ],
+                    },
+                    "close_reason": {
+                        "type": "string",
+                        "enum": [
+                            "goal_complete",
+                            "plan_complete",
+                            "abandoned",
+                            "superseded",
+                            "session_end_reconciled",
+                        ],
+                    },
+                    "summary": {"type": "string"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.reconcile_episodes",
+            description=(
+                "List episodes that are still open from prior sessions, "
+                "for the LLM to prompt the user about."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="memory.list_episodes",
+            description=(
+                "List episodes with optional filters. For UI and LLM "
+                "introspection."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {"type": "string"},
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "success",
+                            "partial",
+                            "abandoned",
+                            "no_outcome",
+                        ],
+                    },
+                    "only_open": {"type": "boolean"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.run_retention",
+            description=(
+                "Apply spec §9 retention rules — flip eligible "
+                "observations to status='archived' and optionally "
+                "hard-delete archived rows older than prune_age_days."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "retention_days": {
+                        "type": "integer",
+                        "default": 90,
+                        "description": (
+                            "Age threshold for the three archive "
+                            "rules. Default 90 (per spec §9)."
+                        ),
+                    },
+                    "prune": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "If true, also hard-delete archived rows "
+                            "older than prune_age_days."
+                        ),
+                    },
+                    "prune_age_days": {
+                        "type": "integer",
+                        "default": 365,
+                        "description": (
+                            "Age threshold for prune mode. Default 365."
+                        ),
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "If true, return the counts without "
+                            "writing any changes to the DB."
+                        ),
+                    },
+                },
+            },
+        ),
     ]
 
 
 # --------------------------------------------------------------------------- helpers
-
-
-def _parse_window(value: str | None) -> int | None:
-    """Parse a window like ``"30d"`` or ``"24h"`` into integer days.
-
-    ``None`` / ``"none"`` disables windowing entirely. ``"Xd"`` returns ``X``,
-    ``"Xh"`` rounds up to at least one day. Anything else raises ``ValueError``
-    so callers see a clear message rather than silent mis-filtering.
-    """
-    if value is None:
-        return 30
-    raw = value.strip().lower()
-    if raw in {"", "none"}:
-        return None
-    if raw.endswith("d"):
-        magnitude = raw[:-1]
-        if not magnitude.isdigit():
-            raise ValueError(f"Unrecognised window: {value!r}")
-        return int(magnitude)
-    if raw.endswith("h"):
-        magnitude = raw[:-1]
-        if not magnitude.isdigit():
-            raise ValueError(f"Unrecognised window: {value!r}")
-        hours = int(magnitude)
-        # Any sub-day window collapses to a single day because the underlying
-        # hybrid_search windowing is day-granular. We round up so a request of
-        # "1h" still matches same-day rows.
-        days = max(1, hours // 24 + (1 if hours % 24 else 0))
-        return days
-    raise ValueError(f"Unrecognised window: {value!r}")
-
-
-def _serialize_result(result: SearchResult) -> dict[str, Any]:
-    return {
-        "id": result.id,
-        "content": result.content,
-        "component": result.component,
-        "theme": result.theme,
-        "outcome": result.outcome,
-        "reinforcement_score": result.reinforcement_score,
-        "created_at": result.created_at,
-        "final_score": result.final_score,
-    }
-
-
-def _serialize_insight(result: InsightSearchResult) -> dict[str, Any]:
-    insight = result.insight
-    return {
-        "id": insight.id,
-        "title": insight.title,
-        "content": insight.content,
-        "polarity": insight.polarity,
-        "status": insight.status,
-        "rank": result.rank,
-    }
 
 
 def _serialize_knowledge_search(result: KnowledgeSearchResult) -> dict[str, Any]:
@@ -320,13 +431,19 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
     # succeed on their next call without a restart.
     _probe_ollama(config.ollama_host)
 
-    observations = ObservationService(memory_conn, embedder)
-    insights = InsightService(memory_conn, embedder=embedder)
+    episodes = EpisodeService(memory_conn)
+    observations = ObservationService(memory_conn, embedder, episodes=episodes)
+
+    # LLM client for reflection synthesis.
+    chat = OllamaChat(host=config.ollama_host, model=config.consolidate_model)
+    reflections = ReflectionSynthesisService(memory_conn, chat=chat)
+    retention = RetentionService(conn=memory_conn)
+
     knowledge = KnowledgeService(
         knowledge_conn,
         knowledge_base=config.knowledge_base,
     )
-    spool = SpoolService(memory_conn, config.spool_dir)
+    spool = SpoolService(memory_conn, config.spool_dir, episodes=episodes)
 
     # Session-start behaviour: reindex knowledge at startup. mtime-only, so
     # the cost is O(files) stat calls on an already-indexed corpus. We
@@ -357,50 +474,42 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 theme=args.get("theme"),
                 trigger_type=args.get("trigger_type"),
                 outcome=args.get("outcome", "neutral"),
+                tech=args.get("tech"),
             )
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
         if name == "memory.retrieve":
-            # 1. Drain spool — must happen before any search so fresh hook
-            #    events are searchable. SpoolService.drain is idempotent.
+            # 1. Drain spool — must happen before any retrieval so fresh
+            #    hook events (session_start, commit_close) are processed.
+            #    SpoolService.drain is idempotent.
             try:
                 spool.drain()
             except Exception:  # noqa: BLE001 — drain is best-effort
-                # A drain failure should not prevent retrieval.
                 pass
 
-            window_days = _parse_window(args.get("window", "30d"))
-            query = args.get("query")
-            component = args.get("component")
-            scope_path = args.get("scope_path")
-
-            buckets = await observations.retrieve(
-                query=query,
-                component=component,
-                window_days=window_days,
-                scope_path=scope_path,
+            project = args.get("project") or Path.cwd().name
+            limit_per_bucket = args.get("limit_per_bucket", 20)
+            buckets = reflections.retrieve_reflections(
+                project=project,
+                tech=args.get("tech"),
+                phase=args.get("phase"),
+                polarity=args.get("polarity"),
+                limit_per_bucket=limit_per_bucket,
             )
+            return [TextContent(type="text", text=json.dumps(buckets))]
 
-            insight_hits: list[dict[str, Any]] = []
-            knowledge_hits: list[dict[str, Any]] = []
-            if query:
-                insight_hits = [
-                    _serialize_insight(r)
-                    for r in insights.search(query, limit=5)
-                ]
-                knowledge_hits = [
-                    _serialize_knowledge_search(r)
-                    for r in knowledge.search(query, limit=5)
-                ]
-
-            payload = {
-                "do": [_serialize_result(r) for r in buckets.do],
-                "dont": [_serialize_result(r) for r in buckets.dont],
-                "neutral": [_serialize_result(r) for r in buckets.neutral],
-                "insights": insight_hits,
-                "knowledge": knowledge_hits,
-            }
-            return [TextContent(type="text", text=json.dumps(payload))]
+        if name == "memory.retrieve_observations":
+            project = args.get("project") or Path.cwd().name
+            results = await observations.list_observations(
+                project=project,
+                episode_id=args.get("episode_id"),
+                component=args.get("component"),
+                theme=args.get("theme"),
+                outcome=args.get("outcome"),
+                query=args.get("query"),
+                limit=args.get("limit", 50),
+            )
+            return [TextContent(type="text", text=json.dumps(results))]
 
         if name == "memory.record_use":
             observations.record_use(
@@ -448,6 +557,128 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 )
             ]
 
+        if name == "memory.start_episode":
+            project = Path.cwd().name
+            episode_id = episodes.start_foreground(
+                session_id=observations._session_id,
+                project=project,
+                goal=args["goal"],
+                tech=args.get("tech"),
+            )
+            buckets = await reflections.synthesize(
+                goal=args["goal"],
+                tech=args.get("tech"),
+                project=project,
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"episode_id": episode_id, "reflections": buckets}
+                    ),
+                )
+            ]
+
+        if name == "memory.close_episode":
+            outcome = args["outcome"]
+            # Default close_reason: match outcome for the common paths.
+            default_reasons = {
+                "success": "goal_complete",
+                "partial": "plan_complete",
+                "abandoned": "abandoned",
+                "no_outcome": "session_end_reconciled",
+            }
+            close_reason = args.get("close_reason") or default_reasons[outcome]
+            try:
+                closed_id = episodes.close_active(
+                    session_id=observations._session_id,
+                    outcome=outcome,
+                    close_reason=close_reason,
+                    summary=args.get("summary"),
+                )
+            except ValueError:
+                # No active episode — already closed (e.g. by a prior commit-
+                # trailer drain) or never opened. Matches the "safe no-op"
+                # contract documented in the CLAUDE snippet's plan-complete
+                # section.
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {"closed_episode_id": None, "already_closed": True}
+                        ),
+                    )
+                ]
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"closed_episode_id": closed_id, "already_closed": False}
+                    ),
+                )
+            ]
+
+        if name == "memory.reconcile_episodes":
+            open_episodes = episodes.unclosed_episodes(
+                exclude_session_ids={observations._session_id}
+            )
+            payload = [
+                {
+                    "episode_id": e.id,
+                    "project": e.project,
+                    "tech": e.tech,
+                    "goal": e.goal,
+                    "started_at": e.started_at,
+                }
+                for e in open_episodes
+            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.run_retention":
+            report = retention.run(
+                retention_days=args.get("retention_days", 90),
+                prune=args.get("prune", False),
+                prune_age_days=args.get("prune_age_days", 365),
+                dry_run=args.get("dry_run", False),
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "archived_via_retired_reflection":
+                            report.archived_via_retired_reflection,
+                        "archived_via_consumed_without_reflection":
+                            report.archived_via_consumed_without_reflection,
+                        "archived_via_no_outcome_episode":
+                            report.archived_via_no_outcome_episode,
+                        "pruned": report.pruned,
+                    }),
+                )
+            ]
+
+        if name == "memory.list_episodes":
+            rows = episodes.list_episodes(
+                project=args.get("project"),
+                outcome=args.get("outcome"),
+                only_open=args.get("only_open", False),
+            )
+            payload = [
+                {
+                    "episode_id": e.id,
+                    "project": e.project,
+                    "tech": e.tech,
+                    "goal": e.goal,
+                    "started_at": e.started_at,
+                    "hardened_at": e.hardened_at,
+                    "ended_at": e.ended_at,
+                    "close_reason": e.close_reason,
+                    "outcome": e.outcome,
+                    "summary": e.summary,
+                }
+                for e in rows
+            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
+
         raise ValueError(f"Unknown tool: {name}")
 
     cleaned = False
@@ -473,6 +704,10 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             pass
         try:
             await embedder.aclose()
+        except Exception:  # noqa: BLE001 — best-effort shutdown
+            pass
+        try:
+            await chat.aclose()
         except Exception:  # noqa: BLE001 — best-effort shutdown
             pass
 

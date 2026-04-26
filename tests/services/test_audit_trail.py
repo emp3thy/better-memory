@@ -22,6 +22,7 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import ObservationService
 
 _VEC_DIM = 768
@@ -69,6 +70,7 @@ def _make_service(
         scope_resolver=lambda: None,
         session_id="sess-phase10",
         audit_log_retrieved=audit_log_retrieved,
+        episodes=EpisodeService(conn),
     )
 
 
@@ -208,6 +210,7 @@ async def test_audit_log_retrieved_flag_defaults_to_config(
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
         session_id="sess-phase10",
+        episodes=EpisodeService(conn),
     )
     ids = await _seed_three(svc)
     await svc.retrieve(query="marker")

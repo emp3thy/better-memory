@@ -15,6 +15,7 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import BucketedResults, ObservationService
 
 _VEC_DIM = 768
@@ -70,6 +71,7 @@ def service(
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
         session_id="sess-abc",
+        episodes=EpisodeService(conn),
     )
 
 

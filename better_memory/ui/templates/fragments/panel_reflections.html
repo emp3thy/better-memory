@@ -1,0 +1,11 @@
+{% if not rows %}
+  <div class="empty-state">
+    <p>No reflections match these filters.</p>
+  </div>
+{% else %}
+  <div class="reflection-list">
+    {% for row in rows %}
+      {% include "fragments/reflection_row.html" %}
+    {% endfor %}
+  </div>
+{% endif %}

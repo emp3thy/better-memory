@@ -1,0 +1,48 @@
+<form id="reflection-filter-form"
+      class="reflection-filters"
+      hx-get="{{ url_for('reflections_panel') }}"
+      hx-target="#reflection-panel"
+      hx-trigger="change delay:200ms, submit"
+      hx-swap="innerHTML">
+  <label>
+    Project
+    <input name="project" value="{{ initial_filters.project }}">
+  </label>
+  <label>
+    Tech
+    <input name="tech" value="{{ initial_filters.tech }}" placeholder="any">
+  </label>
+  <label>
+    Phase
+    <select name="phase">
+      <option value="" {% if not initial_filters.phase %}selected{% endif %}>any</option>
+      <option value="planning"        {% if initial_filters.phase == 'planning' %}selected{% endif %}>planning</option>
+      <option value="implementation"  {% if initial_filters.phase == 'implementation' %}selected{% endif %}>implementation</option>
+      <option value="general"         {% if initial_filters.phase == 'general' %}selected{% endif %}>general</option>
+    </select>
+  </label>
+  <label>
+    Polarity
+    <select name="polarity">
+      <option value="" {% if not initial_filters.polarity %}selected{% endif %}>any</option>
+      <option value="do"      {% if initial_filters.polarity == 'do' %}selected{% endif %}>do</option>
+      <option value="dont"    {% if initial_filters.polarity == 'dont' %}selected{% endif %}>dont</option>
+      <option value="neutral" {% if initial_filters.polarity == 'neutral' %}selected{% endif %}>neutral</option>
+    </select>
+  </label>
+  <label>
+    Status
+    <select name="status">
+      <option value="" {% if not initial_filters.status %}selected{% endif %}>active (default)</option>
+      <option value="pending_review" {% if initial_filters.status == 'pending_review' %}selected{% endif %}>pending_review</option>
+      <option value="confirmed"      {% if initial_filters.status == 'confirmed' %}selected{% endif %}>confirmed</option>
+      <option value="retired"        {% if initial_filters.status == 'retired' %}selected{% endif %}>retired</option>
+      <option value="superseded"     {% if initial_filters.status == 'superseded' %}selected{% endif %}>superseded</option>
+    </select>
+  </label>
+  <label>
+    Min confidence
+    <input name="min_confidence" type="number" step="0.05" min="0" max="1"
+           value="{{ initial_filters.min_confidence }}" placeholder="0.0">
+  </label>
+</form>
