@@ -301,21 +301,54 @@ class RetentionService:
 
         pruned = 0
         if prune:
+            now = self._clock().isoformat()
             prune_threshold = (
                 self._clock() - timedelta(days=prune_age_days)
             ).isoformat()
-            pruned = self._conn.execute(
-                """
-                SELECT COUNT(*) AS n FROM observations
-                WHERE status = 'archived'
-                  AND status_changed_at <= ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM reflection_sources rs
-                      WHERE rs.observation_id = observations.id
-                  )
-                """,
-                (prune_threshold,),
-            ).fetchone()["n"]
+            # Currently-archived rows that satisfy the prune predicate.
+            already_archived_pruneable = {
+                r["id"]
+                for r in self._conn.execute(
+                    """
+                    SELECT id FROM observations
+                    WHERE status = 'archived'
+                      AND status_changed_at <= ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM reflection_sources rs
+                          WHERE rs.observation_id = observations.id
+                      )
+                    """,
+                    (prune_threshold,),
+                ).fetchall()
+            }
+
+            # In a real run, run_archive flips eligible rows to 'archived'
+            # with status_changed_at = now BEFORE _prune sees them. If
+            # `now <= prune_threshold` (i.e. prune_age_days <= 0), those
+            # newly-archived rows ALSO satisfy the prune predicate.
+            # Mirror that here so dry-run counts match real-run counts.
+            if now <= prune_threshold:
+                # Rules B and C bind the row's status to 'archived' with
+                # the row's own status_changed_at = now — same as run_archive.
+                # Filter out any that have reflection_sources (prune guard).
+                # Only B's source rows can have reflection_sources removed
+                # (Rule A rows BY DEFINITION have at least one reflection_source
+                # and are excluded from prune by the NOT EXISTS guard);
+                # so include only B and C ids that lack reflection_sources.
+                candidate_ids = (rule_b_ids | rule_c_ids) - already_archived_pruneable
+                if candidate_ids:
+                    placeholders = ", ".join("?" * len(candidate_ids))
+                    sourced = {
+                        r["observation_id"]
+                        for r in self._conn.execute(
+                            f"SELECT DISTINCT observation_id FROM reflection_sources "
+                            f"WHERE observation_id IN ({placeholders})",
+                            list(candidate_ids),
+                        ).fetchall()
+                    }
+                    already_archived_pruneable |= candidate_ids - sourced
+
+            pruned = len(already_archived_pruneable)
 
         return RetentionReport(
             archived_via_retired_reflection=len(rule_a_ids),

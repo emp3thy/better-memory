@@ -388,6 +388,38 @@ class TestMultiRuleOverlap:
         assert dry.archived_via_no_outcome_episode == real.archived_via_no_outcome_episode
 
 
+class TestDryRunPruneAtZeroAge:
+    """Regression: when prune_age_days=0, a real run archives + immediately
+    prunes the same row. Dry-run must report the same prune count, not
+    miss the rows that would be archived during the run."""
+
+    def test_dry_run_includes_newly_archivable_rows_at_zero_prune_age(
+        self, conn, fixed_clock
+    ):
+        # Rule C: no_outcome episode closed long ago. Real run would
+        # archive obs-c then prune it (since prune_age_days=0 means
+        # any row archived at now satisfies status_changed_at <= now).
+        _seed_episode(
+            conn, ep_id="e1", project="proj-a",
+            outcome="no_outcome", ended_at="2026-04-01T00:00:00+00:00",
+        )
+        _seed_observation(conn, obs_id="obs-c", ep_id="e1", status="active")
+
+        svc = RetentionService(conn, clock=fixed_clock)
+        dry = svc.run(retention_days=90, prune=True, prune_age_days=0,
+                      dry_run=True)
+        # Dry-run must predict 1 prune. Without the fix this would be 0.
+        assert dry.pruned == 1
+        assert dry.archived_via_no_outcome_episode == 1
+
+        # Confirm the real run produces the same prune count.
+        real = RetentionService(conn, clock=fixed_clock).run(
+            retention_days=90, prune=True, prune_age_days=0,
+        )
+        assert real.pruned == 1
+        assert real.archived_via_no_outcome_episode == 1
+
+
 class TestPruneCleansEmbeddings:
     def test_prune_deletes_corresponding_embeddings_row(
         self, conn, fixed_clock
