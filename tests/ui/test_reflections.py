@@ -183,3 +183,111 @@ class TestReflectionDrawer:
         assert "Edit" not in body
         # But the reflection content still renders (audit / read-only view).
         assert "title-r-1" in body
+
+
+class TestReflectionConfirm:
+    def test_confirms_pending(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="pending_review")
+
+        response = client.post(
+            "/reflections/r-1/confirm",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("HX-Trigger") == "reflection-changed"
+
+        conn = connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT status FROM reflections WHERE id = ?", ("r-1",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["status"] == "confirmed"
+
+    def test_404_for_unknown(self, client: FlaskClient):
+        response = client.post(
+            "/reflections/does-not-exist/confirm",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 404
+
+    def test_409_for_retired(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="retired")
+
+        response = client.post(
+            "/reflections/r-1/confirm",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 409
+
+
+class TestReflectionRetire:
+    def test_retires_pending(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="pending_review")
+
+        response = client.post(
+            "/reflections/r-1/retire",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("HX-Trigger") == "reflection-changed"
+
+        conn = connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT status FROM reflections WHERE id = ?", ("r-1",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["status"] == "retired"
+
+    def test_retires_confirmed(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+
+        response = client.post(
+            "/reflections/r-1/retire",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+
+    def test_404_for_unknown(self, client: FlaskClient):
+        response = client.post(
+            "/reflections/does-not-exist/retire",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 404
+
+    def test_409_for_superseded(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="superseded")
+
+        response = client.post(
+            "/reflections/r-1/retire",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 409

@@ -274,14 +274,43 @@ def create_app(
             "fragments/reflection_drawer.html", detail=detail
         )
 
-    # Stubs — Tasks 7+8 replace.
     @app.post("/reflections/<id>/confirm")
-    def reflection_confirm(id: str) -> tuple[str, int]:
-        return "", 200
+    def reflection_confirm(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        try:
+            app.extensions["reflection_service"].confirm(reflection_id=id)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
     @app.post("/reflections/<id>/retire")
-    def reflection_retire(id: str) -> tuple[str, int]:
-        return "", 200
+    def reflection_retire(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        try:
+            app.extensions["reflection_service"].retire(reflection_id=id)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
     @app.get("/reflections/<id>/edit")
     def reflection_edit_form(id: str) -> str:
