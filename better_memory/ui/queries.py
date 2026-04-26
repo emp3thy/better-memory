@@ -336,6 +336,107 @@ def episode_detail(
     )
 
 
+@dataclass(frozen=True)
+class ReflectionListRow:
+    """Read model for one row in the Reflections list."""
+
+    id: str
+    title: str
+    project: str
+    tech: str | None
+    phase: str
+    polarity: str
+    confidence: float
+    status: str
+    use_cases: str
+    evidence_count: int
+    updated_at: str
+
+
+# Default status filter — matches retrieve_reflections (active set only).
+_DEFAULT_REFLECTION_STATUSES = ("pending_review", "confirmed")
+
+
+def reflection_list_for_ui(
+    conn: sqlite3.Connection,
+    *,
+    project: str,
+    tech: str | None = None,
+    phase: str | None = None,
+    polarity: str | None = None,
+    status: str | None = None,
+    min_confidence: float = 0.0,
+    limit: int = 100,
+) -> list[ReflectionListRow]:
+    """Return reflections matching the six filter fields from spec §8.
+
+    Status semantics:
+    - When ``status`` is None (default), returns rows with
+      ``status IN ('pending_review', 'confirmed')`` — the active set,
+      matching ``ReflectionSynthesisService.retrieve_reflections``.
+    - When ``status`` is given, exact match on that single value
+      (lets the user surface ``retired`` or ``superseded`` reflections
+      explicitly).
+
+    Order: ``confidence DESC, updated_at DESC, rowid DESC``.
+    Cap: ``limit`` rows (default 100). ``min_confidence`` is a
+    floor — rows with confidence strictly less than this are dropped.
+    """
+    clauses: list[str] = ["project = ?"]
+    params: list[object] = [project]
+
+    if status is None:
+        clauses.append(
+            "status IN ("
+            + ", ".join("?" * len(_DEFAULT_REFLECTION_STATUSES))
+            + ")"
+        )
+        params.extend(_DEFAULT_REFLECTION_STATUSES)
+    else:
+        clauses.append("status = ?")
+        params.append(status)
+
+    if tech is not None:
+        clauses.append("tech = ?")
+        params.append(tech)
+    if phase is not None:
+        clauses.append("phase = ?")
+        params.append(phase)
+    if polarity is not None:
+        clauses.append("polarity = ?")
+        params.append(polarity)
+    if min_confidence > 0.0:
+        clauses.append("confidence >= ?")
+        params.append(min_confidence)
+
+    where = " AND ".join(clauses)
+    sql = (
+        "SELECT id, title, project, tech, phase, polarity, "
+        "confidence, status, use_cases, evidence_count, updated_at "
+        f"FROM reflections WHERE {where} "
+        "ORDER BY confidence DESC, updated_at DESC, rowid DESC "
+        "LIMIT ?"
+    )
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        ReflectionListRow(
+            id=r["id"],
+            title=r["title"],
+            project=r["project"],
+            tech=r["tech"],
+            phase=r["phase"],
+            polarity=r["polarity"],
+            confidence=r["confidence"],
+            status=r["status"],
+            use_cases=r["use_cases"],
+            evidence_count=r["evidence_count"],
+            updated_at=r["updated_at"],
+        )
+        for r in rows
+    ]
+
+
 def unclosed_episode_count(
     conn: sqlite3.Connection, *, project: str
 ) -> int:
