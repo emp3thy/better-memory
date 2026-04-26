@@ -7,7 +7,6 @@ import time as _time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from flask.testing import FlaskClient
 
 from better_memory.ui.app import create_app
