@@ -232,6 +232,41 @@ def create_app(
 
     @app.get("/reflections/panel")
     def reflections_panel() -> str:
+        conn = app.extensions["db_connection"]
+        args = request.args
+
+        def _arg(name: str) -> str | None:
+            v = args.get(name, "").strip()
+            return v or None
+
+        project = _arg("project") or _project_name()
+        tech = _arg("tech")
+        phase = _arg("phase")
+        polarity = _arg("polarity")
+        status = _arg("status")
+
+        min_conf_raw = _arg("min_confidence")
+        try:
+            min_confidence = float(min_conf_raw) if min_conf_raw else 0.0
+        except ValueError:
+            min_confidence = 0.0
+
+        rows = queries.reflection_list_for_ui(
+            conn,
+            project=project,
+            tech=tech,
+            phase=phase,
+            polarity=polarity,
+            status=status,
+            min_confidence=min_confidence,
+        )
+        return render_template(
+            "fragments/panel_reflections.html", rows=rows
+        )
+
+    # Drawer stub — Task 6 replaces.
+    @app.get("/reflections/<id>/drawer")
+    def reflections_drawer(id: str) -> str:
         return ""
 
     @app.get("/pipeline")

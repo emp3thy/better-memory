@@ -7,6 +7,41 @@ from pathlib import Path
 import pytest
 from flask.testing import FlaskClient
 
+from better_memory.db.connection import connect
+
+
+def _seed_reflection(
+    db_path: Path,
+    *,
+    rid: str,
+    project: str = "proj-a",
+    tech: str | None = None,
+    phase: str = "general",
+    polarity: str = "do",
+    confidence: float = 0.7,
+    status: str = "confirmed",
+    use_cases: str = "uc",
+    hints: str = "h",
+    title: str | None = None,
+    evidence_count: int = 0,
+) -> None:
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, tech, phase, polarity, use_cases, hints, "
+            "confidence, status, evidence_count, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "'2026-04-26T10:00:00+00:00', '2026-04-26T10:00:00+00:00')",
+            (
+                rid, title or f"title-{rid}", project, tech, phase, polarity,
+                use_cases, hints, confidence, status, evidence_count,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 class TestReflectionsPage:
     def test_returns_200(self, client: FlaskClient):
@@ -24,3 +59,70 @@ class TestReflectionsPage:
         assert 'name="polarity"' in body
         assert 'name="status"' in body
         assert 'name="min_confidence"' in body
+
+
+class TestReflectionsPanel:
+    def test_empty_state_when_no_reflections(self, client: FlaskClient):
+        response = client.get("/reflections/panel")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "No reflections" in body
+
+    def test_renders_seeded_reflections(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", title="Lesson A")
+        _seed_reflection(tmp_db, rid="r-2", title="Lesson B")
+
+        response = client.get("/reflections/panel?project=proj-a")
+        body = response.get_data(as_text=True)
+        assert "Lesson A" in body
+        assert "Lesson B" in body
+
+    def test_applies_phase_filter(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-plan", phase="planning", title="Plan")
+        _seed_reflection(tmp_db, rid="r-impl", phase="implementation", title="Impl")
+
+        response = client.get("/reflections/panel?project=proj-a&phase=planning")
+        body = response.get_data(as_text=True)
+        assert "Plan" in body
+        assert "Impl" not in body
+
+    def test_min_confidence_filter_parses_decimal(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-low", confidence=0.3, title="Low")
+        _seed_reflection(tmp_db, rid="r-high", confidence=0.9, title="High")
+
+        response = client.get(
+            "/reflections/panel?project=proj-a&min_confidence=0.6"
+        )
+        body = response.get_data(as_text=True)
+        assert "High" in body
+        assert "Low" not in body
+
+    def test_blank_filter_values_are_treated_as_unset(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", title="Visible")
+
+        response = client.get(
+            "/reflections/panel?project=proj-a"
+            "&tech=&phase=&polarity=&status=&min_confidence="
+        )
+        body = response.get_data(as_text=True)
+        assert "Visible" in body

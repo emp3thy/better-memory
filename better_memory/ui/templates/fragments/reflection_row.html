@@ -1,0 +1,19 @@
+<div class="reflection-row polarity-{{ row.polarity }}"
+     hx-get="{{ url_for('reflections_drawer', id=row.id) }}"
+     hx-target="#reflection-drawer"
+     hx-swap="innerHTML">
+  <div class="row-main">
+    <span class="title">{{ row.title }}</span>
+    <span class="use-cases">{{ row.use_cases | truncate(120, True) }}</span>
+  </div>
+  <div class="row-side">
+    <span class="phase-badge phase-{{ row.phase }}">{{ row.phase }}</span>
+    <span class="polarity-badge polarity-{{ row.polarity }}">{{ row.polarity }}</span>
+    {% if row.tech %}<span class="tech">{{ row.tech }}</span>{% endif %}
+    <div class="confidence-bar" title="confidence {{ '%.2f' | format(row.confidence) }}">
+      <div class="confidence-fill" style="width: {{ (row.confidence * 100) | round(0) }}%"></div>
+    </div>
+    <span class="evidence-count">{{ row.evidence_count }} obs</span>
+    <span class="status-{{ row.status }}">{{ row.status }}</span>
+  </div>
+</div>
