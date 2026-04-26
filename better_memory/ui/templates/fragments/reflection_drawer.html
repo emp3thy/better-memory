@@ -32,7 +32,14 @@
 
   <section class="drawer-section">
     <h4>Hints</h4>
-    <p>{{ detail.reflection.hints }}</p>
+    {% set hint_list = detail.reflection.hints | decode_hints %}
+    {% if hint_list %}
+      <ul class="hint-list">
+        {% for h in hint_list %}<li>{{ h }}</li>{% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty-inline">No hints.</p>
+    {% endif %}
   </section>
 
   {% if detail.reflection.status in ('pending_review', 'confirmed') %}

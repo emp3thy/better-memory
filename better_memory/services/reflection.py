@@ -1080,13 +1080,28 @@ class ReflectionService:
     ) -> None:
         """Edit ``use_cases`` and ``hints`` in place.
 
+        Hints are accepted as newline-separated text (the UI form
+        contract: one hint per line). Internally stored as
+        ``json.dumps(list[str])`` to match
+        ``ReflectionSynthesisService``'s contract — synthesis
+        round-trips ``hints`` through ``json.loads()`` at three call
+        sites (``_apply_augment``, ``_bucketed_reflections``,
+        ``retrieve_reflections``), so plain-text storage would crash
+        the LLM read path.
+
         Blocked on retired/superseded — once a reflection has left the
         active set, mutating its text would silently change the audit
         trail.
         """
         if not use_cases or not use_cases.strip():
             raise ValueError("use_cases must not be empty")
-        if not hints or not hints.strip():
+        # Parse hints from newline-separated UI input → list[str].
+        hint_list = [
+            line.strip()
+            for line in (hints or "").splitlines()
+            if line.strip()
+        ]
+        if not hint_list:
             raise ValueError("hints must not be empty")
         row = self._conn.execute(
             "SELECT status FROM reflections WHERE id = ?", (reflection_id,)
@@ -1102,6 +1117,6 @@ class ReflectionService:
         self._conn.execute(
             "UPDATE reflections SET use_cases = ?, hints = ?, updated_at = ? "
             "WHERE id = ?",
-            (use_cases, hints, now, reflection_id),
+            (use_cases, json.dumps(hint_list), now, reflection_id),
         )
         self._conn.commit()

@@ -150,7 +150,8 @@ class TestUpdateText:
             ("r1",),
         ).fetchone()
         assert row["use_cases"] == "new uc"
-        assert row["hints"] == "new h"
+        # Hints stored as JSON-encoded list[str] to match synthesis contract.
+        assert row["hints"] == '["new h"]'
         assert row["updated_at"] == "2026-04-26T12:00:00+00:00"
 
     def test_works_on_confirmed(self, conn, fixed_clock):
@@ -163,7 +164,7 @@ class TestUpdateText:
             "SELECT use_cases, hints FROM reflections WHERE id = ?", ("r1",)
         ).fetchone()
         assert row["use_cases"] == "new uc"
-        assert row["hints"] == "new h"
+        assert row["hints"] == '["new h"]'
 
     def test_raises_when_reflection_does_not_exist(self, conn, fixed_clock):
         svc = ReflectionService(conn, clock=fixed_clock)
@@ -187,3 +188,43 @@ class TestUpdateText:
         svc = ReflectionService(conn, clock=fixed_clock)
         with pytest.raises(ValueError, match="hints must not be empty"):
             svc.update_text(reflection_id="r1", use_cases="x", hints="")
+
+    def test_splits_hints_on_newlines_and_drops_empties(self, conn, fixed_clock):
+        _seed_reflection(conn, "r1", status="pending_review")
+        svc = ReflectionService(conn, clock=fixed_clock)
+
+        svc.update_text(
+            reflection_id="r1",
+            use_cases="uc",
+            hints="first hint\n\nsecond hint\n   \nthird hint",
+        )
+
+        row = conn.execute(
+            "SELECT hints FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        # Empty / whitespace-only lines are dropped; non-empty lines are stripped.
+        assert row["hints"] == '["first hint", "second hint", "third hint"]'
+
+    def test_hints_round_trip_through_synthesis_read_path(
+        self, conn, fixed_clock
+    ):
+        """Regression: UI edit must NOT corrupt the JSON contract used by
+        ReflectionSynthesisService.retrieve_reflections / _apply_augment."""
+        import json
+
+        _seed_reflection(conn, "r1", status="pending_review")
+        svc = ReflectionService(conn, clock=fixed_clock)
+
+        svc.update_text(
+            reflection_id="r1",
+            use_cases="uc",
+            hints="hint a\nhint b",
+        )
+
+        row = conn.execute(
+            "SELECT hints FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        # Must be valid JSON list[str] — synthesis service round-trips
+        # this through json.loads at retrieve_reflections / _apply_augment.
+        decoded = json.loads(row["hints"])
+        assert decoded == ["hint a", "hint b"]

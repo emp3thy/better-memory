@@ -340,7 +340,8 @@ class TestReflectionEdit:
         finally:
             conn.close()
         assert row["use_cases"] == "new uc"
-        assert row["hints"] == "new h"
+        # Hints stored as JSON-encoded list (synthesis contract).
+        assert row["hints"] == '["new h"]'
 
     def test_post_400_when_use_cases_empty(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch

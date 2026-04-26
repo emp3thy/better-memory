@@ -10,8 +10,8 @@
       <textarea name="use_cases" rows="3">{{ detail.reflection.use_cases }}</textarea>
     </label>
     <label>
-      Hints
-      <textarea name="hints" rows="6">{{ detail.reflection.hints }}</textarea>
+      Hints (one per line)
+      <textarea name="hints" rows="6">{{ (detail.reflection.hints | decode_hints) | join('\n') }}</textarea>
     </label>
     <div class="form-actions">
       <button type="submit" class="action-save">Save</button>

@@ -98,6 +98,28 @@ def create_app(
 
     app.config["_last_activity"] = time.monotonic()
 
+    import json as _json
+
+    @app.template_filter("decode_hints")
+    def _decode_hints(raw: str | None) -> list[str]:
+        """Decode the hints column for template display.
+
+        Hints are stored as ``json.dumps(list[str])`` by the synthesis
+        service and (now) the UI edit handler. This filter decodes the
+        JSON; if the column contains a plain-text legacy value (or any
+        non-JSON), falls back to a single-element list so the UI
+        renders something readable rather than crashing.
+        """
+        if not raw:
+            return []
+        try:
+            value = _json.loads(raw)
+        except (ValueError, TypeError):
+            return [raw]
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        return [str(value)]
+
     @app.before_request
     def _record_activity() -> None:
         if request.path != "/healthz":
