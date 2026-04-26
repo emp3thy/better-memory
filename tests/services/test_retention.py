@@ -460,3 +460,90 @@ class TestPruneCleansEmbeddings:
             "WHERE observation_id = 'obs-old'"
         ).fetchone()["n"]
         assert emb_after == 0  # embeddings row must be gone too
+
+
+class TestRetentionAtomicity:
+    """Multi-statement archive/prune operations must roll back as a
+    unit on failure. Without a SAVEPOINT, partial UPDATEs sit in the
+    implicit SQLite transaction and would be persisted by the next
+    ``conn.commit()`` from any service sharing the connection.
+    """
+
+    def test_archive_rolls_back_partial_state_when_a_rule_raises(
+        self, conn, fixed_clock
+    ):
+        # Rule A would archive obs-A; we'll then make Rule B raise.
+        _seed_episode(conn, ep_id="e1", project="proj-a")
+        _seed_observation(
+            conn, obs_id="obs-A", ep_id="e1",
+            status_changed_at="2025-01-01T00:00:00+00:00",
+        )
+        _seed_reflection(
+            conn, refl_id="r-old", status="retired",
+            updated_at="2025-01-01T00:00:00+00:00",
+        )
+        _link(conn, "r-old", "obs-A")
+
+        svc = RetentionService(conn, clock=fixed_clock)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("simulated rule_b failure")
+        # Monkey-patch rule B to raise AFTER rule A's UPDATE has run.
+        svc._archive_rule_b_consumed_without_reflection = _boom
+
+        with pytest.raises(RuntimeError, match="simulated rule_b failure"):
+            svc.run_archive(retention_days=90)
+
+        # Simulate any other service committing the connection later.
+        conn.commit()
+
+        # Rule A's UPDATE must be rolled back — obs-A still 'active'.
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-A'"
+        ).fetchone()
+        assert row["status"] == "active"
+
+    def test_prune_rolls_back_when_observation_delete_raises(
+        self, conn, fixed_clock
+    ):
+        # Seed an archived obs old enough to prune, plus its embedding row.
+        _seed_episode(conn, ep_id="e1", project="proj-a")
+        _seed_observation(
+            conn, obs_id="obs-old", ep_id="e1", status="archived",
+            status_changed_at="2025-01-01T00:00:00+00:00",
+        )
+        import struct
+        embedding = struct.pack("768f", *(0.0 for _ in range(768)))
+        conn.execute(
+            "INSERT INTO observation_embeddings (observation_id, embedding) "
+            "VALUES (?, ?)", ("obs-old", embedding),
+        )
+        conn.commit()
+
+        svc = RetentionService(conn, clock=fixed_clock)
+
+        # Make the observations DELETE raise AFTER the embeddings DELETE
+        # has already succeeded.
+        def _boom(_ids):
+            raise RuntimeError("simulated observation delete failure")
+        svc._delete_observations = _boom  # type: ignore[method-assign]
+
+        with pytest.raises(
+            RuntimeError, match="simulated observation delete failure"
+        ):
+            svc.run(retention_days=90, prune=True, prune_age_days=365)
+
+        # Simulate any other service committing the connection later.
+        conn.commit()
+
+        # The embeddings DELETE must have been rolled back too.
+        emb_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM observation_embeddings "
+            "WHERE observation_id = 'obs-old'"
+        ).fetchone()["n"]
+        obs_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM observations "
+            "WHERE id = 'obs-old'"
+        ).fetchone()["n"]
+        assert emb_count == 1, "embedding row must survive rollback"
+        assert obs_count == 1, "observation row must survive rollback"

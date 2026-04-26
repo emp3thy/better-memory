@@ -86,15 +86,29 @@ class RetentionService:
         )
 
     def run_archive(self, *, retention_days: int = 90) -> RetentionReport:
-        """Apply the three archive rules. Returns counts."""
+        """Apply the three archive rules atomically. Returns counts.
+
+        All three UPDATEs run inside a single SAVEPOINT envelope so a
+        failure in any rule leaves no partial state for a later
+        ``conn.commit()`` (from any service sharing the connection)
+        to inadvertently persist.
+        """
         threshold = (
             self._clock() - timedelta(days=retention_days)
         ).isoformat()
         now = self._clock().isoformat()
 
-        a = self._archive_rule_a_retired_reflection(threshold, now)
-        b = self._archive_rule_b_consumed_without_reflection(threshold, now)
-        c = self._archive_rule_c_no_outcome_episode(threshold, now)
+        self._conn.execute("SAVEPOINT retention_archive")
+        try:
+            a = self._archive_rule_a_retired_reflection(threshold, now)
+            b = self._archive_rule_b_consumed_without_reflection(threshold, now)
+            c = self._archive_rule_c_no_outcome_episode(threshold, now)
+        except Exception:
+            self._conn.execute("ROLLBACK TO SAVEPOINT retention_archive")
+            self._conn.execute("RELEASE SAVEPOINT retention_archive")
+            raise
+        else:
+            self._conn.execute("RELEASE SAVEPOINT retention_archive")
         self._conn.commit()
 
         return RetentionReport(
@@ -213,20 +227,40 @@ class RetentionService:
         if not eligible_ids:
             return 0
 
-        placeholders = ", ".join("?" * len(eligible_ids))
-        # Delete embeddings first (no AFTER DELETE trigger on the vec0 table).
+        # Both DELETEs run inside a single SAVEPOINT — if the second
+        # raises, the first is rolled back, preventing observations
+        # from outliving their embeddings (which a later
+        # ``conn.commit()`` from another service would otherwise
+        # persist).
+        self._conn.execute("SAVEPOINT retention_prune")
+        try:
+            self._delete_embeddings(eligible_ids)
+            deleted = self._delete_observations(eligible_ids)
+        except Exception:
+            self._conn.execute("ROLLBACK TO SAVEPOINT retention_prune")
+            self._conn.execute("RELEASE SAVEPOINT retention_prune")
+            raise
+        else:
+            self._conn.execute("RELEASE SAVEPOINT retention_prune")
+        self._conn.commit()
+        return deleted
+
+    def _delete_embeddings(self, ids: list[str]) -> None:
+        """Delete embedding rows (no AFTER DELETE trigger on vec0)."""
+        placeholders = ", ".join("?" * len(ids))
         self._conn.execute(
             f"DELETE FROM observation_embeddings "
             f"WHERE observation_id IN ({placeholders})",
-            eligible_ids,
+            ids,
         )
-        # Then delete the observations themselves (FTS5 trigger handles the
-        # observation_fts cleanup automatically).
+
+    def _delete_observations(self, ids: list[str]) -> int:
+        """Delete observation rows (FTS5 trigger handles observation_fts)."""
+        placeholders = ", ".join("?" * len(ids))
         cursor = self._conn.execute(
             f"DELETE FROM observations WHERE id IN ({placeholders})",
-            eligible_ids,
+            ids,
         )
-        self._conn.commit()
         return cursor.rowcount or 0
 
     def _dry_run(

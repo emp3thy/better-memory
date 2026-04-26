@@ -918,49 +918,11 @@ class ReflectionSynthesisService:
     ) -> dict[str, list[dict]]:
         """Return current reflections for (project, tech?) bucketed by polarity.
 
-        Ordered by confidence DESC, updated_at DESC per spec §5.5.
-        Includes pending_review + confirmed; retired/superseded excluded.
+        Thin wrapper over :meth:`retrieve_reflections` to keep the
+        synthesize-internal call site unchanged while sharing the SQL
+        and bucketing logic with the public retrieve API.
         """
-        if tech is None:
-            rows = self._conn.execute(
-                """
-                SELECT id, title, phase, polarity, use_cases, hints,
-                       confidence, tech, evidence_count
-                FROM reflections
-                WHERE project = ?
-                  AND status IN ('pending_review', 'confirmed')
-                ORDER BY confidence DESC, updated_at DESC
-                """,
-                (project,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                """
-                SELECT id, title, phase, polarity, use_cases, hints,
-                       confidence, tech, evidence_count
-                FROM reflections
-                WHERE project = ?
-                  AND status IN ('pending_review', 'confirmed')
-                  AND (tech = ? OR tech IS NULL)
-                ORDER BY confidence DESC, updated_at DESC
-                """,
-                (project, tech),
-            ).fetchall()
-
-        buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
-        for r in rows:
-            entry = {
-                "id": r["id"],
-                "title": r["title"],
-                "phase": r["phase"],
-                "use_cases": r["use_cases"],
-                "hints": json.loads(r["hints"]),
-                "confidence": r["confidence"],
-                "tech": r["tech"],
-                "evidence_count": r["evidence_count"],
-            }
-            buckets[r["polarity"]].append(entry)
-        return buckets
+        return self.retrieve_reflections(project=project, tech=tech)
 
     # --------------------------------------------------------- retrieve_reflections
     def retrieve_reflections(
