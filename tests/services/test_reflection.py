@@ -1234,6 +1234,44 @@ class TestShortCircuit:
         )
         assert len(fake.calls) == 1
 
+    def test_consumed_observations_do_not_block_short_circuit(
+        self, conn, fixed_clock
+    ):
+        """The short-circuit query must mirror load_context's
+        ``status = 'active'`` filter. Consumed/archived observations
+        whose ``created_at > last_run_at`` must NOT count as new —
+        otherwise same-goal resume calls a full LLM synthesis only to
+        find load_context returns zero active observations.
+        """
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        # Observation already consumed by a prior synthesis run, with
+        # created_at AFTER the watermark — load_context will skip it
+        # (status != 'active') but the unfixed short-circuit counts it.
+        _insert_obs(
+            conn, obs_id="obs-1", project="p", episode_id=ep,
+            status="consumed_into_reflection",
+            created_at="2026-04-22T09:57:00+00:00",
+        )
+        # Watermark 5 min before the clock's fixed 10:00 time.
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
+            "VALUES (?, ?, ?, ?)",
+            ("p", "", "2026-04-22T09:55:00+00:00", "resume goal"),
+        )
+        conn.commit()
+
+        fake = FakeChat(responses=[])  # raises if called
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        import asyncio
+        asyncio.run(
+            svc.synthesize(goal="resume goal", tech=None, project="p")
+        )
+        assert fake.calls == []
+
 
 class TestRetrieveReflections:
     def test_returns_buckets_for_project(self, conn, fixed_clock):

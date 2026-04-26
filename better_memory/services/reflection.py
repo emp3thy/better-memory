@@ -871,13 +871,16 @@ class ReflectionSynthesisService:
             return False
 
         # Any new observations since last_run_at?
-        # Use the same outcome filter as load_context to stay consistent.
+        # Mirror load_context exactly — same outcome filter AND the
+        # same `o.status = 'active'` filter — so a same-goal resume
+        # short-circuits whenever load_context would return nothing.
         new_count = self._conn.execute(
             """
             SELECT COUNT(*) AS c
             FROM observations o
             JOIN episodes e ON e.id = o.episode_id
             WHERE o.project = ?
+              AND o.status = 'active'
               AND e.outcome IN (
                   'success', 'partial', 'abandoned', 'no_outcome'
               )
