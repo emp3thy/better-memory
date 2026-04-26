@@ -1,0 +1,101 @@
+<div class="reflection-drawer polarity-{{ detail.reflection.polarity }}"
+     id="reflection-drawer-{{ detail.reflection.id }}">
+  <header class="drawer-header">
+    <h3>{{ detail.reflection.title }}</h3>
+    <button class="close-drawer"
+            type="button"
+            onclick="document.getElementById('reflection-drawer').innerHTML = '';">
+      ×
+    </button>
+  </header>
+
+  <dl class="drawer-meta">
+    <dt>Project</dt><dd>{{ detail.reflection.project }}</dd>
+    {% if detail.reflection.tech %}
+      <dt>Tech</dt><dd>{{ detail.reflection.tech }}</dd>
+    {% endif %}
+    <dt>Phase</dt>
+    <dd><span class="phase-badge phase-{{ detail.reflection.phase }}">{{ detail.reflection.phase }}</span></dd>
+    <dt>Polarity</dt>
+    <dd><span class="polarity-badge polarity-{{ detail.reflection.polarity }}">{{ detail.reflection.polarity }}</span></dd>
+    <dt>Confidence</dt>
+    <dd>{{ '%.2f' | format(detail.reflection.confidence) }}</dd>
+    <dt>Status</dt><dd>{{ detail.reflection.status }}</dd>
+    <dt>Evidence</dt><dd>{{ detail.reflection.evidence_count }} observation{{ 's' if detail.reflection.evidence_count != 1 else '' }}</dd>
+    <dt>Updated</dt><dd>{{ detail.reflection.updated_at }}</dd>
+  </dl>
+
+  <section class="drawer-section">
+    <h4>Use cases</h4>
+    <p>{{ detail.reflection.use_cases }}</p>
+  </section>
+
+  <section class="drawer-section">
+    <h4>Hints</h4>
+    <p>{{ detail.reflection.hints }}</p>
+  </section>
+
+  {% if detail.reflection.status in ('pending_review', 'confirmed') %}
+    <div class="drawer-actions">
+      {% if detail.reflection.status == 'pending_review' %}
+        <button type="button"
+                class="action-confirm"
+                hx-post="{{ url_for('reflection_confirm', id=detail.reflection.id) }}"
+                hx-target="#reflection-drawer"
+                hx-swap="innerHTML">
+          Confirm
+        </button>
+      {% endif %}
+      <button type="button"
+              class="action-retire"
+              hx-post="{{ url_for('reflection_retire', id=detail.reflection.id) }}"
+              hx-target="#reflection-drawer"
+              hx-swap="innerHTML">
+        Retire
+      </button>
+      <button type="button"
+              class="action-edit"
+              hx-get="{{ url_for('reflection_edit_form', id=detail.reflection.id) }}"
+              hx-target="#reflection-drawer"
+              hx-swap="innerHTML">
+        Edit
+      </button>
+    </div>
+  {% endif %}
+
+  <section class="drawer-section">
+    <h4>Source observations ({{ detail.sources | length }})</h4>
+    {% if detail.sources %}
+      <ul class="source-list">
+        {% for src in detail.sources %}
+          <li class="source-item outcome-{{ src.outcome }}">
+            <div class="src-content">{{ src.content }}</div>
+            <div class="src-meta">
+              {% if src.component %}<span>{{ src.component }}</span>{% endif %}
+              {% if src.theme %}<span>{{ src.theme }}</span>{% endif %}
+              <span>obs {{ src.outcome }}</span>
+              <span>{{ src.created_at }}</span>
+            </div>
+            <div class="src-episode">
+              {% if src.episode_goal %}
+                from episode <em>{{ src.episode_goal }}</em>
+              {% else %}
+                from background session
+              {% endif %}
+              {% if src.episode_outcome %}
+                — closed <span class="outcome-badge outcome-{{ src.episode_outcome }}">{{ src.episode_outcome }}</span>
+                {% if src.episode_close_reason %}
+                  ({{ src.episode_close_reason }})
+                {% endif %}
+              {% else %}
+                — still open
+              {% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty-inline">No source observations linked yet.</p>
+    {% endif %}
+  </section>
+</div>

@@ -126,3 +126,60 @@ class TestReflectionsPanel:
         )
         body = response.get_data(as_text=True)
         assert "Visible" in body
+
+
+class TestReflectionDrawer:
+    def test_404_for_unknown_reflection(self, client: FlaskClient):
+        response = client.get("/reflections/does-not-exist/drawer")
+        assert response.status_code == 404
+
+    def test_renders_full_reflection(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", title="My lesson",
+            use_cases="when X happens", hints="do Y, then Z",
+            phase="implementation", polarity="dont",
+            status="pending_review",  # so Confirm button is visible
+        )
+        response = client.get("/reflections/r-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "My lesson" in body
+        assert "when X happens" in body
+        assert "do Y, then Z" in body
+        # Action buttons (status pending_review → confirm visible).
+        assert "Confirm" in body
+        assert "Retire" in body
+        assert "Edit" in body
+
+    def test_omits_confirm_for_already_confirmed(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        response = client.get("/reflections/r-1/drawer")
+        body = response.get_data(as_text=True)
+        assert "Confirm" not in body
+        assert "Retire" in body
+        assert "Edit" in body
+
+    def test_omits_actions_for_retired(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="retired")
+        response = client.get("/reflections/r-1/drawer")
+        body = response.get_data(as_text=True)
+        assert "Confirm" not in body
+        assert "Retire" not in body
+        assert "Edit" not in body
+        # But the reflection content still renders (audit / read-only view).
+        assert "title-r-1" in body

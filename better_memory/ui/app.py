@@ -264,9 +264,27 @@ def create_app(
             "fragments/panel_reflections.html", rows=rows
         )
 
-    # Drawer stub — Task 6 replaces.
     @app.get("/reflections/<id>/drawer")
     def reflections_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+
+    # Stubs — Tasks 7+8 replace.
+    @app.post("/reflections/<id>/confirm")
+    def reflection_confirm(id: str) -> tuple[str, int]:
+        return "", 200
+
+    @app.post("/reflections/<id>/retire")
+    def reflection_retire(id: str) -> tuple[str, int]:
+        return "", 200
+
+    @app.get("/reflections/<id>/edit")
+    def reflection_edit_form(id: str) -> str:
         return ""
 
     @app.get("/pipeline")
