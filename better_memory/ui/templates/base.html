@@ -10,17 +10,8 @@
   <header class="app-header">
     <div class="brand">better-memory</div>
     <nav class="tabs">
-      <a class="tab {% if active_tab == 'pipeline' %}active{% endif %}" href="{{ url_for('pipeline') }}">
-        Pipeline
-        <span id="badge"
-              hx-get="{{ url_for('pipeline_badge') }}"
-              hx-trigger="load, every 10s"
-              hx-swap="innerHTML"></span>
-      </a>
-      <a class="tab {% if active_tab == 'sweep' %}active{% endif %}" href="{{ url_for('sweep') }}">Sweep</a>
-      <a class="tab {% if active_tab == 'knowledge' %}active{% endif %}" href="{{ url_for('knowledge') }}">Knowledge</a>
-      <a class="tab {% if active_tab == 'audit' %}active{% endif %}" href="{{ url_for('audit') }}">Audit</a>
-      <a class="tab {% if active_tab == 'graph' %}active{% endif %}" href="{{ url_for('graph') }}">Graph</a>
+      <a class="tab {% if active_tab == 'episodes' %}active{% endif %}" href="{{ url_for('episodes') }}">Episodes</a>
+      <a class="tab {% if active_tab == 'reflections' %}active{% endif %}" href="{{ url_for('reflections') }}">Reflections</a>
     </nav>
     <button class="close-ui"
             hx-post="{{ url_for('shutdown') }}"

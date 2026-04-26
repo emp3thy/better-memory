@@ -40,10 +40,10 @@ class TestHealthz:
 
 
 class TestRootRedirect:
-    def test_redirects_to_pipeline(self, client: FlaskClient) -> None:
+    def test_redirects_to_episodes(self, client: FlaskClient) -> None:
         response = client.get("/")
         assert response.status_code == 302
-        assert response.headers["Location"].endswith("/pipeline")
+        assert response.headers["Location"].endswith("/episodes")
 
 
 class TestLayoutShell:
@@ -62,6 +62,20 @@ class TestLayoutShell:
         assert "Graph" in body
         # Close UI button is rendered
         assert "Close UI" in body
+
+
+class TestNav:
+    def test_nav_shows_episodes_and_reflections(self, client: FlaskClient) -> None:
+        response = client.get("/episodes")
+        body = response.get_data(as_text=True)
+        assert ">Episodes<" in body
+        assert ">Reflections<" in body
+
+    def test_nav_hides_old_tabs(self, client: FlaskClient) -> None:
+        response = client.get("/episodes")
+        body = response.get_data(as_text=True)
+        for label in ("Pipeline", "Sweep", "Knowledge", "Audit", "Graph"):
+            assert f">{label}<" not in body
 
 
 class TestEmptyViews:

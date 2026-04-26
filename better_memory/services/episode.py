@@ -42,7 +42,7 @@ class Episode:
     summary: str | None
 
 
-def _row_to_episode(row: sqlite3.Row) -> Episode:
+def row_to_episode(row: sqlite3.Row) -> Episode:
     return Episode(
         id=row["id"],
         project=row["project"],
@@ -111,7 +111,7 @@ class EpisodeService:
         session is an invariant the lifecycle methods maintain.
         """
         row = self._active_episode_row(session_id)
-        return _row_to_episode(row) if row is not None else None
+        return row_to_episode(row) if row is not None else None
 
     def start_foreground(
         self,
@@ -257,6 +257,62 @@ class EpisodeService:
         conn.commit()
         return active["id"]
 
+    def close_by_id(
+        self,
+        *,
+        episode_id: str,
+        outcome: str,
+        close_reason: str,
+        summary: str | None = None,
+    ) -> str:
+        """Close an episode by id, regardless of session binding.
+
+        Used by the UI to close prior-session or cross-session episodes
+        that ``close_active`` cannot reach (it requires a session_id and
+        only finds the open episode bound to *that* session).
+
+        Marks every still-open ``episode_sessions`` row for this episode
+        as left at ``now`` so the invariant "exactly-one-open-binding-
+        per-session" continues to hold for any session that was still
+        bound.
+
+        Raises ``ValueError`` if no episode with this id exists, or if
+        the episode is already closed.
+        """
+        row = self._conn.execute(
+            "SELECT ended_at FROM episodes WHERE id = ?",
+            (episode_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Episode not found: {episode_id}")
+        if row["ended_at"] is not None:
+            raise ValueError(f"Episode already closed: {episode_id}")
+
+        now = self._clock().isoformat()
+        conn = self._conn
+        conn.execute("SAVEPOINT episode_close_by_id")
+        try:
+            conn.execute(
+                "UPDATE episodes "
+                "SET ended_at = ?, close_reason = ?, outcome = ?, summary = ? "
+                "WHERE id = ?",
+                (now, close_reason, outcome, summary, episode_id),
+            )
+            conn.execute(
+                "UPDATE episode_sessions "
+                "SET left_at = ? "
+                "WHERE episode_id = ? AND left_at IS NULL",
+                (now, episode_id),
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT episode_close_by_id")
+            conn.execute("RELEASE SAVEPOINT episode_close_by_id")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT episode_close_by_id")
+        conn.commit()
+        return episode_id
+
     def unclosed_episodes(
         self,
         *,
@@ -281,7 +337,7 @@ class EpisodeService:
         ).fetchall()
 
         if not exclude:
-            return [_row_to_episode(r) for r in rows]
+            return [row_to_episode(r) for r in rows]
 
         # Filter out episodes that have an active binding to any excluded session.
         out: list[Episode] = []
@@ -294,7 +350,7 @@ class EpisodeService:
             active_set = {row["session_id"] for row in active_sessions}
             if active_set & exclude:
                 continue
-            out.append(_row_to_episode(r))
+            out.append(row_to_episode(r))
         return out
 
     def list_episodes(
@@ -328,7 +384,7 @@ class EpisodeService:
             f"ORDER BY started_at DESC, rowid DESC"
         )
         rows = self._conn.execute(sql, params).fetchall()
-        return [_row_to_episode(r) for r in rows]
+        return [row_to_episode(r) for r in rows]
 
     def _active_episode_row(self, session_id: str) -> sqlite3.Row | None:
         """Internal helper: returns the raw active episode Row (not Episode)."""

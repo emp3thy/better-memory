@@ -1,0 +1,16 @@
+{% if not days %}
+  <div class="empty-state">
+    <p>No episodes yet. Open one with <code>memory.start_episode</code> in chat.</p>
+  </div>
+{% else %}
+  <div class="timeline">
+    {% for day, rows in days %}
+      <h2 class="day-heading">{{ day }}</h2>
+      <div class="card-list">
+        {% for row in rows %}
+          {% include "fragments/episode_row.html" %}
+        {% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}

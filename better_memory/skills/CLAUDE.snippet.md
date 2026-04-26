@@ -69,8 +69,11 @@ ignores the prompt or proceeds without answering, default to `abandoned`
 — it still feeds synthesis as a negative signal, so nothing is lost.
 
 **Non-blocking:** do not gate regular work on getting through the
-reconciliation queue. Ask about one or two and move on; the Episodes
-UI surface (Phase 8+) will eventually let users reconcile in bulk.
+reconciliation queue. Ask about one or two and move on.
+
+The Episodes tab in the management UI also lists unclosed episodes —
+clicking a row opens a drawer with the same close actions, useful for
+bulk reconcile or follow-up the LLM declined to handle in chat.
 
 ## Closing episodes on git commit + plan completion
 

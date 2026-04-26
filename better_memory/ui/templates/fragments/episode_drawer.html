@@ -1,0 +1,94 @@
+<div class="episode-drawer" id="episode-drawer-{{ detail.episode.id }}">
+  <header class="drawer-header">
+    <h3>
+      {% if detail.episode.goal %}
+        {{ detail.episode.goal }}
+      {% else %}
+        background session
+      {% endif %}
+    </h3>
+    <button class="close-drawer"
+            type="button"
+            onclick="document.getElementById('drawer').innerHTML = '';">
+      &times;
+    </button>
+  </header>
+
+  <dl class="drawer-meta">
+    <dt>Project</dt><dd>{{ detail.episode.project }}</dd>
+    {% if detail.episode.tech %}
+      <dt>Tech</dt><dd>{{ detail.episode.tech }}</dd>
+    {% endif %}
+    <dt>Started</dt><dd>{{ detail.episode.started_at }}</dd>
+    {% if detail.episode.hardened_at %}
+      <dt>Hardened</dt><dd>{{ detail.episode.hardened_at }}</dd>
+    {% endif %}
+    {% if detail.episode.ended_at %}
+      <dt>Ended</dt><dd>{{ detail.episode.ended_at }}</dd>
+      <dt>Close reason</dt><dd>{{ detail.episode.close_reason }}</dd>
+      <dt>Outcome</dt><dd>{{ detail.episode.outcome }}</dd>
+      {% if detail.episode.summary %}
+        <dt>Summary</dt><dd>{{ detail.episode.summary }}</dd>
+      {% endif %}
+    {% endif %}
+  </dl>
+
+  {% if not detail.episode.ended_at %}
+    <div class="drawer-actions">
+      {% for outcome in ['success', 'partial', 'abandoned', 'no_outcome'] %}
+        <button type="button"
+                class="action-close action-{{ outcome }}"
+                hx-post="{{ url_for('episode_close', id=detail.episode.id, outcome=outcome) }}"
+                hx-target="#drawer"
+                hx-swap="innerHTML">
+          Close as {{ outcome }}
+        </button>
+      {% endfor %}
+      <button class="action-continuing"
+              type="button"
+              onclick="document.getElementById('drawer').innerHTML = '';">
+        Continuing (no-op)
+      </button>
+    </div>
+  {% endif %}
+
+  <section class="drawer-section">
+    <h4>Observations ({{ detail.observations | length }})</h4>
+    {% if detail.observations %}
+      <ul class="observation-list">
+        {% for obs in detail.observations %}
+          <li class="observation-item outcome-{{ obs.outcome }}">
+            <div class="obs-content">{{ obs.content }}</div>
+            <div class="obs-meta">
+              {% if obs.component %}<span>{{ obs.component }}</span>{% endif %}
+              {% if obs.theme %}<span>{{ obs.theme }}</span>{% endif %}
+              <span>{{ obs.outcome }}</span>
+              <span>{{ obs.created_at }}</span>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty-inline">No observations yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="drawer-section">
+    <h4>Reflections seeded ({{ detail.reflections | length }})</h4>
+    {% if detail.reflections %}
+      <ul class="reflection-list">
+        {% for refl in detail.reflections %}
+          <li class="reflection-item polarity-{{ refl.polarity }}">
+            <span class="title">{{ refl.title }}</span>
+            <span class="phase">{{ refl.phase }}</span>
+            <span class="polarity">{{ refl.polarity }}</span>
+            <span class="confidence">{{ '%.2f' | format(refl.confidence) }}</span>
+            <span class="status">{{ refl.status }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty-inline">No reflections seeded by this episode yet.</p>
+    {% endif %}
+  </section>
+</div>

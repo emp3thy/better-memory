@@ -397,3 +397,161 @@ main {
 .modal-body h3 {
   margin-top: 0;
 }
+
+/* ---------- Episodes tab (dark theme) ---------- */
+
+.banner-unclosed {
+  background: #3a2f00;
+  border: 1px solid #6f5d10;
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+  color: #fcd97a;
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.day-heading {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #888;
+  margin: 0 0 0.5rem 0;
+}
+
+.episode-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 0.6rem 0.85rem;
+  cursor: pointer;
+  transition: background 0.1s;
+  color: #e0e0e0;
+}
+
+.episode-row:hover {
+  background: #222;
+  border-color: #3a3a3a;
+}
+
+.episode-row .row-main { display: flex; flex-direction: column; gap: 0.2rem; }
+.episode-row .goal { font-weight: 500; color: #f0f0f0; }
+.episode-row .meta { font-size: 0.85rem; color: #888; display: flex; gap: 0.5rem; }
+.episode-row .row-side { display: flex; align-items: center; gap: 0.5rem; }
+
+.outcome-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 8px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.outcome-badge.outcome-success    { background: #1a3a1a; color: #7adb7a; }
+.outcome-badge.outcome-partial    { background: #3a2f00; color: #fcd97a; }
+.outcome-badge.outcome-abandoned  { background: #3a1a1a; color: #db7a7a; }
+.outcome-badge.outcome-no_outcome { background: #2a2a2a; color: #aaa; }
+.outcome-badge.outcome-open       { background: #1a2a3a; color: #7aa9ff; }
+
+.counts { font-size: 0.8rem; color: #888; }
+.close-reason { font-size: 0.75rem; color: #888; font-style: italic; }
+
+/* ---------- Episode drawer (dark theme) ---------- */
+
+.episode-drawer {
+  background: #161616;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  margin-top: 1.5rem;
+  color: #e0e0e0;
+}
+
+.episode-drawer .drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.episode-drawer .drawer-header h3 {
+  margin: 0;
+  color: #f0f0f0;
+}
+
+.close-drawer {
+  background: transparent;
+  border: 1px solid #3a3a3a;
+  color: #aaa;
+  border-radius: 4px;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  font-size: 1.1rem;
+}
+
+.close-drawer:hover { background: #222; color: #f0f0f0; }
+
+.episode-drawer .drawer-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0.75rem 0;
+  font-size: 0.9rem;
+}
+
+.episode-drawer .drawer-meta dt { color: #888; font-weight: 500; }
+.episode-drawer .drawer-meta dd { margin: 0; color: #e0e0e0; }
+
+.drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.drawer-actions button {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid #3a3a3a;
+  background: #1f1f1f;
+  color: #e0e0e0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.drawer-actions button:hover { background: #2a2a2a; border-color: #4a4a4a; }
+.drawer-actions .action-success:hover  { border-color: #4f7f4f; }
+.drawer-actions .action-abandoned:hover { border-color: #7f4f4f; }
+
+.drawer-section {
+  margin-top: 1rem;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 0.75rem;
+}
+
+.drawer-section h4 { margin: 0 0 0.5rem 0; color: #f0f0f0; }
+
+.observation-list, .reflection-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.observation-item, .reflection-item {
+  padding: 0.4rem 0;
+  border-bottom: 1px dashed #2a2a2a;
+  font-size: 0.9rem;
+}
+
+.observation-item:last-child, .reflection-item:last-child {
+  border-bottom: none;
+}
+
+.obs-meta { display: flex; gap: 0.5rem; color: #888; font-size: 0.8rem; }
+.empty-inline { color: #666; font-style: italic; }
+.placeholder { padding: 2rem; text-align: center; color: #666; }

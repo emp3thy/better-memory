@@ -16,6 +16,7 @@ from better_memory.config import resolve_home
 from better_memory.db.connection import connect
 from better_memory.llm.ollama import ChatCompleter, OllamaChat
 from better_memory.services.consolidation import ConsolidationService
+from better_memory.services.episode import EpisodeService
 from better_memory.services.insight import InsightService
 from better_memory.ui import jobs, queries
 
@@ -55,6 +56,7 @@ def create_app(
 
     app.extensions["db_connection"] = db_conn
     app.extensions["insight_service"] = InsightService(conn=db_conn)
+    app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["_db_path"] = resolved_db
     resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
     app.extensions["chat"] = resolved_chat
@@ -122,7 +124,96 @@ def create_app(
 
     @app.get("/")
     def root() -> Response:
-        return redirect(url_for("pipeline"))
+        return redirect(url_for("episodes"))
+
+    @app.get("/episodes")
+    def episodes() -> str:
+        return render_template("episodes.html", active_tab="episodes")
+
+    @app.get("/episodes/panel")
+    def episodes_panel() -> str:
+        conn = app.extensions["db_connection"]
+        rows = queries.episode_list_for_ui(conn, project=_project_name())
+        # Group by ISO date prefix (YYYY-MM-DD) of started_at, preserving
+        # newest-first ordering. itertools.groupby works because rows are
+        # already sorted by started_at DESC.
+        from itertools import groupby
+
+        days = [
+            (day, list(group))
+            for day, group in groupby(
+                rows, key=lambda r: r.started_at[:10]
+            )
+        ]
+        return render_template(
+            "fragments/panel_episodes.html", days=days
+        )
+
+    @app.get("/episodes/banner")
+    def episodes_banner() -> str:
+        conn = app.extensions["db_connection"]
+        count = queries.unclosed_episode_count(
+            conn, project=_project_name()
+        )
+        return render_template(
+            "fragments/episode_banner.html", count=count
+        )
+
+    @app.get("/episodes/<id>/drawer")
+    def episodes_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.episode_detail(conn, episode_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/episode_drawer.html", detail=detail
+        )
+
+    _DEFAULT_CLOSE_REASONS = {
+        "success": "goal_complete",
+        "partial": "superseded",
+        "abandoned": "abandoned",
+        "no_outcome": "session_end_reconciled",
+    }
+
+    @app.post("/episodes/<id>/close")
+    def episode_close(id: str) -> tuple[str, int, dict[str, str]]:
+        outcome = request.args.get("outcome", "")
+        if outcome not in _DEFAULT_CLOSE_REASONS:
+            return (
+                f'<div class="card card-error">'
+                f"<p>Invalid outcome: {escape(outcome)}</p>"
+                "</div>"
+            ), 400, {}
+        conn = app.extensions["db_connection"]
+        if queries.episode_detail(conn, episode_id=id) is None:
+            abort(404)
+        try:
+            app.extensions["episode_service"].close_by_id(
+                episode_id=id,
+                outcome=outcome,
+                close_reason=_DEFAULT_CLOSE_REASONS[outcome],
+            )
+        except ValueError as exc:
+            # close_by_id raises for "already closed" or "not found".
+            # We already checked existence, so this path is the
+            # already-closed race — return 409 with an error card.
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        # Re-render the drawer (now showing the closed view) and fire
+        # episode-closed so the timeline reloads.
+        detail = queries.episode_detail(conn, episode_id=id)
+        rendered = render_template(
+            "fragments/episode_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "episode-closed"}
+
+    @app.get("/reflections")
+    def reflections() -> str:
+        return render_template("reflections.html", active_tab="reflections")
 
     @app.get("/pipeline")
     def pipeline() -> str:
