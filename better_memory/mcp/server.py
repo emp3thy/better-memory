@@ -584,7 +584,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             # Default close_reason: match outcome for the common paths.
             default_reasons = {
                 "success": "goal_complete",
-                "partial": "superseded",
+                "partial": "plan_complete",
                 "abandoned": "abandoned",
                 "no_outcome": "session_end_reconciled",
             }

@@ -159,7 +159,8 @@ class TestLoadContext:
         assert ctx.last_run_at == "2026-04-22T09:00:00+00:00"
 
     def test_filters_observations_by_episode_outcome(self, conn, fixed_clock):
-        """Only episodes with outcome in {success, partial, abandoned} contribute."""
+        """All four closed-episode outcomes feed synthesis; only open
+        episodes are excluded."""
         epsvc = EpisodeService(conn, clock=fixed_clock)
         # Success episode.
         ep_succ = epsvc.start_foreground(session_id="s1", project="p", goal="a")
@@ -167,7 +168,10 @@ class TestLoadContext:
         # Abandoned episode.
         ep_ab = epsvc.start_foreground(session_id="s2", project="p", goal="b")
         epsvc.close_active(session_id="s2", outcome="abandoned", close_reason="abandoned")
-        # no_outcome episode (reconciled without a verdict).
+        # no_outcome episode (reconciled or superseded). Phase 2's
+        # supersede path writes outcome=no_outcome with the work the
+        # user just generated under the prior goal — synthesis must
+        # see it. Bugbot caught the prior exclusion as a real bug.
         ep_no = epsvc.start_foreground(session_id="s3", project="p", goal="c")
         epsvc.close_active(
             session_id="s3", outcome="no_outcome", close_reason="session_end_reconciled",
@@ -184,8 +188,9 @@ class TestLoadContext:
         svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
         ctx = svc.load_context(project="p", tech=None)
         ids = {o.id for o in ctx.observations}
-        # success + abandoned feed synthesis; no_outcome and open episodes don't.
-        assert ids == {"a", "b"}
+        # All three closed outcomes feed synthesis; only the still-
+        # open episode is excluded.
+        assert ids == {"a", "b", "c"}
 
     def test_observations_carry_joined_episode_context(self, conn, fixed_clock):
         epsvc = EpisodeService(conn, clock=fixed_clock)

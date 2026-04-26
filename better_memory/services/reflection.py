@@ -271,8 +271,13 @@ class ReflectionSynthesisService:
         Observations: rows written since the synthesis watermark
         (``synthesis_runs.last_run_at`` for ``(project, tech_key)``
         where ``tech_key`` is ``tech`` or ``''`` when tech is None).
-        Further filtered to episodes with ``outcome IN ('success',
-        'partial', 'abandoned')`` per spec §5.1. Each observation is
+        Filtered to episodes with ``outcome IS NOT NULL`` (i.e. closed
+        episodes — the four allowed outcomes are ``success``,
+        ``partial``, ``abandoned``, and ``no_outcome``). Includes
+        ``no_outcome`` because Phase 2's interim ``superseded`` close
+        path writes ``outcome='no_outcome'`` and those observations
+        are exactly the freshest data the user just generated under
+        the prior goal — synthesis must see them. Each observation is
         returned with its owning episode's ``goal`` and ``outcome``
         joined in.
 
@@ -336,7 +341,9 @@ class ReflectionSynthesisService:
             FROM observations o
             JOIN episodes e ON e.id = o.episode_id
             WHERE o.project = ?
-              AND e.outcome IN ('success', 'partial', 'abandoned')
+              AND e.outcome IN (
+                  'success', 'partial', 'abandoned', 'no_outcome'
+              )
         """
         if last_run_at is not None:
             obs_sql += " AND o.created_at > ?"
@@ -845,7 +852,9 @@ class ReflectionSynthesisService:
             FROM observations o
             JOIN episodes e ON e.id = o.episode_id
             WHERE o.project = ?
-              AND e.outcome IN ('success', 'partial', 'abandoned')
+              AND e.outcome IN (
+                  'success', 'partial', 'abandoned', 'no_outcome'
+              )
               AND o.created_at > ?
             """,
             (project, row["last_run_at"]),

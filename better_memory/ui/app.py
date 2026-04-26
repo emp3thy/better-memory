@@ -187,7 +187,7 @@ def create_app(
 
     _DEFAULT_CLOSE_REASONS = {
         "success": "goal_complete",
-        "partial": "superseded",
+        "partial": "plan_complete",
         "abandoned": "abandoned",
         "no_outcome": "session_end_reconciled",
     }
