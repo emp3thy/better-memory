@@ -547,8 +547,12 @@ class ReflectionSynthesisService:
         """
         from uuid import uuid4
 
-        now = self._clock().isoformat()
         for action in actions:
+            # Stamp once per iteration so each new reflection's
+            # created_at / updated_at and the consume UPDATE's
+            # status_changed_at all reflect this iteration — not a
+            # leftover from a prior iteration.
+            now = self._clock().isoformat()
             valid_sources = self._filter_existing_observations(
                 action.source_observation_ids
             )

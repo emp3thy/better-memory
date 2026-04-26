@@ -1775,3 +1775,61 @@ class TestArchivedObservationGuards:
             "SELECT status FROM observations WHERE id = 'obs-active'"
         ).fetchone()
         assert active_row["status"] == "consumed_into_reflection"
+
+
+class TestApplyNewTimestampFreshness:
+    """`_apply_new` must stamp each iteration with a fresh clock,
+    matching the contract enforced for `_apply_augment` and
+    `_apply_merge`. Skipped iterations (no valid sources) followed
+    by executing ones must not carry the pre-loop timestamp.
+    """
+
+    def test_each_apply_new_iteration_uses_fresh_clock(self, conn):
+        ticks = [
+            datetime(2026, 4, 22, 10, 0, 0, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 1, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 2, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 3, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 4, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 5, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 6, tzinfo=UTC),
+        ]
+        i = {"n": 0}
+        def counter_clock() -> datetime:
+            t = ticks[i["n"]]
+            i["n"] += 1
+            return t
+
+        epsvc = EpisodeService(conn, clock=counter_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-A", project="p", episode_id=ep)
+        _insert_obs(conn, obs_id="obs-B", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=counter_clock,
+        )
+        action_a = NewAction(
+            title="ref-A", phase="general", polarity="do",
+            use_cases="uc", hints=["h"], tech=None, confidence=0.6,
+            source_observation_ids=["obs-A"],
+        )
+        action_b = NewAction(
+            title="ref-B", phase="general", polarity="do",
+            use_cases="uc", hints=["h"], tech=None, confidence=0.6,
+            source_observation_ids=["obs-B"],
+        )
+        svc._apply_new([action_a, action_b], project="p")
+        conn.commit()
+
+        ts_a = conn.execute(
+            "SELECT created_at FROM reflections WHERE title = 'ref-A'"
+        ).fetchone()["created_at"]
+        ts_b = conn.execute(
+            "SELECT created_at FROM reflections WHERE title = 'ref-B'"
+        ).fetchone()["created_at"]
+        assert ts_a != ts_b
+        assert ts_b > ts_a
