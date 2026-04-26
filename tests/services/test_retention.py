@@ -292,3 +292,139 @@ class TestDryRun:
             "SELECT status FROM observations WHERE id = 'obs-1'"
         ).fetchone()
         assert row["status"] == "active"
+
+
+class TestIdempotency:
+    def test_run_archive_twice_produces_zero_archives_second_time(
+        self, conn, fixed_clock
+    ):
+        """Running retention twice in a row should produce zero archives
+        on the second pass — all eligible rows were archived in pass 1."""
+        # Set up rows matching all three rules.
+        # Rule A: linked-only-to-retired.
+        _seed_episode(conn, ep_id="e1", project="proj-a")
+        _seed_observation(conn, obs_id="obs-a", ep_id="e1",
+                          status="consumed_into_reflection")
+        _seed_reflection(conn, refl_id="r-a", status="retired",
+                         updated_at="2026-04-23T00:00:00+00:00")
+        _link(conn, "r-a", "obs-a")
+        # Rule B: consumed_without_reflection, old.
+        _seed_observation(
+            conn, obs_id="obs-b", ep_id="e1",
+            status="consumed_without_reflection",
+            status_changed_at="2026-04-01T00:00:00+00:00",
+        )
+        # Rule C: no_outcome episode.
+        _seed_episode(
+            conn, ep_id="e2", project="proj-a",
+            outcome="no_outcome", ended_at="2026-04-01T00:00:00+00:00",
+        )
+        _seed_observation(conn, obs_id="obs-c", ep_id="e2",
+                          status="active")
+
+        svc = RetentionService(conn, clock=fixed_clock)
+        first = svc.run_archive(retention_days=90)
+        assert (
+            first.archived_via_retired_reflection
+            + first.archived_via_consumed_without_reflection
+            + first.archived_via_no_outcome_episode
+        ) == 3
+
+        second = svc.run_archive(retention_days=90)
+        assert second.archived_via_retired_reflection == 0
+        assert second.archived_via_consumed_without_reflection == 0
+        assert second.archived_via_no_outcome_episode == 0
+
+
+class TestMultiRuleOverlap:
+    def test_row_matching_a_and_c_counted_under_a_only(
+        self, conn, fixed_clock
+    ):
+        """An obs whose only reflection is retired AND whose episode
+        is no_outcome matches both Rule A and Rule C. It should be
+        counted under Rule A (the first matching rule)."""
+        _seed_episode(
+            conn, ep_id="e1", project="proj-a",
+            outcome="no_outcome", ended_at="2026-04-01T00:00:00+00:00",
+        )
+        _seed_observation(conn, obs_id="obs-1", ep_id="e1",
+                          status="consumed_into_reflection")
+        _seed_reflection(conn, refl_id="r1", status="retired",
+                         updated_at="2026-04-01T00:00:00+00:00")
+        _link(conn, "r1", "obs-1")
+
+        report = RetentionService(conn, clock=fixed_clock).run_archive(
+            retention_days=90
+        )
+        assert report.archived_via_retired_reflection == 1
+        assert report.archived_via_no_outcome_episode == 0
+
+    def test_dry_run_matches_run_archive_under_overlap(
+        self, conn, fixed_clock
+    ):
+        """Dry-run counts must match run_archive counts for the same
+        DB state. (Regression test for the dry-run-over-counts bug.)"""
+        _seed_episode(
+            conn, ep_id="e1", project="proj-a",
+            outcome="no_outcome", ended_at="2026-04-01T00:00:00+00:00",
+        )
+        _seed_observation(conn, obs_id="obs-1", ep_id="e1",
+                          status="consumed_into_reflection")
+        _seed_reflection(conn, refl_id="r1", status="retired",
+                         updated_at="2026-04-01T00:00:00+00:00")
+        _link(conn, "r1", "obs-1")
+
+        # Dry run first.
+        dry = RetentionService(conn, clock=fixed_clock).run(
+            retention_days=90, dry_run=True
+        )
+        # Real run on a fresh state would archive once — counts must
+        # match dry-run.
+        real = RetentionService(conn, clock=fixed_clock).run_archive(
+            retention_days=90
+        )
+        assert dry.archived_via_retired_reflection == real.archived_via_retired_reflection
+        assert dry.archived_via_consumed_without_reflection == real.archived_via_consumed_without_reflection
+        assert dry.archived_via_no_outcome_episode == real.archived_via_no_outcome_episode
+
+
+class TestPruneCleansEmbeddings:
+    def test_prune_deletes_corresponding_embeddings_row(
+        self, conn, fixed_clock
+    ):
+        """When _prune deletes an observation, its row in
+        observation_embeddings must also go — vec0 has no DELETE
+        trigger so retention has to clean up explicitly."""
+        _seed_episode(conn, ep_id="e1", project="proj-a")
+        _seed_observation(
+            conn, obs_id="obs-old", ep_id="e1", status="archived",
+            status_changed_at="2025-01-01T00:00:00+00:00",
+        )
+        # Insert a fake embedding row keyed to obs-old.
+        # vec0 syntax: a 768-dim FLOAT vector. Use a literal.
+        import struct
+        embedding = struct.pack("768f", *(0.0 for _ in range(768)))
+        conn.execute(
+            "INSERT INTO observation_embeddings (observation_id, embedding) "
+            "VALUES (?, ?)",
+            ("obs-old", embedding),
+        )
+        conn.commit()
+
+        # Confirm setup.
+        emb_before = conn.execute(
+            "SELECT COUNT(*) AS n FROM observation_embeddings "
+            "WHERE observation_id = 'obs-old'"
+        ).fetchone()["n"]
+        assert emb_before == 1
+
+        report = RetentionService(conn, clock=fixed_clock).run(
+            retention_days=90, prune=True, prune_age_days=365,
+        )
+        assert report.pruned == 1
+
+        emb_after = conn.execute(
+            "SELECT COUNT(*) AS n FROM observation_embeddings "
+            "WHERE observation_id = 'obs-old'"
+        ).fetchone()["n"]
+        assert emb_after == 0  # embeddings row must be gone too
