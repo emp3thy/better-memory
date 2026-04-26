@@ -257,6 +257,12 @@ class ReflectionSynthesisService:
         self._chat = chat
         self._clock: Callable[[], datetime] = clock or _default_clock
 
+    @staticmethod
+    def _normalize_tech(tech: str | None) -> str | None:
+        # Mirror EpisodeService.start_foreground / ObservationService.create
+        # so case-mismatched tech doesn't silently miss on retrieval.
+        return tech.lower() if tech else None
+
     # -------------------------------------------------------------- load_context
     def load_context(
         self, *, project: str, tech: str | None
@@ -284,6 +290,7 @@ class ReflectionSynthesisService:
         When no prior synthesis run exists, the watermark is NULL and
         all eligible observations are returned.
         """
+        tech = self._normalize_tech(tech)
         # --- Reflections --------------------------------------------------
         if tech is None:
             refl_rows = self._conn.execute(
@@ -559,7 +566,8 @@ class ReflectionSynthesisService:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_review', ?, ?, ?)
                 """,
                 (
-                    reflection_id, action.title, project, action.tech,
+                    reflection_id, action.title, project,
+                    self._normalize_tech(action.tech),
                     action.phase, action.polarity, action.use_cases,
                     json.dumps(action.hints), confidence,
                     len(valid_sources), now, now,
@@ -822,6 +830,7 @@ class ReflectionSynthesisService:
         4. No observations have been written after last_run_at for (project, tech).
         """
         from datetime import timedelta
+        tech = self._normalize_tech(tech)
         tech_key = tech if tech is not None else ""
         row = self._conn.execute(
             "SELECT last_run_at, last_goal FROM synthesis_runs "
@@ -875,6 +884,7 @@ class ReflectionSynthesisService:
         When short-circuiting, returns the current reflection buckets
         without calling the LLM.
         """
+        tech = self._normalize_tech(tech)
         if self._should_short_circuit(project=project, tech=tech, goal=goal):
             return self._bucketed_reflections(project=project, tech=tech)
 
@@ -972,6 +982,7 @@ class ReflectionSynthesisService:
         Excludes retired and superseded reflections. Includes pending_review
         + confirmed.
         """
+        tech = self._normalize_tech(tech)
         clauses = [
             "project = ?",
             "status IN ('pending_review', 'confirmed')",

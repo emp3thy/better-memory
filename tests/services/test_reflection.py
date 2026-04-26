@@ -1476,3 +1476,72 @@ class TestStatusChangedAtOnTransition:
         ).fetchone()
         assert row["status"] == "consumed_without_reflection"
         assert row["status_changed_at"] == fixed_clock().isoformat()
+
+
+class TestTechNormalization:
+    """`tech` is lowercased at every entry point so case mismatches
+    don't cause silent miss-on-retrieval.
+
+    EpisodeService.start_foreground and ObservationService.create
+    already normalise. Reflection retrieval/synthesis must do the
+    same so that, e.g., the MCP tool surface accepting tech="React"
+    matches reflections stored as tech="react".
+    """
+
+    def test_load_context_normalizes_tech_arg(self, conn, fixed_clock):
+        _insert_reflection(conn, refl_id="r-react", project="p", tech="react")
+        _insert_reflection(conn, refl_id="r-python", project="p", tech="python")
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+        )
+        ctx = svc.load_context(project="p", tech="React")
+        assert {r.id for r in ctx.reflections} == {"r-react"}
+
+    def test_retrieve_reflections_normalizes_tech_arg(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r-react", project="p", tech="react",
+            polarity="do", status="confirmed",
+        )
+        _insert_reflection(
+            conn, refl_id="r-python", project="p", tech="python",
+            polarity="do", status="confirmed",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+        )
+        result = svc.retrieve_reflections(project="p", tech="REACT")
+        assert {r["id"] for r in result["do"]} == {"r-react"}
+
+    def test_apply_new_lowercases_action_tech(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+        )
+        action = NewAction(
+            title="Mixed-case tech from LLM",
+            phase="general", polarity="do",
+            use_cases="React work",
+            hints=["use hooks"],
+            tech="React",  # LLM may emit mixed case
+            confidence=0.6,
+            source_observation_ids=["obs-1"],
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT tech FROM reflections WHERE title = ?",
+            ("Mixed-case tech from LLM",),
+        ).fetchone()
+        assert row["tech"] == "react"
