@@ -9,7 +9,10 @@ import pytest
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.ui.queries import (
+    ReflectionDetail,
     ReflectionListRow,
+    ReflectionSourceObservation,
+    reflection_detail,
     reflection_list_for_ui,
 )
 
@@ -167,3 +170,103 @@ class TestReflectionListForUi:
             conn, project="proj-a", limit=2
         )
         assert len(rows) == 2
+
+
+from better_memory.services.episode import EpisodeService
+
+
+class TestReflectionDetail:
+    def test_returns_none_for_missing_reflection(self, conn):
+        assert reflection_detail(conn, reflection_id="nope") is None
+
+    def test_returns_reflection_with_no_sources(self, conn):
+        _seed(conn, rid="r-1")
+        detail = reflection_detail(conn, reflection_id="r-1")
+        assert detail is not None
+        assert detail.reflection.id == "r-1"
+        assert detail.sources == []
+
+    def test_returns_full_reflection_fields(self, conn):
+        _seed(
+            conn, rid="r-1", project="proj-a", tech="python",
+            phase="implementation", polarity="dont", confidence=0.85,
+            use_cases="when X", hints="do Y, then Z",
+            title="my title", evidence_count=3,
+        )
+        detail = reflection_detail(conn, reflection_id="r-1")
+        r = detail.reflection
+        assert r.title == "my title"
+        assert r.tech == "python"
+        assert r.phase == "implementation"
+        assert r.polarity == "dont"
+        assert r.confidence == 0.85
+        assert r.use_cases == "when X"
+        assert r.hints == "do Y, then Z"
+        assert r.evidence_count == 3
+
+    def test_returns_sources_with_episode_outcome(self, conn):
+        # Need an episode for observations to bind to.
+        ep_id = EpisodeService(conn).open_background(
+            session_id="s1", project="proj-a"
+        )
+        # Harden to give it a goal + close it as success.
+        EpisodeService(conn).start_foreground(
+            session_id="s1", project="proj-a", goal="ship feature", tech="python"
+        )
+        EpisodeService(conn).close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+
+        # Insert two observations on this episode.
+        for i in range(2):
+            conn.execute(
+                "INSERT INTO observations "
+                "(id, content, project, episode_id, component, theme, outcome) "
+                "VALUES (?, ?, 'proj-a', ?, 'comp', 'bug', 'failure')",
+                (f"obs-{i}", f"content {i}", ep_id),
+            )
+        _seed(conn, rid="r-1")
+        # Both observations source this reflection.
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('r-1', 'obs-0'), ('r-1', 'obs-1')"
+        )
+        conn.commit()
+
+        detail = reflection_detail(conn, reflection_id="r-1")
+        assert len(detail.sources) == 2
+        for src in detail.sources:
+            assert src.episode_goal == "ship feature"
+            assert src.episode_outcome == "success"
+            assert src.episode_close_reason == "goal_complete"
+            assert src.component == "comp"
+            assert src.theme == "bug"
+
+    def test_sources_ordered_by_observation_created_at_desc(self, conn):
+        ep_id = EpisodeService(conn).open_background(
+            session_id="s1", project="proj-a"
+        )
+        # Two observations with explicit created_at to control ordering.
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, episode_id, created_at) "
+            "VALUES ('obs-old', 'older', 'proj-a', ?, "
+            "'2026-04-24T08:00:00+00:00')",
+            (ep_id,),
+        )
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, episode_id, created_at) "
+            "VALUES ('obs-new', 'newer', 'proj-a', ?, "
+            "'2026-04-24T10:00:00+00:00')",
+            (ep_id,),
+        )
+        _seed(conn, rid="r-1")
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('r-1', 'obs-old'), ('r-1', 'obs-new')"
+        )
+        conn.commit()
+
+        detail = reflection_detail(conn, reflection_id="r-1")
+        assert [s.observation_id for s in detail.sources] == ["obs-new", "obs-old"]

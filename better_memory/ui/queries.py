@@ -437,6 +437,131 @@ def reflection_list_for_ui(
     ]
 
 
+@dataclass(frozen=True)
+class ReflectionFull:
+    """Full reflection row for the drawer."""
+
+    id: str
+    title: str
+    project: str
+    tech: str | None
+    phase: str
+    polarity: str
+    confidence: float
+    status: str
+    use_cases: str
+    hints: str
+    evidence_count: int
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ReflectionSourceObservation:
+    """One source observation with its owning episode's outcome.
+
+    Joined: reflection_sources → observations → episodes.
+    """
+
+    observation_id: str
+    content: str
+    component: str | None
+    theme: str | None
+    outcome: str  # observation outcome (success/failure/neutral)
+    created_at: str
+    episode_id: str
+    episode_goal: str | None
+    episode_outcome: str | None  # episode outcome — None on still-open ones
+    episode_close_reason: str | None
+
+
+@dataclass(frozen=True)
+class ReflectionDetail:
+    reflection: ReflectionFull
+    sources: list[ReflectionSourceObservation]
+
+
+def reflection_detail(
+    conn: sqlite3.Connection, *, reflection_id: str
+) -> ReflectionDetail | None:
+    """Return one reflection with its source observations.
+
+    Sources are joined through ``reflection_sources`` to ``observations``
+    and from there to ``episodes`` so the drawer can show the owning
+    episode's goal + outcome + close_reason for each piece of evidence.
+
+    Returns ``None`` if no reflection with this id exists.
+
+    Source ordering: ``observations.created_at DESC, observations.rowid DESC``.
+    Same-status policy as Phase 8's episode_detail: ALL source
+    observations are returned regardless of ``observations.status``.
+    """
+    r_row = conn.execute(
+        "SELECT id, title, project, tech, phase, polarity, "
+        "confidence, status, use_cases, hints, evidence_count, "
+        "created_at, updated_at "
+        "FROM reflections WHERE id = ?",
+        (reflection_id,),
+    ).fetchone()
+    if r_row is None:
+        return None
+
+    src_rows = conn.execute(
+        """
+        SELECT
+            o.id              AS observation_id,
+            o.content         AS content,
+            o.component       AS component,
+            o.theme           AS theme,
+            o.outcome         AS obs_outcome,
+            o.created_at      AS obs_created_at,
+            e.id              AS episode_id,
+            e.goal            AS episode_goal,
+            e.outcome         AS episode_outcome,
+            e.close_reason    AS episode_close_reason
+        FROM reflection_sources rs
+        JOIN observations o ON o.id = rs.observation_id
+        JOIN episodes     e ON e.id = o.episode_id
+        WHERE rs.reflection_id = ?
+        ORDER BY o.created_at DESC, o.rowid DESC
+        """,
+        (reflection_id,),
+    ).fetchall()
+    sources = [
+        ReflectionSourceObservation(
+            observation_id=r["observation_id"],
+            content=r["content"],
+            component=r["component"],
+            theme=r["theme"],
+            outcome=r["obs_outcome"],
+            created_at=r["obs_created_at"],
+            episode_id=r["episode_id"],
+            episode_goal=r["episode_goal"],
+            episode_outcome=r["episode_outcome"],
+            episode_close_reason=r["episode_close_reason"],
+        )
+        for r in src_rows
+    ]
+    return ReflectionDetail(
+        reflection=ReflectionFull(
+            id=r_row["id"],
+            title=r_row["title"],
+            project=r_row["project"],
+            tech=r_row["tech"],
+            phase=r_row["phase"],
+            polarity=r_row["polarity"],
+            confidence=r_row["confidence"],
+            status=r_row["status"],
+            use_cases=r_row["use_cases"],
+            hints=r_row["hints"],
+            evidence_count=r_row["evidence_count"],
+            created_at=r_row["created_at"],
+            updated_at=r_row["updated_at"],
+        ),
+        sources=sources,
+    )
+
+
 def unclosed_episode_count(
     conn: sqlite3.Connection, *, project: str
 ) -> int:
