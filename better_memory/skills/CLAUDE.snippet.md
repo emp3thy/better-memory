@@ -43,6 +43,7 @@ search; without, ordered newest-first.
 - `memory.close_episode(outcome, summary?, close_reason?)` — closes the active episode
 - `memory.reconcile_episodes()` — list unclosed episodes from prior sessions
 - `memory.list_episodes(project?, outcome?, only_open?)` — episodes for UI/inspection
+- `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` — apply spec §9 retention: flip stale observations to `status='archived'` per the three rules (linked-only-to-retired-reflection, consumed_without_reflection, no_outcome episode), optionally prune archived rows older than `prune_age_days`. Reflections are never auto-deleted. User-invoked; no auto-scheduling.
 - `knowledge.search(query, project?)`
 - `knowledge.list(project?)`
 
