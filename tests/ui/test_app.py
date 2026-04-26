@@ -78,28 +78,6 @@ class TestNav:
             assert f">{label}<" not in body
 
 
-class TestEmptyViews:
-    def test_sweep_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/sweep")
-        assert response.status_code == 200
-        assert b"Sweep Review" in response.data
-
-    def test_knowledge_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/knowledge")
-        assert response.status_code == 200
-        assert b"Knowledge Base" in response.data
-
-    def test_audit_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/audit")
-        assert response.status_code == 200
-        assert b"Audit Timeline" in response.data
-
-    def test_graph_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/graph")
-        assert response.status_code == 200
-        assert b"<h1>Graph</h1>" in response.data
-
-
 class TestOriginCheck:
     def test_post_without_origin_or_referer_is_rejected(
         self, client: FlaskClient

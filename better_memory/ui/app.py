@@ -666,22 +666,6 @@ def create_app(
         )
         return render_template("fragments/badge.html", count=counts.candidates)
 
-    @app.get("/sweep")
-    def sweep() -> str:
-        return render_template("sweep.html", active_tab="sweep")
-
-    @app.get("/knowledge")
-    def knowledge() -> str:
-        return render_template("knowledge.html", active_tab="knowledge")
-
-    @app.get("/audit")
-    def audit() -> str:
-        return render_template("audit.html", active_tab="audit")
-
-    @app.get("/graph")
-    def graph() -> str:
-        return render_template("graph.html", active_tab="graph")
-
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:
         def _exit() -> None:
