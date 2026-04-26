@@ -46,23 +46,6 @@ class TestRootRedirect:
         assert response.headers["Location"].endswith("/episodes")
 
 
-class TestLayoutShell:
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
-    def test_pipeline_renders_base_layout(self, client: FlaskClient) -> None:
-        response = client.get("/pipeline")
-        assert response.status_code == 200
-        body = response.data.decode()
-        # All five nav tabs appear in the header
-        assert "Pipeline" in body
-        assert "Sweep" in body
-        assert "Knowledge" in body
-        assert "Audit" in body
-        assert "Graph" in body
-        # Close UI button is rendered
-        assert "Close UI" in body
-
 
 class TestNav:
     def test_nav_shows_episodes_and_reflections(self, client: FlaskClient) -> None:
@@ -167,7 +150,7 @@ class TestInactivityTimeout:
         app = create_app(db_path=tmp_path / "memory.db")
         with app.test_client() as c:
             app.config["_last_activity"] = 0.0  # pretend ancient
-            c.get("/pipeline")
+            c.get("/episodes")
             # After the request, _last_activity should be ~now.
             assert _time.monotonic() - app.config["_last_activity"] < 0.1
 
