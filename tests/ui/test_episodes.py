@@ -231,10 +231,3 @@ class TestEpisodeClose:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 409
-
-
-class TestReflectionsPlaceholder:
-    def test_reflections_route_returns_200(self, client: FlaskClient):
-        response = client.get("/reflections")
-        assert response.status_code == 200
-        assert b"Coming in Phase 9" in response.data

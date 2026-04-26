@@ -1002,3 +1002,121 @@ class ReflectionSynthesisService:
                 "evidence_count": r["evidence_count"],
             })
         return buckets
+
+
+class ReflectionService:
+    """UI-facing writes for reflections.
+
+    Sibling of ``ReflectionSynthesisService``: this class does NOT
+    synthesise — it handles the three lifecycle actions the user
+    drives from the Reflections tab drawer:
+
+    - ``confirm``: pending_review → confirmed (idempotent on confirmed).
+    - ``retire``: pending_review/confirmed → retired (idempotent on retired).
+    - ``update_text``: edit use_cases / hints in place; blocked on
+      retired and superseded so we don't surprise the synthesis
+      pipeline by mutating retired text.
+
+    All three bump ``updated_at`` only when the row actually changes
+    (no-op cases leave the timestamp untouched so reinforcement /
+    audit trails stay honest).
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._conn = conn
+        self._clock: Callable[[], datetime] = clock or _default_clock
+
+    def confirm(self, *, reflection_id: str) -> None:
+        """pending_review → confirmed; no-op on confirmed; raise on retired/superseded."""
+        row = self._conn.execute(
+            "SELECT status FROM reflections WHERE id = ?", (reflection_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Reflection not found: {reflection_id}")
+        status = row["status"]
+        if status == "confirmed":
+            return
+        if status != "pending_review":
+            raise ValueError(
+                f"Cannot confirm reflection in status {status!r}"
+            )
+        now = self._clock().isoformat()
+        self._conn.execute(
+            "UPDATE reflections SET status = 'confirmed', updated_at = ? "
+            "WHERE id = ?",
+            (now, reflection_id),
+        )
+        self._conn.commit()
+
+    def retire(self, *, reflection_id: str) -> None:
+        """pending_review / confirmed → retired; no-op on retired; raise on superseded."""
+        row = self._conn.execute(
+            "SELECT status FROM reflections WHERE id = ?", (reflection_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Reflection not found: {reflection_id}")
+        status = row["status"]
+        if status == "retired":
+            return
+        if status not in ("pending_review", "confirmed"):
+            raise ValueError(
+                f"Cannot retire reflection in status {status!r}"
+            )
+        now = self._clock().isoformat()
+        self._conn.execute(
+            "UPDATE reflections SET status = 'retired', updated_at = ? "
+            "WHERE id = ?",
+            (now, reflection_id),
+        )
+        self._conn.commit()
+
+    def update_text(
+        self, *, reflection_id: str, use_cases: str, hints: str
+    ) -> None:
+        """Edit ``use_cases`` and ``hints`` in place.
+
+        Hints are accepted as newline-separated text (the UI form
+        contract: one hint per line). Internally stored as
+        ``json.dumps(list[str])`` to match
+        ``ReflectionSynthesisService``'s contract — synthesis
+        round-trips ``hints`` through ``json.loads()`` at three call
+        sites (``_apply_augment``, ``_bucketed_reflections``,
+        ``retrieve_reflections``), so plain-text storage would crash
+        the LLM read path.
+
+        Blocked on retired/superseded — once a reflection has left the
+        active set, mutating its text would silently change the audit
+        trail.
+        """
+        if not use_cases or not use_cases.strip():
+            raise ValueError("use_cases must not be empty")
+        # Parse hints from newline-separated UI input → list[str].
+        hint_list = [
+            line.strip()
+            for line in (hints or "").splitlines()
+            if line.strip()
+        ]
+        if not hint_list:
+            raise ValueError("hints must not be empty")
+        row = self._conn.execute(
+            "SELECT status FROM reflections WHERE id = ?", (reflection_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Reflection not found: {reflection_id}")
+        status = row["status"]
+        if status not in ("pending_review", "confirmed"):
+            raise ValueError(
+                f"Cannot edit reflection in status {status!r}"
+            )
+        now = self._clock().isoformat()
+        self._conn.execute(
+            "UPDATE reflections SET use_cases = ?, hints = ?, updated_at = ? "
+            "WHERE id = ?",
+            (use_cases, json.dumps(hint_list), now, reflection_id),
+        )
+        self._conn.commit()

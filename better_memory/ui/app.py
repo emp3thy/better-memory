@@ -18,6 +18,7 @@ from better_memory.llm.ollama import ChatCompleter, OllamaChat
 from better_memory.services.consolidation import ConsolidationService
 from better_memory.services.episode import EpisodeService
 from better_memory.services.insight import InsightService
+from better_memory.services.reflection import ReflectionService
 from better_memory.ui import jobs, queries
 
 
@@ -57,6 +58,7 @@ def create_app(
     app.extensions["db_connection"] = db_conn
     app.extensions["insight_service"] = InsightService(conn=db_conn)
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
+    app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
     app.extensions["_db_path"] = resolved_db
     resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
     app.extensions["chat"] = resolved_chat
@@ -95,6 +97,28 @@ def create_app(
         abort(403)
 
     app.config["_last_activity"] = time.monotonic()
+
+    import json as _json
+
+    @app.template_filter("decode_hints")
+    def _decode_hints(raw: str | None) -> list[str]:
+        """Decode the hints column for template display.
+
+        Hints are stored as ``json.dumps(list[str])`` by the synthesis
+        service and (now) the UI edit handler. This filter decodes the
+        JSON; if the column contains a plain-text legacy value (or any
+        non-JSON), falls back to a single-element list so the UI
+        renders something readable rather than crashing.
+        """
+        if not raw:
+            return []
+        try:
+            value = _json.loads(raw)
+        except (ValueError, TypeError):
+            return [raw]
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        return [str(value)]
 
     @app.before_request
     def _record_activity() -> None:
@@ -213,7 +237,146 @@ def create_app(
 
     @app.get("/reflections")
     def reflections() -> str:
-        return render_template("reflections.html", active_tab="reflections")
+        return render_template(
+            "reflections.html",
+            active_tab="reflections",
+            # The filter-form initial state mirrors the no-filter
+            # default — current project, status=active, no others.
+            initial_filters={
+                "project": _project_name(),
+                "tech": "",
+                "phase": "",
+                "polarity": "",
+                "status": "",
+                "min_confidence": "",
+            },
+        )
+
+    @app.get("/reflections/panel")
+    def reflections_panel() -> str:
+        conn = app.extensions["db_connection"]
+        args = request.args
+
+        def _arg(name: str) -> str | None:
+            v = args.get(name, "").strip()
+            return v or None
+
+        project = _arg("project") or _project_name()
+        tech = _arg("tech")
+        phase = _arg("phase")
+        polarity = _arg("polarity")
+        status = _arg("status")
+
+        min_conf_raw = _arg("min_confidence")
+        try:
+            min_confidence = float(min_conf_raw) if min_conf_raw else 0.0
+        except ValueError:
+            min_confidence = 0.0
+
+        rows = queries.reflection_list_for_ui(
+            conn,
+            project=project,
+            tech=tech,
+            phase=phase,
+            polarity=polarity,
+            status=status,
+            min_confidence=min_confidence,
+        )
+        return render_template(
+            "fragments/panel_reflections.html", rows=rows
+        )
+
+    @app.get("/reflections/<id>/drawer")
+    def reflections_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+
+    @app.post("/reflections/<id>/confirm")
+    def reflection_confirm(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        try:
+            app.extensions["reflection_service"].confirm(reflection_id=id)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
+
+    @app.post("/reflections/<id>/retire")
+    def reflection_retire(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        try:
+            app.extensions["reflection_service"].retire(reflection_id=id)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
+
+    @app.get("/reflections/<id>/edit")
+    def reflection_edit_form(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/reflection_edit_form.html", detail=detail
+        )
+
+    @app.post("/reflections/<id>/edit")
+    def reflection_edit_save(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        use_cases = request.form.get("use_cases", "")
+        hints = request.form.get("hints", "")
+        # Validate empties at the route boundary (input-validation = 400)
+        # so the service-layer ValueError can mean only "lifecycle block"
+        # (= 409). Avoids fragile error-message string matching.
+        if not use_cases.strip() or not hints.strip():
+            return (
+                '<div class="card card-error">'
+                "<p>use_cases and hints must both be non-empty</p>"
+                "</div>"
+            ), 400, {}
+        try:
+            app.extensions["reflection_service"].update_text(
+                reflection_id=id, use_cases=use_cases, hints=hints,
+            )
+        except ValueError as exc:
+            # After the empty-check above, the only remaining ValueError
+            # path is "Cannot edit reflection in status 'retired'/'superseded'".
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
     @app.get("/pipeline")
     def pipeline() -> str:

@@ -1,8 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Reflections — better-memory{% endblock %}
 {% block main %}
-<section class="placeholder">
-  <h1>Reflections</h1>
-  <p>Coming in Phase 9.</p>
+<section class="reflections">
+  {% include "fragments/reflection_filter_form.html" %}
+
+  <div id="reflection-panel"
+       hx-get="{{ url_for('reflections_panel') }}"
+       hx-include="#reflection-filter-form"
+       hx-trigger="load, every 30s, reflection-changed from:body"
+       hx-swap="innerHTML">
+  </div>
+
+  <div id="reflection-drawer"></div>
 </section>
 {% endblock %}

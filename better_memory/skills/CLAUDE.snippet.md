@@ -75,6 +75,13 @@ The Episodes tab in the management UI also lists unclosed episodes —
 clicking a row opens a drawer with the same close actions, useful for
 bulk reconcile or follow-up the LLM declined to handle in chat.
 
+The Reflections tab in the same UI lists all reflections for the
+current project with filters by tech / phase / polarity / status /
+min confidence; clicking a row opens a drawer with the source
+observations + their owning episode's outcome, plus actions to
+confirm pending reflections, retire stale ones, or edit
+`use_cases` and `hints` in place.
+
 ## Closing episodes on git commit + plan completion
 
 ### Git commits that complete the episode's goal
