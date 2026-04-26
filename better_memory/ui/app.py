@@ -314,7 +314,47 @@ def create_app(
 
     @app.get("/reflections/<id>/edit")
     def reflection_edit_form(id: str) -> str:
-        return ""
+        conn = app.extensions["db_connection"]
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/reflection_edit_form.html", detail=detail
+        )
+
+    @app.post("/reflections/<id>/edit")
+    def reflection_edit_save(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        if queries.reflection_detail(conn, reflection_id=id) is None:
+            abort(404)
+        use_cases = request.form.get("use_cases", "")
+        hints = request.form.get("hints", "")
+        # Validate empties at the route boundary (input-validation = 400)
+        # so the service-layer ValueError can mean only "lifecycle block"
+        # (= 409). Avoids fragile error-message string matching.
+        if not use_cases.strip() or not hints.strip():
+            return (
+                '<div class="card card-error">'
+                "<p>use_cases and hints must both be non-empty</p>"
+                "</div>"
+            ), 400, {}
+        try:
+            app.extensions["reflection_service"].update_text(
+                reflection_id=id, use_cases=use_cases, hints=hints,
+            )
+        except ValueError as exc:
+            # After the empty-check above, the only remaining ValueError
+            # path is "Cannot edit reflection in status 'retired'/'superseded'".
+            return (
+                f'<div class="card card-error">'
+                f"<p>{escape(str(exc))}</p>"
+                "</div>"
+            ), 409, {}
+        detail = queries.reflection_detail(conn, reflection_id=id)
+        rendered = render_template(
+            "fragments/reflection_drawer.html", detail=detail
+        )
+        return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
     @app.get("/pipeline")
     def pipeline() -> str:

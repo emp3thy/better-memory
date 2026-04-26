@@ -291,3 +291,83 @@ class TestReflectionRetire:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 409
+
+
+class TestReflectionEdit:
+    def test_get_returns_form(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", use_cases="old uc", hints="old h"
+        )
+        response = client.get("/reflections/r-1/edit")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert 'name="use_cases"' in body
+        assert 'name="hints"' in body
+        assert "old uc" in body
+        assert "old h" in body
+
+    def test_get_404_for_unknown(self, client: FlaskClient):
+        response = client.get("/reflections/does-not-exist/edit")
+        assert response.status_code == 404
+
+    def test_post_saves_and_returns_drawer(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1")
+
+        response = client.post(
+            "/reflections/r-1/edit",
+            data={"use_cases": "new uc", "hints": "new h"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("HX-Trigger") == "reflection-changed"
+
+        conn = connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT use_cases, hints FROM reflections WHERE id = ?",
+                ("r-1",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["use_cases"] == "new uc"
+        assert row["hints"] == "new h"
+
+    def test_post_400_when_use_cases_empty(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1")
+
+        response = client.post(
+            "/reflections/r-1/edit",
+            data={"use_cases": "  ", "hints": "valid"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+
+    def test_post_409_for_retired(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="retired")
+
+        response = client.post(
+            "/reflections/r-1/edit",
+            data={"use_cases": "x", "hints": "y"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 409

@@ -1,0 +1,27 @@
+<div class="reflection-edit-form" id="reflection-edit-{{ detail.reflection.id }}">
+  <header class="drawer-header">
+    <h3>Edit: {{ detail.reflection.title }}</h3>
+  </header>
+  <form hx-post="{{ url_for('reflection_edit_save', id=detail.reflection.id) }}"
+        hx-target="#reflection-drawer"
+        hx-swap="innerHTML">
+    <label>
+      Use cases
+      <textarea name="use_cases" rows="3">{{ detail.reflection.use_cases }}</textarea>
+    </label>
+    <label>
+      Hints
+      <textarea name="hints" rows="6">{{ detail.reflection.hints }}</textarea>
+    </label>
+    <div class="form-actions">
+      <button type="submit" class="action-save">Save</button>
+      <button type="button"
+              class="action-cancel"
+              hx-get="{{ url_for('reflections_drawer', id=detail.reflection.id) }}"
+              hx-target="#reflection-drawer"
+              hx-swap="innerHTML">
+        Cancel
+      </button>
+    </div>
+  </form>
+</div>
