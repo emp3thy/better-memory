@@ -42,7 +42,7 @@ class Episode:
     summary: str | None
 
 
-def _row_to_episode(row: sqlite3.Row) -> Episode:
+def row_to_episode(row: sqlite3.Row) -> Episode:
     return Episode(
         id=row["id"],
         project=row["project"],
@@ -111,7 +111,7 @@ class EpisodeService:
         session is an invariant the lifecycle methods maintain.
         """
         row = self._active_episode_row(session_id)
-        return _row_to_episode(row) if row is not None else None
+        return row_to_episode(row) if row is not None else None
 
     def start_foreground(
         self,
@@ -337,7 +337,7 @@ class EpisodeService:
         ).fetchall()
 
         if not exclude:
-            return [_row_to_episode(r) for r in rows]
+            return [row_to_episode(r) for r in rows]
 
         # Filter out episodes that have an active binding to any excluded session.
         out: list[Episode] = []
@@ -350,7 +350,7 @@ class EpisodeService:
             active_set = {row["session_id"] for row in active_sessions}
             if active_set & exclude:
                 continue
-            out.append(_row_to_episode(r))
+            out.append(row_to_episode(r))
         return out
 
     def list_episodes(
@@ -384,7 +384,7 @@ class EpisodeService:
             f"ORDER BY started_at DESC, rowid DESC"
         )
         rows = self._conn.execute(sql, params).fetchall()
-        return [_row_to_episode(r) for r in rows]
+        return [row_to_episode(r) for r in rows]
 
     def _active_episode_row(self, session_id: str) -> sqlite3.Row | None:
         """Internal helper: returns the raw active episode Row (not Episode)."""

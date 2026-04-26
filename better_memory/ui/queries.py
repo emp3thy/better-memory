@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from better_memory.services.episode import Episode
+from better_memory.services.episode import Episode, row_to_episode
 from better_memory.services.insight import Insight, row_to_insight
 
 
@@ -235,21 +235,6 @@ def episode_list_for_ui(
     ]
 
 
-def _episode_from_row(row: sqlite3.Row) -> Episode:
-    return Episode(
-        id=row["id"],
-        project=row["project"],
-        tech=row["tech"],
-        goal=row["goal"],
-        started_at=row["started_at"],
-        hardened_at=row["hardened_at"],
-        ended_at=row["ended_at"],
-        close_reason=row["close_reason"],
-        outcome=row["outcome"],
-        summary=row["summary"],
-    )
-
-
 @dataclass(frozen=True)
 class EpisodeObservationRow:
     id: str
@@ -345,7 +330,7 @@ def episode_detail(
     ]
 
     return EpisodeDetail(
-        episode=_episode_from_row(ep_row),
+        episode=row_to_episode(ep_row),
         observations=observations,
         reflections=reflections,
     )
