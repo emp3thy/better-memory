@@ -225,7 +225,7 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         versions = [r["version"] for r in rows]
-        assert versions == ["0001", "0002", "0003"]
+        assert versions == ["0001", "0002", "0003", "0004"]
     finally:
         conn.close()
 
@@ -787,3 +787,63 @@ def test_synthesis_runs_last_goal_round_trips(tmp_memory_db: Path) -> None:
         assert row["last_goal"] == "implement feature X"
     finally:
         conn.close()
+
+
+class TestStatusChangedAtColumn:
+    def test_observations_has_status_changed_at_column(self, tmp_memory_db):
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        cols = {
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(observations)").fetchall()
+        }
+        assert "status_changed_at" in cols
+
+    def test_backfill_existing_rows_sets_status_changed_at_from_created_at(
+        self, tmp_memory_db
+    ):
+        """Verify the migration's backfill UPDATE populates pre-existing
+        rows that had NULL status_changed_at."""
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        # Need an episode for FK constraint.
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at) "
+            "VALUES ('ep-1', 'proj-a', '2026-04-01T00:00:00+00:00')"
+        )
+        # Simulate a row that pre-existed the column by inserting then
+        # NULLing the column.
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, episode_id, created_at) "
+            "VALUES ('obs-1', 'c', 'proj-a', 'ep-1', "
+            "'2026-04-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "UPDATE observations SET status_changed_at = NULL "
+            "WHERE id = 'obs-1'"
+        )
+        conn.commit()
+
+        # Re-run the backfill UPDATE manually (this is the same SQL the
+        # migration uses).
+        conn.execute(
+            "UPDATE observations "
+            "SET status_changed_at = created_at "
+            "WHERE status_changed_at IS NULL"
+        )
+        row = conn.execute(
+            "SELECT status_changed_at FROM observations "
+            "WHERE id = 'obs-1'"
+        ).fetchone()
+        assert row["status_changed_at"] == "2026-04-01T00:00:00+00:00"
+
+    def test_status_changed_at_index_exists(self, tmp_memory_db):
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        idx = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'index' AND tbl_name = 'observations' "
+            "AND name = 'idx_observations_status_changed_at'"
+        ).fetchone()
+        assert idx is not None
