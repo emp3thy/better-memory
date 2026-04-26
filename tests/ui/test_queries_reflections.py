@@ -8,6 +8,7 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.services.episode import EpisodeService
 from better_memory.ui.queries import (
     ReflectionDetail,
     ReflectionListRow,
@@ -170,9 +171,6 @@ class TestReflectionListForUi:
             conn, project="proj-a", limit=2
         )
         assert len(rows) == 2
-
-
-from better_memory.services.episode import EpisodeService
 
 
 class TestReflectionDetail:
