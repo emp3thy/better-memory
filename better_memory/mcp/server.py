@@ -59,6 +59,7 @@ from better_memory.services.knowledge import (
 )
 from better_memory.services.observation import ObservationService
 from better_memory.services.reflection import ReflectionSynthesisService
+from better_memory.services.retention import RetentionService
 from better_memory.services.spool import SpoolService
 
 # Module-level migration directories. Packaged alongside the code so
@@ -331,6 +332,51 @@ def _tool_definitions() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="memory.run_retention",
+            description=(
+                "Apply spec §9 retention rules — flip eligible "
+                "observations to status='archived' and optionally "
+                "hard-delete archived rows older than prune_age_days."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "retention_days": {
+                        "type": "integer",
+                        "default": 90,
+                        "description": (
+                            "Age threshold for the three archive "
+                            "rules. Default 90 (per spec §9)."
+                        ),
+                    },
+                    "prune": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "If true, also hard-delete archived rows "
+                            "older than prune_age_days."
+                        ),
+                    },
+                    "prune_age_days": {
+                        "type": "integer",
+                        "default": 365,
+                        "description": (
+                            "Age threshold for prune mode. Default 365."
+                        ),
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "If true, return the counts without "
+                            "writing any changes to the DB."
+                        ),
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -391,6 +437,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
     # LLM client for reflection synthesis.
     chat = OllamaChat(host=config.ollama_host, model=config.consolidate_model)
     reflections = ReflectionSynthesisService(memory_conn, chat=chat)
+    retention = RetentionService(conn=memory_conn)
 
     knowledge = KnowledgeService(
         knowledge_conn,
@@ -586,6 +633,28 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
                 for e in open_episodes
             ]
             return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.run_retention":
+            report = retention.run(
+                retention_days=args.get("retention_days", 90),
+                prune=args.get("prune", False),
+                prune_age_days=args.get("prune_age_days", 365),
+                dry_run=args.get("dry_run", False),
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "archived_via_retired_reflection":
+                            report.archived_via_retired_reflection,
+                        "archived_via_consumed_without_reflection":
+                            report.archived_via_consumed_without_reflection,
+                        "archived_via_no_outcome_episode":
+                            report.archived_via_no_outcome_episode,
+                        "pruned": report.pruned,
+                    }),
+                )
+            ]
 
         if name == "memory.list_episodes":
             rows = episodes.list_episodes(
