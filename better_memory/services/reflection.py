@@ -348,6 +348,7 @@ class ReflectionSynthesisService:
             FROM observations o
             JOIN episodes e ON e.id = o.episode_id
             WHERE o.project = ?
+              AND o.status = 'active'
               AND e.outcome IN (
                   'success', 'partial', 'abandoned', 'no_outcome'
               )
@@ -590,12 +591,19 @@ class ReflectionSynthesisService:
     def _filter_existing_observations(
         self, ids: list[str]
     ) -> list[str]:
-        """Return the subset of ``ids`` that exist in ``observations``."""
+        """Return the subset of ``ids`` that exist AND have status='active'.
+
+        The status guard prevents apply methods from de-archiving an
+        observation if the LLM hallucinates an archived id (or if a
+        pre-existing archived row would otherwise be flipped back to
+        a consumed_* status by the UPDATE).
+        """
         if not ids:
             return []
         placeholders = ",".join("?" * len(ids))
         rows = self._conn.execute(
-            f"SELECT id FROM observations WHERE id IN ({placeholders})",
+            f"SELECT id FROM observations "
+            f"WHERE id IN ({placeholders}) AND status = 'active'",
             ids,
         ).fetchall()
         existing = {r["id"] for r in rows}
@@ -724,8 +732,11 @@ class ReflectionSynthesisService:
         - source_id == target_id → skipped (would DELETE the target's
           sources and supersede the reflection in place; double damage).
         """
-        now = self._clock().isoformat()
         for action in actions:
+            # Stamp once per iteration so each merge's UPDATE timestamp
+            # reflects the time it actually executed — not the pre-loop
+            # value carried over after a skipped iteration.
+            now = self._clock().isoformat()
             # Reject self-merge: same id on both sides would (a) DELETE the
             # reflection's own source rows because the INSERT OR IGNORE from
             # self is a no-op, and (b) mark the reflection superseded against

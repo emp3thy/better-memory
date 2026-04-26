@@ -1618,3 +1618,160 @@ class TestApplyAugmentTimestampFreshness:
         # reflection should not share the first iteration's stamp.
         assert ts1 != ts2
         assert ts2 > ts1
+
+
+class TestApplyMergeTimestampFreshness:
+    """Same per-iteration freshness contract as _apply_augment.
+
+    `_apply_merge` previously stamped ``now`` once before the loop,
+    so a skipped iteration (self-merge, unknown id, retired source)
+    followed by an executing iteration would carry the pre-loop
+    stamp into source/target ``updated_at`` — losing per-iteration
+    fidelity.
+    """
+
+    def test_each_merge_iteration_uses_fresh_clock(self, conn):
+        ticks = [
+            datetime(2026, 4, 22, 10, 0, 0, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 1, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 2, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 3, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 4, tzinfo=UTC),
+        ]
+        i = {"n": 0}
+        def counter_clock() -> datetime:
+            t = ticks[i["n"]]
+            i["n"] += 1
+            return t
+
+        # First merge: src1 -> tgt1. Second merge: src2 -> tgt2.
+        for refl_id in ("src1", "tgt1", "src2", "tgt2"):
+            _insert_reflection(
+                conn, refl_id=refl_id, project="p",
+                confidence=0.5, evidence_count=0,
+            )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=counter_clock,
+        )
+        merge1 = MergeAction(
+            source_id="src1", target_id="tgt1",
+            justification="duplicate",
+        )
+        merge2 = MergeAction(
+            source_id="src2", target_id="tgt2",
+            justification="duplicate",
+        )
+        svc._apply_merge([merge1, merge2])
+        conn.commit()
+
+        ts_src1 = conn.execute(
+            "SELECT updated_at FROM reflections WHERE id = 'src1'"
+        ).fetchone()["updated_at"]
+        ts_src2 = conn.execute(
+            "SELECT updated_at FROM reflections WHERE id = 'src2'"
+        ).fetchone()["updated_at"]
+        # Second merge iteration must not share the first's stamp.
+        assert ts_src1 != ts_src2
+        assert ts_src2 > ts_src1
+
+
+class TestArchivedObservationGuards:
+    """Archived observations must not feed synthesis nor be
+    de-archived by apply methods. Two layers:
+
+    1. ``load_context`` filters ``status = 'active'`` so archived
+       rows never reach the LLM prompt.
+    2. ``_filter_existing_observations`` enforces ``status = 'active'``
+       so even if the LLM hallucinates an archived id, the apply
+       methods skip it (no UPDATE → no de-archiving).
+    """
+
+    def test_load_context_excludes_archived_observations(
+        self, conn, fixed_clock,
+    ):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(
+            conn, obs_id="obs-active", project="p", episode_id=ep,
+            status="active",
+        )
+        _insert_obs(
+            conn, obs_id="obs-archived", project="p", episode_id=ep,
+            status="archived",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        ctx = svc.load_context(project="p", tech=None)
+        ids = {o.id for o in ctx.observations}
+        assert ids == {"obs-active"}
+
+    def test_apply_ignore_does_not_dearchive(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(
+            conn, obs_id="obs-archived", project="p", episode_id=ep,
+            status="archived",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        # Hallucinated archived id from the LLM's ignore list.
+        svc._apply_ignore(["obs-archived"])
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-archived'"
+        ).fetchone()
+        assert row["status"] == "archived"
+
+    def test_apply_new_does_not_dearchive_via_source(
+        self, conn, fixed_clock,
+    ):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(
+            conn, obs_id="obs-active", project="p", episode_id=ep,
+            status="active",
+        )
+        _insert_obs(
+            conn, obs_id="obs-archived", project="p", episode_id=ep,
+            status="archived",
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        action = NewAction(
+            title="t", phase="general", polarity="do",
+            use_cases="uc", hints=["h"], tech=None, confidence=0.6,
+            source_observation_ids=["obs-active", "obs-archived"],
+        )
+        svc._apply_new([action], project="p")
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-archived'"
+        ).fetchone()
+        assert row["status"] == "archived"
+        # Active one was consumed as expected.
+        active_row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-active'"
+        ).fetchone()
+        assert active_row["status"] == "consumed_into_reflection"
