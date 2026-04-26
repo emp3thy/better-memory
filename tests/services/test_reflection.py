@@ -1545,3 +1545,76 @@ class TestTechNormalization:
             ("Mixed-case tech from LLM",),
         ).fetchone()
         assert row["tech"] == "react"
+
+
+class TestApplyAugmentTimestampFreshness:
+    """Each iteration of `_apply_augment` must stamp `updated_at` with
+    the time of THAT iteration, not a stale earlier-iteration value.
+
+    Bug: `now` was set pre-loop and only conditionally reassigned
+    inside `if valid_sources:`. An iteration with empty valid_sources
+    that ran AFTER an iteration with valid_sources would reuse the
+    earlier iteration's timestamp on its reflection's UPDATE.
+    """
+
+    def test_iteration_without_sources_uses_fresh_clock_after_iteration_with_sources(
+        self, conn,
+    ):
+        epsvc_clock_seq = [
+            datetime(2026, 4, 22, 10, 0, 0, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 1, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 2, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 3, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 4, tzinfo=UTC),
+            datetime(2026, 4, 22, 10, 0, 5, tzinfo=UTC),
+        ]
+        # Service clock advances every call so we can detect stale reuse.
+        i = {"n": 0}
+        def counter_clock() -> datetime:
+            t = epsvc_clock_seq[i["n"]]
+            i["n"] += 1
+            return t
+
+        # Episode + observation seed (uses its own ticks of the same clock).
+        epsvc = EpisodeService(conn, clock=counter_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        _insert_reflection(
+            conn, refl_id="r1", project="p",
+            confidence=0.5, evidence_count=0,
+        )
+        _insert_reflection(
+            conn, refl_id="r2", project="p",
+            confidence=0.5, evidence_count=0,
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=counter_clock,
+        )
+        action_with = AugmentAction(
+            reflection_id="r1", add_hints=[],
+            rewrite_use_cases=None, confidence_delta=0.0,
+            add_source_observation_ids=["obs-1"],
+        )
+        action_empty = AugmentAction(
+            reflection_id="r2", add_hints=[],
+            rewrite_use_cases=None, confidence_delta=0.0,
+            add_source_observation_ids=[],
+        )
+        svc._apply_augment([action_with, action_empty])
+        conn.commit()
+
+        ts1 = conn.execute(
+            "SELECT updated_at FROM reflections WHERE id = 'r1'"
+        ).fetchone()["updated_at"]
+        ts2 = conn.execute(
+            "SELECT updated_at FROM reflections WHERE id = 'r2'"
+        ).fetchone()["updated_at"]
+        # Fresh-per-iteration semantics: the second iteration's
+        # reflection should not share the first iteration's stamp.
+        assert ts1 != ts2
+        assert ts2 > ts1

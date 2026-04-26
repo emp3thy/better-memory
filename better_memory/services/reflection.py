@@ -614,8 +614,11 @@ class ReflectionSynthesisService:
         - ``add_source_observation_ids`` filtered to existing obs;
           ``INSERT OR IGNORE`` dedupes against existing source rows.
         """
-        now = self._clock().isoformat()
         for action in actions:
+            # Stamp once per iteration so each reflection's updated_at
+            # reflects the time its UPDATE actually executed — not a
+            # leftover from a prior iteration.
+            now = self._clock().isoformat()
             row = self._conn.execute(
                 "SELECT hints, confidence, status FROM reflections "
                 "WHERE id = ?",
@@ -651,7 +654,6 @@ class ReflectionSynthesisService:
 
             # Mark added observations consumed.
             if valid_sources:
-                now = self._clock().isoformat()
                 placeholders = ",".join("?" * len(valid_sources))
                 self._conn.execute(
                     f"UPDATE observations "
