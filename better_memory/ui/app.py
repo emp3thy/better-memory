@@ -18,6 +18,7 @@ from better_memory.llm.ollama import ChatCompleter, OllamaChat
 from better_memory.services.consolidation import ConsolidationService
 from better_memory.services.episode import EpisodeService
 from better_memory.services.insight import InsightService
+from better_memory.services.reflection import ReflectionService
 from better_memory.ui import jobs, queries
 
 
@@ -57,6 +58,7 @@ def create_app(
     app.extensions["db_connection"] = db_conn
     app.extensions["insight_service"] = InsightService(conn=db_conn)
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
+    app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
     app.extensions["_db_path"] = resolved_db
     resolved_chat: ChatCompleter = chat if chat is not None else OllamaChat()
     app.extensions["chat"] = resolved_chat
@@ -213,7 +215,24 @@ def create_app(
 
     @app.get("/reflections")
     def reflections() -> str:
-        return render_template("reflections.html", active_tab="reflections")
+        return render_template(
+            "reflections.html",
+            active_tab="reflections",
+            # The filter-form initial state mirrors the no-filter
+            # default — current project, status=active, no others.
+            initial_filters={
+                "project": _project_name(),
+                "tech": "",
+                "phase": "",
+                "polarity": "",
+                "status": "",
+                "min_confidence": "",
+            },
+        )
+
+    @app.get("/reflections/panel")
+    def reflections_panel() -> str:
+        return ""
 
     @app.get("/pipeline")
     def pipeline() -> str:
