@@ -21,30 +21,5 @@
   <main>
     {% block main %}{% endblock %}
   </main>
-  <div id="modal"></div>
-  <script>
-(function () {
-  // Collapse any currently-expanded cards when a new card is clicked to expand.
-  // HTMX fires htmx:beforeRequest before every request — we check if the
-  // triggering element is a collapsed card on a panel, and if so, fire
-  // the collapse handler on any sibling [data-expanded="true"] card.
-  document.body.addEventListener('htmx:beforeRequest', function (evt) {
-    var target = evt.detail.elt;
-    // Only act on compact-card expand requests.
-    if (!target.classList || !target.classList.contains('card-compact')) return;
-    // Find the enclosing panel (card-list) and collapse any expanded sibling.
-    var list = target.closest('.card-list');
-    if (!list) return;
-    var expanded = list.querySelectorAll('[data-expanded="true"]');
-    expanded.forEach(function (card) {
-      // Trigger the card's collapse handler — it's hx-get on the panel list,
-      // but we just need the UI to flip back. Simplest: click the card's
-      // .collapse-me button.
-      var btn = card.querySelector('.collapse-me');
-      if (btn) btn.click();
-    });
-  });
-})();
-  </script>
 </body>
 </html>

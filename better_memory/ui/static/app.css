@@ -105,88 +105,6 @@ main {
   color: #888;
 }
 
-/* --------------------------------------------------------------------
- * Kanban (Phase 2)
- * -------------------------------------------------------------------- */
-
-.kanban {
-  max-width: 1024px;
-  margin: 0 auto;
-}
-
-.summary-bar {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-  margin-bottom: 18px;
-}
-
-.pill {
-  flex: 1;
-  padding: 12px 14px;
-  background: #1a1a1a;
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  color: #e0e0e0;
-  cursor: pointer;
-  text-align: center;
-  font-family: inherit;
-  transition: background 0.12s;
-}
-
-.pill:hover {
-  background: #222;
-}
-
-.pill.active {
-  background: #2a2a2a;
-  border-color: #444;
-}
-
-.pill.candidates-pill {
-  border-color: #3a2a1a;
-}
-
-.pill.candidates-pill .count {
-  color: #e0a060;
-}
-
-.pill .count {
-  display: block;
-  font-size: 20px;
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-
-.pill .stage-label {
-  font-size: 12px;
-  color: #999;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.summary-bar .toolbar {
-  display: flex;
-  align-items: center;
-  padding-left: 16px;
-  border-left: 1px solid #2a2a2a;
-}
-
-.run-consolidation {
-  padding: 10px 16px;
-  background: #2a2a2a;
-  border: 1px solid #3a3a3a;
-  border-radius: 4px;
-  color: #e0e0e0;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 13px;
-}
-
-.run-consolidation:hover {
-  background: #333;
-}
-
 .card-list {
   display: flex;
   flex-direction: column;
@@ -322,58 +240,10 @@ main {
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
 
-.card-merge-picker {
-  background: #141414;
-  border-color: #3a2a1a;
-}
-
-.merge-target-list {
-  list-style: none;
-  margin: 8px 0;
-  padding: 0;
-}
-
-.merge-target-list li {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 6px 0;
-  border-bottom: 1px solid #222;
-}
-
 .card-error {
   background: #2a1a1a;
   border-color: #3a2a2a;
   color: #e0a0a0;
-}
-
-.consolidation-job {
-  padding: 10px 14px;
-  margin-bottom: 14px;
-  background: #1a1a1a;
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  font-size: 13px;
-}
-
-.job-status {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-
-.job-status-complete .checkmark { color: #90c060; }
-.job-status-failed .cross { color: #e08080; }
-
-.insight-sources {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid #2a2a2a;
-}
-
-.insight-sources h4 {
-  margin: 0 0 8px 0;
-  font-size: 13px;
-  color: #ccc;
 }
 
 #modal:not(:empty) {

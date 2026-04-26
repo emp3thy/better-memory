@@ -2,26 +2,17 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time as _time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from flask.testing import FlaskClient
 
 from better_memory.ui.app import create_app
 
 
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
 class TestServiceWiring:
-    def test_app_exposes_insight_service(self, client: FlaskClient) -> None:
-        # The service is attached to app.extensions for routes to use.
-        assert "insight_service" in client.application.extensions
-
     def test_app_exposes_open_db_connection(
         self, tmp_db: Path
     ) -> None:
@@ -46,23 +37,6 @@ class TestRootRedirect:
         assert response.headers["Location"].endswith("/episodes")
 
 
-class TestLayoutShell:
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
-    def test_pipeline_renders_base_layout(self, client: FlaskClient) -> None:
-        response = client.get("/pipeline")
-        assert response.status_code == 200
-        body = response.data.decode()
-        # All five nav tabs appear in the header
-        assert "Pipeline" in body
-        assert "Sweep" in body
-        assert "Knowledge" in body
-        assert "Audit" in body
-        assert "Graph" in body
-        # Close UI button is rendered
-        assert "Close UI" in body
-
 
 class TestNav:
     def test_nav_shows_episodes_and_reflections(self, client: FlaskClient) -> None:
@@ -76,28 +50,6 @@ class TestNav:
         body = response.get_data(as_text=True)
         for label in ("Pipeline", "Sweep", "Knowledge", "Audit", "Graph"):
             assert f">{label}<" not in body
-
-
-class TestEmptyViews:
-    def test_sweep_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/sweep")
-        assert response.status_code == 200
-        assert b"Sweep Review" in response.data
-
-    def test_knowledge_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/knowledge")
-        assert response.status_code == 200
-        assert b"Knowledge Base" in response.data
-
-    def test_audit_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/audit")
-        assert response.status_code == 200
-        assert b"Audit Timeline" in response.data
-
-    def test_graph_renders_own_placeholder(self, client: FlaskClient) -> None:
-        response = client.get("/graph")
-        assert response.status_code == 200
-        assert b"<h1>Graph</h1>" in response.data
 
 
 class TestOriginCheck:
@@ -136,18 +88,12 @@ class TestOriginCheck:
         )
         assert response.status_code == 403
 
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
     def test_get_without_origin_is_allowed(self, client: FlaskClient) -> None:
-        response = client.get("/pipeline")
+        response = client.get("/episodes")
         assert response.status_code == 200
 
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
     def test_head_without_origin_is_allowed(self, client: FlaskClient) -> None:
-        response = client.head("/pipeline")
+        response = client.head("/episodes")
         assert response.status_code == 200
 
 
@@ -189,7 +135,7 @@ class TestInactivityTimeout:
         app = create_app(db_path=tmp_path / "memory.db")
         with app.test_client() as c:
             app.config["_last_activity"] = 0.0  # pretend ancient
-            c.get("/pipeline")
+            c.get("/episodes")
             # After the request, _last_activity should be ~now.
             assert _time.monotonic() - app.config["_last_activity"] < 0.1
 
@@ -228,87 +174,3 @@ class TestInactivityTimeout:
         assert app.config["_check_idle"]  # helper still registered
 
 
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-class TestBadgeFragment:
-    def test_badge_empty_when_zero(self, client: FlaskClient) -> None:
-        response = client.get("/pipeline/badge")
-        assert response.status_code == 200
-        assert response.content_type.startswith("text/html")
-        # Phase 1: always zero ⇒ CSS hides the badge ⇒ fragment is empty.
-        assert response.data.strip() == b""
-
-    def test_badge_template_renders_number_when_positive(
-        self, client: FlaskClient
-    ) -> None:
-        # Render the template directly with a non-zero count, proving
-        # the Phase-2-ready code path works without needing to stub the
-        # view or mock the DB.
-        from flask import render_template
-
-        with client.application.app_context():
-            out = render_template("fragments/badge.html", count=7)
-            assert out == "7"
-
-
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-class TestBadgeRealCount:
-    def test_badge_shows_candidate_count_from_db(
-        self, client: FlaskClient
-    ) -> None:
-        # Insert candidates directly via the app's connection so the
-        # project name matches cwd (same as the kanban query).
-        conn: sqlite3.Connection = client.application.extensions["db_connection"]
-        project = Path.cwd().name
-        conn.execute(
-            "INSERT INTO insights (id, title, content, project, status, polarity) "
-            "VALUES ('c1', 't', 'c', ?, 'pending_review', 'neutral')",
-            (project,),
-        )
-        conn.execute(
-            "INSERT INTO insights (id, title, content, project, status, polarity) "
-            "VALUES ('c2', 't', 'c', ?, 'pending_review', 'neutral')",
-            (project,),
-        )
-        conn.execute(
-            "INSERT INTO insights (id, title, content, project, status, polarity) "
-            "VALUES ('x', 't', 'c', ?, 'confirmed', 'neutral')",
-            (project,),
-        )
-        conn.commit()
-
-        response = client.get("/pipeline/badge")
-        assert response.status_code == 200
-        assert response.data.strip() == b"2"
-
-
-class TestOnlyOneExpandedScript:
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
-    def test_base_includes_only_one_expanded_listener(
-        self, client: FlaskClient
-    ) -> None:
-        response = client.get("/pipeline")
-        body = response.data
-        # Script must listen for the HTMX event that fires before any
-        # request and walk the .card-list for expanded siblings.
-        assert b"htmx:beforeRequest" in body
-        assert b"card-compact" in body
-        assert b"data-expanded" in body
-        assert b"collapse-me" in body
-        # Modal target div exists for promote / merge.
-        assert b'id="modal"' in body
-
-
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-class TestConsolidationWiring:
-    def test_app_exposes_db_path_for_threaded_jobs(
-        self, client: FlaskClient
-    ) -> None:
-        assert "_db_path" in client.application.extensions
