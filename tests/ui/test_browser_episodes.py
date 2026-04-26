@@ -12,7 +12,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
 from playwright.sync_api import Page, expect
 
 from better_memory.db.connection import connect
@@ -95,7 +94,7 @@ class TestEpisodesTabSeededFlow:
     ) -> None:
         url, home = ui_url
 
-        ep_id = _seed_episode_via_service(
+        _seed_episode_via_service(
             home, goal="ship Phase 12 e2e tests", tech="python",
             closed=True, outcome="success",
         )
