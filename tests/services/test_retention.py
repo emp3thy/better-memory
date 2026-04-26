@@ -28,8 +28,9 @@ def fixed_clock():
     return lambda: fixed
 
 
-def _seed_episode(conn, *, ep_id: str, project: str, outcome: str = None,
-                  ended_at: str = None) -> None:
+def _seed_episode(conn, *, ep_id: str, project: str,
+                  outcome: str | None = None,
+                  ended_at: str | None = None) -> None:
     conn.execute(
         "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
         "close_reason) "
