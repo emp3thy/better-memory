@@ -388,8 +388,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
     episodes = EpisodeService(memory_conn)
     observations = ObservationService(memory_conn, embedder, episodes=episodes)
 
-    # LLM client for reflection synthesis. Uses the same OllamaChat wrapper
-    # the legacy ConsolidationService used — Phase 5 reuses the pattern.
+    # LLM client for reflection synthesis.
     chat = OllamaChat(host=config.ollama_host, model=config.consolidate_model)
     reflections = ReflectionSynthesisService(memory_conn, chat=chat)
 

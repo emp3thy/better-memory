@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time as _time
 from pathlib import Path
@@ -14,14 +13,7 @@ from flask.testing import FlaskClient
 from better_memory.ui.app import create_app
 
 
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
 class TestServiceWiring:
-    def test_app_exposes_insight_service(self, client: FlaskClient) -> None:
-        # The service is attached to app.extensions for routes to use.
-        assert "insight_service" in client.application.extensions
-
     def test_app_exposes_open_db_connection(
         self, tmp_db: Path
     ) -> None:
@@ -97,18 +89,12 @@ class TestOriginCheck:
         )
         assert response.status_code == 403
 
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
     def test_get_without_origin_is_allowed(self, client: FlaskClient) -> None:
-        response = client.get("/pipeline")
+        response = client.get("/episodes")
         assert response.status_code == 200
 
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
     def test_head_without_origin_is_allowed(self, client: FlaskClient) -> None:
-        response = client.head("/pipeline")
+        response = client.head("/episodes")
         assert response.status_code == 200
 
 
@@ -189,71 +175,11 @@ class TestInactivityTimeout:
         assert app.config["_check_idle"]  # helper still registered
 
 
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-class TestBadgeFragment:
-    def test_badge_empty_when_zero(self, client: FlaskClient) -> None:
-        response = client.get("/pipeline/badge")
-        assert response.status_code == 200
-        assert response.content_type.startswith("text/html")
-        # Phase 1: always zero ⇒ CSS hides the badge ⇒ fragment is empty.
-        assert response.data.strip() == b""
-
-    def test_badge_template_renders_number_when_positive(
-        self, client: FlaskClient
-    ) -> None:
-        # Render the template directly with a non-zero count, proving
-        # the Phase-2-ready code path works without needing to stub the
-        # view or mock the DB.
-        from flask import render_template
-
-        with client.application.app_context():
-            out = render_template("fragments/badge.html", count=7)
-            assert out == "7"
-
-
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-class TestBadgeRealCount:
-    def test_badge_shows_candidate_count_from_db(
-        self, client: FlaskClient
-    ) -> None:
-        # Insert candidates directly via the app's connection so the
-        # project name matches cwd (same as the kanban query).
-        conn: sqlite3.Connection = client.application.extensions["db_connection"]
-        project = Path.cwd().name
-        conn.execute(
-            "INSERT INTO insights (id, title, content, project, status, polarity) "
-            "VALUES ('c1', 't', 'c', ?, 'pending_review', 'neutral')",
-            (project,),
-        )
-        conn.execute(
-            "INSERT INTO insights (id, title, content, project, status, polarity) "
-            "VALUES ('c2', 't', 'c', ?, 'pending_review', 'neutral')",
-            (project,),
-        )
-        conn.execute(
-            "INSERT INTO insights (id, title, content, project, status, polarity) "
-            "VALUES ('x', 't', 'c', ?, 'confirmed', 'neutral')",
-            (project,),
-        )
-        conn.commit()
-
-        response = client.get("/pipeline/badge")
-        assert response.status_code == 200
-        assert response.data.strip() == b"2"
-
-
 class TestOnlyOneExpandedScript:
-    @pytest.mark.skip(
-        reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-    )
     def test_base_includes_only_one_expanded_listener(
         self, client: FlaskClient
     ) -> None:
-        response = client.get("/pipeline")
+        response = client.get("/episodes")
         body = response.data
         # Script must listen for the HTMX event that fires before any
         # request and walk the .card-list for expanded siblings.
@@ -263,13 +189,3 @@ class TestOnlyOneExpandedScript:
         assert b"collapse-me" in body
         # Modal target div exists for promote / merge.
         assert b'id="modal"' in body
-
-
-@pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-class TestConsolidationWiring:
-    def test_app_exposes_db_path_for_threaded_jobs(
-        self, client: FlaskClient
-    ) -> None:
-        assert "_db_path" in client.application.extensions

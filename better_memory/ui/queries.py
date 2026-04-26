@@ -129,11 +129,10 @@ def episode_detail(
 
     The drawer is a historical record: ALL observations bound to the
     episode are returned regardless of ``status`` (active, archived,
-    consumed_without_reflection, etc.). This deliberately differs from
-    ``list_observations`` which filters to ``status='active'`` for the
-    live pipeline view. Likewise, reflections are returned regardless
-    of ``status`` (pending_review / confirmed / retired / superseded)
-    so a closed episode's full provenance trail is visible.
+    consumed_without_reflection, etc.), so a closed episode's full
+    provenance trail is visible. Likewise, reflections are returned
+    regardless of their ``status`` (pending_review / confirmed /
+    retired / superseded).
 
     Reflections are deduped — an episode's two observations seeding the
     same reflection produces a single row in the result.

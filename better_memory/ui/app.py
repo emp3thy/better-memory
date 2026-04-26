@@ -54,7 +54,6 @@ def create_app(
     app.extensions["db_connection"] = db_conn
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
-    app.extensions["_db_path"] = resolved_db
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:
