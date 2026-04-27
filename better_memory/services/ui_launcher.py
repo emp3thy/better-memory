@@ -66,18 +66,20 @@ def _spawn(home: Path) -> None:
             f"cannot write to BETTER_MEMORY_HOME ({home}): {exc}"
         ) from exc
 
-    try:
-        subprocess.Popen(
-            [sys.executable, "-m", "better_memory.ui"],
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=log_fh,
-            close_fds=True,
-            **_detach_kwargs(),
-        )
-    except OSError as exc:
-        log_fh.close()
-        raise RuntimeError(f"failed to spawn UI subprocess: {exc}") from exc
+    with log_fh:
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "better_memory.ui"],
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=log_fh,
+                close_fds=True,
+                **_detach_kwargs(),
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"failed to spawn UI subprocess: {exc}"
+            ) from exc
 
 
 def _wait_for_url(url_path: Path, timeout: float) -> str:
