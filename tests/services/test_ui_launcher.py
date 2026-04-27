@@ -81,3 +81,17 @@ class TestLiveness:
             assert calls == []
         finally:
             server.shutdown()
+
+    def test_stale_url_file_unlinked_when_unresponsive(
+        self, home: Path
+    ) -> None:
+        # Record a URL pointing at a port nothing is listening on.
+        dead_port = _free_port()
+        (home / "ui.url").write_text(f"http://127.0.0.1:{dead_port}")
+
+        # The spawn path is not implemented yet; we expect NotImplementedError
+        # only AFTER the stale file is unlinked.
+        with pytest.raises(NotImplementedError):
+            ui_launcher.start_ui()
+
+        assert not (home / "ui.url").exists()

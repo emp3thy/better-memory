@@ -48,5 +48,11 @@ def start_ui() -> dict:
             url = ""
         if url and _is_alive(url):
             return {"url": url, "reused": True}
+        # File present but URL is stale (or unreadable). Unlink so the
+        # spawn path can write a fresh one.
+        try:
+            url_path.unlink()
+        except FileNotFoundError:
+            pass
 
     raise NotImplementedError("spawn path lands in Task 3")
