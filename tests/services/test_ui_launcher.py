@@ -289,3 +289,29 @@ class TestSpawn:
                 assert inst.kwargs.get("start_new_session") is True
         finally:
             server.shutdown()
+
+
+# --------------------------------------------------------------------------- _detach_kwargs
+
+
+class TestDetachKwargs:
+    def test_posix_uses_start_new_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("sys.platform", "linux")
+        assert ui_launcher._detach_kwargs() == {"start_new_session": True}
+
+    def test_windows_uses_creationflags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("sys.platform", "win32")
+        kwargs = ui_launcher._detach_kwargs()
+        # Resolve via getattr so this test runs on POSIX CI too. The
+        # implementation uses the same getattr at module load time, so
+        # both sides agree on either the real attribute (Windows) or the
+        # documented integer fallback (everywhere else).
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        new_group = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+        )
+        assert kwargs == {"creationflags": detached | new_group}
