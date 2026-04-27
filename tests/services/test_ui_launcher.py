@@ -205,3 +205,27 @@ class TestSpawn:
             ui_launcher.start_ui(spawn_timeout=1.0)
 
         assert len(fake_popen.instances) == 1
+
+    def test_url_appears_but_healthz_fails_raises(
+        self, home: Path, fake_popen
+    ) -> None:
+        """ui.url written, but the URL never serves /healthz -> RuntimeError."""
+
+        class _NotFound(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                self.send_error(404)
+
+            def log_message(self, *_a, **_kw) -> None:
+                return
+
+        bad_url, _t, server = _start_stub(_NotFound)
+        try:
+            fake_popen.schedule_url_write(after=0.025, url=bad_url, home=home)
+
+            with pytest.raises(RuntimeError, match=r"/healthz"):
+                ui_launcher.start_ui(
+                    spawn_timeout=2.0,
+                    confirm_retry_sleep=0.05,
+                )
+        finally:
+            server.shutdown()
