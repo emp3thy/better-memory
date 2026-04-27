@@ -11,7 +11,6 @@ import pytest
 
 from better_memory.services import ui_launcher
 
-
 # --------------------------------------------------------------------------- helpers
 
 
@@ -69,7 +68,6 @@ class TestLiveness:
             (home / "ui.url").write_text(url)
 
             # Popen must NOT be called when a live UI is found.
-            popen_spy = pytest.MonkeyPatch()
             calls: list = []
 
             def _fail(*a, **kw):
