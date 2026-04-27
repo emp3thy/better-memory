@@ -82,21 +82,6 @@ class TestLiveness:
         finally:
             server.shutdown()
 
-    def test_stale_url_file_unlinked_when_unresponsive(
-        self, home: Path, fake_popen
-    ) -> None:
-        # Record a URL pointing at a port nothing is listening on.
-        dead_port = _free_port()
-        (home / "ui.url").write_text(f"http://127.0.0.1:{dead_port}")
-
-        # Stale file must be unlinked before the spawn path runs.
-        # fake_popen captures the Popen call without writing ui.url;
-        # spawn_timeout=0.1 makes _wait_for_url bail quickly.
-        with pytest.raises(RuntimeError, match="ui.url"):
-            ui_launcher.start_ui(spawn_timeout=0.1)
-
-        assert not (home / "ui.url").exists()
-
 
 # --------------------------------------------------------------------------- _FakePopen
 
@@ -168,6 +153,28 @@ def fake_popen(monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSpawn:
+    def test_stale_url_file_replaced_by_fresh_spawn(
+        self, home: Path, fake_popen
+    ) -> None:
+        """Stale ui.url is unlinked, then a fresh spawn writes a new URL."""
+        # Pre-write a URL pointing at a port nothing is listening on.
+        dead_port = _free_port()
+        (home / "ui.url").write_text(f"http://127.0.0.1:{dead_port}")
+
+        # Stub a healthy server on a different free port for the fresh spawn.
+        new_url, _t, server = _start_stub(_HealthOK)
+        try:
+            fake_popen.schedule_url_write(after=0.025, url=new_url, home=home)
+
+            result = ui_launcher.start_ui()
+
+            assert result == {"url": new_url, "reused": False}
+            # The eventual ui.url contents are the new URL (not the stale one).
+            assert (home / "ui.url").read_text().strip() == new_url
+            assert len(fake_popen.instances) == 1
+        finally:
+            server.shutdown()
+
     def test_spawns_when_no_url_file(
         self, home: Path, fake_popen
     ) -> None:
