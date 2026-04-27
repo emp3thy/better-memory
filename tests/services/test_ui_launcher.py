@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import http.server
 import socket
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -189,8 +191,6 @@ class TestSpawn:
             assert len(fake_popen.instances) == 1
             inst = fake_popen.instances[0]
             # Argv: [sys.executable, "-m", "better_memory.ui"]
-            import sys
-
             assert inst.argv[0] == sys.executable
             assert inst.argv[1:] == ["-m", "better_memory.ui"]
         finally:
@@ -244,5 +244,48 @@ class TestSpawn:
 
             assert result == {"url": new_url, "reused": False}
             assert len(fake_popen.instances) == 1
+        finally:
+            server.shutdown()
+
+    def test_popen_kwargs_log_file_and_devnull_stdin(
+        self, home: Path, fake_popen
+    ) -> None:
+        url, _t, server = _start_stub(_HealthOK)
+        try:
+            fake_popen.schedule_url_write(after=0.025, url=url, home=home)
+            ui_launcher.start_ui()
+
+            inst = fake_popen.instances[0]
+            assert inst.stdin is subprocess.DEVNULL
+            # stdout and stderr both point at an open file under home/
+            assert hasattr(inst.stdout, "write")
+            assert hasattr(inst.stderr, "write")
+            # Same handle (one shared log file).
+            assert inst.stdout is inst.stderr
+            # Log file path resolves under home.
+            assert (home / "ui.log").exists()
+        finally:
+            server.shutdown()
+
+    def test_popen_kwargs_detach_flags_match_platform(
+        self, home: Path, fake_popen
+    ) -> None:
+        url, _t, server = _start_stub(_HealthOK)
+        try:
+            fake_popen.schedule_url_write(after=0.025, url=url, home=home)
+            ui_launcher.start_ui()
+
+            inst = fake_popen.instances[0]
+            if sys.platform == "win32":
+                # Resolve via getattr so this assertion compiles on POSIX
+                # too (the constants don't exist there). Win32 documented
+                # values: DETACHED_PROCESS=0x8, CREATE_NEW_PROCESS_GROUP=0x200.
+                detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                new_group = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+                )
+                assert inst.kwargs.get("creationflags") == detached | new_group
+            else:
+                assert inst.kwargs.get("start_new_session") is True
         finally:
             server.shutdown()
