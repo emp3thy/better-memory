@@ -195,3 +195,13 @@ class TestSpawn:
             assert inst.argv[1:] == ["-m", "better_memory.ui"]
         finally:
             server.shutdown()
+
+    def test_spawn_timeout_raises_when_url_never_appears(
+        self, home: Path, fake_popen
+    ) -> None:
+        """No URL is ever written -> RuntimeError after the injected timeout."""
+        # Do NOT schedule_url_write — the fake subprocess writes nothing.
+        with pytest.raises(RuntimeError, match=r"ui\.url"):
+            ui_launcher.start_ui(spawn_timeout=1.0)
+
+        assert len(fake_popen.instances) == 1
