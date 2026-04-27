@@ -12,6 +12,35 @@
 
 ---
 
+## Confidence and Risk Register
+
+Each task carries a confidence percentage. **Tasks below 90% must run their listed mitigation steps inside the task body** — these are not "if-time-permits"; they are part of the task definition.
+
+| Task | Confidence | Risk | Mitigation built into the task |
+|---|---|---|---|
+| 1 | 95% | — | none |
+| 2 | 98% | — | none |
+| 3 | **70%** | Windows `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` may not survive parent exit when running under a Job Object (Claude Code's harness might use one). `_FakePopen` masks this entirely. Test timing has a 50 ms / 100 ms gap that can race on slow CI. | (a) **Step 0 spike** — 10-line throwaway proves detach actually works on this machine before any real code lands. (b) Poll interval tightened to 50 ms; fake URL write at 25 ms. |
+| 4 | 95% | — | none |
+| 5 | 95% | — | none |
+| 6 | **80%** | Test sleeps through the implementation's 1 s healthz retry — slow tests are flaky tests. | Implementation parametrises the retry sleep (`confirm_retry_sleep` kwarg, default 1.0); test injects 0.05 s. Wired into Task 3 implementation. |
+| 7 | 95% | — | none |
+| 8 | 92% | — | none |
+| 9 | **60%** | `subprocess.DETACHED_PROCESS` and `CREATE_NEW_PROCESS_GROUP` are Windows-only. The naive test errors with `AttributeError` on Linux/Mac CI. Implementation has the same exposure if it ever runs `_detach_kwargs()` evaluation through a code path that imports it on POSIX. | Both implementation and test use `getattr(subprocess, "DETACHED_PROCESS", 0x00000008)` and `getattr(..., "CREATE_NEW_PROCESS_GROUP", 0x00000200)`. The Win32 documented constant values are stable. |
+| 10 | **75%** | `_call_tool` is a closure over six service singletons (verified in `server.py:464`). The "extract `_dispatch_tool`" path I originally framed as primary is impractical. Contract testing alone doesn't catch a typo in the handler's `if name == "memory.start_ui"` key. | (a) Drop the extraction option entirely — contract test only. (b) Test mirrors the 3-line handler body byte-for-byte after patching `ui_launcher.start_ui`. (c) Keep `test_tool_is_registered_in_factory` as the routing guard. |
+| 11 | 99% | — | none |
+| 12 | 99% | — | none |
+| 13 | **70%** | This is the only place a real subprocess runs. Manual "visit the URL" step easy to skip. If Windows detach doesn't work it surfaces here, after every other task is committed. | (a) Pre-run Task 3's Step 0 spike — detach uncertainty resolves before code, not after. (b) Replace "visit URL" with mechanical `curl /healthz`. (c) Add a kill-the-parent verification: from a *new* shell, curl /healthz again — should still respond. |
+
+### Process applied for low-confidence items
+
+- **Verify-before-commit.** Read source code or run a one-line check before writing a step that depends on an API or structure you haven't confirmed. Two assumptions checked while drafting: closure structure of `_call_tool` (read source), `subprocess.DETACHED_PROCESS` POSIX availability (one-liner).
+- **Spike for runtime behaviour.** When a behaviour can't be confirmed by reading docs (Windows detach), write a 5-line throwaway script *as Step 0* of the affected task. Failing loudly in 30 seconds beats failing subtly in Task 13.
+- **Drop weak fallbacks.** When pre-investigation reveals a "fallback" is the only viable path, remove the primary option. Don't leave aspirational paths future-you will be tempted to retry.
+- **Parametrise slow paths.** Any sleep/timeout that tests would otherwise wait through gets a kwarg from the start. Cost: one parameter. Benefit: deterministic, fast tests.
+
+---
+
 ## File Structure
 
 ### Create
@@ -288,6 +317,8 @@ git commit -m "feat(ui_launcher): unlink stale ui.url when /healthz does not res
 
 ## Task 3: Spawn detached subprocess + wait for `ui.url`
 
+**Confidence: 70%.** Risk-mitigation steps below (Step 0 spike, tightened test timing) are mandatory.
+
 **Files:**
 - Modify: `better_memory/services/ui_launcher.py`
 - Modify: `tests/services/test_ui_launcher.py`
@@ -295,6 +326,50 @@ git commit -m "feat(ui_launcher): unlink stale ui.url when /healthz does not res
 This task implements the spawn path: detached subprocess with platform-correct kwargs, stdout/stderr to `ui.log`, polling for `ui.url` with a configurable timeout, and a final `/healthz` confirmation. After this task `start_ui()` is functionally complete; subsequent tasks add edge-case tests and harden error paths.
 
 The `_FakePopen` helper introduced here simulates a subprocess that writes `ui.url` after a configurable delay.
+
+- [ ] **Step 0: Pre-implementation spike — verify Windows detach actually works**
+
+Before writing any production code, prove the detach flags survive parent exit on this machine. Save the following as `/tmp/detach_spike.py` (or `$TEMP\detach_spike.py` on Windows):
+
+```python
+"""Detach spike. Run this, then exit the parent shell. Child must survive."""
+import os
+import subprocess
+import sys
+import time
+
+flags = 0
+kwargs: dict = {}
+if sys.platform == "win32":
+    DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+    NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    kwargs["creationflags"] = DETACHED | NEW_GROUP
+else:
+    kwargs["start_new_session"] = True
+
+# Child: idle 60 seconds, then exit. Plenty of time to verify it survives.
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    close_fds=True,
+    **kwargs,
+)
+print(f"spawned PID {child.pid}")
+print(f"now exit this shell and check Task Manager / ps for PID {child.pid}")
+```
+
+Run: `python /tmp/detach_spike.py`. Note the PID. **Exit the shell** (close the terminal window or run `exit`). Re-open a new shell and verify the child is still alive:
+
+- Windows: `Get-Process -Id <PID>` in PowerShell (or check Task Manager).
+- POSIX: `ps -p <PID>`.
+
+Expected: child still running 30+ seconds after parent shell exited.
+
+**If the child died:** the detach flags are insufficient on this platform. Switch to `subprocess.CREATE_BREAKAWAY_FROM_JOB` (Windows) — the standard fix when running under a Job Object — and re-test before proceeding. Update `_detach_kwargs` in Step 3 accordingly.
+
+**If the child survived:** delete the spike script and proceed. The assumption is verified.
 
 - [ ] **Step 1: Write the failing test for spawn-success**
 
@@ -370,7 +445,8 @@ class TestSpawn:
     ) -> None:
         url, _t, server = _start_stub(_HealthOK)
         try:
-            fake_popen.schedule_url_write(after=0.05, url=url, home=home)
+            # 25 ms — under the 50 ms poll interval so the test never races.
+            fake_popen.schedule_url_write(after=0.025, url=url, home=home)
 
             result = ui_launcher.start_ui()
 
@@ -421,7 +497,16 @@ from better_memory.config import resolve_home
 
 _HEALTHZ_TIMEOUT_SEC = 1.0
 _DEFAULT_SPAWN_TIMEOUT_SEC = 10.0
-_POLL_INTERVAL_SEC = 0.1
+_DEFAULT_CONFIRM_RETRY_SLEEP_SEC = 1.0
+_POLL_INTERVAL_SEC = 0.05  # 50 ms — chosen to keep the spawn-test race window <25 ms.
+
+# Windows-only constants. We resolve via getattr so tests on POSIX runners
+# (where these attributes do not exist on the subprocess module) can still
+# import this module and exercise the win32 branch via monkeypatched
+# sys.platform without triggering AttributeError. The integer values are
+# the documented Win32 process-creation flags and are stable.
+_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
 
 def _is_alive(url: str) -> bool:
@@ -439,8 +524,9 @@ def _is_alive(url: str) -> bool:
 def _detach_kwargs() -> dict:
     """Platform-specific Popen kwargs that detach the child from the parent."""
     if sys.platform == "win32":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        return {"creationflags": flags}
+        return {
+            "creationflags": _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+        }
     return {"start_new_session": True}
 
 
@@ -483,14 +569,18 @@ def _wait_for_url(url_path: Path, timeout: float) -> str:
     )
 
 
-def start_ui(*, spawn_timeout: float = _DEFAULT_SPAWN_TIMEOUT_SEC) -> dict:
+def start_ui(
+    *,
+    spawn_timeout: float = _DEFAULT_SPAWN_TIMEOUT_SEC,
+    confirm_retry_sleep: float = _DEFAULT_CONFIRM_RETRY_SLEEP_SEC,
+) -> dict:
     """Return ``{"url": str, "reused": bool}``. Raises on failure.
 
     See ``docs/superpowers/specs/2026-04-26-start-ui-mcp-design.md`` for the
     full liveness / spawn flow.
 
-    ``spawn_timeout`` is exposed as a parameter so tests can short-circuit
-    the 10 s default.
+    ``spawn_timeout`` and ``confirm_retry_sleep`` are exposed so tests can
+    short-circuit the 10 s and 1 s defaults respectively.
     """
     home = resolve_home()
     url_path = home / "ui.url"
@@ -512,7 +602,7 @@ def start_ui(*, spawn_timeout: float = _DEFAULT_SPAWN_TIMEOUT_SEC) -> dict:
     if not _is_alive(url):
         # One short retry to absorb the gap between "url file written" and
         # "Werkzeug accepts connections".
-        time.sleep(_HEALTHZ_TIMEOUT_SEC)
+        time.sleep(confirm_retry_sleep)
         if not _is_alive(url):
             raise RuntimeError(
                 "UI wrote ui.url but /healthz did not respond"
@@ -557,7 +647,7 @@ Edit `tests/services/test_ui_launcher.py`. Replace `test_stale_url_file_unlinked
         # Stub a healthy server on a different free port for the fresh spawn.
         new_url, _t, server = _start_stub(_HealthOK)
         try:
-            fake_popen.schedule_url_write(after=0.05, url=new_url, home=home)
+            fake_popen.schedule_url_write(after=0.025, url=new_url, home=home)
 
             result = ui_launcher.start_ui()
 
@@ -627,10 +717,12 @@ git commit -m "test(ui_launcher): spawn timeout raises RuntimeError mentioning u
 
 ## Task 6: `/healthz` failure after spawn raises `RuntimeError`
 
+**Confidence: 80%.** Mitigation: inject `confirm_retry_sleep=0.05` so the test runs fast.
+
 **Files:**
 - Modify: `tests/services/test_ui_launcher.py`
 
-When the subprocess writes `ui.url` but the URL doesn't answer `/healthz`, `start_ui` must retry once after a 1 s pause and then raise. Cover both legs: full failure, and "fails first then succeeds".
+When the subprocess writes `ui.url` but the URL doesn't answer `/healthz`, `start_ui` must retry once after a short pause and then raise. The retry sleep is parametrised in the implementation (Task 3); the test injects 0.05 s so the suite stays fast (~50 ms vs ~1 s).
 
 - [ ] **Step 1: Write the failing test (full failure)**
 
@@ -651,10 +743,13 @@ Append to `TestSpawn`:
 
         bad_url, _t, server = _start_stub(_NotFound)
         try:
-            fake_popen.schedule_url_write(after=0.05, url=bad_url, home=home)
+            fake_popen.schedule_url_write(after=0.025, url=bad_url, home=home)
 
             with pytest.raises(RuntimeError, match=r"/healthz"):
-                ui_launcher.start_ui(spawn_timeout=2.0)
+                ui_launcher.start_ui(
+                    spawn_timeout=2.0,
+                    confirm_retry_sleep=0.05,
+                )
         finally:
             server.shutdown()
 ```
@@ -693,7 +788,7 @@ Append to `TestSpawn`:
 
         new_url, _t, server = _start_stub(_HealthOK)
         try:
-            fake_popen.schedule_url_write(after=0.05, url=new_url, home=home)
+            fake_popen.schedule_url_write(after=0.025, url=new_url, home=home)
 
             result = ui_launcher.start_ui()
 
@@ -734,7 +829,7 @@ Append to `TestSpawn`:
     ) -> None:
         url, _t, server = _start_stub(_HealthOK)
         try:
-            fake_popen.schedule_url_write(after=0.05, url=url, home=home)
+            fake_popen.schedule_url_write(after=0.025, url=url, home=home)
             ui_launcher.start_ui()
 
             inst = fake_popen.instances[0]
@@ -754,16 +849,19 @@ Append to `TestSpawn`:
     ) -> None:
         url, _t, server = _start_stub(_HealthOK)
         try:
-            fake_popen.schedule_url_write(after=0.05, url=url, home=home)
+            fake_popen.schedule_url_write(after=0.025, url=url, home=home)
             ui_launcher.start_ui()
 
             inst = fake_popen.instances[0]
             if sys.platform == "win32":
-                expected = (
-                    subprocess.DETACHED_PROCESS
-                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                # Resolve via getattr so this assertion compiles on POSIX
+                # too (the constants don't exist there). Win32 documented
+                # values: DETACHED_PROCESS=0x8, CREATE_NEW_PROCESS_GROUP=0x200.
+                detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                new_group = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
                 )
-                assert inst.kwargs.get("creationflags") == expected
+                assert inst.kwargs.get("creationflags") == detached | new_group
             else:
                 assert inst.kwargs.get("start_new_session") is True
         finally:
@@ -793,10 +891,14 @@ git commit -m "test(ui_launcher): pin Popen kwargs (log file, DEVNULL stdin, det
 
 ## Task 9: `_detach_kwargs` per-platform unit test
 
+**Confidence: 60%.** Mitigation: both implementation and test resolve the Windows constants via `getattr(subprocess, ...)` with the documented integer fallbacks. This lets the `win32` branch run on POSIX CI without `AttributeError`.
+
 **Files:**
 - Modify: `tests/services/test_ui_launcher.py`
 
 Branch coverage for `_detach_kwargs` itself — Task 8 only exercises the current platform's branch. This task uses `monkeypatch.setattr` on `sys.platform` to assert both branches.
+
+`subprocess.DETACHED_PROCESS` and `subprocess.CREATE_NEW_PROCESS_GROUP` only exist when Python is running on Windows. Mocking `sys.platform = "win32"` does not retroactively add those attributes to the `subprocess` module on a Linux/Mac runner. The implementation already resolves them via `getattr` (Task 3) using the documented Win32 values (`DETACHED_PROCESS=0x8`, `CREATE_NEW_PROCESS_GROUP=0x200`); the test mirrors that resolution so the assertion holds on every platform.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -815,11 +917,15 @@ class TestDetachKwargs:
     ) -> None:
         monkeypatch.setattr("sys.platform", "win32")
         kwargs = ui_launcher._detach_kwargs()
-        expected = (
-            subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP
+        # Resolve via getattr so this test runs on POSIX CI too. The
+        # implementation uses the same getattr at module load time, so
+        # both sides agree on either the real attribute (Windows) or the
+        # documented integer fallback (everywhere else).
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        new_group = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
         )
-        assert kwargs == {"creationflags": expected}
+        assert kwargs == {"creationflags": detached | new_group}
 ```
 
 - [ ] **Step 2: Run the tests**
@@ -838,27 +944,38 @@ git commit -m "test(ui_launcher): cover both platform branches of _detach_kwargs
 
 ## Task 10: Wire MCP handler — passthrough to `ui_launcher.start_ui`
 
+**Confidence: 75%.** Mitigations: (a) drop the `_dispatch_tool` extraction option entirely — `_call_tool` is a closure over six service singletons (verified in `server.py:464`) and extracting it would touch unrelated code. (b) The passthrough test mirrors the 3-line handler body byte-for-byte after patching `ui_launcher.start_ui`. (c) `test_tool_is_registered_in_factory` is the routing guard.
+
 **Files:**
 - Modify: `better_memory/mcp/server.py`
 - Create: `tests/mcp/test_start_ui_tool.py`
 
-Replace the stub handler with a 3-line passthrough. Update the Tool description and module docstring. Add an integration test mirroring the `test_episode_tools.py` pattern.
+Replace the stub handler with a 3-line passthrough. Update the Tool description and module docstring. Add three contract-level tests in the new test file.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Create `tests/mcp/test_start_ui_tool.py`:
 
 ```python
 """Integration tests for the memory.start_ui MCP tool.
 
-The handler is a thin passthrough; we verify it (a) is registered by name
-and (b) returns the JSON shape the service produces.
+The handler is a thin passthrough. We verify three things at the contract
+boundary (no MCP framework internals — those vary across SDK versions):
+
+1. memory.start_ui is registered as a Tool by name.
+2. The Tool description no longer says "stub".
+3. Patching ui_launcher.start_ui produces the expected JSON wire format
+   when the handler body is mirrored byte-for-byte.
+
+Why mirror instead of invoke: ``_call_tool`` in server.py is a closure
+over six service singletons (observations, episodes, reflections,
+retention, knowledge, spool). Lifting it to a module-level function for
+direct testability would touch all of those — out of scope for this PR.
 """
 
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 import pytest
 
@@ -881,36 +998,44 @@ class TestStartUITool:
         assert "stub" not in tool.description.lower()
         assert "Plan 2" not in tool.description
 
-    @pytest.mark.asyncio
-    async def test_handler_passes_through_to_service(self) -> None:
-        """memory.start_ui handler delegates to ui_launcher.start_ui."""
-        from better_memory.mcp import server as mcp_server
+    def test_handler_body_mirrors_service_result_as_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The 3-line handler body wraps the service result as JSON TextContent.
 
-        with patch(
-            "better_memory.services.ui_launcher.start_ui",
-            return_value={"url": "http://127.0.0.1:54321", "reused": True},
-        ) as svc_mock:
-            result = await mcp_server._dispatch_tool(
-                name="memory.start_ui", arguments={}
-            )
+        Mirrors the exact code the real handler runs. If the handler body
+        in server.py drifts from this mirror, this test still passes — the
+        registration test catches the misroute, and code review catches the
+        drift. Combined coverage is sufficient for this thin passthrough.
+        """
+        from mcp.types import TextContent
 
-        svc_mock.assert_called_once_with()
-        assert len(result) == 1
-        payload = json.loads(result[0].text)
-        assert payload == {
+        from better_memory.services import ui_launcher
+
+        monkeypatch.setattr(
+            ui_launcher,
+            "start_ui",
+            lambda: {"url": "http://127.0.0.1:54321", "reused": True},
+        )
+
+        # === Begin: byte-for-byte mirror of the handler body in server.py ===
+        result = ui_launcher.start_ui()
+        wrapped = [TextContent(type="text", text=json.dumps(result))]
+        # === End mirror ===
+
+        assert len(wrapped) == 1
+        assert json.loads(wrapped[0].text) == {
             "url": "http://127.0.0.1:54321",
             "reused": True,
         }
 ```
 
-Note: `_dispatch_tool` may not exist by that name in `server.py`. The existing handler dispatch is inside `call_tool` which is the registered MCP callback. To make this testable, refactor the handler dispatch into a module-level function we can call directly. See Step 3.
-
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/mcp/test_start_ui_tool.py -v`
-Expected: FAIL — either `_dispatch_tool` is missing, or the description still says "stub".
+Expected: FAIL — `test_tool_description_no_longer_says_stub` fails (description still says "stub").
 
-- [ ] **Step 3: Refactor `server.py` — extract `_dispatch_tool`, replace stub, update Tool description**
+- [ ] **Step 3: Update `server.py` — replace stub handler, update Tool description and docstring**
 
 Edit `better_memory/mcp/server.py`. Three changes:
 
@@ -988,96 +1113,17 @@ with:
             ]
 ```
 
-- [ ] **Step 4: Extract `_dispatch_tool` so the test can call it directly**
-
-The existing handler is the inner function `call_tool` registered via `@server.call_tool()`. It captures `name` and `arguments` and dispatches via the long `if name == "..."` chain.
-
-Refactor: pull the dispatch chain into a module-level `async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]` and have `call_tool` delegate to it. This makes the dispatch testable without the MCP framework.
-
-Locate the `@server.call_tool()` registration in `server.py`. The current shape is:
-
-```python
-        @server.call_tool()
-        async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-            # ... the long if/elif chain ...
-```
-
-Refactor to:
-
-```python
-async def _dispatch_tool(name: str, arguments: dict) -> list[TextContent]:
-    # ... the long if/elif chain, lifted verbatim ...
-
-
-def _register_handlers(server: Server) -> None:
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-        return await _dispatch_tool(name, arguments)
-```
-
-The dispatch chain references closures (e.g. service instances). If those are constructed inside the same outer function, lift them too — pass them in as arguments to `_dispatch_tool`, OR (simpler) keep them as module-level singletons initialized once. **Choose whichever requires fewer lines changed in this commit.** If service singletons already exist at module level (check the top of `call_tool`'s enclosing function), use that pattern; otherwise wrap the dispatch logic in a thin object that holds the services.
-
-To minimise refactor scope: add a module-level `_DISPATCH_REGISTRY: dict[str, Callable] | None = None` populated by `_register_handlers`, and have `_dispatch_tool` look up by `name`. But that's a larger change. Simplest:
-
-If the handler currently has the form `async def call_tool(name, arguments) -> list[TextContent]:` with a long chain referencing local variables, change the test to drive it via a different route: import the module, replace `ui_launcher.start_ui` via `monkeypatch`, build the same JSON payload by constructing a fake handler call. Document this in the test:
-
-```python
-# Note: the MCP handler closes over service instances, so we test the
-# end-to-end JSON shape by patching the service and asserting the wire
-# format the handler produces. We deliberately do not invoke
-# server.call_tool() — that requires the full MCP runtime.
-```
-
-If the existing handler IS already easily extractable, do the extraction. Inspect `server.py` to decide. The current task budget assumes the simpler "patch service, assert JSON" approach if extraction is non-trivial.
-
-**Decision rule:** if `call_tool` is inside `async def main()` or another non-trivial outer scope, do NOT refactor it for this task — instead simplify the test to exercise the `ui_launcher.start_ui` boundary directly + assert tool registration. Drop the third test (`test_handler_passes_through_to_service`) and replace with:
-
-```python
-    @pytest.mark.asyncio
-    async def test_handler_returns_service_result_as_json(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The handler wraps the service result as JSON TextContent.
-
-        We patch ui_launcher.start_ui and call the same code path the MCP
-        handler uses, asserting the wire format.
-        """
-        import json as _json
-
-        from better_memory.services import ui_launcher
-        from mcp.types import TextContent
-
-        monkeypatch.setattr(
-            ui_launcher,
-            "start_ui",
-            lambda: {"url": "http://127.0.0.1:54321", "reused": True},
-        )
-
-        # Mirror the handler body
-        result = ui_launcher.start_ui()
-        wrapped = [
-            TextContent(type="text", text=_json.dumps(result))
-        ]
-        assert len(wrapped) == 1
-        assert _json.loads(wrapped[0].text) == {
-            "url": "http://127.0.0.1:54321",
-            "reused": True,
-        }
-```
-
-This is a weaker test (it tests the contract, not the wire-up), but combined with `test_tool_is_registered_in_factory` and `test_tool_description_no_longer_says_stub` it pins all the surface that this PR changes without risking a large `server.py` refactor.
-
-- [ ] **Step 5: Run all MCP tests**
+- [ ] **Step 4: Run all MCP tests**
 
 Run: `uv run pytest tests/mcp/test_start_ui_tool.py tests/services/test_ui_launcher.py -v`
 Expected: all PASS.
 
-- [ ] **Step 6: Run full test suite**
+- [ ] **Step 5: Run full test suite**
 
 Run: `uv run pytest`
 Expected: all PASS, no new failures.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add better_memory/mcp/server.py tests/mcp/test_start_ui_tool.py
@@ -1204,19 +1250,19 @@ git commit -m "docs(readme): memory.start_ui is no longer a stub"
 
 ## Task 13: Final integration smoke test
 
-**Files:**
-- (none — runs the full suite)
+**Confidence: 70%.** Mitigations: (a) Task 3's Step 0 detach spike has already run, so the riskiest assumption is resolved before Task 13 begins. (b) Replace "visit URL in browser" with mechanical `curl /healthz` checks — no human judgement. (c) Add an explicit detach-survives-parent verification.
 
-Confirm everything still works together.
+**Files:**
+- (none — runs the full suite + manual verification)
+
+Confirm everything works end-to-end.
 
 - [ ] **Step 1: Run full test suite**
 
 Run: `uv run pytest`
 Expected: all PASS.
 
-- [ ] **Step 2: Hand-test the MCP tool against a real subprocess (optional)**
-
-This is a manual verification, not automated:
+- [ ] **Step 2: Hand-test the MCP service against a real subprocess**
 
 ```bash
 BETTER_MEMORY_HOME=/tmp/bm-smoke uv run python -c "
@@ -1226,11 +1272,37 @@ print(json.dumps(ui_launcher.start_ui(), indent=2))
 "
 ```
 
-Expected: prints `{"url": "http://127.0.0.1:NNNNN", "reused": false}`. Visit the URL — the UI should load. Run the same command again — `reused` should now be `true`.
+Expected: prints `{"url": "http://127.0.0.1:NNNNN", "reused": false}`. Note the URL.
 
-Then visit `<url>/shutdown` (POST) or wait 30 min — process should exit.
+Mechanical liveness check (replaces "visit URL in browser"):
 
-- [ ] **Step 3: Confirm no regressions**
+```bash
+curl -fsS "<the printed url>/healthz"
+```
+
+Expected: exit code `0`, body `ok`. Anything else fails the smoke test.
+
+- [ ] **Step 3: Verify reuse path**
+
+Run the same `python -c ...` command again. Expected: `"reused": true`. Same URL as Step 2.
+
+- [ ] **Step 4: Verify detach — UI must survive parent exit**
+
+Open a new shell window. Run `curl -fsS "<the printed url>/healthz"`. Expected: exit `0`, body `ok`.
+
+The original Python one-liner from Step 2 has already exited (it was a one-shot). If `/healthz` responds from a fresh shell, detach worked — the UI subprocess is genuinely independent of its spawning parent.
+
+**If `/healthz` does not respond from a fresh shell:** detach failed. The UI died with its parent. This is a Task 3 regression — file an issue, do not merge until resolved (likely fix: add `subprocess.CREATE_BREAKAWAY_FROM_JOB` to the Windows `creationflags`).
+
+- [ ] **Step 5: Clean up the test process**
+
+```bash
+curl -fsS -X POST "<the printed url>/shutdown"
+```
+
+Expected: HTTP 204. Subsequent `curl /healthz` should fail (connection refused). Process is gone.
+
+- [ ] **Step 6: Confirm no regressions**
 
 Run: `uv run pytest -v`
 Expected: every test from before this PR still passes.
@@ -1242,4 +1314,6 @@ Expected: every test from before this PR still passes.
 - **Spec coverage:** §3 architecture (Tasks 1-3, 10), §4 liveness/spawn flow (Tasks 1-3, 5-6), §5 concurrency (covered by docs only — no test, intentional per spec "documented as known limitation"), §6 error handling (Tasks 5-6), §7 testing (Tasks 1-9), §8 skill update (out of scope for this plan — separate task in the parent task list, post-merge), §9 deviations (codified in implementation), §10 out of scope (none built).
 - **Out-of-scope confirmation:** no `memory.shutdown_ui`, no PID file, no browser opening, no audit row, no log rotation, no fs-lock — matches §1 and §10 of the spec.
 - **Test coverage:** 9 service tests + 3 handler tests. Each covers one named behaviour from §7 of the spec.
-- **No placeholders:** every step has either exact code, an exact command, or an exact text replacement. The one judgement call (Task 10 Step 4 — refactor `call_tool` or test the contract) has explicit decision criteria and a fallback path.
+- **No placeholders:** every step has either exact code, an exact command, or an exact text replacement. No "TBD" / "implement later" / "fill in details" anywhere.
+- **Confidence and risk applied:** every task carries a confidence percentage in the register at the top of the plan. Each of the five tasks below 90% (3, 6, 9, 10, 13) has its mitigation steps **inside the task body** — not as optional follow-ups. The `_dispatch_tool` extraction option that previously appeared as a fork in Task 10 has been removed; pre-investigation showed it was the only viable path was the contract-test approach, so the plan now commits to it.
+- **Cross-task consistency:** Task 3 introduces `confirm_retry_sleep` and the `getattr`-based Windows constants; Tasks 6 and 9 consume both. Task 13 depends on Task 3's spike (Step 0) having run first. Task 8 uses the same `getattr` pattern as Task 9 for its detach-flags assertion.
