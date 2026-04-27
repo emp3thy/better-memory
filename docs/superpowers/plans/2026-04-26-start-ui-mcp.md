@@ -85,7 +85,6 @@ import pytest
 
 from better_memory.services import ui_launcher
 
-
 # --------------------------------------------------------------------------- helpers
 
 
@@ -143,7 +142,6 @@ class TestLiveness:
             (home / "ui.url").write_text(url)
 
             # Popen must NOT be called when a live UI is found.
-            popen_spy = pytest.MonkeyPatch()
             calls: list = []
 
             def _fail(*a, **kw):
@@ -531,7 +529,13 @@ def _detach_kwargs() -> dict:
 
 
 def _spawn(home: Path) -> None:
-    """Spawn the UI subprocess. Stdout/stderr go to ui.log."""
+    """Spawn the UI subprocess. Stdout/stderr go to ui.log.
+
+    The parent's ``log_fh`` is closed via ``with`` immediately after
+    ``Popen`` returns. The child has already inherited its own duplicated
+    fd (via dup2 on POSIX / DuplicateHandle on Windows) before Popen
+    returns, so closing the parent handle does not affect child logging.
+    """
     log_path = home / "ui.log"
     try:
         log_fh = log_path.open("ab")
@@ -540,18 +544,20 @@ def _spawn(home: Path) -> None:
             f"cannot write to BETTER_MEMORY_HOME ({home}): {exc}"
         ) from exc
 
-    try:
-        subprocess.Popen(
-            [sys.executable, "-m", "better_memory.ui"],
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=log_fh,
-            close_fds=True,
-            **_detach_kwargs(),
-        )
-    except OSError as exc:
-        log_fh.close()
-        raise RuntimeError(f"failed to spawn UI subprocess: {exc}") from exc
+    with log_fh:
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "better_memory.ui"],
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=log_fh,
+                close_fds=True,
+                **_detach_kwargs(),
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"failed to spawn UI subprocess: {exc}"
+            ) from exc
 
 
 def _wait_for_url(url_path: Path, timeout: float) -> str:
@@ -1296,11 +1302,13 @@ The original Python one-liner from Step 2 has already exited (it was a one-shot)
 
 - [ ] **Step 5: Clean up the test process**
 
+The `/shutdown` route is guarded by the UI's `before_request` Origin/Referer check (loopback CSRF protection on non-GET methods). `curl -X POST` without the header returns 403. Pass an `Origin` header that matches the bound host:
+
 ```bash
-curl -fsS -X POST "<the printed url>/shutdown"
+curl -fsS -X POST -H "Origin: <the printed url>" "<the printed url>/shutdown"
 ```
 
-Expected: HTTP 204. Subsequent `curl /healthz` should fail (connection refused). Process is gone.
+Expected: HTTP 204 (empty body). Subsequent `curl /healthz` should fail (connection refused). Process is gone.
 
 - [ ] **Step 6: Confirm no regressions**
 
