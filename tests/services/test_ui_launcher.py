@@ -229,3 +229,20 @@ class TestSpawn:
                 )
         finally:
             server.shutdown()
+
+    def test_corrupt_ui_url_treated_as_missing(
+        self, home: Path, fake_popen
+    ) -> None:
+        """Empty ui.url file is unlinked and replaced by a fresh spawn."""
+        (home / "ui.url").write_text("")  # corrupt: empty
+
+        new_url, _t, server = _start_stub(_HealthOK)
+        try:
+            fake_popen.schedule_url_write(after=0.025, url=new_url, home=home)
+
+            result = ui_launcher.start_ui()
+
+            assert result == {"url": new_url, "reused": False}
+            assert len(fake_popen.instances) == 1
+        finally:
+            server.shutdown()
