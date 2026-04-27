@@ -83,15 +83,108 @@ class TestLiveness:
             server.shutdown()
 
     def test_stale_url_file_unlinked_when_unresponsive(
-        self, home: Path
+        self, home: Path, fake_popen
     ) -> None:
         # Record a URL pointing at a port nothing is listening on.
         dead_port = _free_port()
         (home / "ui.url").write_text(f"http://127.0.0.1:{dead_port}")
 
-        # The spawn path is not implemented yet; we expect NotImplementedError
-        # only AFTER the stale file is unlinked.
-        with pytest.raises(NotImplementedError):
-            ui_launcher.start_ui()
+        # Stale file must be unlinked before the spawn path runs.
+        # fake_popen captures the Popen call without writing ui.url;
+        # spawn_timeout=0.1 makes _wait_for_url bail quickly.
+        with pytest.raises(RuntimeError, match="ui.url"):
+            ui_launcher.start_ui(spawn_timeout=0.1)
 
         assert not (home / "ui.url").exists()
+
+
+# --------------------------------------------------------------------------- _FakePopen
+
+
+class _FakePopen:
+    """subprocess.Popen mock.
+
+    Configurable behaviour:
+      * write_url_after: float seconds — schedule writing the given URL into ui.url
+      * url_to_write: str — the URL the fake subprocess "binds" to
+    """
+
+    instances: list[_FakePopen] = []
+
+    def __init__(
+        self,
+        argv,
+        *,
+        stdin=None,
+        stdout=None,
+        stderr=None,
+        close_fds=True,
+        **kwargs,
+    ) -> None:
+        self.argv = list(argv)
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+        self.close_fds = close_fds
+        self.kwargs = kwargs
+        type(self).instances.append(self)
+
+        plan = type(self)._next_plan
+        if plan is None:
+            return
+        delay, url, home = plan
+        type(self)._next_plan = None
+
+        def _write_after_delay() -> None:
+            import time as _time
+
+            _time.sleep(delay)
+            (home / "ui.url").write_text(url)
+
+        threading.Thread(target=_write_after_delay, daemon=True).start()
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.instances = []
+        cls._next_plan = None
+
+    @classmethod
+    def schedule_url_write(cls, *, after: float, url: str, home: Path) -> None:
+        cls._next_plan = (after, url, home)
+
+
+_FakePopen._next_plan = None  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+def fake_popen(monkeypatch: pytest.MonkeyPatch):
+    _FakePopen.reset()
+    monkeypatch.setattr("subprocess.Popen", _FakePopen)
+    yield _FakePopen
+    _FakePopen.reset()
+
+
+# --------------------------------------------------------------------------- tests
+
+
+class TestSpawn:
+    def test_spawns_when_no_url_file(
+        self, home: Path, fake_popen
+    ) -> None:
+        url, _t, server = _start_stub(_HealthOK)
+        try:
+            # 25 ms — under the 50 ms poll interval so the test never races.
+            fake_popen.schedule_url_write(after=0.025, url=url, home=home)
+
+            result = ui_launcher.start_ui()
+
+            assert result == {"url": url, "reused": False}
+            assert len(fake_popen.instances) == 1
+            inst = fake_popen.instances[0]
+            # Argv: [sys.executable, "-m", "better_memory.ui"]
+            import sys
+
+            assert inst.argv[0] == sys.executable
+            assert inst.argv[1:] == ["-m", "better_memory.ui"]
+        finally:
+            server.shutdown()
