@@ -65,7 +65,8 @@ def episode_list_for_ui(
                 WHERE o.episode_id = e.id
             ) AS observation_count,
             (
-                SELECT COUNT(DISTINCT rs.reflection_id)  -- DISTINCT: a reflection citing two obs in this episode counts once
+                -- DISTINCT: a reflection citing two obs in this episode counts once
+                SELECT COUNT(DISTINCT rs.reflection_id)
                 FROM reflection_sources rs
                 JOIN observations o ON o.id = rs.observation_id
                 WHERE o.episode_id = e.id
@@ -417,6 +418,69 @@ def reflection_detail(
         ),
         sources=sources,
     )
+
+
+@dataclass(frozen=True)
+class ObservationRow:
+    id: str
+    content: str
+    component: str | None
+    theme: str | None
+    outcome: str
+    status: str
+    created_at: str
+    episode_id: str | None
+
+
+def observation_list_for_ui(
+    conn: sqlite3.Connection,
+    *,
+    project: str,
+    status: str | None = None,
+    outcome: str | None = None,
+    component: str | None = None,
+    limit: int = 100,
+) -> list[ObservationRow]:
+    """Project-scoped observation list with optional filters. Newest first.
+
+    No filter defaults: omitting ``status``/``outcome``/``component``
+    returns observations across all values for that column. The panel
+    shows everything on first load (filters are user-driven).
+    """
+    clauses = ["project = ?"]
+    params: list = [project]
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if outcome is not None:
+        clauses.append("outcome = ?")
+        params.append(outcome)
+    if component is not None:
+        clauses.append("component = ?")
+        params.append(component)
+    where = " AND ".join(clauses)
+    sql = (
+        "SELECT id, content, component, theme, outcome, status, "
+        "       created_at, episode_id "
+        "FROM observations "
+        f"WHERE {where} "
+        "ORDER BY created_at DESC, rowid DESC "
+        "LIMIT ?"
+    )
+    params.append(limit)
+    return [
+        ObservationRow(
+            id=r["id"],
+            content=r["content"],
+            component=r["component"],
+            theme=r["theme"],
+            outcome=r["outcome"],
+            status=r["status"],
+            created_at=r["created_at"],
+            episode_id=r["episode_id"],
+        )
+        for r in conn.execute(sql, params).fetchall()
+    ]
 
 
 def unclosed_episode_count(
