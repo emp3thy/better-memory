@@ -68,3 +68,17 @@ class TestObservationsPage:
         response = client.get("/observations")
         body = response.get_data(as_text=True)
         assert "Run synthesis" in body
+
+
+class TestServiceWiring:
+    def test_reflection_synthesis_service_is_in_app_extensions(
+        self, client: FlaskClient
+    ) -> None:
+        # client fixture builds the app via create_app(); we read
+        # extensions from the underlying app object.
+        app = client.application
+        assert "reflection_synthesis_service" in app.extensions
+        svc = app.extensions["reflection_synthesis_service"]
+        # Quack-test: it has a synthesize coroutine.
+        from inspect import iscoroutinefunction
+        assert iscoroutinefunction(svc.synthesize)

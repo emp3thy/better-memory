@@ -12,10 +12,11 @@ from flask import Flask, abort, redirect, render_template, request, url_for
 from markupsafe import escape
 from werkzeug.wrappers import Response
 
-from better_memory.config import resolve_home
+from better_memory.config import get_config, resolve_home
 from better_memory.db.connection import connect
+from better_memory.llm.ollama import OllamaChat
 from better_memory.services.episode import EpisodeService
-from better_memory.services.reflection import ReflectionService
+from better_memory.services.reflection import ReflectionService, ReflectionSynthesisService
 from better_memory.ui import queries
 
 
@@ -54,6 +55,16 @@ def create_app(
     app.extensions["db_connection"] = db_conn
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
+
+    # Synthesis (Ollama LLM client + service). Construction is cheap and
+    # does NOT contact Ollama; the first synthesize() call does.
+    config = get_config()
+    chat = OllamaChat(
+        host=config.ollama_host, model=config.consolidate_model
+    )
+    app.extensions["reflection_synthesis_service"] = (
+        ReflectionSynthesisService(db_conn, chat=chat)
+    )
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:
