@@ -11,6 +11,7 @@
     <div class="brand">better-memory</div>
     <nav class="tabs">
       <a class="tab {% if active_tab == 'episodes' %}active{% endif %}" href="{{ url_for('episodes') }}">Episodes</a>
+      <a class="tab {% if active_tab == 'observations' %}active{% endif %}" href="{{ url_for('observations') }}">Observations</a>
       <a class="tab {% if active_tab == 'reflections' %}active{% endif %}" href="{{ url_for('reflections') }}">Reflections</a>
     </nav>
     <button class="close-ui"

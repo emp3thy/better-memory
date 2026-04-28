@@ -227,3 +227,21 @@ class TestObservationDrawer:
         assert "ep-1" in body
         # reinforcement_score appears as text
         assert "1.5" in body
+
+
+class TestNavTab:
+    def test_observations_tab_appears_in_base_layout(
+        self, client: FlaskClient
+    ):
+        response = client.get("/episodes")
+        body = response.get_data(as_text=True)
+        assert ">Observations<" in body
+        assert "/observations" in body
+
+    def test_observations_tab_marked_active_on_observations_page(
+        self, client: FlaskClient
+    ):
+        response = client.get("/observations")
+        body = response.get_data(as_text=True)
+        assert 'class="tab active"' in body
+        assert "Observations" in body
