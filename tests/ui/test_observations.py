@@ -72,17 +72,12 @@ class TestObservationsPage:
 
 
 class TestServiceWiring:
-    def test_reflection_synthesis_service_is_in_app_extensions(
+    def test_synthesis_dependencies_are_in_app_extensions(
         self, client: FlaskClient
     ) -> None:
-        # client fixture builds the app via create_app(); we read
-        # extensions from the underlying app object.
         app = client.application
-        assert "reflection_synthesis_service" in app.extensions
-        svc = app.extensions["reflection_synthesis_service"]
-        # Quack-test: it has a synthesize coroutine.
-        from inspect import iscoroutinefunction
-        assert iscoroutinefunction(svc.synthesize)
+        assert "chat" in app.extensions
+        assert "db_path" in app.extensions
 
 
 class TestObservationsPanel:
@@ -313,3 +308,41 @@ class TestObservationsSynthesize:
         body = response.get_data(as_text=True)
         assert "card-error" in body
         assert "ollama unreachable" in body
+
+    def test_synthesize_uses_worker_thread_connection_not_app_connection(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: the route must NOT reuse the app's db_connection.
+
+        sqlite3 connections are not thread-safe by default. The route
+        dispatches synthesize() to a worker thread, so it must open a
+        fresh connection there. We verify by stubbing OllamaChat.complete
+        (the lowest LLM-touching boundary) so the real synthesize body
+        runs against a real per-thread connection.
+        """
+        from better_memory.llm.ollama import OllamaChat
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+
+        # Return a parseable empty SynthesisResponse so the synthesize
+        # body finishes without producing reflections — we don't care
+        # about output, only that no ProgrammingError fires.
+        async def fake_complete(self, prompt: str) -> str:
+            return '{"new": [], "augment": [], "merge": [], "ignore": []}'
+
+        monkeypatch.setattr(OllamaChat, "complete", fake_complete)
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        # Critically: not 500. Specifically not a ProgrammingError card.
+        assert response.status_code == 200, response.get_data(as_text=True)
+        body = response.get_data(as_text=True)
+        assert "ProgrammingError" not in body
+        assert "thread" not in body.lower()
+        assert response.headers.get("HX-Trigger") == (
+            "observations-synthesized"
+        )

@@ -57,15 +57,15 @@ def create_app(
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
 
-    # Synthesis (Ollama LLM client + service). Construction is cheap and
-    # does NOT contact Ollama; the first synthesize() call does.
+    # Synthesis dependencies stored separately so the route can build a
+    # fresh ReflectionSynthesisService bound to a per-request DB
+    # connection — sqlite3 connections are not thread-safe by default,
+    # and the route dispatches synthesize() to a worker thread.
     config = get_config()
-    chat = OllamaChat(
+    app.extensions["chat"] = OllamaChat(
         host=config.ollama_host, model=config.consolidate_model
     )
-    app.extensions["reflection_synthesis_service"] = (
-        ReflectionSynthesisService(db_conn, chat=chat)
-    )
+    app.extensions["db_path"] = resolved_db
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:
@@ -429,29 +429,40 @@ def create_app(
     def observations_synthesize() -> tuple[str, int, dict[str, str]]:
         # synthesize() is async; the route is sync. We can't use
         # asyncio.run() because pyproject.toml sets pytest-asyncio's
-        # asyncio_mode = "auto", which means tests run inside an active
-        # event loop and asyncio.run would raise. Dispatch the coroutine
-        # to a fresh-loop daemon thread so the bridge works in both
-        # production (no loop) and test (loop already running).
+        # asyncio_mode = "auto", so tests run inside an active event
+        # loop and asyncio.run would raise. Dispatch to a fresh-loop
+        # daemon thread instead — works in production (no loop) and
+        # in tests (loop already running).
+        #
+        # The thread also opens its OWN sqlite3 connection because
+        # SQLite enforces same-thread use of connection objects;
+        # reusing the app's main-thread `db_connection` from a worker
+        # thread raises ProgrammingError.
         project = _project_name()
-        svc = app.extensions["reflection_synthesis_service"]
+        chat = app.extensions["chat"]
+        db_path = app.extensions["db_path"]
 
         result: dict | None = None
         exc_holder: list[BaseException] = []
 
         def _run() -> None:
-            loop = asyncio.new_event_loop()
+            nonlocal result
+            local_conn = connect(db_path)
             try:
-                nonlocal result
-                result = loop.run_until_complete(svc.synthesize(
-                    goal="manual synthesis",
-                    tech=None,
-                    project=project,
-                ))
-            except BaseException as _exc:  # noqa: BLE001
-                exc_holder.append(_exc)
+                svc = ReflectionSynthesisService(local_conn, chat=chat)
+                loop = asyncio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(svc.synthesize(
+                        goal="manual synthesis",
+                        tech=None,
+                        project=project,
+                    ))
+                except BaseException as _exc:  # noqa: BLE001
+                    exc_holder.append(_exc)
+                finally:
+                    loop.close()
             finally:
-                loop.close()
+                local_conn.close()
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
