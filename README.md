@@ -118,7 +118,7 @@ One env var roots the runtime filesystem layout:
 | `memory.record_use(id, outcome?)` | Stamp reinforcement outcome on a memory after validation. |
 | `knowledge.search(query, project?)` | BM25 search against the knowledge base. |
 | `knowledge.list(project?)` | List indexed knowledge docs. |
-| `memory.start_ui()` | Plan 2 stub. |
+| `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 
 ## Skills
 
@@ -175,13 +175,17 @@ See [LICENSE](LICENSE).
 
 ## Management UI
 
-Spawn the UI on demand (Phase 10 of Plan 2 will expose this as the
-`memory.start_ui()` MCP tool). Until then, start it manually:
+Call the `memory.start_ui` MCP tool. It returns `{"url": ..., "reused": ...}`:
+the URL is the loopback address the UI bound to; `reused` is `true` when an
+existing live UI was returned and `false` when a fresh one was spawned. Open
+the URL in a browser. Stdout and stderr from the UI subprocess are written
+to `$BETTER_MEMORY_HOME/ui.log`.
+
+The UI exits after 30 minutes of inactivity or when you click **Close UI**
+in the header.
+
+To launch it manually for debugging, the entry point is unchanged:
 
 ```bash
 BETTER_MEMORY_HOME=~/.better-memory uv run python -m better_memory.ui
-cat ~/.better-memory/ui.url   # print the bound URL
 ```
-
-The UI exits after 30 minutes of inactivity, or when you click
-**Close UI** in the header.

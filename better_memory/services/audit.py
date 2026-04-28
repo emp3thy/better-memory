@@ -16,8 +16,9 @@ Deliberate non-audit surfaces
   either. Each inserted ``hook_events`` row is itself the audit surface
   for the event it describes — writing an additional ``audit_log`` row
   would duplicate the record without adding information.
-* The ``memory.start_ui`` MCP tool is a stub today and performs no state
-  transition; nothing to audit until it actually does something.
+* The ``memory.start_ui`` MCP tool spawns / reuses a UI subprocess but
+  performs no database state transition — the spawned process is runtime
+  state, not persisted state. Nothing to audit.
 """
 
 from __future__ import annotations

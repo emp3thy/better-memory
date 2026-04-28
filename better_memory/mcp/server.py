@@ -13,7 +13,7 @@ Tools
 * ``memory.record_use``    — record re-use (optionally with outcome).
 * ``knowledge.search``     — BM25 search against the knowledge-base FTS.
 * ``knowledge.list``       — list indexed knowledge documents.
-* ``memory.start_ui``      — Plan 2 stub; returns an explanatory error.
+* ``memory.start_ui``      — spawn or reuse the management UI; returns ``{url, reused}``.
 
 Connection ownership
 --------------------
@@ -26,9 +26,6 @@ Error surfaces
 All tool handlers return JSON-encoded ``TextContent``. Exceptions raised
 inside a handler are caught by the MCP framework and re-surfaced as a
 ``CallToolResult`` with ``isError=True`` and a plain-text error message.
-The ``memory.start_ui`` stub is *not* an error — it returns a normal
-``{"error": "UI not yet implemented ..."}`` JSON payload so clients can
-display the message without treating it as a tool crash.
 """
 
 from __future__ import annotations
@@ -51,6 +48,7 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.llm.ollama import OllamaChat
+from better_memory.services import ui_launcher
 from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
     KnowledgeDocument,
@@ -236,8 +234,9 @@ def _tool_definitions() -> list[Tool]:
         Tool(
             name="memory.start_ui",
             description=(
-                "Launch the better-memory review UI. Stub — the UI ships in "
-                "Plan 2; this tool currently returns an explanatory error."
+                "Spawn or reuse the better-memory management UI. Returns "
+                '{"url": str, "reused": bool}. Reuses an existing live UI '
+                "when one is already running on /healthz."
             ),
             inputSchema={
                 "type": "object",
@@ -544,17 +543,9 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             ]
 
         if name == "memory.start_ui":
+            result = ui_launcher.start_ui()
             return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "error": (
-                                "UI not yet implemented — planned for Plan 2."
-                            )
-                        }
-                    ),
-                )
+                TextContent(type="text", text=json.dumps(result))
             ]
 
         if name == "memory.start_episode":
