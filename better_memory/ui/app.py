@@ -370,6 +370,27 @@ def create_app(
         )
         return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
+    @app.get("/observations")
+    def observations() -> str:
+        return render_template(
+            "observations.html", active_tab="observations"
+        )
+
+    @app.get("/observations/panel")
+    def observations_panel() -> tuple[str, int]:
+        # Implemented in Task 5.
+        return "", 501
+
+    @app.get("/observations/<id>/drawer")
+    def observation_drawer(id: str) -> tuple[str, int]:
+        # Implemented in Task 6.
+        return "", 501
+
+    @app.post("/observations/synthesize")
+    def observations_synthesize() -> tuple[str, int]:
+        # Implemented in Task 8.
+        return "", 501
+
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:
         def _exit() -> None:
