@@ -388,9 +388,31 @@ def create_app(
         )
 
     @app.get("/observations/panel")
-    def observations_panel() -> tuple[str, int]:
-        # Implemented in Task 5.
-        return "", 501
+    def observations_panel() -> str:
+        conn = app.extensions["db_connection"]
+        args = request.args
+
+        def _arg(name: str) -> str | None:
+            v = args.get(name, "").strip()
+            return v or None
+
+        project = _arg("project") or _project_name()
+        rows = queries.observation_list_for_ui(
+            conn,
+            project=project,
+            status=_arg("status"),
+            outcome=_arg("outcome"),
+            component=_arg("component"),
+        )
+        from itertools import groupby
+
+        days = [
+            (day, list(group))
+            for day, group in groupby(rows, key=lambda r: r.created_at[:10])
+        ]
+        return render_template(
+            "fragments/panel_observations.html", days=days
+        )
 
     @app.get("/observations/<id>/drawer")
     def observation_drawer(id: str) -> tuple[str, int]:

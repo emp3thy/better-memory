@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from flask.testing import FlaskClient
 
 from better_memory.db.connection import connect
@@ -82,3 +83,100 @@ class TestServiceWiring:
         # Quack-test: it has a synthesize coroutine.
         from inspect import iscoroutinefunction
         assert iscoroutinefunction(svc.synthesize)
+
+
+class TestObservationsPanel:
+    def test_empty_state_when_no_observations(self, client: FlaskClient):
+        response = client.get("/observations/panel")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "No observations" in body
+
+    def test_renders_seeded_rows(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        _seed_obs(tmp_db, oid="o-1", content="hello world")
+        _seed_obs(tmp_db, oid="o-2", content="second")
+
+        response = client.get("/observations/panel?project=proj-a")
+        body = response.get_data(as_text=True)
+        assert "hello world" in body
+        assert "second" in body
+
+    def test_filters_by_outcome(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        _seed_obs(tmp_db, oid="o-fail", outcome="failure", content="bad")
+        _seed_obs(tmp_db, oid="o-ok", outcome="success", content="good")
+
+        response = client.get(
+            "/observations/panel?project=proj-a&outcome=failure"
+        )
+        body = response.get_data(as_text=True)
+        assert "bad" in body
+        assert "good" not in body
+
+    def test_filters_by_status(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        _seed_obs(tmp_db, oid="o-active", status="active", content="A")
+        _seed_obs(tmp_db, oid="o-arch", status="archived", content="X")
+
+        response = client.get(
+            "/observations/panel?project=proj-a&status=active"
+        )
+        body = response.get_data(as_text=True)
+        assert "A" in body
+        assert "X" not in body
+
+    def test_filters_by_component(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        _seed_obs(tmp_db, oid="o-ui", component="ui_launcher", content="ui")
+        _seed_obs(tmp_db, oid="o-mcp", component="mcp", content="mcp")
+
+        response = client.get(
+            "/observations/panel?project=proj-a&component=ui_launcher"
+        )
+        body = response.get_data(as_text=True)
+        assert "ui" in body
+        assert "mcp" not in body
+
+    def test_blank_filter_values_are_treated_as_unset(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        _seed_obs(tmp_db, oid="o-1", outcome="failure", content="A")
+        _seed_obs(tmp_db, oid="o-2", outcome="success", content="B")
+
+        response = client.get(
+            "/observations/panel?project=proj-a&outcome=&status="
+        )
+        body = response.get_data(as_text=True)
+        # Both should appear when filters are blank.
+        assert "A" in body
+        assert "B" in body

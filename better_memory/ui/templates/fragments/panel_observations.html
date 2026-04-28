@@ -1,0 +1,12 @@
+{% if days %}
+  {% for day, rows in days %}
+    <div class="day">
+      <h3 class="day-header">{{ day }}</h3>
+      {% for row in rows %}
+        {% include "fragments/observation_row.html" %}
+      {% endfor %}
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="empty-state"><p>No observations match these filters.</p></div>
+{% endif %}
