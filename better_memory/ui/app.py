@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -425,9 +426,43 @@ def create_app(
         )
 
     @app.post("/observations/synthesize")
-    def observations_synthesize() -> tuple[str, int]:
-        # Implemented in Task 8.
-        return "", 501
+    def observations_synthesize() -> tuple[str, int, dict[str, str]]:
+        project = _project_name()
+        svc = app.extensions["reflection_synthesis_service"]
+
+        result: dict | None = None
+        exc_holder: list[BaseException] = []
+
+        def _run() -> None:
+            loop = asyncio.new_event_loop()
+            try:
+                nonlocal result
+                result = loop.run_until_complete(svc.synthesize(
+                    goal="manual synthesis",
+                    tech=None,
+                    project=project,
+                ))
+            except BaseException as _exc:  # noqa: BLE001
+                exc_holder.append(_exc)
+            finally:
+                loop.close()
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join()
+
+        if exc_holder:
+            exc = exc_holder[0]
+            return (
+                f'<div class="card card-error"><p>{escape(str(exc))}</p></div>',
+                500,
+                {},
+            )
+        counts = {k: len(v) for k, v in (result or {}).items()}
+        rendered = render_template(
+            "fragments/observations_synth_banner.html", counts=counts,
+        )
+        return rendered, 200, {"HX-Trigger": "observations-synthesized"}
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:

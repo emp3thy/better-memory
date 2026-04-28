@@ -245,3 +245,71 @@ class TestNavTab:
         body = response.get_data(as_text=True)
         assert 'class="tab active"' in body
         assert "Observations" in body
+
+
+class TestObservationsSynthesize:
+    def test_calls_service_and_returns_banner(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.services.reflection import (
+            ReflectionSynthesisService,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+
+        async def fake_synthesize(self, *, goal, tech, project):
+            assert goal == "manual synthesis"
+            assert tech is None
+            assert project == "proj-a"
+            return {
+                "do": [{"id": "r1"}, {"id": "r2"}],
+                "dont": [{"id": "r3"}],
+                "neutral": [],
+            }
+
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize", fake_synthesize
+        )
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("HX-Trigger") == (
+            "observations-synthesized"
+        )
+        body = response.get_data(as_text=True)
+        # Banner mentions the bucket counts.
+        assert "2" in body and "do" in body
+        assert "1" in body and "dont" in body
+        assert "0" in body and "neutral" in body
+
+    def test_returns_500_card_error_on_service_failure(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.services.reflection import (
+            ReflectionSynthesisService,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+
+        async def boom(self, *, goal, tech, project):
+            raise RuntimeError("ollama unreachable")
+
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize", boom
+        )
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 500
+        body = response.get_data(as_text=True)
+        assert "card-error" in body
+        assert "ollama unreachable" in body
