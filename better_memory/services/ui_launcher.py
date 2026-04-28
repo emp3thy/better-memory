@@ -43,7 +43,7 @@ def _is_alive(url: str) -> bool:
             probe, timeout=_HEALTHZ_TIMEOUT_SEC
         ) as response:
             return response.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return False
 
 

@@ -267,6 +267,30 @@ class TestSpawn:
         finally:
             server.shutdown()
 
+    def test_garbage_ui_url_treated_as_stale(
+        self, home: Path, fake_popen
+    ) -> None:
+        """Non-URL garbage in ui.url is treated as stale, not a hard crash.
+
+        urllib.request.urlopen raises ValueError on URLs without a valid
+        scheme (e.g. "garbage" with no http:// prefix). _is_alive must
+        catch ValueError so the stale-cleanup path runs; otherwise the
+        corrupt file persists and every subsequent start_ui call dies.
+        """
+        (home / "ui.url").write_text("not a real url")
+
+        new_url, _t, server = _start_stub(_HealthOK)
+        try:
+            fake_popen.schedule_url_write(after=0.025, url=new_url, home=home)
+
+            result = ui_launcher.start_ui()
+
+            assert result == {"url": new_url, "reused": False}
+            assert (home / "ui.url").read_text().strip() == new_url
+            assert len(fake_popen.instances) == 1
+        finally:
+            server.shutdown()
+
     def test_popen_kwargs_detach_flags_match_platform(
         self, home: Path, fake_popen
     ) -> None:
