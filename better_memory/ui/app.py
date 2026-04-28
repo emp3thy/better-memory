@@ -415,9 +415,14 @@ def create_app(
         )
 
     @app.get("/observations/<id>/drawer")
-    def observation_drawer(id: str) -> tuple[str, int]:
-        # Implemented in Task 6.
-        return "", 501
+    def observation_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.observation_detail(conn, observation_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/observation_drawer.html", detail=detail
+        )
 
     @app.post("/observations/synthesize")
     def observations_synthesize() -> tuple[str, int]:

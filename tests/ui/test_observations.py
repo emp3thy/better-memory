@@ -180,3 +180,50 @@ class TestObservationsPanel:
         # Both should appear when filters are blank.
         assert "A" in body
         assert "B" in body
+
+
+class TestObservationDrawer:
+    def test_renders_full_content(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        _seed_episode(tmp_db)
+        _seed_obs(tmp_db, oid="o-1", content="full content for drawer")
+
+        response = client.get("/observations/o-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "full content for drawer" in body
+
+    def test_returns_404_for_unknown_id(self, client: FlaskClient):
+        response = client.get("/observations/nope/drawer")
+        assert response.status_code == 404
+
+    def test_renders_metadata_grid(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        _seed_episode(tmp_db)
+        conn = connect(tmp_db)
+        try:
+            conn.execute(
+                "INSERT INTO observations "
+                "(id, content, project, component, theme, outcome, status, "
+                " episode_id, tech, trigger_type, reinforcement_score, "
+                " created_at) "
+                "VALUES "
+                "('o-1', 'x', 'proj-a', 'ui_launcher', 'bug', 'failure', "
+                " 'active', 'ep-1', 'python', 'review', 1.5, "
+                " '2026-04-26T10:00:00+00:00')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        response = client.get("/observations/o-1/drawer")
+        body = response.get_data(as_text=True)
+        assert "ui_launcher" in body
+        assert "bug" in body
+        assert "python" in body
+        assert "review" in body
+        assert "ep-1" in body
+        # reinforcement_score appears as text
+        assert "1.5" in body
