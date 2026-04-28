@@ -23,7 +23,7 @@
 | 5 — panel route + row template | 95% | — | none |
 | 6 — drawer route + template | 95% | — | none |
 | 7 — nav tab | 99% | — | none |
-| 8 — synthesis trigger | **80%** | `asyncio.run` inside a sync Flask route is a well-known bridge but easy to get wrong on Windows (the default event loop policy differs). Errors from `synthesize` need to surface as 500 + card-error not propagate. | Test patches `synthesize` and asserts both the success path and the error path. Implementation uses bare `asyncio.run` (matches the project's `mcp/server.py` pattern). |
+| 8 — synthesis trigger | **80%** | `asyncio.run` inside a sync Flask route raises `RuntimeError("cannot be called from a running event loop")` under this project's pytest config (`asyncio_mode = "auto"` in `pyproject.toml`). The bridge needs to work both in production (no loop) and tests (loop running). | Implementation dispatches the coroutine to a daemon thread that owns a fresh `asyncio.new_event_loop()`, so the bridge is unconditionally safe. Test patches `synthesize` to assert both the success and error paths. |
 | 9 — browser tests | **75%** | Browser test depends on Playwright fixtures already wired in `tests/ui/test_browser_*.py`. Stubbing the LLM cleanly across the live-server subprocess is the open question. | Step 1 reads `test_browser_reflections.py` first to confirm the fixture shape; if `monkeypatch` doesn't cross the subprocess, the test seeds the DB so the synthesis call short-circuits naturally. The synthesis-trigger UI flow is not exercised in this task — Task 8's Flask test-client tests cover it. |
 | 10 — final integration check | 95% | — | none |
 
@@ -1388,26 +1388,49 @@ Create `better_memory/ui/templates/fragments/observations_synth_banner.html`:
 
 - [ ] **Step 4: Add the route**
 
-Edit `better_memory/ui/app.py`. At the top, ensure `import asyncio` is present (the file may already use it; if not, add it next to other stdlib imports). After `observation_drawer`, add:
+Edit `better_memory/ui/app.py`. Ensure `import asyncio` and `import threading` are present at the top. After `observation_drawer`, add:
 
 ```python
     @app.post("/observations/synthesize")
     def observations_synthesize() -> tuple[str, int, dict[str, str]]:
+        # synthesize() is async; the route is sync. We can't use
+        # asyncio.run() because pyproject.toml sets pytest-asyncio's
+        # asyncio_mode = "auto", so tests run inside an active event
+        # loop and asyncio.run would raise. Dispatch to a fresh-loop
+        # daemon thread instead — works in production (no loop) and
+        # in tests (loop already running).
         project = _project_name()
         svc = app.extensions["reflection_synthesis_service"]
-        try:
-            buckets = asyncio.run(svc.synthesize(
-                goal="manual synthesis",
-                tech=None,
-                project=project,
-            ))
-        except Exception as exc:  # noqa: BLE001 — surface to user
+
+        result: dict | None = None
+        exc_holder: list[BaseException] = []
+
+        def _run() -> None:
+            loop = asyncio.new_event_loop()
+            try:
+                nonlocal result
+                result = loop.run_until_complete(svc.synthesize(
+                    goal="manual synthesis",
+                    tech=None,
+                    project=project,
+                ))
+            except BaseException as _exc:  # noqa: BLE001
+                exc_holder.append(_exc)
+            finally:
+                loop.close()
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join()
+
+        if exc_holder:
+            exc = exc_holder[0]
             return (
                 f'<div class="card card-error"><p>{escape(str(exc))}</p></div>',
                 500,
                 {},
             )
-        counts = {k: len(v) for k, v in buckets.items()}
+        counts = {k: len(v) for k, v in (result or {}).items()}
         rendered = render_template(
             "fragments/observations_synth_banner.html", counts=counts,
         )

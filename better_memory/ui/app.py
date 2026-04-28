@@ -427,6 +427,12 @@ def create_app(
 
     @app.post("/observations/synthesize")
     def observations_synthesize() -> tuple[str, int, dict[str, str]]:
+        # synthesize() is async; the route is sync. We can't use
+        # asyncio.run() because pyproject.toml sets pytest-asyncio's
+        # asyncio_mode = "auto", which means tests run inside an active
+        # event loop and asyncio.run would raise. Dispatch the coroutine
+        # to a fresh-loop daemon thread so the bridge works in both
+        # production (no loop) and test (loop already running).
         project = _project_name()
         svc = app.extensions["reflection_synthesis_service"]
 
