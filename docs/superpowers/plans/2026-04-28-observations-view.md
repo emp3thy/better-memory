@@ -389,7 +389,7 @@ class TestObservationDetail:
         ):
             conn.execute(
                 "INSERT INTO audit_log "
-                "(id, entity_type, entity_id, action, actor, at) "
+                "(id, entity_type, entity_id, action, actor, created_at) "
                 "VALUES (?, 'observation', 'o-1', 'create', 'ai', ?)",
                 (f"a-{at}", at),
             )
@@ -515,10 +515,12 @@ def observation_detail(
     )
 
     audit_rows = conn.execute(
-        "SELECT at, actor, action, from_status, to_status "
+        # audit_log's timestamp column is `created_at` (per 0001_init.sql);
+        # alias to `at` so the dataclass field name stays short.
+        "SELECT created_at AS at, actor, action, from_status, to_status "
         "FROM audit_log "
         "WHERE entity_type = 'observation' AND entity_id = ? "
-        "ORDER BY at DESC, rowid DESC",
+        "ORDER BY created_at DESC, rowid DESC",
         (observation_id,),
     ).fetchall()
     audit = [
