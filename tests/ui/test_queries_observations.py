@@ -157,3 +157,97 @@ class TestObservationListForUi:
         assert row.outcome == "failure"
         assert row.status == "active"
         assert row.episode_id == "ep-1"
+
+
+class TestObservationDetail:
+    def test_returns_none_for_unknown_id(self, conn):
+        from better_memory.ui.queries import observation_detail
+
+        result = observation_detail(conn, observation_id="nope")
+        assert result is None
+
+    def test_returns_full_observation(self, conn):
+        from better_memory.ui.queries import observation_detail
+
+        _seed_episode(conn)
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, component, theme, outcome, status, "
+            " episode_id, tech, trigger_type, reinforcement_score, "
+            " created_at) "
+            "VALUES "
+            "('o-1', 'hello', 'proj-a', 'ui_launcher', 'bug', 'failure', "
+            " 'active', 'ep-1', 'python', 'review', 1.5, "
+            " '2026-04-26T10:00:00+00:00')"
+        )
+        conn.commit()
+
+        detail = observation_detail(conn, observation_id="o-1")
+        assert detail is not None
+        assert detail.observation.id == "o-1"
+        assert detail.observation.content == "hello"
+        assert detail.observation.project == "proj-a"
+        assert detail.observation.component == "ui_launcher"
+        assert detail.observation.theme == "bug"
+        assert detail.observation.outcome == "failure"
+        assert detail.observation.status == "active"
+        assert detail.observation.tech == "python"
+        assert detail.observation.trigger_type == "review"
+        assert detail.observation.reinforcement_score == 1.5
+        assert detail.observation.episode_id == "ep-1"
+        assert detail.audit == []
+        assert detail.reflections == []
+
+    def test_returns_audit_timeline_newest_first(self, conn):
+        from better_memory.ui.queries import observation_detail
+
+        _seed_episode(conn)
+        _seed_obs(conn, oid="o-1")
+        for at in (
+            "2026-04-26T10:00:00+00:00",
+            "2026-04-26T11:00:00+00:00",
+            "2026-04-26T12:00:00+00:00",
+        ):
+            conn.execute(
+                "INSERT INTO audit_log "
+                "(id, entity_type, entity_id, action, actor, created_at) "
+                "VALUES (?, 'observation', 'o-1', 'create', 'ai', ?)",
+                (f"a-{at}", at),
+            )
+        conn.commit()
+
+        detail = observation_detail(conn, observation_id="o-1")
+        assert detail is not None
+        assert len(detail.audit) == 3
+        # Newest first.
+        ats = [e.at for e in detail.audit]
+        assert ats == sorted(ats, reverse=True)
+
+    def test_returns_linked_reflections(self, conn):
+        from better_memory.ui.queries import observation_detail
+
+        _seed_episode(conn)
+        _seed_obs(conn, oid="o-1")
+        conn.execute(
+            "INSERT INTO reflections "
+            "(id, title, project, tech, phase, polarity, use_cases, hints, "
+            " confidence, status, evidence_count, created_at, updated_at) "
+            "VALUES "
+            "('r-1', 'Linked', 'proj-a', NULL, 'general', 'do', "
+            " 'uc', 'h', 0.8, 'confirmed', 1, "
+            " '2026-04-26T10:00:00+00:00', '2026-04-26T10:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('r-1', 'o-1')"
+        )
+        conn.commit()
+
+        detail = observation_detail(conn, observation_id="o-1")
+        assert detail is not None
+        assert len(detail.reflections) == 1
+        assert detail.reflections[0].id == "r-1"
+        assert detail.reflections[0].title == "Linked"
+        assert detail.reflections[0].polarity == "do"
+        assert detail.reflections[0].confidence == 0.8
+        assert detail.reflections[0].status == "confirmed"
