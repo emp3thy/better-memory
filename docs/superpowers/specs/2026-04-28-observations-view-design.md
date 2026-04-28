@@ -127,8 +127,24 @@ class ObservationAuditEntry:
     to_status: str | None
 
 @dataclass(frozen=True)
+class ObservationFull:
+    """All columns from the observations row that the drawer renders."""
+    id: str
+    content: str
+    project: str
+    component: str | None
+    theme: str | None
+    tech: str | None
+    trigger_type: str | None
+    outcome: str
+    status: str
+    reinforcement_score: float
+    episode_id: str | None
+    created_at: str
+
+@dataclass(frozen=True)
 class ObservationDetail:
-    observation: Observation     # full row from services/observation.py
+    observation: ObservationFull
     audit: list[ObservationAuditEntry]
     reflections: list[LinkedReflectionRow]
 
@@ -139,7 +155,7 @@ def observation_detail(
     """Return one observation with audit + linked reflections, or None if not found."""
 ```
 
-`Observation` is the existing dataclass in `services/observation.py`. `LinkedReflectionRow` mirrors the existing `EpisodeReflectionRow` shape. Audit reads from `audit_log` filtered to `entity_type = 'observation' AND entity_id = ?`. Linked reflections JOIN `reflection_sources` on `observation_id`.
+`ObservationFull` is a new dataclass local to `queries.py` — the project has no shared `Observation` dataclass and pulling all view-relevant columns into a typed row keeps the drawer template free of `dict.get()` lookups. `LinkedReflectionRow` mirrors the existing `EpisodeReflectionRow` shape. Audit reads from `audit_log` filtered to `entity_type = 'observation' AND entity_id = ?`. Linked reflections JOIN `reflection_sources` on `observation_id`.
 
 Default sort: `created_at DESC, rowid DESC` for both list and audit.
 
