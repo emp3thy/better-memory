@@ -466,6 +466,13 @@ def create_app(
                             project=project,
                         ))
                     finally:
+                        # Close the httpx.AsyncClient inside the same
+                        # loop that owns it. Wrap in try/except so a
+                        # cleanup error doesn't mask a synthesize error.
+                        try:
+                            loop.run_until_complete(chat.aclose())
+                        except BaseException:  # noqa: BLE001
+                            pass
                         loop.close()
                 finally:
                     local_conn.close()

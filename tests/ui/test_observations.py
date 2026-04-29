@@ -415,3 +415,49 @@ class TestObservationsSynthesize:
         body = response.get_data(as_text=True)
         assert "card-error" in body
         assert "connect blew up" in body
+
+    def test_synthesize_closes_httpx_client_per_call(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: each synthesis call must aclose() its OllamaChat.
+
+        The OllamaChat constructor builds an httpx.AsyncClient with a
+        TCP pool. Without aclose(), every click leaks an unclosed
+        client. We verify by counting aclose() calls after two synth
+        requests.
+        """
+        from better_memory.llm.ollama import OllamaChat
+        from better_memory.services.reflection import (
+            ReflectionSynthesisService,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+
+        async def fake_synthesize(self, *, goal, tech, project):
+            return {"do": [], "dont": [], "neutral": []}
+
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize", fake_synthesize
+        )
+
+        aclose_count = [0]
+        original_aclose = OllamaChat.aclose
+
+        async def counting_aclose(self):
+            aclose_count[0] += 1
+            await original_aclose(self)
+
+        monkeypatch.setattr(OllamaChat, "aclose", counting_aclose)
+
+        for _ in range(2):
+            response = client.post(
+                "/observations/synthesize",
+                headers={"Origin": "http://localhost"},
+            )
+            assert response.status_code == 200, response.get_data(as_text=True)
+
+        assert aclose_count[0] == 2, (
+            f"expected 2 aclose() calls, got {aclose_count[0]}"
+        )
