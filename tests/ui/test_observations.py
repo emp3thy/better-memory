@@ -70,6 +70,20 @@ class TestObservationsPage:
         body = response.get_data(as_text=True)
         assert "Run synthesis" in body
 
+    def test_synthesis_button_swaps_5xx_error_responses(
+        self, client: FlaskClient
+    ):
+        """HTMX drops 4xx/5xx responses by default, so without an
+        explicit shouldSwap override the card-error fragment from a
+        failed POST /observations/synthesize never reaches the page —
+        the user sees a stuck spinner with no feedback. The button
+        sets `event.detail.shouldSwap = true` in the htmx:before-swap
+        handler so the error body always replaces the banner.
+        """
+        response = client.get("/observations")
+        body = response.get_data(as_text=True)
+        assert "shouldSwap = true" in body
+
 
 class TestServiceWiring:
     def test_synthesis_dependencies_are_in_app_extensions(

@@ -27,7 +27,8 @@
           hx-post="{{ url_for('observations_synthesize') }}"
           hx-target="#observations-synth-banner"
           hx-swap="innerHTML"
-          hx-indicator="#observations-synth-spinner">
+          hx-indicator="#observations-synth-spinner"
+          hx-on::before-swap="event.detail.shouldSwap = true">
     Run synthesis
     <span id="observations-synth-spinner" class="htmx-indicator">…</span>
   </button>
