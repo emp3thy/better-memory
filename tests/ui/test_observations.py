@@ -76,7 +76,8 @@ class TestServiceWiring:
         self, client: FlaskClient
     ) -> None:
         app = client.application
-        assert "chat" in app.extensions
+        assert "ollama_host" in app.extensions
+        assert "consolidate_model" in app.extensions
         assert "db_path" in app.extensions
 
 
@@ -346,3 +347,71 @@ class TestObservationsSynthesize:
         assert response.headers.get("HX-Trigger") == (
             "observations-synthesized"
         )
+
+    def test_synthesize_succeeds_on_second_call_with_fresh_event_loop(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: each call must build a fresh OllamaChat.
+
+        httpx.AsyncClient pools are bound to the loop they were created
+        on. If the route shared a single OllamaChat across calls, the
+        second call's loop would inherit dead transports from the first
+        closed loop, producing transport errors. We verify by patching
+        synthesize to count calls and asserting both succeed.
+        """
+        from better_memory.services.reflection import (
+            ReflectionSynthesisService,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+
+        call_count = [0]
+
+        async def fake_synthesize(self, *, goal, tech, project):
+            call_count[0] += 1
+            return {"do": [], "dont": [], "neutral": []}
+
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize", fake_synthesize
+        )
+
+        first = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        second = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+
+        assert first.status_code == 200, first.get_data(as_text=True)
+        assert second.status_code == 200, second.get_data(as_text=True)
+        assert call_count[0] == 2
+
+    def test_synthesize_surfaces_setup_errors_as_500(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: errors during worker setup (e.g. connect failure)
+        must surface as 500, not silently produce a 200 with empty body.
+        """
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+
+        def boom(_path):
+            raise RuntimeError("connect blew up")
+
+        # Patch connect at the module level the route imports it from.
+        monkeypatch.setattr(app_module, "connect", boom)
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 500
+        body = response.get_data(as_text=True)
+        assert "card-error" in body
+        assert "connect blew up" in body

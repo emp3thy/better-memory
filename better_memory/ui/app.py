@@ -57,14 +57,16 @@ def create_app(
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
 
-    # Synthesis dependencies stored separately so the route can build a
-    # fresh ReflectionSynthesisService bound to a per-request DB
-    # connection — sqlite3 connections are not thread-safe by default,
-    # and the route dispatches synthesize() to a worker thread.
+    # Synthesis runs in a worker thread (sqlite3 connections aren't
+    # thread-safe by default) with a fresh asyncio event loop per call
+    # (httpx.AsyncClient pools are bound to the loop they were created
+    # on; reusing a shared client across loops produces transport errors
+    # after the first loop closes). So we store only the *config* here
+    # — the route builds a fresh OllamaChat + DB connection +
+    # ReflectionSynthesisService inside the worker each time.
     config = get_config()
-    app.extensions["chat"] = OllamaChat(
-        host=config.ollama_host, model=config.consolidate_model
-    )
+    app.extensions["ollama_host"] = config.ollama_host
+    app.extensions["consolidate_model"] = config.consolidate_model
     app.extensions["db_path"] = resolved_db
 
     @app.teardown_appcontext
@@ -434,12 +436,14 @@ def create_app(
         # daemon thread instead — works in production (no loop) and
         # in tests (loop already running).
         #
-        # The thread also opens its OWN sqlite3 connection because
-        # SQLite enforces same-thread use of connection objects;
-        # reusing the app's main-thread `db_connection` from a worker
-        # thread raises ProgrammingError.
+        # The thread also opens its OWN sqlite3 connection (sqlite
+        # enforces same-thread use) AND its own OllamaChat (httpx
+        # AsyncClient pools are bound to the loop they were created
+        # on; sharing across short-lived loops produces transport
+        # errors after the first close).
         project = _project_name()
-        chat = app.extensions["chat"]
+        ollama_host = app.extensions["ollama_host"]
+        consolidate_model = app.extensions["consolidate_model"]
         db_path = app.extensions["db_path"]
 
         result: dict | None = None
@@ -447,22 +451,26 @@ def create_app(
 
         def _run() -> None:
             nonlocal result
-            local_conn = connect(db_path)
             try:
-                svc = ReflectionSynthesisService(local_conn, chat=chat)
-                loop = asyncio.new_event_loop()
+                local_conn = connect(db_path)
                 try:
-                    result = loop.run_until_complete(svc.synthesize(
-                        goal="manual synthesis",
-                        tech=None,
-                        project=project,
-                    ))
-                except BaseException as _exc:  # noqa: BLE001
-                    exc_holder.append(_exc)
+                    chat = OllamaChat(
+                        host=ollama_host, model=consolidate_model
+                    )
+                    svc = ReflectionSynthesisService(local_conn, chat=chat)
+                    loop = asyncio.new_event_loop()
+                    try:
+                        result = loop.run_until_complete(svc.synthesize(
+                            goal="manual synthesis",
+                            tech=None,
+                            project=project,
+                        ))
+                    finally:
+                        loop.close()
                 finally:
-                    loop.close()
-            finally:
-                local_conn.close()
+                    local_conn.close()
+            except BaseException as _exc:  # noqa: BLE001
+                exc_holder.append(_exc)
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
