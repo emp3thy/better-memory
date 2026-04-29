@@ -70,19 +70,36 @@ class TestObservationsPage:
         body = response.get_data(as_text=True)
         assert "Run synthesis" in body
 
-    def test_synthesis_button_swaps_5xx_error_responses(
+    def test_synthesis_banner_target_swaps_5xx_error_responses(
         self, client: FlaskClient
     ):
         """HTMX drops 4xx/5xx responses by default, so without an
         explicit shouldSwap override the card-error fragment from a
         failed POST /observations/synthesize never reaches the page —
-        the user sees a stuck spinner with no feedback. The button
-        sets `event.detail.shouldSwap = true` in the htmx:before-swap
-        handler so the error body always replaces the banner.
+        the user sees a stuck spinner with no feedback.
+
+        The directive must be on the SWAP TARGET (the banner div), not
+        the requesting button — htmx:beforeSwap fires on the target
+        element, and the button is a sibling, not an ancestor, so the
+        event would never bubble through it.
         """
         response = client.get("/observations")
         body = response.get_data(as_text=True)
-        assert "shouldSwap = true" in body
+        # The attribute must live on the same element that carries
+        # id="observations-synth-banner". This regex-free check matches
+        # the rendered substring in either attribute order.
+        assert (
+            'id="observations-synth-banner"' in body
+            and "shouldSwap = true" in body
+        )
+        # Verify they're co-located on the same div (within ~150 chars).
+        banner_idx = body.index('id="observations-synth-banner"')
+        swap_idx = body.index("shouldSwap = true")
+        assert abs(swap_idx - banner_idx) < 150, (
+            "shouldSwap directive must be on the same element as "
+            "id=observations-synth-banner so htmx:beforeSwap fires "
+            "where the listener lives."
+        )
 
 
 class TestServiceWiring:
