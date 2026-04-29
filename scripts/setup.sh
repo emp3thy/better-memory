@@ -163,7 +163,22 @@ else
     else
         log "Ollama is reachable. Pulling nomic-embed-text..."
         "$OLLAMA_BIN" pull nomic-embed-text
-        log "Model pulled."
+        log "Embedding model pulled."
+
+        # Synthesis (Reflection consolidation) needs a chat model.
+        # Default matches better_memory.config._DEFAULT_CONSOLIDATE_MODEL.
+        # Respect CONSOLIDATE_MODEL if the user already exported one.
+        CHAT_MODEL="${CONSOLIDATE_MODEL:-llama3}"
+        read -rp "Pull chat model for reflection synthesis ($CHAT_MODEL, ~4.7 GB for llama3)? [Y/n]: " yn
+        if [[ -z "$yn" || "$yn" =~ ^[Yy]$ ]]; then
+            "$OLLAMA_BIN" pull "$CHAT_MODEL"
+            log "Chat model pulled."
+        else
+            warn "Skipping chat model pull. Set CONSOLIDATE_MODEL env var"
+            warn "to a chat model you already have, or run 'ollama pull <model>'"
+            warn "manually. The synthesis UI will fail with 'model not found'"
+            warn "until a chat model is installed."
+        fi
     fi
 fi
 
