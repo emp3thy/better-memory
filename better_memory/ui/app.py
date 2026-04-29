@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -12,10 +13,11 @@ from flask import Flask, abort, redirect, render_template, request, url_for
 from markupsafe import escape
 from werkzeug.wrappers import Response
 
-from better_memory.config import resolve_home
+from better_memory.config import get_config, resolve_home
 from better_memory.db.connection import connect
+from better_memory.llm.ollama import OllamaChat
 from better_memory.services.episode import EpisodeService
-from better_memory.services.reflection import ReflectionService
+from better_memory.services.reflection import ReflectionService, ReflectionSynthesisService
 from better_memory.ui import queries
 
 
@@ -54,6 +56,18 @@ def create_app(
     app.extensions["db_connection"] = db_conn
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
+
+    # Synthesis runs in a worker thread (sqlite3 connections aren't
+    # thread-safe by default) with a fresh asyncio event loop per call
+    # (httpx.AsyncClient pools are bound to the loop they were created
+    # on; reusing a shared client across loops produces transport errors
+    # after the first loop closes). So we store only the *config* here
+    # — the route builds a fresh OllamaChat + DB connection +
+    # ReflectionSynthesisService inside the worker each time.
+    config = get_config()
+    app.extensions["ollama_host"] = config.ollama_host
+    app.extensions["consolidate_model"] = config.consolidate_model
+    app.extensions["db_path"] = resolved_db
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:
@@ -369,6 +383,118 @@ def create_app(
             "fragments/reflection_drawer.html", detail=detail
         )
         return rendered, 200, {"HX-Trigger": "reflection-changed"}
+
+    @app.get("/observations")
+    def observations() -> str:
+        return render_template(
+            "observations.html", active_tab="observations"
+        )
+
+    @app.get("/observations/panel")
+    def observations_panel() -> str:
+        conn = app.extensions["db_connection"]
+        args = request.args
+
+        def _arg(name: str) -> str | None:
+            v = args.get(name, "").strip()
+            return v or None
+
+        project = _arg("project") or _project_name()
+        rows = queries.observation_list_for_ui(
+            conn,
+            project=project,
+            status=_arg("status"),
+            outcome=_arg("outcome"),
+            component=_arg("component"),
+        )
+        from itertools import groupby
+
+        days = [
+            (day, list(group))
+            for day, group in groupby(rows, key=lambda r: r.created_at[:10])
+        ]
+        return render_template(
+            "fragments/panel_observations.html", days=days
+        )
+
+    @app.get("/observations/<id>/drawer")
+    def observation_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.observation_detail(conn, observation_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/observation_drawer.html", detail=detail
+        )
+
+    @app.post("/observations/synthesize")
+    def observations_synthesize() -> tuple[str, int, dict[str, str]]:
+        # synthesize() is async; the route is sync. We can't use
+        # asyncio.run() because pyproject.toml sets pytest-asyncio's
+        # asyncio_mode = "auto", so tests run inside an active event
+        # loop and asyncio.run would raise. Dispatch to a fresh-loop
+        # daemon thread instead — works in production (no loop) and
+        # in tests (loop already running).
+        #
+        # The thread also opens its OWN sqlite3 connection (sqlite
+        # enforces same-thread use) AND its own OllamaChat (httpx
+        # AsyncClient pools are bound to the loop they were created
+        # on; sharing across short-lived loops produces transport
+        # errors after the first close).
+        project = _project_name()
+        ollama_host = app.extensions["ollama_host"]
+        consolidate_model = app.extensions["consolidate_model"]
+        db_path = app.extensions["db_path"]
+
+        result: dict | None = None
+        exc_holder: list[BaseException] = []
+
+        def _run() -> None:
+            nonlocal result
+            try:
+                local_conn = connect(db_path)
+                try:
+                    chat = OllamaChat(
+                        host=ollama_host, model=consolidate_model
+                    )
+                    svc = ReflectionSynthesisService(local_conn, chat=chat)
+                    loop = asyncio.new_event_loop()
+                    try:
+                        result = loop.run_until_complete(svc.synthesize(
+                            goal="manual synthesis",
+                            tech=None,
+                            project=project,
+                        ))
+                    finally:
+                        # Close the httpx.AsyncClient inside the same
+                        # loop that owns it. Wrap in try/except so a
+                        # cleanup error doesn't mask a synthesize error.
+                        try:
+                            loop.run_until_complete(chat.aclose())
+                        except BaseException:  # noqa: BLE001
+                            pass
+                        loop.close()
+                finally:
+                    local_conn.close()
+            except BaseException as _exc:  # noqa: BLE001
+                exc_holder.append(_exc)
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join()
+
+        if exc_holder:
+            exc = exc_holder[0]
+            return (
+                f'<div class="card card-error"><p>{escape(str(exc))}</p></div>',
+                500,
+                {},
+            )
+        counts = {k: len(v) for k, v in (result or {}).items()}
+        rendered = render_template(
+            "fragments/observations_synth_banner.html", counts=counts,
+        )
+        return rendered, 200, {"HX-Trigger": "observations-synthesized"}
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:

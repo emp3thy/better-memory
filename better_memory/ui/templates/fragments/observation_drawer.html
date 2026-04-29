@@ -1,0 +1,57 @@
+<aside class="drawer">
+  <header class="drawer-header">
+    <span class="chip outcome-{{ detail.observation.outcome }}">{{ detail.observation.outcome }}</span>
+    <span class="created-at">{{ detail.observation.created_at }}</span>
+  </header>
+
+  <section class="content">
+    <p>{{ detail.observation.content }}</p>
+  </section>
+
+  <section class="metadata">
+    <dl>
+      <dt>id</dt><dd>{{ detail.observation.id }}</dd>
+      <dt>component</dt><dd>{{ detail.observation.component or "—" }}</dd>
+      <dt>theme</dt><dd>{{ detail.observation.theme or "—" }}</dd>
+      <dt>tech</dt><dd>{{ detail.observation.tech or "—" }}</dd>
+      <dt>trigger</dt><dd>{{ detail.observation.trigger_type or "—" }}</dd>
+      <dt>status</dt><dd>{{ detail.observation.status }}</dd>
+      <dt>reinforcement</dt><dd>{{ detail.observation.reinforcement_score }}</dd>
+      <dt>episode</dt><dd>{{ detail.observation.episode_id or "—" }}</dd>
+    </dl>
+  </section>
+
+  {% if detail.reflections %}
+    <section class="linked-reflections">
+      <h4>Linked reflections</h4>
+      <ul>
+        {% for r in detail.reflections %}
+          <li>
+            <span class="chip polarity-{{ r.polarity }}">{{ r.polarity }}</span>
+            <span class="confidence">{{ "%.2f"|format(r.confidence) }}</span>
+            <span class="title">{{ r.title }}</span>
+            <span class="status">{{ r.status }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+
+  {% if detail.audit %}
+    <section class="audit">
+      <h4>Audit</h4>
+      <ol>
+        {% for entry in detail.audit %}
+          <li>
+            <span class="at">{{ entry.at }}</span>
+            <span class="actor">{{ entry.actor }}</span>
+            <span class="action">{{ entry.action }}</span>
+            {% if entry.from_status or entry.to_status %}
+              <span class="transition">{{ entry.from_status or "—" }} → {{ entry.to_status or "—" }}</span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+    </section>
+  {% endif %}
+</aside>

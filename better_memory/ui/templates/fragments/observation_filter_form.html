@@ -1,0 +1,35 @@
+<form id="observation-filter-form"
+      class="filter-form"
+      hx-get="{{ url_for('observations_panel') }}"
+      hx-target="#observation-panel"
+      hx-trigger="change from:select, change from:input">
+  <label>Status
+    <select name="status">
+      <option value="">all</option>
+      <option value="active">active</option>
+      <option value="archived">archived</option>
+      <option value="consumed_without_reflection">consumed</option>
+    </select>
+  </label>
+  <label>Outcome
+    <select name="outcome">
+      <option value="">all</option>
+      <option value="success">success</option>
+      <option value="failure">failure</option>
+      <option value="neutral">neutral</option>
+    </select>
+  </label>
+  <label>Component
+    <input type="text" name="component" placeholder="(any)">
+  </label>
+  <button type="button"
+          class="primary"
+          hx-post="{{ url_for('observations_synthesize') }}"
+          hx-target="#observations-synth-banner"
+          hx-swap="innerHTML"
+          hx-indicator="#observations-synth-spinner">
+    Run synthesis
+    <span id="observations-synth-spinner" class="htmx-indicator">…</span>
+  </button>
+  <div id="observations-synth-banner"></div>
+</form>

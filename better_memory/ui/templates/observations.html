@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Observations — better-memory{% endblock %}
+{% block main %}
+<section class="observations">
+  {% include "fragments/observation_filter_form.html" %}
+
+  <div id="observation-panel"
+       hx-get="{{ url_for('observations_panel') }}"
+       hx-include="#observation-filter-form"
+       hx-trigger="load, every 30s, observations-synthesized from:body"
+       hx-swap="innerHTML">
+  </div>
+
+  <div id="observation-drawer"></div>
+</section>
+{% endblock %}

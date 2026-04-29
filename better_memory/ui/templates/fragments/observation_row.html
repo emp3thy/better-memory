@@ -1,0 +1,9 @@
+<div class="card observation-row"
+     hx-get="{{ url_for('observation_drawer', id=row.id) }}"
+     hx-target="#observation-drawer"
+     hx-swap="innerHTML">
+  <span class="chip outcome-{{ row.outcome }}">{{ row.outcome }}</span>
+  <span class="component">{{ row.component or "—" }}</span>
+  <span class="time">{{ row.created_at[11:16] }}</span>
+  <span class="content">{{ row.content }}</span>
+</div>

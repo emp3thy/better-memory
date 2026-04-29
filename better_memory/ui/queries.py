@@ -65,7 +65,8 @@ def episode_list_for_ui(
                 WHERE o.episode_id = e.id
             ) AS observation_count,
             (
-                SELECT COUNT(DISTINCT rs.reflection_id)  -- DISTINCT: a reflection citing two obs in this episode counts once
+                -- DISTINCT: a reflection citing two obs in this episode counts once
+                SELECT COUNT(DISTINCT rs.reflection_id)
                 FROM reflection_sources rs
                 JOIN observations o ON o.id = rs.observation_id
                 WHERE o.episode_id = e.id
@@ -416,6 +417,189 @@ def reflection_detail(
             updated_at=r_row["updated_at"],
         ),
         sources=sources,
+    )
+
+
+@dataclass(frozen=True)
+class ObservationRow:
+    id: str
+    content: str
+    component: str | None
+    theme: str | None
+    outcome: str
+    status: str
+    created_at: str
+    episode_id: str | None
+
+
+def observation_list_for_ui(
+    conn: sqlite3.Connection,
+    *,
+    project: str,
+    status: str | None = None,
+    outcome: str | None = None,
+    component: str | None = None,
+    limit: int = 100,
+) -> list[ObservationRow]:
+    """Project-scoped observation list with optional filters. Newest first.
+
+    No filter defaults: omitting ``status``/``outcome``/``component``
+    returns observations across all values for that column. The panel
+    shows everything on first load (filters are user-driven).
+    """
+    clauses = ["project = ?"]
+    params: list = [project]
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if outcome is not None:
+        clauses.append("outcome = ?")
+        params.append(outcome)
+    if component is not None:
+        clauses.append("component = ?")
+        params.append(component)
+    where = " AND ".join(clauses)
+    sql = (
+        "SELECT id, content, component, theme, outcome, status, "
+        "       created_at, episode_id "
+        "FROM observations "
+        f"WHERE {where} "
+        "ORDER BY created_at DESC, rowid DESC "
+        "LIMIT ?"
+    )
+    params.append(limit)
+    return [
+        ObservationRow(
+            id=r["id"],
+            content=r["content"],
+            component=r["component"],
+            theme=r["theme"],
+            outcome=r["outcome"],
+            status=r["status"],
+            created_at=r["created_at"],
+            episode_id=r["episode_id"],
+        )
+        for r in conn.execute(sql, params).fetchall()
+    ]
+
+
+@dataclass(frozen=True)
+class ObservationFull:
+    """All columns from observations that the drawer renders."""
+
+    id: str
+    content: str
+    project: str
+    component: str | None
+    theme: str | None
+    tech: str | None
+    trigger_type: str | None
+    outcome: str
+    status: str
+    reinforcement_score: float
+    episode_id: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class LinkedReflectionRow:
+    """One reflection that cites the observation under inspection."""
+
+    id: str
+    title: str
+    polarity: str
+    confidence: float
+    status: str
+
+
+@dataclass(frozen=True)
+class ObservationAuditEntry:
+    at: str
+    actor: str
+    action: str
+    from_status: str | None
+    to_status: str | None
+
+
+@dataclass(frozen=True)
+class ObservationDetail:
+    observation: ObservationFull
+    audit: list[ObservationAuditEntry]
+    reflections: list[LinkedReflectionRow]
+
+
+def observation_detail(
+    conn: sqlite3.Connection, *, observation_id: str
+) -> ObservationDetail | None:
+    """Return one observation with audit + linked reflections, or None."""
+    obs_row = conn.execute(
+        "SELECT id, content, project, component, theme, tech, "
+        "       trigger_type, outcome, status, reinforcement_score, "
+        "       episode_id, created_at "
+        "FROM observations WHERE id = ?",
+        (observation_id,),
+    ).fetchone()
+    if obs_row is None:
+        return None
+
+    observation = ObservationFull(
+        id=obs_row["id"],
+        content=obs_row["content"],
+        project=obs_row["project"],
+        component=obs_row["component"],
+        theme=obs_row["theme"],
+        tech=obs_row["tech"],
+        trigger_type=obs_row["trigger_type"],
+        outcome=obs_row["outcome"],
+        status=obs_row["status"],
+        reinforcement_score=obs_row["reinforcement_score"],
+        episode_id=obs_row["episode_id"],
+        created_at=obs_row["created_at"],
+    )
+
+    audit_rows = conn.execute(
+        "SELECT created_at AS at, actor, action, from_status, to_status "
+        "FROM audit_log "
+        "WHERE entity_type = 'observation' AND entity_id = ? "
+        "ORDER BY created_at DESC, rowid DESC",
+        (observation_id,),
+    ).fetchall()
+    audit = [
+        ObservationAuditEntry(
+            at=r["at"],
+            actor=r["actor"],
+            action=r["action"],
+            from_status=r["from_status"],
+            to_status=r["to_status"],
+        )
+        for r in audit_rows
+    ]
+
+    refl_rows = conn.execute(
+        """
+        SELECT r.id, r.title, r.polarity, r.confidence, r.status
+        FROM reflections r
+        JOIN reflection_sources rs ON rs.reflection_id = r.id
+        WHERE rs.observation_id = ?
+        ORDER BY r.confidence DESC, r.id ASC
+        """,
+        (observation_id,),
+    ).fetchall()
+    reflections = [
+        LinkedReflectionRow(
+            id=r["id"],
+            title=r["title"],
+            polarity=r["polarity"],
+            confidence=r["confidence"],
+            status=r["status"],
+        )
+        for r in refl_rows
+    ]
+
+    return ObservationDetail(
+        observation=observation,
+        audit=audit,
+        reflections=reflections,
     )
 
 
