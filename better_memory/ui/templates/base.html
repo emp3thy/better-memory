@@ -8,13 +8,19 @@
   {# HTMX 2.x default responseHandling skips swaps on 4xx/5xx, so error
      fragments returned by routes (e.g. card-error from synthesis
      failure) never reach the page. Override globally to swap all
-     responses except 204. Both scripts are deferred and execute in
-     document order, so `htmx` is defined when this runs. #}
-  <script defer>
-    htmx.config.responseHandling = [
-      { code: "204", swap: false },
-      { code: ".*", swap: true }
-    ];
+     responses except 204.
+
+     The `defer` attribute is ignored on inline scripts (HTML spec),
+     so we can't rely on document-order execution to put this after
+     htmx.min.js. Wait for DOMContentLoaded — fires after all deferred
+     external scripts have executed, so `htmx` is defined. #}
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      htmx.config.responseHandling = [
+        { code: "204", swap: false },
+        { code: ".*", swap: true }
+      ];
+    });
   </script>
 </head>
 <body>
