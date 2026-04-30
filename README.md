@@ -169,6 +169,48 @@ Your hook command is using `python.exe`; switch to `.venv\Scripts\pythonw.exe`. 
 
 See `docs/superpowers/specs/2026-04-06-better-memory-design.md` for the full design spec — four-layer epistemic hierarchy, hybrid search via FTS5 + sqlite-vec + RRF, reinforcement-weighted ranking, and the consolidation pipeline that lives in Plan 2.
 
+## Observation lifecycle
+
+Observations don't live forever. They flow through four states (`active` → `consumed_*` → `archived` → deleted) driven by two pipelines: **synthesis** (LLM-driven, runs from the UI button or automatically by `memory.start_episode`) and **retention** (manual; spec §13 explicitly defers auto-scheduling).
+
+```mermaid
+stateDiagram-v2
+    [*] --> active: memory.observe
+    active --> consumed_into_reflection: synthesis cites as source<br/>(_apply_new / _apply_augment)
+    active --> consumed_without_reflection: synthesis ignore action<br/>(_apply_ignore)
+    consumed_into_reflection --> archived: Retention Rule A<br/>only retired reflections,<br/>retired ≥ retention_days ago
+    consumed_without_reflection --> archived: Retention Rule B<br/>status changed ≥ retention_days ago
+    active --> archived: Retention Rule C<br/>episode outcome=no_outcome,<br/>ended ≥ retention_days ago
+    consumed_into_reflection --> archived: Retention Rule C
+    consumed_without_reflection --> archived: Retention Rule C
+    archived --> [*]: prune (opt-in)<br/>archived ≥ prune_age_days
+```
+
+**Synthesis transitions** (no deletion, just status flips, atomic per run):
+
+| Outcome | New status | Notes |
+|---|---|---|
+| Cited as a source for a NEW reflection | `consumed_into_reflection` | Linked into `reflection_sources`. |
+| Cited as a NEW source for an EXISTING reflection (`augment`) | `consumed_into_reflection` | Linked into `reflection_sources`. |
+| LLM marks as not reflection-worthy (`ignore`) | `consumed_without_reflection` | No link, just marked done. |
+| Untouched by this run | (unchanged — usually `active`) | Picked up by the next synthesis run. |
+
+`merge` is link-only: source reflection's `reflection_sources` rows move to the target; observation status doesn't change.
+
+**Retention** (`better_memory.services.retention.RetentionService.run`, default `retention_days=90`):
+
+| Rule | Archives observations where … |
+|---|---|
+| **A** | linked only to *retired* reflections, oldest retirement ≥ retention_days old |
+| **B** | `status='consumed_without_reflection'` and the status change was ≥ retention_days ago |
+| **C** | belongs to an episode whose `outcome='no_outcome'` and ended ≥ retention_days ago |
+
+**Prune** (opt-in, `RetentionService.run(..., prune=True, prune_age_days=N)`): hard-deletes `archived` rows older than `prune_age_days`. `dry_run=True` previews the count without deleting. Reflections are **never** auto-deleted.
+
+Retention is invoked manually — there's no scheduler. Triggers today:
+- `memory.run_retention` MCP tool, or
+- Direct call from a script / cron / CI step.
+
 ## License
 
 See [LICENSE](LICENSE).
