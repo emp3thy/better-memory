@@ -25,7 +25,10 @@ class ChatError(RuntimeError):
 
 
 class ChatCompleter(Protocol):
-    """Duck-typed interface for chat completions used by ReflectionSynthesisService and the MCP server."""
+    """Duck-typed interface for chat completions.
+
+    Used by ReflectionSynthesisService and the MCP server.
+    """
 
     async def complete(self, prompt: str) -> str: ...
 
@@ -61,11 +64,19 @@ class OllamaChat:
             self._owns_client = False
 
     async def complete(self, prompt: str) -> str:
-        """Return a single completion for ``prompt``."""
+        """Return a single completion for ``prompt``.
+
+        ``format: "json"`` tells Ollama to constrain output to valid
+        JSON. Every consumer of this client (reflection synthesis +
+        MCP retrieval drafts) parses the response as JSON, so the
+        constraint is unconditional. Without it, models like llama3
+        emit prose around the JSON and the parser fails at character 0.
+        """
         body = {
             "model": self._model,
             "prompt": prompt,
             "stream": False,
+            "format": "json",
         }
 
         last_exc: Exception | None = None
@@ -116,7 +127,7 @@ class OllamaChat:
         if self._owns_client:
             await self._client.aclose()
 
-    async def __aenter__(self) -> "OllamaChat":
+    async def __aenter__(self) -> OllamaChat:
         return self
 
     async def __aexit__(
