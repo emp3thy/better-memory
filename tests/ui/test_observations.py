@@ -70,36 +70,31 @@ class TestObservationsPage:
         body = response.get_data(as_text=True)
         assert "Run synthesis" in body
 
-    def test_synthesis_banner_target_swaps_5xx_error_responses(
+    def test_synthesis_5xx_responses_swap_via_global_htmx_config(
         self, client: FlaskClient
     ):
-        """HTMX drops 4xx/5xx responses by default, so without an
-        explicit shouldSwap override the card-error fragment from a
-        failed POST /observations/synthesize never reaches the page —
-        the user sees a stuck spinner with no feedback.
+        """HTMX 2.x default responseHandling skips swaps on 4xx/5xx,
+        so the card-error fragment returned by a failed
+        POST /observations/synthesize never reaches the page — the
+        user sees no feedback. base.html overrides
+        htmx.config.responseHandling to swap all responses except 204.
 
-        The directive must be on the SWAP TARGET (the banner div), not
-        the requesting button — htmx:beforeSwap fires on the target
-        element, and the button is a sibling, not an ancestor, so the
-        event would never bubble through it.
+        Earlier attempts used per-element hx-on listeners
+        (`hx-on::before-swap`), but htmx:beforeSwap does not fire on
+        non-2xx responses in HTMX 2.x — the event is never dispatched,
+        so the listener never runs. Global responseHandling is the
+        documented mechanism.
         """
+        # The base layout renders on every page, so any tab page works.
         response = client.get("/observations")
         body = response.get_data(as_text=True)
-        # The attribute must live on the same element that carries
-        # id="observations-synth-banner". This regex-free check matches
-        # the rendered substring in either attribute order.
-        assert (
-            'id="observations-synth-banner"' in body
-            and "shouldSwap = true" in body
-        )
-        # Verify they're co-located on the same div (within ~150 chars).
-        banner_idx = body.index('id="observations-synth-banner"')
-        swap_idx = body.index("shouldSwap = true")
-        assert abs(swap_idx - banner_idx) < 150, (
-            "shouldSwap directive must be on the same element as "
-            "id=observations-synth-banner so htmx:beforeSwap fires "
-            "where the listener lives."
-        )
+        assert "htmx.config.responseHandling" in body
+        # The override must keep 204 No Content opted out of swap and
+        # opt all other status codes in.
+        assert '"204"' in body
+        assert '".*"' in body
+        assert "swap: true" in body
+        assert "swap: false" in body
 
 
 class TestServiceWiring:
