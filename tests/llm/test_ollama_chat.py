@@ -62,6 +62,10 @@ class TestOllamaChat:
         assert call["body"]["model"] == "llama3"
         assert call["body"]["prompt"] == "say hi"
         assert call["body"]["stream"] is False
+        # Every caller parses the response as JSON. Constrain Ollama
+        # to JSON output so models like llama3 don't emit prose around
+        # it and break json.loads at character 0.
+        assert call["body"]["format"] == "json"
 
     async def test_complete_retries_on_5xx(self, transport_factory) -> None:
         transport = transport_factory(
