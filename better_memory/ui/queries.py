@@ -535,7 +535,7 @@ class LinkedReflectionRow:
 
 @dataclass(frozen=True)
 class ObservationAuditEntry:
-    at: str
+    created_at: str
     actor: str
     action: str
     from_status: str | None
@@ -579,7 +579,7 @@ def observation_detail(
     )
 
     audit_rows = conn.execute(
-        "SELECT created_at AS at, actor, action, from_status, to_status "
+        "SELECT created_at, actor, action, from_status, to_status "
         "FROM audit_log "
         "WHERE entity_type = 'observation' AND entity_id = ? "
         "ORDER BY created_at DESC, rowid DESC",
@@ -587,7 +587,7 @@ def observation_detail(
     ).fetchall()
     audit = [
         ObservationAuditEntry(
-            at=r["at"],
+            created_at=r["created_at"],
             actor=r["actor"],
             action=r["action"],
             from_status=r["from_status"],
