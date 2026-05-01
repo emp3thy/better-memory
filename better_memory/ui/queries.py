@@ -424,6 +424,7 @@ def reflection_detail(
 class ObservationRow:
     id: str
     content: str
+    project: str
     component: str | None
     theme: str | None
     outcome: str
@@ -435,20 +436,24 @@ class ObservationRow:
 def observation_list_for_ui(
     conn: sqlite3.Connection,
     *,
-    project: str,
+    project: str | None = None,
     status: str | None = None,
     outcome: str | None = None,
     component: str | None = None,
     limit: int = 100,
 ) -> list[ObservationRow]:
-    """Project-scoped observation list with optional filters. Newest first.
+    """Observation list with optional filters. Newest first.
 
-    No filter defaults: omitting ``status``/``outcome``/``component``
-    returns observations across all values for that column. The panel
-    shows everything on first load (filters are user-driven).
+    No filter defaults: omitting ``project``/``status``/``outcome``/
+    ``component`` returns observations across all values for that
+    column. The panel shows everything on first load (filters are
+    user-driven).
     """
-    clauses = ["project = ?"]
-    params: list = [project]
+    clauses: list[str] = []
+    params: list = []
+    if project is not None:
+        clauses.append("project = ?")
+        params.append(project)
     if status is not None:
         clauses.append("status = ?")
         params.append(status)
@@ -458,12 +463,12 @@ def observation_list_for_ui(
     if component is not None:
         clauses.append("component = ?")
         params.append(component)
-    where = " AND ".join(clauses)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
-        "SELECT id, content, component, theme, outcome, status, "
+        "SELECT id, content, project, component, theme, outcome, status, "
         "       created_at, episode_id "
         "FROM observations "
-        f"WHERE {where} "
+        f"{where} "
         "ORDER BY created_at DESC, rowid DESC "
         "LIMIT ?"
     )
@@ -472,6 +477,7 @@ def observation_list_for_ui(
         ObservationRow(
             id=r["id"],
             content=r["content"],
+            project=r["project"],
             component=r["component"],
             theme=r["theme"],
             outcome=r["outcome"],
@@ -480,6 +486,21 @@ def observation_list_for_ui(
             episode_id=r["episode_id"],
         )
         for r in conn.execute(sql, params).fetchall()
+    ]
+
+
+def observation_distinct_projects(conn: sqlite3.Connection) -> list[str]:
+    """Return all distinct project values in the observations table, sorted.
+
+    Powers the Project dropdown on the observations page.
+    """
+    return [
+        r["project"]
+        for r in conn.execute(
+            "SELECT DISTINCT project FROM observations "
+            "WHERE project IS NOT NULL AND project != '' "
+            "ORDER BY project COLLATE NOCASE"
+        ).fetchall()
     ]
 
 
@@ -514,7 +535,7 @@ class LinkedReflectionRow:
 
 @dataclass(frozen=True)
 class ObservationAuditEntry:
-    at: str
+    created_at: str
     actor: str
     action: str
     from_status: str | None
@@ -558,7 +579,7 @@ def observation_detail(
     )
 
     audit_rows = conn.execute(
-        "SELECT created_at AS at, actor, action, from_status, to_status "
+        "SELECT created_at, actor, action, from_status, to_status "
         "FROM audit_log "
         "WHERE entity_type = 'observation' AND entity_id = ? "
         "ORDER BY created_at DESC, rowid DESC",
@@ -566,7 +587,7 @@ def observation_detail(
     ).fetchall()
     audit = [
         ObservationAuditEntry(
-            at=r["at"],
+            created_at=r["created_at"],
             actor=r["actor"],
             action=r["action"],
             from_status=r["from_status"],

@@ -21,6 +21,28 @@ For decisions whose outcome you cannot yet prove, write `outcome='neutral'`, **k
 
 This matches the reinforcement loop's design: `record_use(outcome)` is what moves `reinforcement_score`, so the outcome you stamp there is what future retrievals rank on.
 
+## Working with episodes
+
+`memory.observe` is the per-decision-point write. When focused work has a clear goal you want tracked end-to-end, also bracket it with an episode:
+
+```python
+result = memory.start_episode(
+    goal="Extract the async-bridge helper from ui/app.py",
+)
+# result is {"episode_id": ..., "reflections": {...}}
+# ... memory.observe() calls during the work ...
+memory.close_episode(
+    outcome="success",   # or "abandoned" / "partial" — see hardening
+    summary="One sentence on what was done.",
+)
+```
+
+**Hardening.** Closing an episode with a *real* outcome (`success`, `partial`, or `abandoned` — NOT `no_outcome`) is a stronger reinforcement signal than `record_use` alone. Every observation made during the episode inherits the outcome at synthesis time.
+
+**Background episodes.** Sessions without an explicit `start_episode` get a background episode (no goal) auto-opened by the session-start hook and auto-closed on session-end. You only need `start_episode` / `close_episode` yourself for goal-driven work.
+
+**Lifecycle is automatic.** Observation `status` flips through `active` → `consumed_into_reflection` (cited as a reflection source) or `consumed_without_reflection` (seen by synthesis but not cited). You don't set these — synthesis does. Just `memory.observe()` and trust the pipeline.
+
 ## When to pick each outcome
 
 | Situation | At observe time | Later via record_use |

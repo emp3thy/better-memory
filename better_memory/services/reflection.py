@@ -246,6 +246,11 @@ class ReflectionSynthesisService:
 
     _SHORT_CIRCUIT_WINDOW_MINUTES = 10
 
+    _ZERO_COUNTS: dict[str, int] = {
+        "created": 0, "augmented": 0, "merged": 0,
+        "ignored": 0, "auto_ignored": 0,
+    }
+
     def __init__(
         self,
         conn: sqlite3.Connection,
@@ -256,6 +261,22 @@ class ReflectionSynthesisService:
         self._conn = conn
         self._chat = chat
         self._clock: Callable[[], datetime] = clock or _default_clock
+        self._last_run_counts: dict[str, int] = dict(self._ZERO_COUNTS)
+
+    @property
+    def last_run_counts(self) -> dict[str, int]:
+        """Per-action counts from the most recent synthesize() call.
+
+        Keys: ``created``, ``augmented``, ``merged``, ``ignored`` (LLM-
+        emitted ignore list), ``auto_ignored`` (input batch observations
+        the LLM did not cite, marked consumed_without_reflection so the
+        active set stays honest after the watermark advances).
+
+        All zeros after a short-circuit (no LLM call). Reset to all-zero
+        at the start of each synthesize(), so a caller observing this
+        attribute always sees the freshest run's numbers.
+        """
+        return dict(self._last_run_counts)
 
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
@@ -816,6 +837,32 @@ class ReflectionSynthesisService:
             [now, *valid],
         )
 
+    # ------------------------------------------------------- _auto_ignore_unused
+    def _auto_ignore_unused(self, observation_ids: list[str]) -> int:
+        """Mark input batch observations still 'active' as consumed_without_reflection.
+
+        The watermark advances past every fed-to-LLM observation regardless
+        of whether the LLM acted on it. Without this sweep, observations the
+        LLM ignored (and didn't bother to list in its `ignore` array) would
+        stay status='active' yet never reappear in any future synthesis —
+        stranded in the active pool but invisible to consolidation.
+
+        Bounded to ``observation_ids`` (the batch we fed) so observations
+        written concurrently during the synthesize() call are not affected.
+        Returns the rowcount of newly-flipped rows.
+        """
+        if not observation_ids:
+            return 0
+        now = self._clock().isoformat()
+        placeholders = ",".join("?" * len(observation_ids))
+        cur = self._conn.execute(
+            f"UPDATE observations "
+            f"SET status = 'consumed_without_reflection', status_changed_at = ? "
+            f"WHERE id IN ({placeholders}) AND status = 'active'",
+            [now, *observation_ids],
+        )
+        return cur.rowcount or 0
+
     # --------------------------------------------------------- _upsert_watermark
     def _upsert_watermark(
         self, *, project: str, tech: str | None, goal: str
@@ -904,11 +951,14 @@ class ReflectionSynthesisService:
         When short-circuiting, returns the current reflection buckets
         without calling the LLM.
         """
+        # Reset per-run counters; short-circuit returns all-zero counts.
+        self._last_run_counts = dict(self._ZERO_COUNTS)
         tech = self._normalize_tech(tech)
         if self._should_short_circuit(project=project, tech=tech, goal=goal):
             return self._bucketed_reflections(project=project, tech=tech)
 
         context = self.load_context(project=project, tech=tech)
+        input_obs_ids = [o.id for o in context.observations]
         prompt = self.build_prompt(goal=goal, tech=tech, context=context)
         raw = await self._chat.complete(prompt)
         response = self.parse_response(raw)
@@ -920,6 +970,7 @@ class ReflectionSynthesisService:
             self._apply_augment(response.augment)
             self._apply_merge(response.merge)
             self._apply_ignore(response.ignore)
+            auto_ignored = self._auto_ignore_unused(input_obs_ids)
             self._upsert_watermark(project=project, tech=tech, goal=goal)
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT reflection_synthesize")
@@ -928,6 +979,14 @@ class ReflectionSynthesisService:
         else:
             conn.execute("RELEASE SAVEPOINT reflection_synthesize")
         conn.commit()
+
+        self._last_run_counts = {
+            "created": len(response.new),
+            "augmented": len(response.augment),
+            "merged": len(response.merge),
+            "ignored": len(response.ignore),
+            "auto_ignored": auto_ignored,
+        }
 
         return self._bucketed_reflections(project=project, tech=tech)
 

@@ -198,6 +198,30 @@ class TestObservationDetail:
         assert detail.audit == []
         assert detail.reflections == []
 
+    def test_audit_entry_field_is_created_at(self, conn):
+        """Regression: ObservationAuditEntry exposes the audit_log row
+        timestamp as `created_at`, matching the column name. Avoids the
+        `created_at AS at` translation tax that caused two prior bugs
+        (memories 54446ae9, 87d40804)."""
+        from better_memory.ui.queries import observation_detail
+
+        _seed_episode(conn)
+        _seed_obs(conn, oid="o-1")
+        conn.execute(
+            "INSERT INTO audit_log "
+            "(id, entity_type, entity_id, action, actor, created_at) "
+            "VALUES ('a-1', 'observation', 'o-1', 'create', 'ai', "
+            "'2026-04-26T10:00:00+00:00')"
+        )
+        conn.commit()
+
+        detail = observation_detail(conn, observation_id="o-1")
+        assert detail is not None
+        assert len(detail.audit) == 1
+        entry = detail.audit[0]
+        assert entry.created_at == "2026-04-26T10:00:00+00:00"
+        assert not hasattr(entry, "at")
+
     def test_returns_audit_timeline_newest_first(self, conn):
         from better_memory.ui.queries import observation_detail
 
@@ -220,8 +244,8 @@ class TestObservationDetail:
         assert detail is not None
         assert len(detail.audit) == 3
         # Newest first.
-        ats = [e.at for e in detail.audit]
-        assert ats == sorted(ats, reverse=True)
+        timestamps = [e.created_at for e in detail.audit]
+        assert timestamps == sorted(timestamps, reverse=True)
 
     def test_returns_linked_reflections(self, conn):
         from better_memory.ui.queries import observation_detail

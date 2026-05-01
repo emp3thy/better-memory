@@ -148,6 +148,8 @@ class SpoolService:
                     self._maybe_open_episode_for_session_start(payload)
                 elif event_type == "commit_close":
                     self._maybe_close_episode_for_commit(payload)
+                elif event_type == "session_end":
+                    self._maybe_close_episode_for_session_end(payload)
 
         # ---- Pass 3: unlink committed files -------------------------------
         # Only reached if commit() succeeded. Every file in ``inserted`` now
@@ -250,6 +252,38 @@ class SpoolService:
                 session_id=session_id,
                 outcome="success",
                 close_reason="goal_complete",
+            )
+        except ValueError:
+            # No active episode for this session — stale/duplicate marker.
+            pass
+        except Exception:  # noqa: BLE001 — drain side-effects must not fail drain
+            pass
+
+    def _maybe_close_episode_for_session_end(
+        self, payload: dict[str, object]
+    ) -> None:
+        """Close the active background (unhardened) episode on session_end.
+
+        Hardened episodes (goal != NULL) are left open so the next session's
+        reconcile prompt can resolve them with a real outcome — matches spec
+        §3. Background episodes have no goal to reconcile, so closing them
+        immediately as ``no_outcome`` / ``session_end_reconciled`` keeps the
+        open-episode list clean. Errors are swallowed: drain side-effects
+        must not fail drain.
+        """
+        if self._episodes is None:
+            return
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        try:
+            active = self._episodes.active_episode(session_id)
+            if active is None or active.goal is not None:
+                return
+            self._episodes.close_active(
+                session_id=session_id,
+                outcome="no_outcome",
+                close_reason="session_end_reconciled",
             )
         except ValueError:
             # No active episode for this session — stale/duplicate marker.

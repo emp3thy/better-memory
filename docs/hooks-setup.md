@@ -74,9 +74,11 @@ Adjust the `command` to match your environment — for example:
    subsequent `memory.observe` calls bind to.
 5. **Per-turn observations write to the background episode** via
    auto-binding in `ObservationService.create`.
-6. **Session ends.** The `Stop` hook writes a `session_end` marker. The
-   open episode is NOT auto-closed — it stays open so the next session's
-   reconciliation prompt can resolve it.
+6. **Session ends.** The `Stop` hook writes a `session_end` marker. On the
+   next drain, an unhardened (background) episode for that session is
+   auto-closed as `outcome=no_outcome`, `close_reason=session_end_reconciled`.
+   A hardened (goal-declared) episode stays open so the next session's
+   reconciliation prompt can resolve it with a real outcome.
 7. **Next session starts.** Claude calls `memory.reconcile_episodes()`,
    sees the prior unclosed episode, and prompts the user in chat per the
    guidance in the CLAUDE.md snippet.

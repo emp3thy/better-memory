@@ -43,7 +43,7 @@
       <ol>
         {% for entry in detail.audit %}
           <li>
-            <span class="at">{{ entry.at }}</span>
+            <span class="at">{{ entry.created_at }}</span>
             <span class="actor">{{ entry.actor }}</span>
             <span class="action">{{ entry.action }}</span>
             {% if entry.from_status or entry.to_status %}

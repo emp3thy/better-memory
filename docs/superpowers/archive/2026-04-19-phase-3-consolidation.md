@@ -1,3 +1,8 @@
+> **SUPERSEDED.** This plan describes the Pipeline / Consolidation / Insight
+> architecture, replaced by the episodic memory redesign. See
+> `docs/superpowers/specs/2026-04-20-episodic-memory-design.md`. Kept for
+> design-decision history; not implementable against the current codebase.
+
 # ConsolidationService — Phase 3 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

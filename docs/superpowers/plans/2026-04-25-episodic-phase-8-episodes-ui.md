@@ -19,7 +19,7 @@
 
 **Reference spec:** `docs/superpowers/specs/2026-04-20-episodic-memory-design.md` §3 (lifecycle), §4 (schema), §8 (UI), §14 (build order).
 
-**Reference plans:** Phase 2 (`2026-04-21-episodic-phase-2-episode-service.md`) for `EpisodeService` shape; UI Phase 1 (`2026-04-19-ui-phase-1-web-skeleton.md`) and UI Phase 2 (`2026-04-19-ui-phase-2-pipeline-kanban.md`) for the existing Flask + HTMX conventions this plan extends.
+**Reference plans:** Phase 2 (`2026-04-21-episodic-phase-2-episode-service.md`) for `EpisodeService` shape; UI Phase 1 (`2026-04-19-ui-phase-1-web-skeleton.md`) and UI Phase 2 (`docs/superpowers/archive/2026-04-19-ui-phase-2-pipeline-kanban.md`) for the existing Flask + HTMX conventions this plan extends.
 
 ---
 

@@ -17,6 +17,22 @@ When to use: before starting any meaningful coding task, or when entering a new 
 
 If a `dont` memory exactly matches what you were about to do, treat that as a hard stop. Look for an alternative or ask the user.
 
+## Drilling into raw observations
+
+`memory.retrieve` returns *distilled reflections* — the reinforcement-weighted lessons synthesis has built from observations. That's almost always what you want.
+
+When reflections aren't specific enough — typically when investigating a specific incident or hunting for an exact prior decision — drop down to raw observations:
+
+```python
+result = memory.retrieve_observations(
+    query="async bridge ollama transport error",
+    component="ui",
+    limit=10,
+)
+```
+
+Hits are ranked by hybrid FTS5 + sqlite-vec relevance. Use this for incident triage and root-cause hunts; use `memory.retrieve` for "should I do X?"
+
 ## Window guidance
 
 - Default `30d` is right for active projects.
