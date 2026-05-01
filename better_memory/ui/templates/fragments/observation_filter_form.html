@@ -3,6 +3,14 @@
       hx-get="{{ url_for('observations_panel') }}"
       hx-target="#observation-panel"
       hx-trigger="change from:select, change from:input">
+  <label>Project
+    <select name="project">
+      <option value="">all</option>
+      {% for p in projects %}
+        <option value="{{ p }}">{{ p }}</option>
+      {% endfor %}
+    </select>
+  </label>
   <label>Status
     <select name="status">
       <option value="">all</option>

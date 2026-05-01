@@ -386,8 +386,11 @@ def create_app(
 
     @app.get("/observations")
     def observations() -> str:
+        conn = app.extensions["db_connection"]
         return render_template(
-            "observations.html", active_tab="observations"
+            "observations.html",
+            active_tab="observations",
+            projects=queries.observation_distinct_projects(conn),
         )
 
     @app.get("/observations/panel")
@@ -399,10 +402,9 @@ def create_app(
             v = args.get(name, "").strip()
             return v or None
 
-        project = _arg("project") or _project_name()
         rows = queries.observation_list_for_ui(
             conn,
-            project=project,
+            project=_arg("project"),
             status=_arg("status"),
             outcome=_arg("outcome"),
             component=_arg("component"),
@@ -447,10 +449,11 @@ def create_app(
         db_path = app.extensions["db_path"]
 
         result: dict | None = None
+        run_counts: dict[str, int] | None = None
         exc_holder: list[BaseException] = []
 
         def _run() -> None:
-            nonlocal result
+            nonlocal result, run_counts
             try:
                 local_conn = connect(db_path)
                 try:
@@ -465,6 +468,7 @@ def create_app(
                             tech=None,
                             project=project,
                         ))
+                        run_counts = svc.last_run_counts
                     finally:
                         # Close the httpx.AsyncClient inside the same
                         # loop that owns it. Wrap in try/except so a
@@ -490,9 +494,14 @@ def create_app(
                 500,
                 {},
             )
-        counts = {k: len(v) for k, v in (result or {}).items()}
+        bucket_counts = {k: len(v) for k, v in (result or {}).items()}
         rendered = render_template(
-            "fragments/observations_synth_banner.html", counts=counts,
+            "fragments/observations_synth_banner.html",
+            counts=bucket_counts,
+            run_counts=run_counts or {
+                "created": 0, "augmented": 0, "merged": 0,
+                "ignored": 0, "auto_ignored": 0,
+            },
         )
         return rendered, 200, {"HX-Trigger": "observations-synthesized"}
 
