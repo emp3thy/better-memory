@@ -25,7 +25,7 @@ Three layers, top-down:
 
 **Observations** — atomic per-event facts. Unchanged in purpose. Schema gains two columns (`episode_id`, `tech`).
 
-**Episodes** — goal-bounded containers. An episode has a soft start (session-start hook opens a background episode with no declared goal) and a hard end (explicit close on goal achievement, abandonment, or superseding). Session-end does not auto-close; unclosed episodes reconcile at the next session start.
+**Episodes** — goal-bounded containers. An episode has a soft start (session-start hook opens a background episode with no declared goal) and a hard end (explicit close on goal achievement, abandonment, or superseding). Session-end auto-closes background (unhardened) episodes as `no_outcome` since they have no goal to reconcile; hardened episodes stay open and reconcile at the next session start.
 
 **Reflections** — generalised lessons. Replace `insights`. Carry a `polarity` (`do`/`dont`/`neutral`), a `phase` (`planning`/`implementation`/`general`), `use_cases`, `hints[]`, `confidence` (0.1-1.0), plus `project` and `tech` tags.
 
@@ -46,7 +46,7 @@ This beats close-time synthesis because the lessons materialise when they are ab
 | Git post-commit hook | Close the active episode: `outcome=success`, `close_reason=goal_complete` |
 | Plan-complete signal (from `superpowers:executing-plans`) | Close as `outcome=success`, `close_reason=plan_complete` |
 | `memory.close_episode(outcome='abandoned', summary=...)` | The LLM calls this when the user steers away ("no, stop, change direction"). `summary` captures what was rejected. |
-| Session-end | **No action.** Open episodes remain open. |
+| Session-end (Stop hook) | If the active episode is **unhardened** (background, `goal=NULL`), close it as `outcome=no_outcome`, `close_reason=session_end_reconciled` on next drain. **Hardened** episodes stay open and reconcile at the next session start. |
 | Next session-start, unclosed episode exists | LLM calls `memory.reconcile_episodes()` and prompts user: *"Prior session left this episode open (goal: X, started: Y). How did it end? (success / abandoned / partial / no_outcome / continuing)"*. Default on no answer: `abandoned`. |
 
 ### Nesting

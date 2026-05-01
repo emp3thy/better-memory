@@ -17,6 +17,7 @@ from better_memory.services.reflection import (
     ReflectionSynthesisService,
     SynthesisContext,
 )
+from tests.conftest import run_async
 
 
 @pytest.fixture
@@ -945,8 +946,7 @@ class TestSynthesizeOrchestrator:
             ]
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        result = asyncio.run(
+        result = run_async(
             svc.synthesize(goal="g2", tech=None, project="p")
         )
 
@@ -988,9 +988,8 @@ class TestSynthesizeOrchestrator:
 
         fake = FakeChat(responses=["not json"])
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
         with pytest.raises(SynthesisResponseError):
-            asyncio.run(
+            run_async(
                 svc.synthesize(goal="g", tech=None, project="p")
             )
 
@@ -1017,8 +1016,7 @@ class TestSynthesizeOrchestrator:
             })]
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        asyncio.run(
+        run_async(
             svc.synthesize(goal="g", tech=None, project="p")
         )
         wm = conn.execute(
@@ -1035,8 +1033,7 @@ class TestSynthesizeOrchestrator:
             })]
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        asyncio.run(
+        run_async(
             svc.synthesize(goal="g", tech=None, project="p")
         )
         wm = conn.execute(
@@ -1090,9 +1087,8 @@ class TestSynthesizeOrchestrator:
 
         monkeypatch.setattr(svc, "_apply_merge", boom)
 
-        import asyncio
         with pytest.raises(RuntimeError, match="forced apply failure"):
-            asyncio.run(svc.synthesize(goal="g", tech=None, project="p"))
+            run_async(svc.synthesize(goal="g", tech=None, project="p"))
 
         # Nothing from _apply_new persists.
         count = conn.execute(
@@ -1111,6 +1107,208 @@ class TestSynthesizeOrchestrator:
             "SELECT status FROM observations WHERE id = 'obs-1'"
         ).fetchone()
         assert obs["status"] == "active"
+
+
+class TestAutoIgnoreUnusedObservations:
+    """synthesize() auto-marks input batch observations the LLM ignored.
+
+    Without this, observations the LLM didn't cite (and didn't explicitly
+    return in `ignore`) would stay status='active' but be permanently
+    excluded by the watermark filter — stranded forever. Auto-ignoring
+    them after each run keeps the active set honest.
+    """
+
+    def test_uncited_active_observations_marked_consumed_without_reflection(
+        self, conn, fixed_clock
+    ):
+        import json as _json
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-cited", project="p", episode_id=ep)
+        _insert_obs(conn, obs_id="obs-uncited", project="p", episode_id=ep)
+        _insert_obs(conn, obs_id="obs-uncited-2", project="p", episode_id=ep)
+        conn.commit()
+
+        # LLM cites obs-cited only; says nothing about the other two.
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [{
+                    "title": "L", "phase": "general", "polarity": "do",
+                    "use_cases": "uc", "hints": [], "tech": None,
+                    "confidence": 0.7,
+                    "source_observation_ids": ["obs-cited"],
+                }],
+                "augment": [], "merge": [], "ignore": [],
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        run_async(svc.synthesize(goal="g2", tech=None, project="p"))
+
+        rows = {
+            r["id"]: r["status"]
+            for r in conn.execute(
+                "SELECT id, status FROM observations WHERE project = 'p'"
+            ).fetchall()
+        }
+        assert rows["obs-cited"] == "consumed_into_reflection"
+        assert rows["obs-uncited"] == "consumed_without_reflection"
+        assert rows["obs-uncited-2"] == "consumed_without_reflection"
+
+    def test_explicit_ignore_takes_precedence_over_auto(
+        self, conn, fixed_clock
+    ):
+        """LLM-returned ignore ids still go through _apply_ignore unchanged;
+        auto-ignore is a no-op for already-flipped rows (status guard)."""
+        import json as _json
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [], "augment": [], "merge": [],
+                "ignore": ["obs-1"],
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        run_async(svc.synthesize(goal="g2", tech=None, project="p"))
+
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'obs-1'"
+        ).fetchone()
+        assert row["status"] == "consumed_without_reflection"
+
+    def test_auto_ignore_does_not_touch_observations_outside_input_batch(
+        self, conn, fixed_clock
+    ):
+        """An observation written AFTER load_context ran (newer than the
+        prior watermark, but not actually fed to this synthesis call)
+        must not be auto-ignored."""
+        import json as _json
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        _insert_obs(conn, obs_id="obs-in-batch", project="p", episode_id=ep)
+        conn.commit()
+
+        # FakeChat that, when called, inserts a NEW obs into the table
+        # to simulate a concurrent write arriving during synthesis.
+        class _RaceyChat:
+            def __init__(self) -> None:
+                self._called = False
+
+            async def complete(self, prompt: str) -> str:
+                if not self._called:
+                    self._called = True
+                    conn.execute(
+                        "INSERT INTO observations "
+                        "(id, content, project, episode_id, created_at, "
+                        "status, status_changed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "obs-arrived-mid-run",
+                            "racey",
+                            "p",
+                            ep,
+                            "2026-04-22T09:30:00+00:00",
+                            "active",
+                            "2026-04-22T09:30:00+00:00",
+                        ),
+                    )
+                return _json.dumps({
+                    "new": [], "augment": [], "merge": [], "ignore": [],
+                })
+
+        svc = ReflectionSynthesisService(
+            conn, chat=_RaceyChat(), clock=fixed_clock
+        )
+        run_async(svc.synthesize(goal="g2", tech=None, project="p"))
+
+        rows = {
+            r["id"]: r["status"]
+            for r in conn.execute(
+                "SELECT id, status FROM observations WHERE project = 'p'"
+            ).fetchall()
+        }
+        assert rows["obs-in-batch"] == "consumed_without_reflection"
+        assert rows["obs-arrived-mid-run"] == "active"
+
+
+class TestLastRunCounts:
+    """synthesize() exposes per-run action counts via last_run_counts."""
+
+    def test_counts_reflect_actions_taken(self, conn, fixed_clock):
+        import json as _json
+
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        for i in range(4):
+            _insert_obs(conn, obs_id=f"obs-{i}", project="p", episode_id=ep)
+        conn.commit()
+
+        fake = FakeChat(
+            responses=[_json.dumps({
+                "new": [{
+                    "title": "L", "phase": "general", "polarity": "do",
+                    "use_cases": "uc", "hints": [], "tech": None,
+                    "confidence": 0.7,
+                    "source_observation_ids": ["obs-0"],
+                }],
+                "augment": [],
+                "merge": [],
+                "ignore": ["obs-1"],
+            })]
+        )
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        run_async(svc.synthesize(goal="g2", tech=None, project="p"))
+
+        counts = svc.last_run_counts
+        assert counts["created"] == 1
+        assert counts["augmented"] == 0
+        assert counts["merged"] == 0
+        assert counts["ignored"] == 1  # explicit
+        # obs-2 and obs-3 are auto-ignored.
+        assert counts["auto_ignored"] == 2
+
+    def test_counts_zero_on_short_circuit(self, conn, fixed_clock):
+        import json as _json
+
+        # Pre-seed a watermark + same-goal trigger short-circuit by inserting
+        # synthesis_runs row directly with last_goal == goal we'll call with,
+        # at "now" (fixed_clock) so within the 10-min window.
+        conn.execute(
+            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
+            "VALUES ('p', '', ?, 'g')",
+            (fixed_clock().isoformat(),),
+        )
+        conn.commit()
+
+        fake = FakeChat(responses=[_json.dumps({
+            "new": [], "augment": [], "merge": [], "ignore": [],
+        })])
+        svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
+        run_async(svc.synthesize(goal="g", tech=None, project="p"))
+
+        counts = svc.last_run_counts
+        assert counts == {
+            "created": 0, "augmented": 0, "merged": 0,
+            "ignored": 0, "auto_ignored": 0,
+        }
 
 
 class TestShortCircuit:
@@ -1132,8 +1330,7 @@ class TestShortCircuit:
         # Empty responses list — if LLM is called, FakeChat raises.
         fake = FakeChat(responses=[])
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        result = asyncio.run(
+        result = run_async(
             svc.synthesize(goal="resume goal", tech=None, project="p")
         )
 
@@ -1159,8 +1356,7 @@ class TestShortCircuit:
             })]
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        asyncio.run(
+        run_async(
             svc.synthesize(goal="new goal", tech=None, project="p")
         )
         # LLM WAS called — different goal.
@@ -1182,8 +1378,7 @@ class TestShortCircuit:
             })]
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        asyncio.run(
+        run_async(
             svc.synthesize(goal="same goal", tech=None, project="p")
         )
         assert len(fake.calls) == 1
@@ -1214,8 +1409,7 @@ class TestShortCircuit:
             })]
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        asyncio.run(
+        run_async(
             svc.synthesize(goal="resume", tech=None, project="p")
         )
         assert len(fake.calls) == 1
@@ -1228,8 +1422,7 @@ class TestShortCircuit:
             })]
         )
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        asyncio.run(
+        run_async(
             svc.synthesize(goal="g", tech=None, project="p")
         )
         assert len(fake.calls) == 1
@@ -1266,8 +1459,7 @@ class TestShortCircuit:
 
         fake = FakeChat(responses=[])  # raises if called
         svc = ReflectionSynthesisService(conn, chat=fake, clock=fixed_clock)
-        import asyncio
-        asyncio.run(
+        run_async(
             svc.synthesize(goal="resume goal", tech=None, project="p")
         )
         assert fake.calls == []

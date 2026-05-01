@@ -675,7 +675,8 @@ class TestDrainCommitCloseEvents:
     def test_drain_commit_close_without_episodes_dependency_is_noop(
         self, tmp_memory_db: Path, tmp_path: Path
     ) -> None:
-        """Back-compat: SpoolService without episodes kwarg drains hook_events and does not attempt close."""
+        """Back-compat: SpoolService without episodes kwarg drains
+        hook_events and does not attempt close."""
         import json as _json
 
         from better_memory.db.connection import connect
@@ -709,5 +710,237 @@ class TestDrainCommitCloseEvents:
             ).fetchall()
             assert len(rows) == 1
             assert rows[0]["event_type"] == "commit_close"
+        finally:
+            conn.close()
+
+
+class TestDrainSessionEndEvents:
+    """drain auto-closes UNHARDENED episodes on session_end markers.
+
+    Hardened (goal != NULL) episodes are intentionally left open so the next
+    session's reconciliation prompt can resolve them per spec §3. Background
+    episodes have nothing to reconcile (no goal) and would otherwise pile up
+    indefinitely, so they close as outcome=no_outcome,
+    close_reason=session_end_reconciled.
+    """
+
+    def test_drain_closes_unhardened_episode_on_session_end(
+        self, tmp_memory_db: Path, tmp_path: Path
+    ) -> None:
+        import json as _json
+
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        from better_memory.services.episode import EpisodeService
+        from better_memory.services.spool import SpoolService
+
+        spool = tmp_path / "spool"
+        spool.mkdir()
+
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        try:
+            episodes = EpisodeService(conn)
+            bg_id = episodes.open_background(
+                session_id="sess-bg-end", project="p"
+            )
+
+            marker = {
+                "event_type": "session_end",
+                "timestamp": "2026-04-30T10:00:00+00:00",
+                "session_id": "sess-bg-end",
+                "cwd": "/p",
+            }
+            (spool / "m.json").write_text(
+                _json.dumps(marker), encoding="utf-8"
+            )
+
+            svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
+            svc.drain()
+
+            row = conn.execute(
+                "SELECT ended_at, outcome, close_reason "
+                "FROM episodes WHERE id = ?",
+                (bg_id,),
+            ).fetchone()
+            assert row["ended_at"] is not None
+            assert row["outcome"] == "no_outcome"
+            assert row["close_reason"] == "session_end_reconciled"
+        finally:
+            conn.close()
+
+    def test_drain_does_not_close_hardened_episode_on_session_end(
+        self, tmp_memory_db: Path, tmp_path: Path
+    ) -> None:
+        """Hardened episodes (goal != NULL) defer to next-session reconciliation."""
+        import json as _json
+
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        from better_memory.services.episode import EpisodeService
+        from better_memory.services.spool import SpoolService
+
+        spool = tmp_path / "spool"
+        spool.mkdir()
+
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        try:
+            episodes = EpisodeService(conn)
+            fg_id = episodes.start_foreground(
+                session_id="sess-fg-end", project="p", goal="ship"
+            )
+
+            marker = {
+                "event_type": "session_end",
+                "timestamp": "2026-04-30T10:00:00+00:00",
+                "session_id": "sess-fg-end",
+                "cwd": "/p",
+            }
+            (spool / "m.json").write_text(
+                _json.dumps(marker), encoding="utf-8"
+            )
+
+            svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
+            svc.drain()
+
+            row = conn.execute(
+                "SELECT ended_at, outcome, close_reason "
+                "FROM episodes WHERE id = ?",
+                (fg_id,),
+            ).fetchone()
+            assert row["ended_at"] is None
+            assert row["outcome"] is None
+            assert row["close_reason"] is None
+        finally:
+            conn.close()
+
+    def test_drain_session_end_without_active_episode_is_noop(
+        self, tmp_memory_db: Path, tmp_path: Path
+    ) -> None:
+        """Stale or duplicate session_end marker must not fail drain."""
+        import json as _json
+
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        from better_memory.services.episode import EpisodeService
+        from better_memory.services.spool import SpoolService
+
+        spool = tmp_path / "spool"
+        spool.mkdir()
+
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        try:
+            episodes = EpisodeService(conn)
+            # No episode open for sess-orphan-end.
+
+            marker = {
+                "event_type": "session_end",
+                "timestamp": "2026-04-30T10:00:00+00:00",
+                "session_id": "sess-orphan-end",
+                "cwd": "/p",
+            }
+            (spool / "m.json").write_text(
+                _json.dumps(marker), encoding="utf-8"
+            )
+
+            svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
+            report = svc.drain()
+            assert report.drained == 1
+            assert report.quarantined == 0
+
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM episodes"
+            ).fetchone()["c"]
+            assert count == 0
+        finally:
+            conn.close()
+
+    def test_drain_session_end_idempotent_on_duplicate_marker(
+        self, tmp_memory_db: Path, tmp_path: Path
+    ) -> None:
+        """Two session_end markers for the same session: first closes, second is no-op."""
+        import json as _json
+
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        from better_memory.services.episode import EpisodeService
+        from better_memory.services.spool import SpoolService
+
+        spool = tmp_path / "spool"
+        spool.mkdir()
+
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        try:
+            episodes = EpisodeService(conn)
+            bg_id = episodes.open_background(
+                session_id="sess-dup", project="p"
+            )
+
+            for i, ts in enumerate(
+                ("2026-04-30T10:00:00+00:00", "2026-04-30T10:00:01+00:00")
+            ):
+                marker = {
+                    "event_type": "session_end",
+                    "timestamp": ts,
+                    "session_id": "sess-dup",
+                    "cwd": "/p",
+                }
+                (spool / f"m{i}.json").write_text(
+                    _json.dumps(marker), encoding="utf-8"
+                )
+
+            svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
+            report = svc.drain()
+            assert report.drained == 2
+            assert report.quarantined == 0
+
+            row = conn.execute(
+                "SELECT ended_at, outcome FROM episodes WHERE id = ?",
+                (bg_id,),
+            ).fetchone()
+            assert row["ended_at"] is not None
+            assert row["outcome"] == "no_outcome"
+        finally:
+            conn.close()
+
+    def test_drain_session_end_without_episodes_dependency_is_noop(
+        self, tmp_memory_db: Path, tmp_path: Path
+    ) -> None:
+        """Back-compat: SpoolService without episodes kwarg drains
+        hook_events and does not attempt close."""
+        import json as _json
+
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        from better_memory.services.spool import SpoolService
+
+        spool = tmp_path / "spool"
+        spool.mkdir()
+
+        conn = connect(tmp_memory_db)
+        apply_migrations(conn)
+        try:
+            marker = {
+                "event_type": "session_end",
+                "timestamp": "2026-04-30T10:00:00+00:00",
+                "session_id": "sess-no-eps",
+                "cwd": "/p",
+            }
+            (spool / "m.json").write_text(
+                _json.dumps(marker), encoding="utf-8"
+            )
+
+            svc = SpoolService(conn, spool_dir=spool)  # no episodes
+            report = svc.drain()
+            assert report.drained == 1
+
+            rows = conn.execute(
+                "SELECT event_type FROM hook_events"
+            ).fetchall()
+            assert len(rows) == 1
+            assert rows[0]["event_type"] == "session_end"
         finally:
             conn.close()
