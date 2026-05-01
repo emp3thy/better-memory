@@ -28,9 +28,9 @@ If an `observe(outcome='neutral')` has no `record_use` yet because the work genu
 
 ## Episodes close themselves (mostly)
 
-If the session ran without an explicit `memory.start_episode`, a *background* episode (no goal) was auto-opened by the session-start hook and is auto-closed by the Stop hook as `outcome='no_outcome'` (via `SpoolService._maybe_close_episode_for_session_end`). Nothing to do.
+If the session ran without an explicit `memory.start_episode`, a *background* episode (no goal) was auto-opened by the session-start hook. The Stop hook writes a `session_end` marker which the next `SpoolService.drain` (typically the next `memory.retrieve` call) consumes via `_maybe_close_episode_for_session_end`, closing the episode as `outcome='no_outcome'`. Nothing to do.
 
-Hardened episodes — those you opened with `start_episode` *and a goal* — stay open across sessions deliberately, so the next session's reconcile prompt can resolve them with a real outcome. If the goal is genuinely complete now, call `memory.close_episode(episode_id, outcome=...)` before wrapping up. That hardens the episode and reinforces every observation inside it.
+Hardened episodes — those you opened with `start_episode` *and a goal* — stay open across sessions deliberately, so the next session's reconcile prompt can resolve them with a real outcome. If the goal is genuinely complete now, call `memory.close_episode(outcome=...)` before wrapping up. That hardens the episode and reinforces every observation inside it.
 
 ## Anti-patterns
 

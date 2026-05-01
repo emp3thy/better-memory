@@ -30,7 +30,7 @@ Recording a `failure` against a stale memory is how you retire bad advice over t
 
 ## Hardening: the strongest signal
 
-`memory.close_episode(episode_id, outcome='success' | 'failure' | 'partial')` is a stronger reinforcement signal than per-observation `record_use`. Every observation made during the episode inherits the outcome at synthesis time.
+`memory.close_episode(outcome='success' | 'partial' | 'abandoned')` is a stronger reinforcement signal than per-observation `record_use`. Every observation made during the episode inherits the outcome at synthesis time.
 
 If the work was opened with `memory.start_episode(...)` and the goal is now resolved, prefer hardening — call `close_episode` with a real outcome. Per-observation `record_use` is still right when you're closing the loop on a single decision (e.g. validating one retrieved memory you applied), but for goal-driven work, hardening is the higher-leverage move.
 

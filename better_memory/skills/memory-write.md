@@ -26,19 +26,18 @@ This matches the reinforcement loop's design: `record_use(outcome)` is what move
 `memory.observe` is the per-decision-point write. When focused work has a clear goal you want tracked end-to-end, also bracket it with an episode:
 
 ```python
-episode_id = memory.start_episode(
-    project="myproj",
+result = memory.start_episode(
     goal="Extract the async-bridge helper from ui/app.py",
 )
+# result is {"episode_id": ..., "reflections": {...}}
 # ... memory.observe() calls during the work ...
 memory.close_episode(
-    episode_id=episode_id,
-    outcome="success",   # or "failure" / "partial" — see hardening
+    outcome="success",   # or "abandoned" / "partial" — see hardening
     summary="One sentence on what was done.",
 )
 ```
 
-**Hardening.** Closing an episode with a *real* outcome (`success`, `failure`, or `partial` — NOT `no_outcome`) is a stronger reinforcement signal than `record_use` alone. Every observation made during the episode inherits the outcome at synthesis time.
+**Hardening.** Closing an episode with a *real* outcome (`success`, `partial`, or `abandoned` — NOT `no_outcome`) is a stronger reinforcement signal than `record_use` alone. Every observation made during the episode inherits the outcome at synthesis time.
 
 **Background episodes.** Sessions without an explicit `start_episode` get a background episode (no goal) auto-opened by the session-start hook and auto-closed on session-end. You only need `start_episode` / `close_episode` yourself for goal-driven work.
 
