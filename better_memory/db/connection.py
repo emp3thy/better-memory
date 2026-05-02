@@ -43,6 +43,11 @@ def connect(db_path: Path) -> sqlite3.Connection:
         # WAL must be set via ``PRAGMA``; it persists across connections.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # busy_timeout: wait up to 5s for write-lock contention before
+        # raising OperationalError. Mitigates the case where an abandoned
+        # synthesize worker (memory 4f7afb58) holds the lock briefly
+        # after the route has already 504'd.
+        conn.execute("PRAGMA busy_timeout=5000")
     except Exception:
         conn.close()
         raise

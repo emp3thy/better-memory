@@ -94,3 +94,15 @@ def test_connect_closes_connection_if_vec_load_fails(tmp_memory_db: Path) -> Non
     assert tmp_memory_db.exists(), "connect should still have created the DB file"
     tmp_memory_db.unlink()
     assert not tmp_memory_db.exists()
+
+
+def test_busy_timeout_pragma_set(tmp_path: Path) -> None:
+    """connect() applies PRAGMA busy_timeout=5000 so abandoned-worker
+    SQLite locks don't immediately fail subsequent writers."""
+    conn = connect(tmp_path / "test.db")
+    try:
+        result = conn.execute("PRAGMA busy_timeout").fetchone()
+        # PRAGMA busy_timeout returns a single value column.
+        assert result[0] == 5000
+    finally:
+        conn.close()
