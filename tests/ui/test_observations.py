@@ -606,3 +606,127 @@ class TestObservationsSynthesize:
         )
         assert resp.status_code == 500
         assert _app_module._synth_busy is False
+
+    def test_busy_flag_cleared_when_connect_raises_during_setup(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: if connect() raises during the route's setup,
+        _synth_busy must still be released — otherwise the route is
+        bricked for the lifetime of the process. The previous version
+        of _build_coro raised before _run was created, so _run's
+        finally (which clears the flag) was never reached."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+
+        # Make connect() raise once it's called from inside _build_coro.
+        # Patch the symbol used by app.py's route (not better_memory.db.connection
+        # globally — the route imports `connect` at module top).
+        original_connect = _app_module.connect
+        call_count = [0]
+
+        def _failing_connect(*args, **kwargs):
+            call_count[0] += 1
+            # Only fail the synthesize route's call, not setup-time
+            # calls (e.g. the create_app path).
+            if call_count[0] == 1:
+                raise RuntimeError("simulated connect failure")
+            return original_connect(*args, **kwargs)
+
+        monkeypatch.setattr(_app_module, "connect", _failing_connect)
+
+        c = app.test_client()
+        resp1 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp1.status_code == 500
+        assert _app_module._synth_busy is False, (
+            "busy flag must be released even when setup raises"
+        )
+
+        # Restore connect; second request must succeed (not 429).
+        monkeypatch.setattr(_app_module, "connect", original_connect)
+
+        async def _ok_complete(self, prompt):
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+        monkeypatch.setattr(OllamaChat, "complete", _ok_complete)
+
+        resp2 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp2.status_code == 200, (
+            f"second request after setup-error should be 200, got "
+            f"{resp2.status_code}: {resp2.data[:200]}"
+        )
+
+    def test_busy_flag_cleared_when_OllamaChat_raises_during_setup(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: if OllamaChat() construction raises during the
+        route's setup, _synth_busy must still be released."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+
+        original_OllamaChat = _app_module.OllamaChat
+        call_count = [0]
+
+        def _failing_OllamaChat(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated OllamaChat failure")
+            return original_OllamaChat(*args, **kwargs)
+
+        monkeypatch.setattr(
+            _app_module, "OllamaChat", _failing_OllamaChat
+        )
+
+        c = app.test_client()
+        resp1 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp1.status_code == 500
+        assert _app_module._synth_busy is False, (
+            "busy flag must be released even when OllamaChat setup raises"
+        )
+
+        # Restore; second request succeeds (not 429).
+        monkeypatch.setattr(
+            _app_module, "OllamaChat", original_OllamaChat
+        )
+
+        async def _ok_complete(self, prompt):
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+        monkeypatch.setattr(
+            original_OllamaChat, "complete", _ok_complete
+        )
+
+        resp2 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp2.status_code == 200, (
+            f"second request after setup-error should be 200, got "
+            f"{resp2.status_code}: {resp2.data[:200]}"
+        )
