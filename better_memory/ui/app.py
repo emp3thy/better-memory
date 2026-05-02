@@ -21,30 +21,44 @@ from better_memory.services.reflection import ReflectionService, ReflectionSynth
 from better_memory.ui import queries
 
 _synth_busy: bool = False
+_synth_token: int = 0
 _synth_lock = threading.Lock()
 
 
-def _try_acquire_synth() -> bool:
+def _try_acquire_synth() -> int | None:
     """Atomically check-and-set the synth busy flag.
 
-    Returns True if acquired (caller now owns the slot), False if
-    another synthesize is already in flight.
+    Returns a unique token (positive int) if acquired (caller now
+    owns the slot), None if another synthesize is already in flight.
+
+    The token is required to release the flag — see _release_synth.
+    Tokens prevent the race where one request's "double release"
+    (e.g. _run's finally + route's except handler) could clear a
+    busy flag that a CONCURRENT request had just acquired.
+    """
+    global _synth_busy, _synth_token
+    with _synth_lock:
+        if _synth_busy:
+            return None
+        _synth_busy = True
+        _synth_token += 1
+        return _synth_token
+
+
+def _release_synth(token: int) -> None:
+    """Release the synth busy flag IF the current token matches.
+
+    Stale-token releases (from a prior request whose worker raced
+    with a fresh request's acquire) are no-ops. Without this guard,
+    a route handler that calls _release_synth() twice (once via
+    _run's finally, once via except-BaseException) could clear the
+    busy state of a third concurrent request that acquired between
+    those two releases.
     """
     global _synth_busy
     with _synth_lock:
-        if _synth_busy:
-            return False
-        _synth_busy = True
-        return True
-
-
-def _release_synth() -> None:
-    """Release the synth busy flag. Called from inside the worker
-    thread's coroutine finally, so it fires regardless of whether
-    the route returned via 200 / 500 / 504."""
-    global _synth_busy
-    with _synth_lock:
-        _synth_busy = False
+        if _synth_token == token:
+            _synth_busy = False
 
 
 def _project_name() -> str:
@@ -463,7 +477,8 @@ def create_app(
         # Concurrency guard: only one synthesize at a time per process.
         # If a previous worker timed out and is still running, the busy
         # flag stays True until that worker's inner finally fires.
-        if not _try_acquire_synth():
+        acquired_token = _try_acquire_synth()
+        if acquired_token is None:
             return (
                 '<div class="card card-error">Synthesis already in '
                 'progress. Wait for it to finish, then try again.</div>',
@@ -525,7 +540,11 @@ def create_app(
                         # succeeded — fixes the leak path where
                         # construction of connect/OllamaChat/svc raises
                         # before _run could establish its finally.
-                        _release_synth()
+                        # Passes the token captured at acquire time so
+                        # a stale release (e.g. on a path where the
+                        # route ALSO releases) can't clobber a
+                        # concurrent request's flag.
+                        _release_synth(acquired_token)
                 return _run()
 
             worker_dispatched = True
@@ -548,15 +567,24 @@ def create_app(
                 # Helper raised a non-WorkerTimeout exception. This
                 # covers two distinct cases:
                 # (a) The coroutine raised inside _run — _run's finally
-                #     already called _release_synth() (idempotent here).
+                #     already called _release_synth(acquired_token).
+                #     Our call here is a no-op because the token has
+                #     already incremented past acquired_token if a
+                #     concurrent request acquired in between, OR the
+                #     state is still busy and we re-clear it (token
+                #     match). Either way, no race with concurrent
+                #     requests.
                 # (b) The helper's own infrastructure failed BEFORE _run
                 #     could establish its finally (e.g. Thread.start()
-                #     exhaustion, asyncio.new_event_loop() failure inside
-                #     the worker, coro_factory() raising). _run never
-                #     ran, so its finally never fired — we MUST release.
+                #     exhaustion, asyncio.new_event_loop() failure
+                #     inside the worker, coro_factory() raising). _run
+                #     never ran, so its finally never fired — we MUST
+                #     release. Token still matches because no
+                #     concurrent acquire could have happened (busy was
+                #     still True).
                 # WorkerTimeout is handled separately above because the
                 # worker is still running and owns the flag's lifecycle.
-                _release_synth()
+                _release_synth(acquired_token)
                 return (
                     f'<div class="card card-error"><p>{escape(str(exc))}'
                     f'</p></div>',
@@ -578,7 +606,7 @@ def create_app(
             # lifecycle (its inner finally has fired or will fire when
             # the abandoned-on-timeout daemon completes).
             if not worker_dispatched:
-                _release_synth()
+                _release_synth(acquired_token)
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:

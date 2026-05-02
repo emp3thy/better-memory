@@ -731,6 +731,52 @@ class TestObservationsSynthesize:
             f"{resp2.status_code}: {resp2.data[:200]}"
         )
 
+    def test_release_synth_with_stale_token_does_not_clear_concurrent_flag(
+        self
+    ):
+        """Regression for follow-up Bugbot finding on PR #18 (Low
+        severity but real concurrency hazard): the route's
+        except-BaseException handler calls _release_synth() AFTER
+        _run's finally already called it. Without token-matching, a
+        concurrent acquire between those two releases would have
+        its busy state cleared by the second release.
+
+        Verifies _release_synth(stale_token) is a no-op when a
+        newer request has acquired with a fresh token.
+        """
+        from better_memory.ui import app as _app_module
+
+        # Reset to known state.
+        _app_module._synth_busy = False
+
+        # Request A acquires.
+        token_a = _app_module._try_acquire_synth()
+        assert token_a is not None
+        assert _app_module._synth_busy is True
+
+        # Pretend A's _run finished and released.
+        _app_module._release_synth(token_a)
+        assert _app_module._synth_busy is False
+
+        # A concurrent Request B acquires (gets a NEW token).
+        token_b = _app_module._try_acquire_synth()
+        assert token_b is not None
+        assert token_b != token_a
+        assert _app_module._synth_busy is True
+
+        # A's route then tries to release again (the double-release
+        # path that was previously a race). Stale token must not
+        # clear B's busy flag.
+        _app_module._release_synth(token_a)
+        assert _app_module._synth_busy is True, (
+            "stale-token release must not clear a concurrent "
+            "request's busy flag"
+        )
+
+        # B's owner releases with its own token: succeeds.
+        _app_module._release_synth(token_b)
+        assert _app_module._synth_busy is False
+
     def test_busy_flag_cleared_when_helper_infrastructure_fails(
         self, client, monkeypatch
     ):
