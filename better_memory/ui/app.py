@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import threading
 import time
@@ -13,12 +12,39 @@ from flask import Flask, abort, redirect, render_template, request, url_for
 from markupsafe import escape
 from werkzeug.wrappers import Response
 
+from better_memory.async_bridge import WorkerTimeout, run_async_in_worker
 from better_memory.config import get_config, resolve_home
 from better_memory.db.connection import connect
 from better_memory.llm.ollama import OllamaChat
 from better_memory.services.episode import EpisodeService
 from better_memory.services.reflection import ReflectionService, ReflectionSynthesisService
 from better_memory.ui import queries
+
+_synth_busy: bool = False
+_synth_lock = threading.Lock()
+
+
+def _try_acquire_synth() -> bool:
+    """Atomically check-and-set the synth busy flag.
+
+    Returns True if acquired (caller now owns the slot), False if
+    another synthesize is already in flight.
+    """
+    global _synth_busy
+    with _synth_lock:
+        if _synth_busy:
+            return False
+        _synth_busy = True
+        return True
+
+
+def _release_synth() -> None:
+    """Release the synth busy flag. Called from inside the worker
+    thread's coroutine finally, so it fires regardless of whether
+    the route returned via 200 / 500 / 504."""
+    global _synth_busy
+    with _synth_lock:
+        _synth_busy = False
 
 
 def _project_name() -> str:
@@ -32,6 +58,7 @@ def create_app(
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
     db_path: Path | None = None,
+    synth_timeout: float = 60.0,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -46,6 +73,8 @@ def create_app(
         If ``False``, skip starting the background watchdog thread.
         ``_check_idle`` is still registered so tests can drive it
         synchronously without spawning threads.
+    synth_timeout:
+        Seconds before a synthesize call is abandoned. Default 60.0.
     """
     app = Flask(__name__)
 
@@ -431,77 +460,78 @@ def create_app(
 
     @app.post("/observations/synthesize")
     def observations_synthesize() -> tuple[str, int, dict[str, str]]:
-        # synthesize() is async; the route is sync. We can't use
-        # asyncio.run() because pyproject.toml sets pytest-asyncio's
-        # asyncio_mode = "auto", so tests run inside an active event
-        # loop and asyncio.run would raise. Dispatch to a fresh-loop
-        # daemon thread instead — works in production (no loop) and
-        # in tests (loop already running).
-        #
-        # The thread also opens its OWN sqlite3 connection (sqlite
-        # enforces same-thread use) AND its own OllamaChat (httpx
-        # AsyncClient pools are bound to the loop they were created
-        # on; sharing across short-lived loops produces transport
-        # errors after the first close).
+        # Concurrency guard: only one synthesize at a time per process.
+        # If a previous worker timed out and is still running, the busy
+        # flag stays True until that worker's inner finally fires.
+        if not _try_acquire_synth():
+            return (
+                '<div class="card card-error">Synthesis already in '
+                'progress. Wait for it to finish, then try again.</div>',
+                429, {},
+            )
+
         project = _project_name()
+        db_path_local = app.extensions["db_path"]
         ollama_host = app.extensions["ollama_host"]
         consolidate_model = app.extensions["consolidate_model"]
-        db_path = app.extensions["db_path"]
 
-        result: dict | None = None
-        run_counts: dict[str, int] | None = None
-        exc_holder: list[BaseException] = []
+        def _build_coro():
+            local_conn = connect(db_path_local)
+            chat = OllamaChat(host=ollama_host, model=consolidate_model)
+            svc = ReflectionSynthesisService(local_conn, chat=chat)
 
-        def _run() -> None:
-            nonlocal result, run_counts
-            try:
-                local_conn = connect(db_path)
+            async def _run():
                 try:
-                    chat = OllamaChat(
-                        host=ollama_host, model=consolidate_model
+                    result = await svc.synthesize(
+                        goal="manual synthesis",
+                        tech=None,
+                        project=project,
                     )
-                    svc = ReflectionSynthesisService(local_conn, chat=chat)
-                    loop = asyncio.new_event_loop()
-                    try:
-                        result = loop.run_until_complete(svc.synthesize(
-                            goal="manual synthesis",
-                            tech=None,
-                            project=project,
-                        ))
-                        run_counts = svc.last_run_counts
-                    finally:
-                        # Close the httpx.AsyncClient inside the same
-                        # loop that owns it. Wrap in try/except so a
-                        # cleanup error doesn't mask a synthesize error.
-                        try:
-                            loop.run_until_complete(chat.aclose())
-                        except BaseException:  # noqa: BLE001
-                            pass
-                        loop.close()
+                    return result, dict(svc.last_run_counts)
                 finally:
-                    local_conn.close()
-            except BaseException as _exc:  # noqa: BLE001
-                exc_holder.append(_exc)
+                    # Cleanup must NOT mask the synthesize result or
+                    # exception (memory 777c89b2). Each cleanup gets
+                    # its own wrapper so one failing doesn't skip the
+                    # other.
+                    try:
+                        await chat.aclose()
+                    except BaseException:  # noqa: BLE001
+                        pass
+                    try:
+                        local_conn.close()
+                    except BaseException:  # noqa: BLE001
+                        pass
+                    # Always-last: release the busy flag. Runs in the
+                    # worker thread regardless of route exit path.
+                    _release_synth()
+            return _run()
 
-        worker = threading.Thread(target=_run, daemon=True)
-        worker.start()
-        worker.join()
-
-        if exc_holder:
-            exc = exc_holder[0]
-            return (
-                f'<div class="card card-error"><p>{escape(str(exc))}</p></div>',
-                500,
-                {},
+        try:
+            result, run_counts = run_async_in_worker(
+                _build_coro, timeout=synth_timeout,
             )
-        bucket_counts = {k: len(v) for k, v in (result or {}).items()}
+        except WorkerTimeout:
+            # Worker abandoned but still running; _release_synth()
+            # will fire when it eventually finishes. Until then,
+            # new requests get 429.
+            return (
+                f'<div class="card card-error">Synthesis timed out '
+                f'after {synth_timeout}s. The worker is still running; '
+                f'the UI will be available again shortly.</div>',
+                504, {},
+            )
+        except BaseException as exc:  # noqa: BLE001
+            return (
+                f'<div class="card card-error"><p>{escape(str(exc))}'
+                f'</p></div>',
+                500, {},
+            )
+
+        bucket_counts = {k: len(v) for k, v in result.items()}
         rendered = render_template(
             "fragments/observations_synth_banner.html",
             counts=bucket_counts,
-            run_counts=run_counts or {
-                "created": 0, "augmented": 0, "merged": 0,
-                "ignored": 0, "auto_ignored": 0,
-            },
+            run_counts=run_counts,
         )
         return rendered, 200, {"HX-Trigger": "observations-synthesized"}
 

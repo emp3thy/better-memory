@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
 
 from better_memory.db.connection import connect
+from better_memory.llm.ollama import OllamaChat
 
 
 def _seed_episode(
@@ -487,3 +489,120 @@ class TestObservationsSynthesize:
         assert aclose_count[0] == 2, (
             f"expected 2 aclose() calls, got {aclose_count[0]}"
         )
+
+    def test_synthesize_returns_429_when_already_in_flight(self, client):
+        """If a synthesis worker is already in-flight (busy flag set),
+        a second concurrent request returns 429 immediately."""
+        from better_memory.ui import app as _app_module
+
+        _app_module._synth_busy = True
+        try:
+            resp = client.post(
+                "/observations/synthesize",
+                headers={"Origin": "http://localhost"},
+            )
+            assert resp.status_code == 429
+            assert b"already in progress" in resp.data
+        finally:
+            _app_module._synth_busy = False
+
+    def test_synthesize_returns_504_on_timeout(
+        self, tmp_path, monkeypatch
+    ):
+        """If the worker exceeds the timeout, the route returns 504
+        with a clear error card. The test creates an app with a tiny
+        synth_timeout to avoid actually waiting 60s."""
+        from better_memory.ui.app import create_app
+
+        async def _slow_complete(self, prompt):
+            await asyncio.sleep(2.0)
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+
+        monkeypatch.setattr(OllamaChat, "complete", _slow_complete)
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path,
+            start_watchdog=False,
+            synth_timeout=0.5,
+        )
+        c = app.test_client()
+        resp = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 504
+        assert b"timed out" in resp.data
+
+    def test_busy_flag_cleared_after_completion(
+        self, tmp_path, monkeypatch
+    ):
+        """After a synthesis completes (success path), _synth_busy is
+        False so the next call goes through."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        async def _ok_complete(self, prompt):
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+
+        monkeypatch.setattr(OllamaChat, "complete", _ok_complete)
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+        c = app.test_client()
+
+        resp1 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp1.status_code == 200
+        assert _app_module._synth_busy is False
+
+        resp2 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp2.status_code == 200
+
+    def test_busy_flag_cleared_after_exception(
+        self, tmp_path, monkeypatch
+    ):
+        """If the synthesize coroutine raises, _synth_busy is still
+        cleared (cleanup happens in the inner finally)."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        async def _bad_complete(self, prompt):
+            raise RuntimeError("simulated synthesis failure")
+
+        monkeypatch.setattr(OllamaChat, "complete", _bad_complete)
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+        c = app.test_client()
+
+        resp = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 500
+        assert _app_module._synth_busy is False
