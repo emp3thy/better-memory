@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
 
 from better_memory.db.connection import connect
+from better_memory.llm.ollama import OllamaChat
 
 
 def _seed_episode(
@@ -487,3 +489,365 @@ class TestObservationsSynthesize:
         assert aclose_count[0] == 2, (
             f"expected 2 aclose() calls, got {aclose_count[0]}"
         )
+
+    def test_synthesize_returns_429_when_already_in_flight(self, client):
+        """If a synthesis worker is already in-flight (busy flag set),
+        a second concurrent request returns 429 immediately."""
+        from better_memory.ui import app as _app_module
+
+        _app_module._synth_busy = True
+        try:
+            resp = client.post(
+                "/observations/synthesize",
+                headers={"Origin": "http://localhost"},
+            )
+            assert resp.status_code == 429
+            assert b"already in progress" in resp.data
+        finally:
+            _app_module._synth_busy = False
+
+    def test_synthesize_returns_504_on_timeout(
+        self, tmp_path, monkeypatch
+    ):
+        """If the worker exceeds the timeout, the route returns 504
+        with a clear error card. The test creates an app with a tiny
+        synth_timeout to avoid actually waiting 60s."""
+        from better_memory.ui.app import create_app
+
+        async def _slow_complete(self, prompt):
+            await asyncio.sleep(2.0)
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+
+        monkeypatch.setattr(OllamaChat, "complete", _slow_complete)
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path,
+            start_watchdog=False,
+            synth_timeout=0.5,
+        )
+        c = app.test_client()
+        resp = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 504
+        assert b"timed out" in resp.data
+
+    def test_busy_flag_cleared_after_completion(
+        self, tmp_path, monkeypatch
+    ):
+        """After a synthesis completes (success path), _synth_busy is
+        False so the next call goes through."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        async def _ok_complete(self, prompt):
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+
+        monkeypatch.setattr(OllamaChat, "complete", _ok_complete)
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+        c = app.test_client()
+
+        resp1 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp1.status_code == 200
+        assert _app_module._synth_busy is False
+
+        resp2 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp2.status_code == 200
+
+    def test_busy_flag_cleared_after_exception(
+        self, tmp_path, monkeypatch
+    ):
+        """If the synthesize coroutine raises, _synth_busy is still
+        cleared (cleanup happens in the inner finally)."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        async def _bad_complete(self, prompt):
+            raise RuntimeError("simulated synthesis failure")
+
+        monkeypatch.setattr(OllamaChat, "complete", _bad_complete)
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+        c = app.test_client()
+
+        resp = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 500
+        assert _app_module._synth_busy is False
+
+    def test_busy_flag_cleared_when_connect_raises_during_setup(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: if connect() raises during the route's setup,
+        _synth_busy must still be released — otherwise the route is
+        bricked for the lifetime of the process. The previous version
+        of _build_coro raised before _run was created, so _run's
+        finally (which clears the flag) was never reached."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+
+        # Make connect() raise once it's called from inside _build_coro.
+        # Patch the symbol used by app.py's route (not better_memory.db.connection
+        # globally — the route imports `connect` at module top).
+        original_connect = _app_module.connect
+        call_count = [0]
+
+        def _failing_connect(*args, **kwargs):
+            call_count[0] += 1
+            # Only fail the synthesize route's call, not setup-time
+            # calls (e.g. the create_app path).
+            if call_count[0] == 1:
+                raise RuntimeError("simulated connect failure")
+            return original_connect(*args, **kwargs)
+
+        monkeypatch.setattr(_app_module, "connect", _failing_connect)
+
+        c = app.test_client()
+        resp1 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp1.status_code == 500
+        assert _app_module._synth_busy is False, (
+            "busy flag must be released even when setup raises"
+        )
+
+        # Restore connect; second request must succeed (not 429).
+        monkeypatch.setattr(_app_module, "connect", original_connect)
+
+        async def _ok_complete(self, prompt):
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+        monkeypatch.setattr(OllamaChat, "complete", _ok_complete)
+
+        resp2 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp2.status_code == 200, (
+            f"second request after setup-error should be 200, got "
+            f"{resp2.status_code}: {resp2.data[:200]}"
+        )
+
+    def test_busy_flag_cleared_when_OllamaChat_raises_during_setup(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: if OllamaChat() construction raises during the
+        route's setup, _synth_busy must still be released."""
+        from better_memory.ui import app as _app_module
+        from better_memory.ui.app import create_app
+
+        db_path = tmp_path / "memory.db"
+        from better_memory.db.connection import connect
+        from better_memory.db.schema import apply_migrations
+        with connect(db_path) as c:
+            apply_migrations(c)
+
+        app = create_app(
+            db_path=db_path, start_watchdog=False
+        )
+
+        original_OllamaChat = _app_module.OllamaChat
+        call_count = [0]
+
+        def _failing_OllamaChat(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated OllamaChat failure")
+            return original_OllamaChat(*args, **kwargs)
+
+        monkeypatch.setattr(
+            _app_module, "OllamaChat", _failing_OllamaChat
+        )
+
+        c = app.test_client()
+        resp1 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp1.status_code == 500
+        assert _app_module._synth_busy is False, (
+            "busy flag must be released even when OllamaChat setup raises"
+        )
+
+        # Restore; second request succeeds (not 429).
+        monkeypatch.setattr(
+            _app_module, "OllamaChat", original_OllamaChat
+        )
+
+        async def _ok_complete(self, prompt):
+            return '{"new":[],"augment":[],"merge":[],"ignore":[]}'
+        monkeypatch.setattr(
+            original_OllamaChat, "complete", _ok_complete
+        )
+
+        resp2 = c.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp2.status_code == 200, (
+            f"second request after setup-error should be 200, got "
+            f"{resp2.status_code}: {resp2.data[:200]}"
+        )
+
+    def test_release_synth_with_stale_token_does_not_clear_concurrent_flag(
+        self
+    ):
+        """Regression for follow-up Bugbot finding on PR #18 (Low
+        severity but real concurrency hazard): the route's
+        except-BaseException handler calls _release_synth() AFTER
+        _run's finally already called it. Without token-matching, a
+        concurrent acquire between those two releases would have
+        its busy state cleared by the second release.
+
+        Verifies _release_synth(stale_token) is a no-op when a
+        newer request has acquired with a fresh token.
+        """
+        from better_memory.ui import app as _app_module
+
+        # Reset to known state.
+        _app_module._synth_busy = False
+
+        # Request A acquires.
+        token_a = _app_module._try_acquire_synth()
+        assert token_a is not None
+        assert _app_module._synth_busy is True
+
+        # Pretend A's _run finished and released.
+        _app_module._release_synth(token_a)
+        assert _app_module._synth_busy is False
+
+        # A concurrent Request B acquires (gets a NEW token).
+        token_b = _app_module._try_acquire_synth()
+        assert token_b is not None
+        assert token_b != token_a
+        assert _app_module._synth_busy is True
+
+        # A's route then tries to release again (the double-release
+        # path that was previously a race). Stale token must not
+        # clear B's busy flag.
+        _app_module._release_synth(token_a)
+        assert _app_module._synth_busy is True, (
+            "stale-token release must not clear a concurrent "
+            "request's busy flag"
+        )
+
+        # B's owner releases with its own token: succeeds.
+        _app_module._release_synth(token_b)
+        assert _app_module._synth_busy is False
+
+    def test_busy_flag_cleared_when_helper_infrastructure_fails(
+        self, client, monkeypatch
+    ):
+        """Regression for follow-up Bugbot finding on PR #18 (Low
+        severity but real): if run_async_in_worker raises a
+        non-WorkerTimeout exception (e.g. threading.Thread.start()
+        exhaustion, asyncio.new_event_loop() failure inside the
+        worker, or coro_factory() raising), the worker's _run
+        coroutine may never execute — so _release_synth() inside
+        _run's finally never fires. With worker_dispatched=True the
+        outer finally also skips release, so the route's
+        except-BaseException branch must release the flag itself.
+        Idempotent on the typical case where _run did establish its
+        finally."""
+        from better_memory.ui import app as _app_module
+
+        def _failing_helper(coro_factory, *, timeout=None):
+            # Simulate infrastructure failure where _run never executes.
+            # Don't call coro_factory() — mimics Thread.start() failure
+            # before the worker body could invoke the factory.
+            raise RuntimeError("simulated worker infrastructure failure")
+
+        monkeypatch.setattr(
+            _app_module, "run_async_in_worker", _failing_helper
+        )
+
+        resp = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 500
+        assert b"simulated worker infrastructure failure" in resp.data
+        assert _app_module._synth_busy is False, (
+            "busy flag must be released when run_async_in_worker raises "
+            "a non-WorkerTimeout exception (the worker's _run finally "
+            "may never have fired)"
+        )
+
+    def test_busy_flag_cleared_when_pre_worker_setup_raises(
+        self, client
+    ):
+        """Regression for Bugbot finding on PR #18 (Low severity but
+        real): pre-worker setup (project name, app.extensions lookups
+        on app.py:473-476) executes BETWEEN the busy flag acquire and
+        the try/except block that wraps run_async_in_worker. If
+        anything in that gap raises (e.g. a missing app.extensions
+        key), the worker is never dispatched and its inner finally
+        never fires — leaking the flag and bricking the route.
+
+        Pops app.extensions['db_path'] to force a KeyError in the
+        pre-worker setup path. In TESTING mode Flask propagates the
+        exception; in production it returns 500. Either way the busy
+        flag must be False after.
+        """
+        from better_memory.ui import app as _app_module
+
+        original_db_path = client.application.extensions.pop("db_path")
+        try:
+            try:
+                resp = client.post(
+                    "/observations/synthesize",
+                    headers={"Origin": "http://localhost"},
+                )
+                # Production path: Flask catches and returns 500.
+                assert resp.status_code == 500
+            except KeyError:
+                # TESTING path: Flask propagates the exception. Expected.
+                pass
+            assert _app_module._synth_busy is False, (
+                "busy flag must be released even when pre-worker "
+                "setup raises before run_async_in_worker is called"
+            )
+        finally:
+            client.application.extensions["db_path"] = original_db_path

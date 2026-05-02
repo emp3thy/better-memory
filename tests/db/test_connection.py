@@ -94,3 +94,40 @@ def test_connect_closes_connection_if_vec_load_fails(tmp_memory_db: Path) -> Non
     assert tmp_memory_db.exists(), "connect should still have created the DB file"
     tmp_memory_db.unlink()
     assert not tmp_memory_db.exists()
+
+
+def test_busy_timeout_pragma_set(tmp_memory_db: Path) -> None:
+    """connect() applies PRAGMA busy_timeout=5000 explicitly, not relying
+    on sqlite3.connect()'s timeout kwarg default. Guards against a future
+    refactor that drops or changes the connection-level timeout."""
+    import sqlite3
+    from unittest.mock import patch
+
+    from better_memory.db.connection import connect
+
+    # Sanity: prove our test would catch removal of the PRAGMA. A bare
+    # connection with timeout=0 has busy_timeout=0; only the PRAGMA brings
+    # it back up to 5000.
+    bare = sqlite3.connect(str(tmp_memory_db), timeout=0)
+    try:
+        assert bare.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+    finally:
+        bare.close()
+
+    # Patch sqlite3.connect inside the connection module to force
+    # timeout=0, isolating the PRAGMA's effect.
+    real_connect = sqlite3.connect
+
+    def forced_connect(*args, **kwargs):
+        kwargs["timeout"] = 0
+        return real_connect(*args, **kwargs)
+
+    with patch(
+        "better_memory.db.connection.sqlite3.connect",
+        side_effect=forced_connect,
+    ):
+        conn = connect(tmp_memory_db)
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        conn.close()

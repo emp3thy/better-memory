@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import threading
 import time
@@ -13,12 +12,53 @@ from flask import Flask, abort, redirect, render_template, request, url_for
 from markupsafe import escape
 from werkzeug.wrappers import Response
 
+from better_memory.async_bridge import WorkerTimeout, run_async_in_worker
 from better_memory.config import get_config, resolve_home
 from better_memory.db.connection import connect
 from better_memory.llm.ollama import OllamaChat
 from better_memory.services.episode import EpisodeService
 from better_memory.services.reflection import ReflectionService, ReflectionSynthesisService
 from better_memory.ui import queries
+
+_synth_busy: bool = False
+_synth_token: int = 0
+_synth_lock = threading.Lock()
+
+
+def _try_acquire_synth() -> int | None:
+    """Atomically check-and-set the synth busy flag.
+
+    Returns a unique token (positive int) if acquired (caller now
+    owns the slot), None if another synthesize is already in flight.
+
+    The token is required to release the flag — see _release_synth.
+    Tokens prevent the race where one request's "double release"
+    (e.g. _run's finally + route's except handler) could clear a
+    busy flag that a CONCURRENT request had just acquired.
+    """
+    global _synth_busy, _synth_token
+    with _synth_lock:
+        if _synth_busy:
+            return None
+        _synth_busy = True
+        _synth_token += 1
+        return _synth_token
+
+
+def _release_synth(token: int) -> None:
+    """Release the synth busy flag IF the current token matches.
+
+    Stale-token releases (from a prior request whose worker raced
+    with a fresh request's acquire) are no-ops. Without this guard,
+    a route handler that calls _release_synth() twice (once via
+    _run's finally, once via except-BaseException) could clear the
+    busy state of a third concurrent request that acquired between
+    those two releases.
+    """
+    global _synth_busy
+    with _synth_lock:
+        if _synth_token == token:
+            _synth_busy = False
 
 
 def _project_name() -> str:
@@ -32,6 +72,7 @@ def create_app(
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
     db_path: Path | None = None,
+    synth_timeout: float = 60.0,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -46,6 +87,8 @@ def create_app(
         If ``False``, skip starting the background watchdog thread.
         ``_check_idle`` is still registered so tests can drive it
         synchronously without spawning threads.
+    synth_timeout:
+        Seconds before a synthesize call is abandoned. Default 60.0.
     """
     app = Flask(__name__)
 
@@ -431,79 +474,139 @@ def create_app(
 
     @app.post("/observations/synthesize")
     def observations_synthesize() -> tuple[str, int, dict[str, str]]:
-        # synthesize() is async; the route is sync. We can't use
-        # asyncio.run() because pyproject.toml sets pytest-asyncio's
-        # asyncio_mode = "auto", so tests run inside an active event
-        # loop and asyncio.run would raise. Dispatch to a fresh-loop
-        # daemon thread instead — works in production (no loop) and
-        # in tests (loop already running).
-        #
-        # The thread also opens its OWN sqlite3 connection (sqlite
-        # enforces same-thread use) AND its own OllamaChat (httpx
-        # AsyncClient pools are bound to the loop they were created
-        # on; sharing across short-lived loops produces transport
-        # errors after the first close).
-        project = _project_name()
-        ollama_host = app.extensions["ollama_host"]
-        consolidate_model = app.extensions["consolidate_model"]
-        db_path = app.extensions["db_path"]
+        # Concurrency guard: only one synthesize at a time per process.
+        # If a previous worker timed out and is still running, the busy
+        # flag stays True until that worker's inner finally fires.
+        acquired_token = _try_acquire_synth()
+        if acquired_token is None:
+            return (
+                '<div class="card card-error">Synthesis already in '
+                'progress. Wait for it to finish, then try again.</div>',
+                429, {},
+            )
 
-        result: dict | None = None
-        run_counts: dict[str, int] | None = None
-        exc_holder: list[BaseException] = []
+        # worker_dispatched gates whether the route's `finally` releases
+        # the busy flag. If anything between the acquire above and the
+        # run_async_in_worker call below raises (e.g. KeyError on the
+        # app.extensions lookups), the worker is never dispatched and
+        # its inner finally never fires — so the route MUST release the
+        # flag here. If the worker IS dispatched, the helper guarantees
+        # its inner finally runs (success/exception), or in the
+        # WorkerTimeout case, the worker's daemon thread eventually
+        # runs the finally on its own.
+        worker_dispatched = False
+        try:
+            project = _project_name()
+            db_path_local = app.extensions["db_path"]
+            ollama_host = app.extensions["ollama_host"]
+            consolidate_model = app.extensions["consolidate_model"]
 
-        def _run() -> None:
-            nonlocal result, run_counts
-            try:
-                local_conn = connect(db_path)
-                try:
-                    chat = OllamaChat(
-                        host=ollama_host, model=consolidate_model
-                    )
-                    svc = ReflectionSynthesisService(local_conn, chat=chat)
-                    loop = asyncio.new_event_loop()
+            def _build_coro():
+                async def _run():
+                    local_conn = None
+                    chat = None
                     try:
-                        result = loop.run_until_complete(svc.synthesize(
+                        local_conn = connect(db_path_local)
+                        chat = OllamaChat(
+                            host=ollama_host, model=consolidate_model
+                        )
+                        svc = ReflectionSynthesisService(
+                            local_conn, chat=chat
+                        )
+                        result = await svc.synthesize(
                             goal="manual synthesis",
                             tech=None,
                             project=project,
-                        ))
-                        run_counts = svc.last_run_counts
+                        )
+                        return result, dict(svc.last_run_counts)
                     finally:
-                        # Close the httpx.AsyncClient inside the same
-                        # loop that owns it. Wrap in try/except so a
-                        # cleanup error doesn't mask a synthesize error.
-                        try:
-                            loop.run_until_complete(chat.aclose())
-                        except BaseException:  # noqa: BLE001
-                            pass
-                        loop.close()
-                finally:
-                    local_conn.close()
-            except BaseException as _exc:  # noqa: BLE001
-                exc_holder.append(_exc)
+                        # Cleanup must NOT mask the synthesize result or
+                        # exception (memory 777c89b2). Each cleanup gets
+                        # its own wrapper so one failing doesn't skip the
+                        # other. Both resources may be None if construction
+                        # itself raised — handle that.
+                        if chat is not None:
+                            try:
+                                await chat.aclose()
+                            except BaseException:  # noqa: BLE001
+                                pass
+                        if local_conn is not None:
+                            try:
+                                local_conn.close()
+                            except BaseException:  # noqa: BLE001
+                                pass
+                        # Always-last: release the busy flag. Runs in
+                        # the worker thread regardless of whether setup
+                        # succeeded — fixes the leak path where
+                        # construction of connect/OllamaChat/svc raises
+                        # before _run could establish its finally.
+                        # Passes the token captured at acquire time so
+                        # a stale release (e.g. on a path where the
+                        # route ALSO releases) can't clobber a
+                        # concurrent request's flag.
+                        _release_synth(acquired_token)
+                return _run()
 
-        worker = threading.Thread(target=_run, daemon=True)
-        worker.start()
-        worker.join()
+            worker_dispatched = True
+            try:
+                result, run_counts = run_async_in_worker(
+                    _build_coro, timeout=synth_timeout,
+                )
+            except WorkerTimeout:
+                # Worker abandoned but still running; _release_synth()
+                # will fire when it eventually finishes. Until then,
+                # new requests get 429.
+                return (
+                    f'<div class="card card-error">Synthesis timed out '
+                    f'after {synth_timeout}s. The worker is still '
+                    f'running; the UI will be available again '
+                    f'shortly.</div>',
+                    504, {},
+                )
+            except BaseException as exc:  # noqa: BLE001
+                # Helper raised a non-WorkerTimeout exception. This
+                # covers two distinct cases:
+                # (a) The coroutine raised inside _run — _run's finally
+                #     already called _release_synth(acquired_token).
+                #     Our call here is a no-op because the token has
+                #     already incremented past acquired_token if a
+                #     concurrent request acquired in between, OR the
+                #     state is still busy and we re-clear it (token
+                #     match). Either way, no race with concurrent
+                #     requests.
+                # (b) The helper's own infrastructure failed BEFORE _run
+                #     could establish its finally (e.g. Thread.start()
+                #     exhaustion, asyncio.new_event_loop() failure
+                #     inside the worker, coro_factory() raising). _run
+                #     never ran, so its finally never fired — we MUST
+                #     release. Token still matches because no
+                #     concurrent acquire could have happened (busy was
+                #     still True).
+                # WorkerTimeout is handled separately above because the
+                # worker is still running and owns the flag's lifecycle.
+                _release_synth(acquired_token)
+                return (
+                    f'<div class="card card-error"><p>{escape(str(exc))}'
+                    f'</p></div>',
+                    500, {},
+                )
 
-        if exc_holder:
-            exc = exc_holder[0]
-            return (
-                f'<div class="card card-error"><p>{escape(str(exc))}</p></div>',
-                500,
-                {},
+            bucket_counts = {k: len(v) for k, v in result.items()}
+            rendered = render_template(
+                "fragments/observations_synth_banner.html",
+                counts=bucket_counts,
+                run_counts=run_counts,
             )
-        bucket_counts = {k: len(v) for k, v in (result or {}).items()}
-        rendered = render_template(
-            "fragments/observations_synth_banner.html",
-            counts=bucket_counts,
-            run_counts=run_counts or {
-                "created": 0, "augmented": 0, "merged": 0,
-                "ignored": 0, "auto_ignored": 0,
-            },
-        )
-        return rendered, 200, {"HX-Trigger": "observations-synthesized"}
+            return (
+                rendered, 200, {"HX-Trigger": "observations-synthesized"}
+            )
+        finally:
+            # Release the busy flag if the worker was never dispatched.
+            # If worker_dispatched is True, the worker owns the flag's
+            # lifecycle (its inner finally has fired or will fire when
+            # the abandoned-on-timeout daemon completes).
+            if not worker_dispatched:
+                _release_synth(acquired_token)
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:
