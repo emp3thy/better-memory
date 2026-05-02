@@ -545,6 +545,18 @@ def create_app(
                     504, {},
                 )
             except BaseException as exc:  # noqa: BLE001
+                # Helper raised a non-WorkerTimeout exception. This
+                # covers two distinct cases:
+                # (a) The coroutine raised inside _run — _run's finally
+                #     already called _release_synth() (idempotent here).
+                # (b) The helper's own infrastructure failed BEFORE _run
+                #     could establish its finally (e.g. Thread.start()
+                #     exhaustion, asyncio.new_event_loop() failure inside
+                #     the worker, coro_factory() raising). _run never
+                #     ran, so its finally never fired — we MUST release.
+                # WorkerTimeout is handled separately above because the
+                # worker is still running and owns the flag's lifecycle.
+                _release_synth()
                 return (
                     f'<div class="card card-error"><p>{escape(str(exc))}'
                     f'</p></div>',

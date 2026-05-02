@@ -731,6 +731,44 @@ class TestObservationsSynthesize:
             f"{resp2.status_code}: {resp2.data[:200]}"
         )
 
+    def test_busy_flag_cleared_when_helper_infrastructure_fails(
+        self, client, monkeypatch
+    ):
+        """Regression for follow-up Bugbot finding on PR #18 (Low
+        severity but real): if run_async_in_worker raises a
+        non-WorkerTimeout exception (e.g. threading.Thread.start()
+        exhaustion, asyncio.new_event_loop() failure inside the
+        worker, or coro_factory() raising), the worker's _run
+        coroutine may never execute — so _release_synth() inside
+        _run's finally never fires. With worker_dispatched=True the
+        outer finally also skips release, so the route's
+        except-BaseException branch must release the flag itself.
+        Idempotent on the typical case where _run did establish its
+        finally."""
+        from better_memory.ui import app as _app_module
+
+        def _failing_helper(coro_factory, *, timeout=None):
+            # Simulate infrastructure failure where _run never executes.
+            # Don't call coro_factory() — mimics Thread.start() failure
+            # before the worker body could invoke the factory.
+            raise RuntimeError("simulated worker infrastructure failure")
+
+        monkeypatch.setattr(
+            _app_module, "run_async_in_worker", _failing_helper
+        )
+
+        resp = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 500
+        assert b"simulated worker infrastructure failure" in resp.data
+        assert _app_module._synth_busy is False, (
+            "busy flag must be released when run_async_in_worker raises "
+            "a non-WorkerTimeout exception (the worker's _run finally "
+            "may never have fired)"
+        )
+
     def test_busy_flag_cleared_when_pre_worker_setup_raises(
         self, client
     ):
