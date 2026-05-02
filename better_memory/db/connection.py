@@ -44,9 +44,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         # busy_timeout: wait up to 5s for write-lock contention before
-        # raising OperationalError. Mitigates the case where an abandoned
-        # synthesize worker (memory 4f7afb58) holds the lock briefly
-        # after the route has already 504'd.
+        # raising OperationalError. The /observations/synthesize route's
+        # 60s timeout may abandon a worker thread that briefly holds the
+        # write lock after the route has already returned 504; this
+        # PRAGMA gives the next writer time to wait the abandoned worker
+        # out. Defense-in-depth: sqlite3.connect()'s timeout kwarg
+        # default also gives 5000, but this PRAGMA survives any future
+        # refactor that drops the kwarg default.
         conn.execute("PRAGMA busy_timeout=5000")
     except Exception:
         conn.close()
