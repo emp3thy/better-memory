@@ -470,81 +470,103 @@ def create_app(
                 429, {},
             )
 
-        project = _project_name()
-        db_path_local = app.extensions["db_path"]
-        ollama_host = app.extensions["ollama_host"]
-        consolidate_model = app.extensions["consolidate_model"]
-
-        def _build_coro():
-            async def _run():
-                local_conn = None
-                chat = None
-                try:
-                    local_conn = connect(db_path_local)
-                    chat = OllamaChat(
-                        host=ollama_host, model=consolidate_model
-                    )
-                    svc = ReflectionSynthesisService(
-                        local_conn, chat=chat
-                    )
-                    result = await svc.synthesize(
-                        goal="manual synthesis",
-                        tech=None,
-                        project=project,
-                    )
-                    return result, dict(svc.last_run_counts)
-                finally:
-                    # Cleanup must NOT mask the synthesize result or
-                    # exception (memory 777c89b2). Each cleanup gets
-                    # its own wrapper so one failing doesn't skip the
-                    # other. Both resources may be None if construction
-                    # itself raised — handle that.
-                    if chat is not None:
-                        try:
-                            await chat.aclose()
-                        except BaseException:  # noqa: BLE001
-                            pass
-                    if local_conn is not None:
-                        try:
-                            local_conn.close()
-                        except BaseException:  # noqa: BLE001
-                            pass
-                    # Always-last: release the busy flag. Runs in the
-                    # worker thread regardless of whether setup
-                    # succeeded — fixes the leak path where construction
-                    # of connect/OllamaChat/svc raises before _run could
-                    # establish its finally.
-                    _release_synth()
-            return _run()
-
+        # worker_dispatched gates whether the route's `finally` releases
+        # the busy flag. If anything between the acquire above and the
+        # run_async_in_worker call below raises (e.g. KeyError on the
+        # app.extensions lookups), the worker is never dispatched and
+        # its inner finally never fires — so the route MUST release the
+        # flag here. If the worker IS dispatched, the helper guarantees
+        # its inner finally runs (success/exception), or in the
+        # WorkerTimeout case, the worker's daemon thread eventually
+        # runs the finally on its own.
+        worker_dispatched = False
         try:
-            result, run_counts = run_async_in_worker(
-                _build_coro, timeout=synth_timeout,
-            )
-        except WorkerTimeout:
-            # Worker abandoned but still running; _release_synth()
-            # will fire when it eventually finishes. Until then,
-            # new requests get 429.
-            return (
-                f'<div class="card card-error">Synthesis timed out '
-                f'after {synth_timeout}s. The worker is still running; '
-                f'the UI will be available again shortly.</div>',
-                504, {},
-            )
-        except BaseException as exc:  # noqa: BLE001
-            return (
-                f'<div class="card card-error"><p>{escape(str(exc))}'
-                f'</p></div>',
-                500, {},
-            )
+            project = _project_name()
+            db_path_local = app.extensions["db_path"]
+            ollama_host = app.extensions["ollama_host"]
+            consolidate_model = app.extensions["consolidate_model"]
 
-        bucket_counts = {k: len(v) for k, v in result.items()}
-        rendered = render_template(
-            "fragments/observations_synth_banner.html",
-            counts=bucket_counts,
-            run_counts=run_counts,
-        )
-        return rendered, 200, {"HX-Trigger": "observations-synthesized"}
+            def _build_coro():
+                async def _run():
+                    local_conn = None
+                    chat = None
+                    try:
+                        local_conn = connect(db_path_local)
+                        chat = OllamaChat(
+                            host=ollama_host, model=consolidate_model
+                        )
+                        svc = ReflectionSynthesisService(
+                            local_conn, chat=chat
+                        )
+                        result = await svc.synthesize(
+                            goal="manual synthesis",
+                            tech=None,
+                            project=project,
+                        )
+                        return result, dict(svc.last_run_counts)
+                    finally:
+                        # Cleanup must NOT mask the synthesize result or
+                        # exception (memory 777c89b2). Each cleanup gets
+                        # its own wrapper so one failing doesn't skip the
+                        # other. Both resources may be None if construction
+                        # itself raised — handle that.
+                        if chat is not None:
+                            try:
+                                await chat.aclose()
+                            except BaseException:  # noqa: BLE001
+                                pass
+                        if local_conn is not None:
+                            try:
+                                local_conn.close()
+                            except BaseException:  # noqa: BLE001
+                                pass
+                        # Always-last: release the busy flag. Runs in
+                        # the worker thread regardless of whether setup
+                        # succeeded — fixes the leak path where
+                        # construction of connect/OllamaChat/svc raises
+                        # before _run could establish its finally.
+                        _release_synth()
+                return _run()
+
+            worker_dispatched = True
+            try:
+                result, run_counts = run_async_in_worker(
+                    _build_coro, timeout=synth_timeout,
+                )
+            except WorkerTimeout:
+                # Worker abandoned but still running; _release_synth()
+                # will fire when it eventually finishes. Until then,
+                # new requests get 429.
+                return (
+                    f'<div class="card card-error">Synthesis timed out '
+                    f'after {synth_timeout}s. The worker is still '
+                    f'running; the UI will be available again '
+                    f'shortly.</div>',
+                    504, {},
+                )
+            except BaseException as exc:  # noqa: BLE001
+                return (
+                    f'<div class="card card-error"><p>{escape(str(exc))}'
+                    f'</p></div>',
+                    500, {},
+                )
+
+            bucket_counts = {k: len(v) for k, v in result.items()}
+            rendered = render_template(
+                "fragments/observations_synth_banner.html",
+                counts=bucket_counts,
+                run_counts=run_counts,
+            )
+            return (
+                rendered, 200, {"HX-Trigger": "observations-synthesized"}
+            )
+        finally:
+            # Release the busy flag if the worker was never dispatched.
+            # If worker_dispatched is True, the worker owns the flag's
+            # lifecycle (its inner finally has fired or will fire when
+            # the abandoned-on-timeout daemon completes).
+            if not worker_dispatched:
+                _release_synth()
 
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:

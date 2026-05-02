@@ -730,3 +730,40 @@ class TestObservationsSynthesize:
             f"second request after setup-error should be 200, got "
             f"{resp2.status_code}: {resp2.data[:200]}"
         )
+
+    def test_busy_flag_cleared_when_pre_worker_setup_raises(
+        self, client
+    ):
+        """Regression for Bugbot finding on PR #18 (Low severity but
+        real): pre-worker setup (project name, app.extensions lookups
+        on app.py:473-476) executes BETWEEN the busy flag acquire and
+        the try/except block that wraps run_async_in_worker. If
+        anything in that gap raises (e.g. a missing app.extensions
+        key), the worker is never dispatched and its inner finally
+        never fires — leaking the flag and bricking the route.
+
+        Pops app.extensions['db_path'] to force a KeyError in the
+        pre-worker setup path. In TESTING mode Flask propagates the
+        exception; in production it returns 500. Either way the busy
+        flag must be False after.
+        """
+        from better_memory.ui import app as _app_module
+
+        original_db_path = client.application.extensions.pop("db_path")
+        try:
+            try:
+                resp = client.post(
+                    "/observations/synthesize",
+                    headers={"Origin": "http://localhost"},
+                )
+                # Production path: Flask catches and returns 500.
+                assert resp.status_code == 500
+            except KeyError:
+                # TESTING path: Flask propagates the exception. Expected.
+                pass
+            assert _app_module._synth_busy is False, (
+                "busy flag must be released even when pre-worker "
+                "setup raises before run_async_in_worker is called"
+            )
+        finally:
+            client.application.extensions["db_path"] = original_db_path
