@@ -55,7 +55,7 @@ website/
 │   ├── js/
 │   │   └── install-tabs.js          # OS tabs in the install section
 │   └── fonts/
-│       ├── DepartureMono-Regular.woff2
+│       ├── Inter-ExtraBold.woff2
 │       ├── JetBrainsMono-Regular.woff2
 │       ├── JetBrainsMono-Medium.woff2
 │       └── JetBrainsMono-Bold.woff2
@@ -99,8 +99,10 @@ extra_javascript:
 
 | Role | Family | Weight | License |
 |---|---|---|---|
-| Display (hero, h1 of each page, section numbers) | **Departure Mono** | 400 | OFL, free |
-| Body (paragraphs, nav, code, tables, everything else) | **JetBrains Mono** | 400, 500, 700 | OFL, free |
+| Display (hero, h1 of each page, large section headlines) | **Inter** | 800 (Extra Bold) | OFL, free |
+| Body, code, eyebrows, nav, tables, small labels | **JetBrains Mono** | 400, 500, 700 | OFL, free |
+
+The display sans is the only non-mono element. Eyebrows (`// LOCAL-FIRST · MCP · CLAUDE-CODE`), navigation, code blocks, body text, table headers, footer — all stay JetBrains Mono. The contrast between Inter's tight modern sans and the surrounding mono-everywhere is the typographic system.
 
 Both self-hosted as `.woff2` in `website/assets/fonts/` via `@font-face`. No external font loaders. `font-display: swap`. Material's own font loader is disabled with `theme.font: false`.
 
@@ -171,7 +173,7 @@ The five non-landing pages keep MkDocs Material's full structure (top tab nav, l
 | Search box | Paper-shade pill, mono `// search` placeholder. Material's search functionality untouched. |
 | Sidebar (left nav) | JetBrains Mono, hairline `--rule` between top-level sections, active page gets a 2px amber left bar. |
 | TOC (right) | Same mono treatment, active heading gets amber left bar. |
-| Page title (h1) | Departure Mono, large, lowercase, ink. |
+| Page title (h1) | Inter ExtraBold, large, lowercase, ink. |
 | Section headings (h2/h3) | Ink, lowercase, slight negative letter-spacing. h2 gets thin top rule. |
 | Body | JetBrains Mono ~15px, line-height 1.65. |
 | Code blocks | `--paper-shade` background, no border. Pygments retuned to amber/ink/muted. |
@@ -214,13 +216,13 @@ No automated visual-regression tooling — overkill for a 6-page site that one p
 
 ## Open questions
 
-None blocking. The two judgment calls flagged above (Departure Mono vs. Geist Mono for display; all-mono body vs. softening with sans) are reversible CSS-variable swaps — settle by inspection during implementation rather than up front.
+None blocking. One judgment call flagged above (all-mono body vs. softening with sans on docs pages) is a reversible CSS-variable swap — settle by inspection during implementation rather than up front.
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| Departure Mono renders too retro/pixelly when seen at full size | One CSS variable swap to Geist Mono. No structural change. |
+| Inter display reads too generic at full size | One CSS variable swap to Geist Sans (more character) or back to a mono (fully terminal). No structural change. |
 | All-mono body text fatigues readers on long docs pages | One CSS variable swap to a sans body font. Component styles unchanged. |
 | Material updates break our overrides | Pin Material version in `pyproject.toml [docs]`. Already pinned — no change. |
 | Self-hosted fonts add page weight | Subset `.woff2` files to Latin only. Regular + Bold only for JetBrains Mono. Total font budget < 80KB. |
