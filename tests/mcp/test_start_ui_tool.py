@@ -36,6 +36,7 @@ class TestStartUITool:
         tool = next(
             t for t in _tool_definitions() if t.name == "memory.start_ui"
         )
+        assert tool.description is not None, "memory.start_ui must have a description"
         assert "stub" not in tool.description.lower()
         assert "Plan 2" not in tool.description
 

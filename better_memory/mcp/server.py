@@ -35,7 +35,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +43,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from better_memory.config import get_config
+from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
@@ -406,7 +406,7 @@ def _serialize_knowledge_doc(doc: KnowledgeDocument) -> dict[str, Any]:
 # --------------------------------------------------------------------------- factory
 
 
-def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
+def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     """Wire services and register tools.
 
     Returns a ``(server, cleanup)`` tuple where ``cleanup`` is an idempotent
@@ -498,7 +498,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             except Exception:  # noqa: BLE001 — retention is best-effort
                 pass
 
-            project = args.get("project") or Path.cwd().name
+            project = args.get("project") or project_name()
             limit_per_bucket = args.get("limit_per_bucket", 20)
             buckets = reflections.retrieve_reflections(
                 project=project,
@@ -510,7 +510,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             return [TextContent(type="text", text=json.dumps(buckets))]
 
         if name == "memory.retrieve_observations":
-            project = args.get("project") or Path.cwd().name
+            project = args.get("project") or project_name()
             results = await observations.list_observations(
                 project=project,
                 episode_id=args.get("episode_id"),
@@ -561,7 +561,7 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             ]
 
         if name == "memory.start_episode":
-            project = Path.cwd().name
+            project = project_name()
             episode_id = episodes.start_foreground(
                 session_id=observations._session_id,
                 project=project,

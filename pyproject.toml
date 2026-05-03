@@ -23,6 +23,7 @@ dev = [
     "pytest-asyncio",
     "pytest-playwright",
     "ruff",
+    "pyright",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -42,3 +43,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["better_memory", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
