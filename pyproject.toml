@@ -25,6 +25,9 @@ dev = [
     "ruff",
     "pyright",
 ]
+docs = [
+    "mkdocs-material",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["better_memory"]
