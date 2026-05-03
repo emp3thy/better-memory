@@ -1,3 +1,12 @@
+---
+template: home.html
+title: better-memory
+description: Memory that sticks between sessions.
+hide:
+  - navigation
+  - toc
+---
+
 # better-memory
 
 A local-first semantic + episodic memory manager for [Claude Code](https://claude.com/claude-code). All state lives on your machine — SQLite databases for observations and the knowledge base, and a local [Ollama](https://ollama.com/) instance for embeddings.

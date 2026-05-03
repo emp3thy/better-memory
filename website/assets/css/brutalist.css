@@ -147,3 +147,36 @@ html, body, .md-typeset {
 .md-typeset table:not([class]) td {
   border-bottom: 1px solid var(--brut-rule);
 }
+
+/* ============================================================
+   Landing page scope
+   ============================================================ */
+
+.brut-landing {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  margin: 0;
+}
+
+.brut-landing > * {
+  /* Sections will set their own backgrounds */
+}
+
+.brut-section {
+  padding: var(--brut-section-y) 32px;
+  background: var(--brut-paper);
+}
+
+.brut-section.brut-shade {
+  background: var(--brut-paper-shade);
+}
+
+.brut-container {
+  max-width: var(--brut-content-w);
+  margin: 0 auto;
+}
+
+.brut-container.brut-wide {
+  max-width: var(--brut-hero-w);
+}
