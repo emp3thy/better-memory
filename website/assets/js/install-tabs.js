@@ -1,5 +1,7 @@
 (function () {
   function initBrutTabs(root) {
+    if (root.dataset.brutTabsInit === '1') return;
+    root.dataset.brutTabsInit = '1';
     const buttons = root.querySelectorAll('.brut-tab');
     const section = root.closest('.brut-section') || document;
     const panes = section.querySelectorAll('.brut-tab-pane');
