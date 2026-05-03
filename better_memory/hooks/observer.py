@@ -94,10 +94,15 @@ def main() -> None:
         (spool_dir / file_name).write_text(
             json.dumps(data), encoding="utf-8"
         )
-    except Exception:
+    except Exception as _exc:
         # Hooks MUST NOT fail. Swallow everything; a silent miss is far
-        # preferable to failing a tool invocation inside Claude Code.
-        pass
+        # better than crashing Claude Code. Best-effort: record the
+        # failure to hook_errors for /diagnostics visibility.
+        try:
+            from better_memory.hooks._error_log import record_hook_error
+            record_hook_error(hook_name="observer", exc=_exc)
+        except BaseException:  # noqa: BLE001
+            pass
     sys.exit(0)
 
 

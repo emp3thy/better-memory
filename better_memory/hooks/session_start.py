@@ -116,9 +116,14 @@ def main() -> None:
         (spool_dir / file_name).write_text(
             json.dumps(data), encoding="utf-8"
         )
-    except Exception:
-        # Hooks must never fail.
-        pass
+    except Exception as _exc:
+        # Hooks must never fail. Best-effort: record to hook_errors
+        # for /diagnostics visibility.
+        try:
+            from better_memory.hooks._error_log import record_hook_error
+            record_hook_error(hook_name="session_start", exc=_exc)
+        except BaseException:  # noqa: BLE001
+            pass
     sys.exit(0)
 
 
