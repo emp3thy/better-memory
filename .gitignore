@@ -25,6 +25,9 @@ build/
 dist/
 *.egg
 
+# MkDocs build output
+site/
+
 # Better-memory runtime state
 .better-memory/
 memory.db
