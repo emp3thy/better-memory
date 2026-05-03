@@ -10,24 +10,12 @@ site_dir: site
 
 theme:
   name: material
+  custom_dir: website/overrides
+  font: false
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: teal
-      accent: teal
-      toggle:
-        icon: material/weather-sunny
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: teal
-      accent: teal
-      toggle:
-        icon: material/weather-night
-        name: Switch to light mode
-  font:
-    text: Inter
-    code: JetBrains Mono
+    scheme: default
+    primary: custom
+    accent: custom
   features:
     - navigation.instant
     - navigation.tracking
@@ -70,3 +58,10 @@ nav:
   - MCP tools: mcp-tools.md
   - Observation lifecycle: observation-lifecycle.md
   - Contributing: contributing.md
+
+extra_css:
+  - assets/css/brutalist.css
+  - assets/css/pygments-brutalist.css
+
+extra_javascript:
+  - assets/js/install-tabs.js
