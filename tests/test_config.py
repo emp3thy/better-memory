@@ -117,3 +117,62 @@ def test_config_auto_prune_true_when_env_set(monkeypatch) -> None:
     from better_memory.config import get_config
     cfg = get_config()
     assert cfg.auto_prune is True
+
+
+def test_project_name_defaults_to_cwd_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no override file, project_name returns cwd's leaf name."""
+    cwd = tmp_path / "my-service"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    from better_memory.config import project_name
+    assert project_name() == "my-service"
+
+
+def test_project_name_explicit_cwd(tmp_path: Path) -> None:
+    """When cwd is passed explicitly, it is used over Path.cwd()."""
+    cwd = tmp_path / "explicit"
+    cwd.mkdir()
+    from better_memory.config import project_name
+    assert project_name(cwd) == "explicit"
+
+
+def test_project_name_override_file_wins(tmp_path: Path) -> None:
+    """A .better-memory file in cwd overrides the directory name."""
+    cwd = tmp_path / "renamed"
+    cwd.mkdir()
+    (cwd / ".better-memory").write_text("canonical-name\n", encoding="utf-8")
+    from better_memory.config import project_name
+    assert project_name(cwd) == "canonical-name"
+
+
+def test_project_name_empty_override_falls_back(tmp_path: Path) -> None:
+    """An empty override file falls back to cwd.name."""
+    cwd = tmp_path / "leaf"
+    cwd.mkdir()
+    (cwd / ".better-memory").write_text("", encoding="utf-8")
+    from better_memory.config import project_name
+    assert project_name(cwd) == "leaf"
+
+
+def test_project_name_whitespace_only_override_falls_back(tmp_path: Path) -> None:
+    """A whitespace-only override file falls back to cwd.name."""
+    cwd = tmp_path / "leaf"
+    cwd.mkdir()
+    (cwd / ".better-memory").write_text("   \n  \n", encoding="utf-8")
+    from better_memory.config import project_name
+    assert project_name(cwd) == "leaf"
+
+
+def test_project_name_multi_line_override_takes_first_non_empty(
+    tmp_path: Path,
+) -> None:
+    """A multi-line override takes the first non-empty stripped line."""
+    cwd = tmp_path / "leaf"
+    cwd.mkdir()
+    (cwd / ".better-memory").write_text(
+        "  first-line  \nignored-second\n", encoding="utf-8"
+    )
+    from better_memory.config import project_name
+    assert project_name(cwd) == "first-line"

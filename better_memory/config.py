@@ -32,6 +32,24 @@ def resolve_home() -> Path:
     return Path(raw).expanduser()
 
 
+def project_name(cwd: Path | None = None) -> str:
+    """Return the canonical project name for ``cwd`` (defaults to ``Path.cwd()``).
+
+    A ``<cwd>/.better-memory`` file overrides the default ``cwd.name``: the
+    first non-empty stripped line is used. Used uniformly by knowledge
+    search, observation writes/reads, episode scoping, the UI panel filter,
+    and hook payloads — every subsystem that buckets state by project must
+    call this helper, never construct the name inline.
+    """
+    cwd = cwd if cwd is not None else Path.cwd()
+    override = cwd / ".better-memory"
+    if override.is_file():
+        text = override.read_text(encoding="utf-8").strip()
+        if text:
+            return text.splitlines()[0].strip()
+    return cwd.name
+
+
 def _resolve_str(env_var: str, default: str) -> str:
     return os.environ.get(env_var, default)
 
