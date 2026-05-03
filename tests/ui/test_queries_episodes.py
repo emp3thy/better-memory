@@ -251,7 +251,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
-        assert detail is not None, "episode_detail should return for ep_id with two shared-reflection observations"
+        assert detail is not None, "episode_detail returns for shared-reflection seed"
         assert len(detail.reflections) == 1
 
     def test_includes_observations_regardless_of_status(self, conn):
@@ -267,7 +267,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
-        assert detail is not None, "episode_detail should return for ep_id with an archived observation"
+        assert detail is not None, "episode_detail returns for archived-observation seed"
         ids = [o.id for o in detail.observations]
         assert "obs-arch" in ids
 
@@ -295,7 +295,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
-        assert detail is not None, "episode_detail should return for ep_id with a retired reflection"
+        assert detail is not None, "episode_detail returns for retired-reflection seed"
         assert len(detail.reflections) == 1
         assert detail.reflections[0].status == "retired"
 

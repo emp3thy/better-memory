@@ -192,7 +192,7 @@ class TestReflectionDetail:
             title="my title", evidence_count=3,
         )
         detail = reflection_detail(conn, reflection_id="r-1")
-        assert detail is not None, "reflection_detail should return for the freshly-inserted reflection"
+        assert detail is not None, "reflection_detail should return for the seeded reflection"
         r = detail.reflection
         assert r.title == "my title"
         assert r.tech == "python"
@@ -233,7 +233,7 @@ class TestReflectionDetail:
         conn.commit()
 
         detail = reflection_detail(conn, reflection_id="r-1")
-        assert detail is not None, "reflection_detail should return for the seeded reflection with two source observations"
+        assert detail is not None, "reflection_detail returns for two-source seed"
         assert len(detail.sources) == 2
         for src in detail.sources:
             assert src.episode_goal == "ship feature"
@@ -269,5 +269,5 @@ class TestReflectionDetail:
         conn.commit()
 
         detail = reflection_detail(conn, reflection_id="r-1")
-        assert detail is not None, "reflection_detail should return for the seeded reflection with ordered source observations"
+        assert detail is not None, "reflection_detail returns for ordered-sources seed"
         assert [s.observation_id for s in detail.sources] == ["obs-new", "obs-old"]
