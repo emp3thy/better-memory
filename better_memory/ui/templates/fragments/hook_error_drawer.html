@@ -1,0 +1,26 @@
+<aside class="drawer">
+  <header class="drawer-header">
+    <span class="exception-type">{{ detail.exception_type }}</span>
+    <span class="created-at">{{ detail.created_at }}</span>
+  </header>
+
+  <section class="metadata">
+    <dl>
+      <dt>hook</dt><dd>{{ detail.hook_name }}</dd>
+      <dt>cwd</dt><dd>{{ detail.cwd or "—" }}</dd>
+      <dt>id</dt><dd>{{ detail.id }}</dd>
+    </dl>
+  </section>
+
+  <section class="message">
+    <h4>Message</h4>
+    <p>{{ detail.exception_message or "—" }}</p>
+  </section>
+
+  {% if detail.traceback %}
+    <section class="traceback">
+      <h4>Traceback</h4>
+      <pre>{{ detail.traceback }}</pre>
+    </section>
+  {% endif %}
+</aside>

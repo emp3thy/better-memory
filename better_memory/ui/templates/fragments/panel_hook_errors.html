@@ -1,0 +1,18 @@
+{% if days %}
+  <div class="panel-actions">
+    <button class="purge-all"
+            hx-post="{{ url_for('hook_errors_purge') }}"
+            hx-confirm="Delete ALL hook errors? This cannot be undone."
+            hx-swap="none">Clear all</button>
+  </div>
+  {% for day, rows in days %}
+    <div class="day">
+      <h3 class="day-header">{{ day }}</h3>
+      {% for row in rows %}
+        {% include "fragments/hook_error_row.html" %}
+      {% endfor %}
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="empty-state"><p>No hook errors recorded.</p></div>
+{% endif %}

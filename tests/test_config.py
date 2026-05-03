@@ -101,3 +101,19 @@ def test_consolidate_model_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONSOLIDATE_MODEL", "mistral")
     cfg = get_config()
     assert cfg.consolidate_model == "mistral"
+
+
+def test_config_auto_prune_defaults_false(monkeypatch) -> None:
+    """Config.auto_prune defaults to False when env var unset."""
+    monkeypatch.delenv("BETTER_MEMORY_AUTO_PRUNE", raising=False)
+    from better_memory.config import get_config
+    cfg = get_config()
+    assert cfg.auto_prune is False
+
+
+def test_config_auto_prune_true_when_env_set(monkeypatch) -> None:
+    """Config.auto_prune is True when BETTER_MEMORY_AUTO_PRUNE=1."""
+    monkeypatch.setenv("BETTER_MEMORY_AUTO_PRUNE", "1")
+    from better_memory.config import get_config
+    cfg = get_config()
+    assert cfg.auto_prune is True

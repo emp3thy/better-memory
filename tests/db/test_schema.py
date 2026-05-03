@@ -225,7 +225,7 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         versions = [r["version"] for r in rows]
-        assert versions == ["0001", "0002", "0003", "0004"]
+        assert versions == ["0001", "0002", "0003", "0004", "0005"]
     finally:
         conn.close()
 

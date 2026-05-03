@@ -1,0 +1,21 @@
+{% if days %}
+  {% for day, rows in days %}
+    <div class="day">
+      <h3 class="day-header">{{ day }}</h3>
+      {% for row in rows %}
+        <div class="card retention-run-row">
+          <span class="time">{{ row.run_at[11:16] }}</span>
+          <span class="trigger">{{ row.triggered_by }}</span>
+          <span class="counts">
+            archived: {{ row.archived_via_retired_reflection
+                       + row.archived_via_consumed_without_reflection
+                       + row.archived_via_no_outcome_episode }}
+            (pruned: {{ row.pruned }})
+          </span>
+        </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="empty-state"><p>No retention runs yet.</p></div>
+{% endif %}

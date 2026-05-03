@@ -640,3 +640,103 @@ def unclosed_episode_count(
         (project,),
     ).fetchone()
     return int(row["n"])
+
+
+@dataclass(frozen=True)
+class HookErrorRow:
+    id: str
+    created_at: str
+    hook_name: str
+    exception_type: str
+    exception_message: str | None
+    traceback: str | None
+    cwd: str | None
+
+
+def hook_errors_list_for_ui(
+    conn: sqlite3.Connection, *, limit: int = 100,
+) -> list[HookErrorRow]:
+    """Return recent hook errors, newest first."""
+    rows = conn.execute(
+        "SELECT id, created_at, hook_name, exception_type, "
+        "       exception_message, traceback, cwd "
+        "FROM hook_errors "
+        "ORDER BY created_at DESC, id DESC "
+        "LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        HookErrorRow(
+            id=r["id"],
+            created_at=r["created_at"],
+            hook_name=r["hook_name"],
+            exception_type=r["exception_type"],
+            exception_message=r["exception_message"],
+            traceback=r["traceback"],
+            cwd=r["cwd"],
+        )
+        for r in rows
+    ]
+
+
+def hook_error_detail(
+    conn: sqlite3.Connection, *, error_id: str,
+) -> HookErrorRow | None:
+    """Single row by id for the drawer view."""
+    row = conn.execute(
+        "SELECT id, created_at, hook_name, exception_type, "
+        "       exception_message, traceback, cwd "
+        "FROM hook_errors WHERE id = ?",
+        (error_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return HookErrorRow(
+        id=row["id"],
+        created_at=row["created_at"],
+        hook_name=row["hook_name"],
+        exception_type=row["exception_type"],
+        exception_message=row["exception_message"],
+        traceback=row["traceback"],
+        cwd=row["cwd"],
+    )
+
+
+@dataclass(frozen=True)
+class RetentionRunRow:
+    id: int
+    run_at: str
+    archived_via_retired_reflection: int
+    archived_via_consumed_without_reflection: int
+    archived_via_no_outcome_episode: int
+    pruned: int
+    triggered_by: str
+
+
+def retention_runs_list_for_ui(
+    conn: sqlite3.Connection, *, limit: int = 30,
+) -> list[RetentionRunRow]:
+    """Return recent retention runs, newest first."""
+    rows = conn.execute(
+        "SELECT id, run_at, archived_via_retired_reflection, "
+        "       archived_via_consumed_without_reflection, "
+        "       archived_via_no_outcome_episode, pruned, triggered_by "
+        "FROM retention_runs "
+        "ORDER BY run_at DESC, id DESC "
+        "LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        RetentionRunRow(
+            id=r["id"],
+            run_at=r["run_at"],
+            archived_via_retired_reflection=r["archived_via_retired_reflection"],
+            archived_via_consumed_without_reflection=r[
+                "archived_via_consumed_without_reflection"
+            ],
+            archived_via_no_outcome_episode=r["archived_via_no_outcome_episode"],
+            pruned=r["pruned"],
+            triggered_by=r["triggered_by"],
+        )
+        for r in rows
+    ]

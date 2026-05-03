@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Diagnostics — better-memory{% endblock %}
+{% block main %}
+<section class="diagnostics">
+  <h2>Hook errors</h2>
+  <div id="hook-errors-panel"
+       hx-get="{{ url_for('hook_errors_panel') }}"
+       hx-trigger="load, every 30s, hook-errors-changed from:body"
+       hx-swap="innerHTML">
+  </div>
+
+  <h2>Retention runs</h2>
+  <div id="retention-runs-panel"
+       hx-get="{{ url_for('retention_runs_panel') }}"
+       hx-trigger="load, every 60s"
+       hx-swap="innerHTML">
+  </div>
+
+  <div id="hook-error-drawer"></div>
+</section>
+{% endblock %}
