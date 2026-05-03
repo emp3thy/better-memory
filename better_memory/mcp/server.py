@@ -35,7 +35,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -406,7 +406,7 @@ def _serialize_knowledge_doc(doc: KnowledgeDocument) -> dict[str, Any]:
 # --------------------------------------------------------------------------- factory
 
 
-def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
+def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     """Wire services and register tools.
 
     Returns a ``(server, cleanup)`` tuple where ``cleanup`` is an idempotent
