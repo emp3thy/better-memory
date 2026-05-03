@@ -108,6 +108,7 @@ One env var roots the runtime filesystem layout:
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model (must produce 768-dim vectors) |
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
+| `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 
 ## MCP tools
 
