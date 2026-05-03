@@ -386,7 +386,7 @@ class KnowledgeService:
         """Build the ``{standards, languages, project}`` bundle for ``cwd``."""
         cwd = Path(cwd)
         detected = set(self.detect_languages(cwd))
-        project_name = self.project_for(cwd)
+        project = self.project_for(cwd)
 
         standards = [
             _row_to_document(row)
@@ -411,7 +411,7 @@ class KnowledgeService:
             for row in self._conn.execute(
                 "SELECT * FROM documents WHERE scope = 'project' AND project = ? "
                 "ORDER BY path",
-                (project_name,),
+                (project,),
             ).fetchall()
         ]
 
