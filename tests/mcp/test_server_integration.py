@@ -223,6 +223,7 @@ async def test_spool_drain_on_retrieve(
     tmp_path: Path,
 ) -> None:
     """A file dropped into the spool is consumed by ``memory.retrieve``."""
+    assert server_params.env is not None, "server_params fixture must populate env"
     spool_dir = Path(server_params.env["BETTER_MEMORY_HOME"]) / "spool"
     spool_dir.mkdir(parents=True, exist_ok=True)
 
