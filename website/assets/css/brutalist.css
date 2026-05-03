@@ -746,3 +746,84 @@ html, body, .md-typeset {
   padding-top: 1.5rem;
   margin-top: 2.5rem;
 }
+
+/* ============================================================
+   Docs page — admonitions
+   ============================================================ */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border: 1px solid var(--brut-ink);
+  border-left: 4px solid var(--brut-ink);
+  border-radius: 0;
+  background: var(--brut-paper);
+  box-shadow: none;
+  margin: 1.5rem 0;
+  font-family: var(--brut-mono);
+  font-size: 14px;
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+  background: transparent;
+  font-family: var(--brut-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  color: var(--brut-ink);
+  padding: 12px 16px 8px;
+}
+.md-typeset .admonition-title::before,
+.md-typeset summary::before { display: none; }
+.md-typeset .admonition > p,
+.md-typeset details > p { padding: 0 16px 12px; }
+
+.md-typeset .admonition.warning,
+.md-typeset details.warning { border-left-color: var(--brut-amber); }
+
+.md-typeset .admonition.note,
+.md-typeset details.note { border-left-color: var(--brut-ink); }
+
+.md-typeset .admonition.tip,
+.md-typeset details.tip { border-left-color: var(--brut-amber); }
+
+.md-typeset .admonition.danger,
+.md-typeset details.danger { border-left-color: var(--brut-amber); }
+
+/* ============================================================
+   Docs page — tables
+   ============================================================ */
+
+.md-typeset table:not([class]) {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  margin: 1.5rem 0;
+}
+
+.md-typeset table:not([class]) th {
+  background: transparent;
+  border-bottom: 2px solid var(--brut-ink);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brut-ink);
+  padding: 12px 14px;
+}
+
+.md-typeset table:not([class]) td {
+  background: transparent;
+  border-bottom: 1px solid var(--brut-rule);
+  padding: 12px 14px;
+  vertical-align: top;
+}
+
+/* Inline code inside tables */
+.md-typeset table:not([class]) code {
+  background: var(--brut-paper-shade);
+  padding: 1px 5px;
+}
