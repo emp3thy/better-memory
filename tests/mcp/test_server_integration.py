@@ -22,6 +22,7 @@ import os
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -121,7 +122,7 @@ async def test_memory_observe_and_retrieve_roundtrip(
                     "outcome": "failure",
                 },
             )
-            fail_id = _single_json(fail_resp)["id"]
+            fail_id = _single_json_dict(fail_resp)["id"]
 
             success_resp = await session.call_tool(
                 "memory.observe",
@@ -130,13 +131,13 @@ async def test_memory_observe_and_retrieve_roundtrip(
                     "outcome": "success",
                 },
             )
-            success_id = _single_json(success_resp)["id"]
+            success_id = _single_json_dict(success_resp)["id"]
 
             retrieve_resp = await session.call_tool(
                 "memory.retrieve",
                 {"query": "probemarker"},
             )
-            payload = _single_json(retrieve_resp)
+            payload = _single_json_dict(retrieve_resp)
 
             # All three buckets + insights + knowledge present as lists.
             assert isinstance(payload["do"], list)
@@ -169,13 +170,13 @@ async def test_memory_record_use_returns_ok(
                 "memory.observe",
                 {"content": "record-use probe", "outcome": "neutral"},
             )
-            obs_id = _single_json(observe_resp)["id"]
+            obs_id = _single_json_dict(observe_resp)["id"]
 
             record_resp = await session.call_tool(
                 "memory.record_use",
                 {"id": obs_id, "outcome": "success"},
             )
-            assert _single_json(record_resp) == {"ok": True}
+            assert _single_json_dict(record_resp) == {"ok": True}
 
 
 async def test_knowledge_search_and_list_return_arrays(
@@ -190,16 +191,14 @@ async def test_knowledge_search_and_list_return_arrays(
             await session.initialize()
 
             list_resp = await session.call_tool("knowledge.list", {})
-            docs = _single_json(list_resp)
-            assert isinstance(docs, list)
+            docs = _single_json_list(list_resp)
             paths = {d["path"] for d in docs}
             assert "standards/testing.md" in paths
 
             search_resp = await session.call_tool(
                 "knowledge.search", {"query": "probemarker"}
             )
-            hits = _single_json(search_resp)
-            assert isinstance(hits, list)
+            hits = _single_json_list(search_resp)
             assert any(h["path"] == "standards/testing.md" for h in hits)
 
 
@@ -214,7 +213,7 @@ async def test_memory_start_ui_returns_stub_error(
             await session.initialize()
 
             resp = await session.call_tool("memory.start_ui", {})
-            payload = _single_json(resp)
+            payload = _single_json_dict(resp)
             assert "error" in payload
             assert "UI not yet implemented" in payload["error"]
 
@@ -262,8 +261,8 @@ async def test_spool_drain_on_retrieve(
 # ---------------------------------------------------------------------------
 
 
-def _single_json(result: object) -> dict | list:
-    """Extract the single TextContent from a call_tool response and parse it.
+def _parse_single_json(result: object) -> object:
+    """Extract the single TextContent and parse its JSON payload.
 
     The MCP SDK returns a ``CallToolResult`` with ``.content`` as a list of
     content blocks. Our tools always emit exactly one ``TextContent`` whose
@@ -277,4 +276,22 @@ def _single_json(result: object) -> dict | list:
     assert getattr(block, "type", None) == "text", f"not a text block: {block!r}"
     if is_error:
         raise AssertionError(f"tool returned error: {block.text}")
-    return json.loads(block.text)  # type: ignore[no-any-return]
+    return json.loads(block.text)
+
+
+def _single_json_dict(result: object) -> dict[str, Any]:
+    """Parse the single TextContent payload, asserting it's a JSON object."""
+    parsed = _parse_single_json(result)
+    assert isinstance(parsed, dict), (
+        f"expected JSON object, got {type(parsed).__name__}"
+    )
+    return parsed
+
+
+def _single_json_list(result: object) -> list[Any]:
+    """Parse the single TextContent payload, asserting it's a JSON array."""
+    parsed = _parse_single_json(result)
+    assert isinstance(parsed, list), (
+        f"expected JSON array, got {type(parsed).__name__}"
+    )
+    return parsed
