@@ -604,3 +604,145 @@ html, body, .md-typeset {
 }
 
 .brut-footer-sep { margin: 0 8px; }
+
+/* ============================================================
+   Docs page — header
+   ============================================================ */
+
+.brut-docs-header.md-header {
+  background: var(--brut-paper);
+  color: var(--brut-ink);
+  box-shadow: none;
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.brut-docs-brand {
+  font-family: var(--brut-mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--brut-ink);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  padding: 14px 0;
+}
+.brut-docs-brand .brut-bracket { color: var(--brut-muted); }
+
+.brut-docs-header-links {
+  display: flex;
+  gap: 24px;
+  margin-left: auto;
+  margin-right: 24px;
+  font-family: var(--brut-mono);
+  font-size: 14px;
+}
+
+.brut-docs-header-links a {
+  color: var(--brut-ink);
+  text-decoration: none;
+  border-bottom: none;
+  padding: 14px 0;
+  transition: color 120ms ease;
+}
+.brut-docs-header-links a:hover { color: var(--brut-amber); background: transparent; }
+
+/* Material search button + drawer adjustments */
+.md-header .md-search__form {
+  background: var(--brut-paper-shade);
+  border-radius: 0;
+}
+.md-header .md-search__input::placeholder { color: var(--brut-muted); }
+.md-header .md-search__input { color: var(--brut-ink); }
+.md-header .md-icon svg { fill: var(--brut-ink); }
+
+/* ============================================================
+   Docs page — sidebar (left nav)
+   ============================================================ */
+
+.md-sidebar--primary {
+  background: var(--brut-paper);
+}
+
+.md-nav__title {
+  font-family: var(--brut-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  color: var(--brut-muted);
+  background: transparent;
+  box-shadow: none;
+  padding: 16px 16px 8px;
+}
+
+.md-nav__list {
+  border-top: 1px solid var(--brut-rule);
+}
+
+.md-nav__item {
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.md-nav__link {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  color: var(--brut-ink);
+  padding: 12px 16px;
+  border-bottom: none;
+  border-left: 2px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.md-nav__link:hover {
+  background: var(--brut-paper-shade);
+  color: var(--brut-ink);
+}
+
+.md-nav__link--active {
+  border-left-color: var(--brut-amber);
+  color: var(--brut-ink);
+  font-weight: 700;
+}
+
+/* ============================================================
+   Docs page — TOC (right)
+   ============================================================ */
+
+.md-sidebar--secondary .md-nav__title {
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.md-sidebar--secondary .md-nav__link {
+  font-size: 12px;
+  border-left: 2px solid transparent;
+  border-bottom: none;
+  padding: 6px 12px;
+}
+.md-sidebar--secondary .md-nav__link--active {
+  border-left-color: var(--brut-amber);
+}
+
+/* ============================================================
+   Docs page — content
+   ============================================================ */
+
+.md-content__inner {
+  padding-top: 32px;
+  padding-bottom: 64px;
+}
+
+.md-typeset h1 {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: clamp(40px, 5vw, 64px);
+  line-height: 0.96;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  color: var(--brut-ink);
+  margin: 0 0 1.5rem;
+}
+
+.md-typeset h2 {
+  border-top: 1px solid var(--brut-rule);
+  padding-top: 1.5rem;
+  margin-top: 2.5rem;
+}
