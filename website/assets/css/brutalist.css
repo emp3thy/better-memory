@@ -159,10 +159,6 @@ html, body, .md-typeset {
   margin: 0;
 }
 
-.brut-landing > * {
-  /* Sections will set their own backgrounds */
-}
-
 .brut-section {
   padding: var(--brut-section-y) 32px;
   background: var(--brut-paper);
@@ -179,4 +175,19 @@ html, body, .md-typeset {
 
 .brut-container.brut-wide {
   max-width: var(--brut-hero-w);
+}
+
+/* When the landing template is in play, neutralize Material's outer
+   wrappers so .brut-section can paint edge-to-edge and .brut-container.brut-wide
+   can actually reach 1100px. */
+.md-main:has(> .md-main__inner > .brut-landing),
+.md-main:has(> .md-main__inner > main.brut-landing) {
+  display: block;
+}
+.md-main__inner:has(> .brut-landing),
+.md-main__inner:has(> main.brut-landing) {
+  display: block;
+  max-width: none;
+  margin: 0;
+  padding: 0;
 }
