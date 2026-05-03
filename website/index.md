@@ -165,3 +165,24 @@ cd better-memory
     <p style="margin-top:18px"><a href="configuration/">full setup guide →</a></p>
   </div>
 </section>
+
+<section class="brut-section brut-shade">
+  <div class="brut-container">
+    <div class="brut-num">06 — TOOLS</div>
+    <h2 class="brut-section-h">the surface area</h2>
+
+    <table class="brut-tools">
+      <thead>
+        <tr><th>tool</th><th>purpose</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><a href="mcp-tools/#memoryobserve">memory.observe</a></td><td>Create a new observation. Returns {"id": ...}.</td></tr>
+        <tr><td><a href="mcp-tools/#memoryretrieve">memory.retrieve</a></td><td>Three outcome buckets + insights + knowledge. Drains spool first.</td></tr>
+        <tr><td><a href="mcp-tools/#memoryrecord_use">memory.record_use</a></td><td>Stamp reinforcement outcome on a memory after validation.</td></tr>
+        <tr><td><a href="mcp-tools/#knowledgesearch">knowledge.search</a></td><td>BM25 search against the knowledge base.</td></tr>
+        <tr><td><a href="mcp-tools/#knowledgelist">knowledge.list</a></td><td>List indexed knowledge docs.</td></tr>
+        <tr><td><a href="mcp-tools/#memorystart_ui">memory.start_ui</a></td><td>Spawn or reuse the management UI; returns {url, reused}.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
