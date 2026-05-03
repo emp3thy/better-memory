@@ -58,6 +58,7 @@ from better_memory.services.knowledge import (
 from better_memory.services.observation import ObservationService
 from better_memory.services.reflection import ReflectionSynthesisService
 from better_memory.services.retention import RetentionService
+from better_memory.services.retention_scheduler import RetentionScheduler
 from better_memory.services.spool import SpoolService
 
 # Module-level migration directories. Packaged alongside the code so
@@ -484,6 +485,17 @@ def create_server() -> tuple[Server, Callable[[], Awaitable[None]]]:
             try:
                 spool.drain()
             except Exception:  # noqa: BLE001 — drain is best-effort
+                pass
+
+            # 2. Maybe run retention. Guard ensures at most once per 24h
+            #    regardless of how often retrieve is called. Best-effort:
+            #    a retention failure must NEVER block memory.retrieve.
+            try:
+                config = get_config()
+                RetentionScheduler(
+                    memory_conn, auto_prune=config.auto_prune
+                ).maybe_run(triggered_by="retrieve")
+            except Exception:  # noqa: BLE001 — retention is best-effort
                 pass
 
             project = args.get("project") or Path.cwd().name

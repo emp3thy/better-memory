@@ -57,6 +57,7 @@ class Config:
     embed_model: str
     consolidate_model: str
     audit_log_retrieved: bool
+    auto_prune: bool
 
 
 def get_config() -> Config:
@@ -77,4 +78,5 @@ def get_config() -> Config:
             "CONSOLIDATE_MODEL", _DEFAULT_CONSOLIDATE_MODEL
         ),
         audit_log_retrieved=_resolve_bool("AUDIT_LOG_RETRIEVED", default=True),
+        auto_prune=_resolve_bool("BETTER_MEMORY_AUTO_PRUNE", default=False),
     )
