@@ -23,6 +23,16 @@ def record_hook_error(*, hook_name: str, exc: BaseException) -> None:
     this helper extends that defensive posture by ensuring its own
     DB write cannot escape.
     """
+    # os.getcwd() can raise OSError (deleted cwd, permission error in a
+    # sandboxed subprocess). If it does AND we don't guard it, the outer
+    # except below would catch it and we'd lose the entire row write —
+    # the diagnostic that's supposed to expose hook failures itself
+    # silently fails on exactly the kind of weird production state where
+    # we most want it to work. Mirror the pattern in session_start.py:50-53.
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
     try:
         home = resolve_home()
         db_path = home / "memory.db"
@@ -40,7 +50,7 @@ def record_hook_error(*, hook_name: str, exc: BaseException) -> None:
                     type(exc).__name__,
                     str(exc),
                     traceback.format_exc(),
-                    os.getcwd(),
+                    cwd,
                 ),
             )
             conn.commit()

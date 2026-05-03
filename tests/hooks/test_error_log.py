@@ -113,3 +113,36 @@ def test_record_hook_error_uses_uuid_id(db_path: Path) -> None:
     assert len(ids) == 2  # both unique
     for id_ in ids:
         assert len(id_) == 32  # uuid4().hex is 32 chars
+
+
+def test_record_hook_error_falls_back_to_empty_cwd_when_getcwd_raises(
+    db_path: Path, monkeypatch
+) -> None:
+    """Regression for code-review M3 on Group C: if os.getcwd() raises
+    (deleted cwd, sandboxed subprocess permission error), the helper
+    must STILL write the row — with cwd='' as the fallback. Otherwise
+    the diagnostic that's supposed to expose hook failures silently
+    fails on exactly the kind of weird production state where we most
+    want it to work."""
+    from better_memory.hooks import _error_log
+    from better_memory.hooks._error_log import record_hook_error
+
+    def _failing_getcwd():
+        raise OSError("simulated deleted cwd")
+
+    monkeypatch.setattr(_error_log.os, "getcwd", _failing_getcwd)
+
+    record_hook_error(hook_name="observer", exc=RuntimeError("x"))
+
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT hook_name, cwd FROM hook_errors"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, (
+        "row should still be written even when os.getcwd() raises"
+    )
+    assert row["hook_name"] == "observer"
+    assert row["cwd"] == ""
