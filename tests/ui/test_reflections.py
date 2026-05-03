@@ -73,7 +73,7 @@ class TestReflectionsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", title="Lesson A")
         _seed_reflection(tmp_db, rid="r-2", title="Lesson B")
 
@@ -87,7 +87,7 @@ class TestReflectionsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-plan", phase="planning", title="Plan")
         _seed_reflection(tmp_db, rid="r-impl", phase="implementation", title="Impl")
 
@@ -101,7 +101,7 @@ class TestReflectionsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-low", confidence=0.3, title="Low")
         _seed_reflection(tmp_db, rid="r-high", confidence=0.9, title="High")
 
@@ -117,7 +117,7 @@ class TestReflectionsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", title="Visible")
 
         response = client.get(
@@ -138,7 +138,7 @@ class TestReflectionDrawer:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(
             tmp_db, rid="r-1", title="My lesson",
             use_cases="when X happens", hints="do Y, then Z",
@@ -161,7 +161,7 @@ class TestReflectionDrawer:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="confirmed")
         response = client.get("/reflections/r-1/drawer")
         body = response.get_data(as_text=True)
@@ -174,7 +174,7 @@ class TestReflectionDrawer:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="retired")
         response = client.get("/reflections/r-1/drawer")
         body = response.get_data(as_text=True)
@@ -191,7 +191,7 @@ class TestReflectionConfirm:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="pending_review")
 
         response = client.post(
@@ -222,7 +222,7 @@ class TestReflectionConfirm:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="retired")
 
         response = client.post(
@@ -238,7 +238,7 @@ class TestReflectionRetire:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="pending_review")
 
         response = client.post(
@@ -262,7 +262,7 @@ class TestReflectionRetire:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="confirmed")
 
         response = client.post(
@@ -283,7 +283,7 @@ class TestReflectionRetire:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="superseded")
 
         response = client.post(
@@ -299,7 +299,7 @@ class TestReflectionEdit:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(
             tmp_db, rid="r-1", use_cases="old uc", hints="old h"
         )
@@ -320,7 +320,7 @@ class TestReflectionEdit:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1")
 
         response = client.post(
@@ -348,7 +348,7 @@ class TestReflectionEdit:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1")
 
         response = client.post(
@@ -363,7 +363,7 @@ class TestReflectionEdit:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="retired")
 
         response = client.post(

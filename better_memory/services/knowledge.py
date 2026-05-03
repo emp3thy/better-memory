@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from better_memory.config import project_name
 from better_memory.search.query import sanitize_fts5_query
 
 
@@ -308,16 +309,10 @@ class KnowledgeService:
     def project_for(self, cwd: Path) -> str:
         """Return the project name for ``cwd``.
 
-        Defaults to ``cwd.name`` (the leaf directory). Overridden by the first
-        non-empty line of ``<cwd>/.better-memory`` when present.
+        Thin wrapper around :func:`better_memory.config.project_name`,
+        kept as a method to preserve the ``KnowledgeService`` public API.
         """
-        cwd = Path(cwd)
-        override = cwd / ".better-memory"
-        if override.is_file():
-            text = override.read_text(encoding="utf-8").strip()
-            if text:
-                return text.splitlines()[0].strip()
-        return cwd.name
+        return project_name(cwd)
 
     def search(
         self,

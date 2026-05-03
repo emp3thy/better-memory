@@ -122,7 +122,7 @@ class TestObservationsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_episode(tmp_db)
         _seed_obs(tmp_db, oid="o-1", content="hello world")
         _seed_obs(tmp_db, oid="o-2", content="second")
@@ -138,7 +138,7 @@ class TestObservationsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_episode(tmp_db)
         _seed_obs(tmp_db, oid="o-fail", outcome="failure", content="bad")
         _seed_obs(tmp_db, oid="o-ok", outcome="success", content="good")
@@ -156,7 +156,7 @@ class TestObservationsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_episode(tmp_db)
         _seed_obs(tmp_db, oid="o-active", status="active", content="A")
         _seed_obs(tmp_db, oid="o-arch", status="archived", content="X")
@@ -174,7 +174,7 @@ class TestObservationsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_episode(tmp_db)
         _seed_obs(tmp_db, oid="o-ui", component="ui_launcher", content="ui")
         _seed_obs(tmp_db, oid="o-mcp", component="mcp", content="mcp")
@@ -192,7 +192,7 @@ class TestObservationsPanel:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_episode(tmp_db)
         _seed_obs(tmp_db, oid="o-1", outcome="failure", content="A")
         _seed_obs(tmp_db, oid="o-2", outcome="success", content="B")
@@ -281,7 +281,7 @@ class TestObservationsSynthesize:
         )
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
         async def fake_synthesize(self, *, goal, tech, project):
             assert goal == "manual synthesis"
@@ -320,7 +320,7 @@ class TestObservationsSynthesize:
         )
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
         async def boom(self, *, goal, tech, project):
             raise RuntimeError("ollama unreachable")
@@ -353,7 +353,7 @@ class TestObservationsSynthesize:
         from better_memory.llm.ollama import OllamaChat
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
         # Return a parseable empty SynthesisResponse so the synthesize
         # body finishes without producing reflections — we don't care
@@ -393,7 +393,7 @@ class TestObservationsSynthesize:
         )
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
         call_count = [0]
 
@@ -427,7 +427,7 @@ class TestObservationsSynthesize:
         """
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
         def boom(_path):
             raise RuntimeError("connect blew up")
@@ -461,7 +461,7 @@ class TestObservationsSynthesize:
         )
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
         async def fake_synthesize(self, *, goal, tech, project):
             return {"do": [], "dont": [], "neutral": []}

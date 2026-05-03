@@ -13,7 +13,7 @@ from markupsafe import escape
 from werkzeug.wrappers import Response
 
 from better_memory.async_bridge import WorkerTimeout, run_async_in_worker
-from better_memory.config import get_config, resolve_home
+from better_memory.config import get_config, project_name, resolve_home
 from better_memory.db.connection import connect
 from better_memory.llm.ollama import OllamaChat
 from better_memory.services.episode import EpisodeService
@@ -59,11 +59,6 @@ def _release_synth(token: int) -> None:
     with _synth_lock:
         if _synth_token == token:
             _synth_busy = False
-
-
-def _project_name() -> str:
-    """Return the current project — cwd name, matching service convention."""
-    return Path.cwd().name
 
 
 def create_app(
@@ -206,7 +201,7 @@ def create_app(
     @app.get("/episodes/panel")
     def episodes_panel() -> str:
         conn = app.extensions["db_connection"]
-        rows = queries.episode_list_for_ui(conn, project=_project_name())
+        rows = queries.episode_list_for_ui(conn, project=project_name())
         # Group by ISO date prefix (YYYY-MM-DD) of started_at, preserving
         # newest-first ordering. itertools.groupby works because rows are
         # already sorted by started_at DESC.
@@ -226,7 +221,7 @@ def create_app(
     def episodes_banner() -> str:
         conn = app.extensions["db_connection"]
         count = queries.unclosed_episode_count(
-            conn, project=_project_name()
+            conn, project=project_name()
         )
         return render_template(
             "fragments/episode_banner.html", count=count
@@ -292,7 +287,7 @@ def create_app(
             # The filter-form initial state mirrors the no-filter
             # default — current project, status=active, no others.
             initial_filters={
-                "project": _project_name(),
+                "project": project_name(),
                 "tech": "",
                 "phase": "",
                 "polarity": "",
@@ -310,7 +305,7 @@ def create_app(
             v = args.get(name, "").strip()
             return v or None
 
-        project = _arg("project") or _project_name()
+        project = _arg("project") or project_name()
         tech = _arg("tech")
         phase = _arg("phase")
         polarity = _arg("polarity")
@@ -496,7 +491,7 @@ def create_app(
         # runs the finally on its own.
         worker_dispatched = False
         try:
-            project = _project_name()
+            project = project_name()
             db_path_local = app.extensions["db_path"]
             ollama_host = app.extensions["ollama_host"]
             consolidate_model = app.extensions["consolidate_model"]

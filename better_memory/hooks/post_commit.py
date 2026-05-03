@@ -28,6 +28,8 @@ import subprocess
 import sys
 import time
 from datetime import UTC, datetime
+
+from better_memory.config import project_name
 from pathlib import Path
 from uuid import uuid4
 
@@ -154,7 +156,7 @@ def main() -> None:
             "timestamp": now_iso,
             "session_id": session_id,
             "cwd": cwd,
-            "project": Path(cwd).name,
+            "project": project_name(Path(cwd)),
             "commit_sha": commit_sha,
         }
 

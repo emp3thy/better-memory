@@ -42,11 +42,11 @@ class TestEpisodesPage:
     def test_shows_episode_in_timeline(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The UI infers project from cwd().name. Monkeypatch _project_name
+        # The UI infers project from cwd().name. Monkeypatch project_name
         # to a stable value matching the seed.
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed(tmp_db, project="proj-a")
         response = client.get("/episodes/panel")
         body = response.get_data(as_text=True)
@@ -58,7 +58,7 @@ class TestEpisodesPage:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed(tmp_db, project="proj-a")
         response = client.get("/episodes/panel")
         body = response.get_data(as_text=True)
@@ -72,7 +72,7 @@ class TestEpisodesBanner:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         response = client.get("/episodes/banner")
         assert response.status_code == 200
         body = response.get_data(as_text=True)
@@ -84,7 +84,7 @@ class TestEpisodesBanner:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed(tmp_db, project="proj-a")
         response = client.get("/episodes/banner")
         body = response.get_data(as_text=True)
@@ -102,7 +102,7 @@ class TestEpisodeDrawer:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         ep_id = _seed(tmp_db, project="proj-a")
         response = client.get(f"/episodes/{ep_id}/drawer")
         assert response.status_code == 200
@@ -120,7 +120,7 @@ class TestEpisodeDrawer:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         ep_id = _seed(tmp_db, project="proj-a")
         # Close it.
         conn = connect(tmp_db)
@@ -146,7 +146,7 @@ class TestEpisodeClose:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         ep_id = _seed(tmp_db, project="proj-a")
 
         response = client.post(
@@ -172,7 +172,7 @@ class TestEpisodeClose:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         ep_id = _seed(tmp_db, project="proj-a")
 
         client.post(
@@ -204,7 +204,7 @@ class TestEpisodeClose:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         ep_id = _seed(tmp_db, project="proj-a")
 
         response = client.post(
@@ -218,7 +218,7 @@ class TestEpisodeClose:
     ):
         from better_memory.ui import app as app_module
 
-        monkeypatch.setattr(app_module, "_project_name", lambda: "proj-a")
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         ep_id = _seed(tmp_db, project="proj-a")
         # First close: success.
         client.post(

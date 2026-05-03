@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from better_memory.config import project_name
+
 # Mirror the observer cap: reject any stdin payload above 1 MiB without
 # raising. Hooks must never fail.
 _MAX_STDIN_BYTES = 1_048_576
@@ -55,7 +57,7 @@ def _synthesise_marker() -> dict[str, str]:
         "event_type": "session_start",
         "timestamp": datetime.now(UTC).isoformat(),
         "cwd": cwd,
-        "project": Path(cwd).name,
+        "project": project_name(Path(cwd)),
         "session_id": os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex,
     }
 
@@ -102,7 +104,7 @@ def main() -> None:
                 data["cwd"] = os.environ.get("PWD") or "."
         # Derive project from cwd if not supplied.
         if "project" not in data or not data["project"]:
-            data["project"] = Path(str(data["cwd"])).name
+            data["project"] = project_name(Path(str(data["cwd"])))
 
         spool_dir = _default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)

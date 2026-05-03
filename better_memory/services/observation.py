@@ -63,7 +63,7 @@ from uuid import uuid4
 
 import sqlite_vec
 
-from better_memory.config import get_config
+from better_memory.config import get_config, project_name
 from better_memory.search.hybrid import (
     SearchFilters,
     SearchResult,
@@ -128,7 +128,7 @@ class ObservationService:
         self._embedder = embedder
         self._clock: Callable[[], datetime] = clock or _default_clock
         self._project_resolver: Callable[[], str] = (
-            project_resolver if project_resolver is not None else (lambda: Path.cwd().name)
+            project_resolver if project_resolver is not None else project_name
         )
         self._scope_resolver: Callable[[], str | None] = (
             scope_resolver if scope_resolver is not None else (lambda: None)
