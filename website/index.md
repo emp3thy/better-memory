@@ -78,3 +78,20 @@ memory.retrieve(query="growatt") → do bucket
     <p class="brut-bucket-sub">reinforcement-weighted — memory.record_use promotes signal, demotes noise.</p>
   </div>
 </section>
+
+<section class="brut-section brut-shade">
+  <div class="brut-container">
+    <div class="brut-num">04 — LIFECYCLE</div>
+    <h2 class="brut-section-h">observations have a lifecycle</h2>
+    <p class="brut-lede brut-muted">Synthesis consolidates. Retention archives. Prune is opt-in.</p>
+
+```mermaid
+stateDiagram-v2
+    [*] --> active: memory.observe
+    active --> consumed: synthesis
+    consumed --> archived: retention
+    archived --> [*]: prune (opt-in)
+```
+
+  </div>
+</section>

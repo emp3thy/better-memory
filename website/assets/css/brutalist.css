@@ -413,3 +413,17 @@ html, body, .md-typeset {
   .brut-bucket { border-right: none; border-bottom: 1px solid var(--brut-ink); }
   .brut-bucket:last-child { border-bottom: none; }
 }
+
+/* ============================================================
+   Landing — lifecycle (04)
+   ============================================================ */
+
+.brut-section .mermaid {
+  margin-top: 24px;
+  padding: 32px 20px;
+  background: var(--brut-paper);
+  border: 1px solid var(--brut-ink);
+  text-align: center;
+}
+
+.brut-shade .mermaid { background: var(--brut-paper-shade); }
