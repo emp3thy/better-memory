@@ -1,0 +1,13 @@
+<div class="card hook-error-row">
+  <span class="time"
+        hx-get="{{ url_for('hook_error_drawer', id=row.id) }}"
+        hx-target="#hook-error-drawer"
+        hx-swap="innerHTML">{{ row.created_at[11:16] }}</span>
+  <span class="hook-name">{{ row.hook_name }}</span>
+  <span class="exception-type">{{ row.exception_type }}</span>
+  <span class="message">{{ row.exception_message or "—" }}</span>
+  <button class="delete-row"
+          hx-post="{{ url_for('hook_error_delete', id=row.id) }}"
+          hx-confirm="Delete this error?"
+          hx-swap="none">×</button>
+</div>

@@ -30,6 +30,7 @@
       <a class="tab {% if active_tab == 'episodes' %}active{% endif %}" href="{{ url_for('episodes') }}">Episodes</a>
       <a class="tab {% if active_tab == 'observations' %}active{% endif %}" href="{{ url_for('observations') }}">Observations</a>
       <a class="tab {% if active_tab == 'reflections' %}active{% endif %}" href="{{ url_for('reflections') }}">Reflections</a>
+      <a class="tab {% if active_tab == 'diagnostics' %}active{% endif %}" href="{{ url_for('diagnostics') }}">Diagnostics</a>
     </nav>
     <button class="close-ui"
             hx-post="{{ url_for('shutdown') }}"

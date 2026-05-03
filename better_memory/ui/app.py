@@ -608,6 +608,64 @@ def create_app(
             if not worker_dispatched:
                 _release_synth(acquired_token)
 
+    @app.get("/diagnostics")
+    def diagnostics() -> str:
+        return render_template(
+            "diagnostics.html", active_tab="diagnostics"
+        )
+
+    @app.get("/diagnostics/panel/hook-errors")
+    def hook_errors_panel() -> str:
+        conn = app.extensions["db_connection"]
+        rows = queries.hook_errors_list_for_ui(conn)
+        from itertools import groupby
+        days = [
+            (day, list(group))
+            for day, group in groupby(rows, key=lambda r: r.created_at[:10])
+        ]
+        return render_template(
+            "fragments/panel_hook_errors.html", days=days
+        )
+
+    @app.get("/diagnostics/panel/retention-runs")
+    def retention_runs_panel() -> str:
+        conn = app.extensions["db_connection"]
+        rows = queries.retention_runs_list_for_ui(conn)
+        from itertools import groupby
+        days = [
+            (day, list(group))
+            for day, group in groupby(rows, key=lambda r: r.run_at[:10])
+        ]
+        return render_template(
+            "fragments/panel_retention_runs.html", days=days
+        )
+
+    @app.get("/diagnostics/hook-errors/<id>/drawer")
+    def hook_error_drawer(id: str) -> str:
+        conn = app.extensions["db_connection"]
+        detail = queries.hook_error_detail(conn, error_id=id)
+        if detail is None:
+            abort(404)
+        return render_template(
+            "fragments/hook_error_drawer.html", detail=detail
+        )
+
+    @app.post("/diagnostics/hook-errors/<id>/delete")
+    def hook_error_delete(id: str) -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        conn.execute(
+            "DELETE FROM hook_errors WHERE id = ?", (id,)
+        )
+        conn.commit()
+        return "", 200, {"HX-Trigger": "hook-errors-changed"}
+
+    @app.post("/diagnostics/hook-errors/purge")
+    def hook_errors_purge() -> tuple[str, int, dict[str, str]]:
+        conn = app.extensions["db_connection"]
+        conn.execute("DELETE FROM hook_errors")
+        conn.commit()
+        return "", 200, {"HX-Trigger": "hook-errors-changed"}
+
     @app.post("/shutdown")
     def shutdown() -> tuple[str, int]:
         def _exit() -> None:
