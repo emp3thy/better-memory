@@ -1,0 +1,41 @@
+{#-
+  Brutalist header partial. Replaces Material's partials/header.html.
+  Verified against mkdocs-material==9.7.6 — preserves the same conditional
+  includes for search, palette, and repo source so we don't have to
+  re-implement them.
+-#}
+{% set class = "md-header brut-docs-header" %}
+{% if "navigation.tabs.sticky" in features %}
+  {% set class = class ~ " md-header--shadow md-header--lifted" %}
+{% endif %}
+<header class="{{ class }}" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="{{ lang.t('header') }}">
+    <a href="{{ config.extra.homepage | d(nav.homepage.url, true) | url }}" title="{{ config.site_name | e }}" class="brut-docs-brand" aria-label="{{ config.site_name }}">
+      <span class="brut-bracket">[</span>&nbsp;{{ config.site_name }}&nbsp;<span class="brut-bracket">]</span>
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      {% set icon = config.theme.icon.menu or "material/menu" %}
+      {% include ".icons/" ~ icon ~ ".svg" %}
+    </label>
+    <div class="brut-docs-header-links">
+      <a href="{{ '.' | url }}#install">install</a>
+      <a href="{{ 'configuration/' | url }}">docs</a>
+      {% if config.repo_url %}<a href="{{ config.repo_url }}">github</a>{% endif %}
+    </div>
+    {% if "material/search" in config.plugins %}
+      {% set search = config.plugins["material/search"] | attr("config") %}
+      {% if search.enabled %}
+        <label class="md-header__button md-icon" for="__search">
+          {% set icon = config.theme.icon.search or "material/magnify" %}
+          {% include ".icons/" ~ icon ~ ".svg" %}
+        </label>
+        {% include "partials/search.html" %}
+      {% endif %}
+    {% endif %}
+  </nav>
+  {% if "navigation.tabs.sticky" in features %}
+    {% if "navigation.tabs" in features %}
+      {% include "partials/tabs.html" %}
+    {% endif %}
+  {% endif %}
+</header>

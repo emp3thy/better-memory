@@ -1,0 +1,105 @@
+/* ============================================================
+   Pygments — brutalist theme
+   amber for keywords, muted for strings/comments, ink for everything else
+   ============================================================ */
+
+.highlight,
+.codehilite,
+.md-typeset pre,
+.md-typeset code {
+  color: var(--brut-ink);
+  background-color: var(--brut-paper-shade);
+}
+
+/* Keywords (def, class, if, return, etc.) */
+.highlight .k,
+.highlight .kc,
+.highlight .kd,
+.highlight .kn,
+.highlight .kp,
+.highlight .kr,
+.highlight .kt {
+  color: var(--brut-amber);
+  font-weight: 700;
+}
+
+/* Strings */
+.highlight .s,
+.highlight .s1,
+.highlight .s2,
+.highlight .sb,
+.highlight .sc,
+.highlight .sd,
+.highlight .se,
+.highlight .sh,
+.highlight .si,
+.highlight .sx,
+.highlight .sr,
+.highlight .ss {
+  color: var(--brut-muted);
+}
+
+/* Comments */
+.highlight .c,
+.highlight .c1,
+.highlight .cm,
+.highlight .cp,
+.highlight .cs {
+  color: var(--brut-muted);
+  font-style: normal;
+}
+
+/* Numeric literals */
+.highlight .m,
+.highlight .mb,
+.highlight .mf,
+.highlight .mh,
+.highlight .mi,
+.highlight .mo {
+  color: var(--brut-ink);
+  font-weight: 700;
+}
+
+/* Function and class names */
+.highlight .nf,
+.highlight .nc {
+  color: var(--brut-ink);
+  font-weight: 700;
+}
+
+/* Built-ins (print, range, len) */
+.highlight .nb { color: var(--brut-ink); }
+
+/* Operators */
+.highlight .o,
+.highlight .ow {
+  color: var(--brut-ink);
+}
+
+/* Punctuation */
+.highlight .p { color: var(--brut-ink); }
+
+/* Variable names — default ink */
+.highlight .n,
+.highlight .nv,
+.highlight .nx { color: var(--brut-ink); }
+
+/* JSON / config — keys */
+.highlight .nt { color: var(--brut-ink); font-weight: 700; }
+
+/* Emphasized error text */
+.highlight .err { color: var(--brut-amber); border: none; background: transparent; }
+
+/* Diff blocks */
+.highlight .gi { color: var(--brut-ink); background: rgba(255, 140, 43, 0.12); }
+.highlight .gd { color: var(--brut-muted); }
+
+/* Code-block line numbers (if used) */
+.highlight .linenos { color: var(--brut-muted); border-right: 1px solid var(--brut-rule); padding-right: 12px; }
+
+/* Inline code (already styled in brutalist.css but reinforce here) */
+.md-typeset code {
+  background: var(--brut-paper-shade);
+  border-radius: 0;
+  padding: 1px 5px;
+}

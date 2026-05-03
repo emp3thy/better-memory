@@ -1,0 +1,829 @@
+/* ============================================================
+   Fonts (self-hosted)
+   ============================================================ */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("../fonts/Inter-ExtraBold.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("../fonts/JetBrainsMono-Medium.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../fonts/JetBrainsMono-Bold.woff2") format("woff2");
+}
+
+/* ============================================================
+   Design tokens
+   ============================================================ */
+
+:root,
+[data-md-color-scheme="default"] {
+  /* Color */
+  --brut-ink: #0d0d0d;
+  --brut-paper: #f5f3ee;
+  --brut-paper-shade: #ebe8e1;
+  --brut-amber: #ff8c2b;
+  --brut-amber-ink: #0d0d0d;
+  --brut-muted: #6b6862;
+  --brut-rule: #d8d4cb;
+
+  /* Type */
+  --brut-display: "Inter", "Helvetica Neue", Arial, sans-serif;
+  --brut-mono: "JetBrains Mono", "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
+
+  /* Layout */
+  --brut-content-w: 880px;
+  --brut-hero-w: 1100px;
+  --brut-section-y: 96px;
+  --brut-section-y-docs: 56px;
+
+  /* Override Material's primary/accent so anywhere it leaks through, we're consistent */
+  --md-primary-fg-color: var(--brut-ink);
+  --md-primary-fg-color--light: var(--brut-ink);
+  --md-primary-fg-color--dark: var(--brut-ink);
+  --md-accent-fg-color: var(--brut-amber);
+  --md-default-bg-color: var(--brut-paper);
+  --md-default-fg-color: var(--brut-ink);
+  --md-typeset-color: var(--brut-ink);
+  --md-typeset-a-color: var(--brut-ink);
+}
+
+/* ============================================================
+   Base typography
+   ============================================================ */
+
+html, body, .md-typeset {
+  font-family: var(--brut-mono);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--brut-ink);
+  background: var(--brut-paper);
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  color: var(--brut-ink);
+}
+
+.md-typeset h1 { font-size: 3.25rem; line-height: 0.96; margin: 0 0 1.25rem; }
+.md-typeset h2 { font-size: 2.25rem; line-height: 1.0;  margin: 2rem 0 0.75rem; }
+.md-typeset h3 { font-size: 1.5rem;  line-height: 1.1;  margin: 1.5rem 0 0.5rem; }
+.md-typeset h4 { font-size: 1.15rem; line-height: 1.2;  margin: 1.25rem 0 0.5rem; }
+
+.md-typeset p { margin: 0 0 1rem; }
+
+.md-typeset a {
+  color: var(--brut-ink);
+  text-decoration: none;
+  border-bottom: 2px solid var(--brut-amber);
+  padding-bottom: 1px;
+  transition: background 120ms ease;
+}
+.md-typeset a:hover { background: var(--brut-amber); color: var(--brut-amber-ink); }
+
+.md-typeset code {
+  font-family: var(--brut-mono);
+  background: var(--brut-paper-shade);
+  border-radius: 0;
+  padding: 1px 5px;
+  font-size: 0.92em;
+  color: var(--brut-ink);
+}
+
+.md-typeset pre,
+.md-typeset .highlight,
+.md-typeset .highlight pre {
+  border-radius: 0;
+  background: var(--brut-paper-shade);
+  border: none;
+}
+
+.md-typeset table:not([class]) {
+  font-family: var(--brut-mono);
+  font-size: 0.9rem;
+  border: none;
+}
+
+.md-typeset table:not([class]) th {
+  background: transparent;
+  border-bottom: 2px solid var(--brut-ink);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--brut-ink);
+}
+
+.md-typeset table:not([class]) td {
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+/* ============================================================
+   Landing page scope
+   ============================================================ */
+
+.brut-landing {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  margin: 0;
+}
+
+.brut-section {
+  padding: var(--brut-section-y) 32px;
+  background: var(--brut-paper);
+}
+
+.brut-section.brut-shade {
+  background: var(--brut-paper-shade);
+}
+
+.brut-container {
+  max-width: var(--brut-content-w);
+  margin: 0 auto;
+}
+
+.brut-container.brut-wide {
+  max-width: var(--brut-hero-w);
+}
+
+/* When the landing template is in play, neutralize Material's outer
+   wrappers so .brut-section can paint edge-to-edge and .brut-container.brut-wide
+   can actually reach 1100px. */
+.md-main:has(> .md-main__inner > .brut-landing),
+.md-main:has(> .md-main__inner > main.brut-landing) {
+  display: block;
+}
+.md-main__inner:has(> .brut-landing),
+.md-main__inner:has(> main.brut-landing) {
+  display: block;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* ============================================================
+   Landing — top nav
+   ============================================================ */
+
+.brut-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 32px;
+  border-bottom: 1px solid var(--brut-rule);
+  background: var(--brut-paper);
+  font-family: var(--brut-mono);
+  font-size: 14px;
+}
+
+.brut-nav-brand { font-weight: 700; }
+.brut-nav-brand .brut-bracket { color: var(--brut-muted); margin: 0 2px; }
+
+.brut-nav-links { display: flex; gap: 24px; }
+.brut-nav-links a {
+  color: var(--brut-ink);
+  text-decoration: none;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.brut-nav-links a:hover {
+  background: transparent;
+  color: var(--brut-amber);
+}
+
+/* ============================================================
+   Landing — hero section (01)
+   ============================================================ */
+
+.brut-hero-section {
+  padding-top: 100px;
+  padding-bottom: 110px;
+}
+
+.brut-eyebrow {
+  font-family: var(--brut-mono);
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--brut-muted);
+  margin-bottom: 18px;
+}
+
+.brut-display {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: clamp(48px, 8vw, 104px);
+  line-height: 0.94;
+  letter-spacing: -0.045em;
+  text-transform: lowercase;
+  margin: 0 0 28px;
+  color: var(--brut-ink);
+}
+
+.brut-display .brut-hl {
+  background: var(--brut-amber);
+  color: var(--brut-amber-ink);
+  padding: 0 8px;
+}
+
+.brut-lede {
+  font-family: var(--brut-mono);
+  font-size: 18px;
+  line-height: 1.55;
+  color: var(--brut-ink);
+  max-width: 60ch;
+  margin: 0 0 32px;
+}
+
+.brut-ctas { display: flex; gap: 0; }
+
+.brut-cta {
+  font-family: var(--brut-mono);
+  font-size: 14px;
+  padding: 14px 24px;
+  border-bottom: none;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+  transition: background 120ms ease, color 120ms ease;
+}
+.brut-cta-primary {
+  background: var(--brut-ink);
+  color: var(--brut-paper);
+  border: 2px solid var(--brut-ink);
+}
+.brut-cta-primary:hover {
+  background: var(--brut-amber);
+  color: var(--brut-amber-ink);
+  border-color: var(--brut-ink);
+}
+.brut-cta-secondary {
+  background: var(--brut-paper);
+  color: var(--brut-ink);
+  border: 2px solid var(--brut-ink);
+  border-left: none;
+}
+.brut-cta-secondary:hover {
+  background: var(--brut-ink);
+  color: var(--brut-paper);
+}
+
+/* Responsive */
+@media (max-width: 720px) {
+  .brut-nav { padding: 14px 20px; }
+  .brut-nav-links { gap: 16px; }
+  .brut-hero-section { padding-top: 56px; padding-bottom: 64px; }
+}
+
+/* ============================================================
+   Landing — common section primitives
+   ============================================================ */
+
+.brut-num {
+  font-family: var(--brut-mono);
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  color: var(--brut-muted);
+  margin-bottom: 8px;
+}
+
+.brut-section-h {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: clamp(36px, 5vw, 56px);
+  line-height: 1.0;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  margin: 0 0 16px;
+  color: var(--brut-ink);
+}
+
+.brut-lede.brut-muted { color: var(--brut-muted); }
+
+.brut-section .highlight,
+.brut-section pre {
+  margin-top: 16px;
+  background: var(--brut-paper-shade);
+  border: none;
+  padding: 18px 20px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.brut-shade .highlight,
+.brut-shade pre {
+  background: var(--brut-paper);
+}
+
+/* Inline code pills on shaded sections need the inverse background */
+.brut-shade code,
+.brut-shade .md-typeset code {
+  background: var(--brut-paper);
+}
+
+/* ============================================================
+   Landing — three buckets (03)
+   ============================================================ */
+
+.brut-buckets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid var(--brut-ink);
+  margin-top: 28px;
+}
+
+.brut-bucket {
+  padding: 24px 22px;
+  border-right: 1px solid var(--brut-ink);
+}
+.brut-bucket:last-child { border-right: none; }
+
+.brut-bucket-do {
+  border-left: 4px solid var(--brut-amber);
+  margin-left: -1px;
+}
+
+.brut-bucket-name {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: 36px;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  line-height: 1.0;
+  color: var(--brut-ink);
+}
+
+.brut-bucket-role {
+  font-family: var(--brut-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brut-muted);
+  margin-top: 6px;
+}
+
+.brut-bucket-ex {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  margin-top: 16px;
+  color: var(--brut-ink);
+}
+
+.brut-bucket-sub {
+  font-family: var(--brut-mono);
+  font-size: 14px;
+  color: var(--brut-muted);
+  margin-top: 18px;
+}
+
+@media (max-width: 720px) {
+  .brut-buckets { grid-template-columns: 1fr; }
+  .brut-bucket { border-right: none; border-bottom: 1px solid var(--brut-ink); }
+  .brut-bucket:last-child { border-bottom: none; }
+}
+
+/* ============================================================
+   Landing — lifecycle (04)
+   ============================================================ */
+
+.brut-section .mermaid {
+  margin-top: 24px;
+  padding: 32px 20px;
+  background: var(--brut-paper);
+  border: 1px solid var(--brut-ink);
+  text-align: center;
+}
+
+.brut-shade .mermaid { background: var(--brut-paper-shade); }
+
+/* ============================================================
+   Landing — install tabs (05)
+   ============================================================ */
+
+.brut-tabs {
+  display: flex;
+  gap: 0;
+  margin-top: 24px;
+  border-bottom: 2px solid var(--brut-ink);
+}
+
+.brut-tab {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  text-transform: lowercase;
+  padding: 8px 18px;
+  background: var(--brut-paper-shade);
+  color: var(--brut-ink);
+  border: 2px solid var(--brut-ink);
+  border-bottom: none;
+  margin-right: -2px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.brut-tab:hover { background: var(--brut-paper); }
+
+.brut-tab-active,
+.brut-tab-active:hover {
+  background: var(--brut-ink);
+  color: var(--brut-paper);
+}
+
+.brut-tab-pane { display: none; }
+.brut-tab-pane-active { display: block; }
+
+.brut-tab-pane > .highlight,
+.brut-tab-pane > pre {
+  margin-top: 0;
+  border: 2px solid var(--brut-ink);
+  border-top: none;
+}
+
+/* ============================================================
+   Landing — tools table (06)
+   ============================================================ */
+
+.brut-tools {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 28px;
+  font-family: var(--brut-mono);
+  font-size: 14px;
+}
+
+.brut-tools th {
+  text-align: left;
+  padding: 12px 16px;
+  border-bottom: 2px solid var(--brut-ink);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brut-ink);
+}
+
+.brut-tools td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--brut-rule);
+  vertical-align: top;
+  color: var(--brut-ink);
+}
+
+.brut-tools td:first-child {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.brut-tools td a {
+  color: var(--brut-ink);
+  text-decoration: none;
+  border-bottom: 2px solid var(--brut-amber);
+  padding-bottom: 1px;
+}
+.brut-tools td a:hover {
+  background: var(--brut-amber);
+  color: var(--brut-amber-ink);
+}
+
+/* ============================================================
+   Landing — doc cards (07)
+   ============================================================ */
+
+.brut-docs-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-top: 1px solid var(--brut-rule);
+  margin-top: 28px;
+}
+
+.brut-doc-card {
+  display: block;
+  padding: 26px 24px;
+  border-bottom: 1px solid var(--brut-rule);
+  border-right: 1px solid var(--brut-rule);
+  text-decoration: none;
+  color: var(--brut-ink);
+  transition: background 120ms ease;
+}
+.brut-doc-card:nth-child(2n) { border-right: none; }
+.brut-doc-card:hover {
+  background: var(--brut-paper-shade);
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.brut-doc-title {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: 32px;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  margin-bottom: 6px;
+  color: var(--brut-ink);
+}
+
+.brut-doc-desc {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--brut-muted);
+}
+
+.brut-doc-arrow {
+  font-family: var(--brut-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--brut-amber);
+  margin-top: 14px;
+}
+
+@media (max-width: 720px) {
+  .brut-docs-grid { grid-template-columns: 1fr; }
+  .brut-doc-card { border-right: none; }
+}
+
+/* ============================================================
+   Landing — footer (08)
+   ============================================================ */
+
+.brut-footer {
+  background: var(--brut-paper);
+  border-top: 2px solid var(--brut-ink);
+  padding: 28px 32px;
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-family: var(--brut-mono);
+  font-size: 12px;
+  color: var(--brut-muted);
+}
+
+.brut-footer a {
+  color: var(--brut-muted);
+  text-decoration: none;
+  border-bottom: 1px solid var(--brut-rule);
+  padding-bottom: 1px;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.brut-footer a:hover {
+  background: var(--brut-amber);
+  color: var(--brut-amber-ink);
+  border-bottom-color: var(--brut-ink);
+}
+
+.brut-footer-sep { margin: 0 8px; }
+
+/* ============================================================
+   Docs page — header
+   ============================================================ */
+
+.brut-docs-header.md-header {
+  background: var(--brut-paper);
+  color: var(--brut-ink);
+  box-shadow: none;
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.brut-docs-brand {
+  font-family: var(--brut-mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--brut-ink);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  padding: 14px 0;
+}
+.brut-docs-brand .brut-bracket { color: var(--brut-muted); }
+
+.brut-docs-header-links {
+  display: flex;
+  gap: 24px;
+  margin-left: auto;
+  margin-right: 24px;
+  font-family: var(--brut-mono);
+  font-size: 14px;
+}
+
+.brut-docs-header-links a {
+  color: var(--brut-ink);
+  text-decoration: none;
+  border-bottom: none;
+  padding: 14px 0;
+  transition: color 120ms ease;
+}
+.brut-docs-header-links a:hover { color: var(--brut-amber); background: transparent; }
+
+/* Material search button + drawer adjustments */
+.md-header .md-search__form {
+  background: var(--brut-paper-shade);
+  border-radius: 0;
+}
+.md-header .md-search__input::placeholder { color: var(--brut-muted); }
+.md-header .md-search__input { color: var(--brut-ink); }
+.md-header .md-icon svg { fill: var(--brut-ink); }
+
+/* ============================================================
+   Docs page — sidebar (left nav)
+   ============================================================ */
+
+.md-sidebar--primary {
+  background: var(--brut-paper);
+}
+
+.md-nav__title {
+  font-family: var(--brut-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  color: var(--brut-muted);
+  background: transparent;
+  box-shadow: none;
+  padding: 16px 16px 8px;
+}
+
+.md-nav__list {
+  border-top: 1px solid var(--brut-rule);
+}
+
+.md-nav__item {
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.md-nav__link {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  color: var(--brut-ink);
+  padding: 12px 16px;
+  border-bottom: none;
+  border-left: 2px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.md-nav__link:hover {
+  background: var(--brut-paper-shade);
+  color: var(--brut-ink);
+}
+
+.md-nav__link--active {
+  border-left-color: var(--brut-amber);
+  color: var(--brut-ink);
+  font-weight: 700;
+}
+
+/* ============================================================
+   Docs page — TOC (right)
+   ============================================================ */
+
+.md-sidebar--secondary .md-nav__title {
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.md-sidebar--secondary .md-nav__link {
+  font-size: 12px;
+  border-left: 2px solid transparent;
+  border-bottom: none;
+  padding: 6px 12px;
+}
+.md-sidebar--secondary .md-nav__link--active {
+  border-left-color: var(--brut-amber);
+}
+
+/* ============================================================
+   Docs page — content
+   ============================================================ */
+
+.md-content__inner {
+  padding-top: 32px;
+  padding-bottom: 64px;
+}
+
+.md-typeset h1 {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: clamp(40px, 5vw, 64px);
+  line-height: 0.96;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  color: var(--brut-ink);
+  margin: 0 0 1.5rem;
+}
+
+.md-typeset h2 {
+  border-top: 1px solid var(--brut-rule);
+  padding-top: 1.5rem;
+  margin-top: 2.5rem;
+}
+
+/* ============================================================
+   Docs page — admonitions
+   ============================================================ */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border: 1px solid var(--brut-ink);
+  border-left: 4px solid var(--brut-ink);
+  border-radius: 0;
+  background: var(--brut-paper);
+  box-shadow: none;
+  margin: 1.5rem 0;
+  font-family: var(--brut-mono);
+  font-size: 14px;
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+  background: transparent;
+  font-family: var(--brut-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  color: var(--brut-ink);
+  padding: 12px 16px 8px;
+}
+.md-typeset .admonition-title::before,
+.md-typeset summary::before { display: none; }
+.md-typeset .admonition > p,
+.md-typeset details > p { padding: 0 16px 12px; }
+
+.md-typeset .admonition.warning,
+.md-typeset details.warning { border-left-color: var(--brut-amber); }
+
+.md-typeset .admonition.note,
+.md-typeset details.note { border-left-color: var(--brut-ink); }
+
+.md-typeset .admonition.tip,
+.md-typeset details.tip { border-left-color: var(--brut-amber); }
+
+.md-typeset .admonition.danger,
+.md-typeset details.danger { border-left-color: var(--brut-amber); }
+
+/* ============================================================
+   Docs page — tables
+   ============================================================ */
+
+.md-typeset table:not([class]) {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  margin: 1.5rem 0;
+}
+
+.md-typeset table:not([class]) th {
+  background: transparent;
+  border-bottom: 2px solid var(--brut-ink);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brut-ink);
+  padding: 12px 14px;
+}
+
+.md-typeset table:not([class]) td {
+  background: transparent;
+  border-bottom: 1px solid var(--brut-rule);
+  padding: 12px 14px;
+  vertical-align: top;
+}
+
+/* Inline code inside tables */
+.md-typeset table:not([class]) code {
+  background: var(--brut-paper-shade);
+  padding: 1px 5px;
+}
