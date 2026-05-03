@@ -110,6 +110,25 @@ One env var roots the runtime filesystem layout:
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
 | `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 
+### Project-name override
+
+Memory is bucketed by project name, derived from the cwd's leaf
+directory name (`Path.cwd().name`). For situations where the leaf name
+isn't right — multiple worktrees of the same logical project, or a
+deeply-nested cwd — drop a `.better-memory` file at the project root
+with a single line containing the desired project name:
+
+```bash
+echo "my-project" > .better-memory
+```
+
+This applies uniformly to knowledge search, observation writes/reads,
+episode scoping, and the UI panel filter.
+
+Note: this is a *file* in your repo root, not the data root directory
+`~/.better-memory/` (set by `BETTER_MEMORY_HOME`). Different things
+despite the shared name.
+
 ## MCP tools
 
 | Tool | Purpose |
