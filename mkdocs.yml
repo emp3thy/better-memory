@@ -65,3 +65,4 @@ extra_css:
 
 extra_javascript:
   - assets/js/install-tabs.js
+  - assets/js/mermaid-init.js
