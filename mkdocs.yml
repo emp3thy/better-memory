@@ -47,9 +47,34 @@ markdown_extensions:
       custom_fences:
         - name: mermaid
           class: mermaid
-          format: !!python/name:pymdownx.superfences.fence_code_format
+          format: !!python/name:mermaid2.fence_mermaid_custom
   - pymdownx.tabbed:
       alternate_style: true
+
+plugins:
+  - search
+  - mermaid2:
+      arguments:
+        theme: 'base'
+        themeVariables:
+          fontFamily: '"JetBrains Mono", monospace'
+          fontSize: '14px'
+          primaryColor: '#f5f3ee'
+          primaryTextColor: '#0d0d0d'
+          primaryBorderColor: '#0d0d0d'
+          lineColor: '#0d0d0d'
+          secondaryColor: '#ff8c2b'
+          tertiaryColor: '#ebe8e1'
+          background: '#f5f3ee'
+          edgeLabelBackground: '#f5f3ee'
+          textColor: '#0d0d0d'
+          stateBkg: '#f5f3ee'
+          stateBorder: '#0d0d0d'
+          labelColor: '#0d0d0d'
+          altBackground: '#ebe8e1'
+          cScale0: '#ff8c2b'
+          cScale1: '#ebe8e1'
+          cScale2: '#f5f3ee'
 
 nav:
   - Home: index.md
@@ -65,4 +90,3 @@ extra_css:
 
 extra_javascript:
   - assets/js/install-tabs.js
-  - assets/js/mermaid-init.js

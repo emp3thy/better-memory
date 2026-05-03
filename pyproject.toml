@@ -27,6 +27,7 @@ dev = [
 ]
 docs = [
     "mkdocs-material",
+    "mkdocs-mermaid2-plugin",
 ]
 
 [tool.hatch.build.targets.wheel]
