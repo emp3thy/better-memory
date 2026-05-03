@@ -41,19 +41,22 @@ website/
 ├── index.md                               # rewrite — hero + sections via md_in_html
 ├── overrides/
 │   ├── home.html                          # NEW — landing page template (no chrome)
-│   └── main.html                          # NEW — extends Material main, restyles docs pages
+│   ├── main.html                          # NEW — extends Material main, adds extrahead
+│   └── partials/
+│       └── header.html                    # NEW — brand-wordmark header replacing partials/header.html
 ├── assets/
 │   ├── css/
 │   │   ├── brutalist.css                  # NEW — variables, typography, components
 │   │   └── pygments-brutalist.css         # NEW — syntax highlighting palette
 │   ├── js/
-│   │   └── install-tabs.js                # NEW — OS tabs in install section
+│   │   ├── install-tabs.js                # NEW — OS tabs in install section
+│   │   └── mermaid-init.js                # NEW — re-themes mermaid on every page
 │   └── fonts/
 │       ├── Inter-ExtraBold.woff2          # NEW — binary asset
 │       ├── JetBrainsMono-Regular.woff2    # NEW — binary asset
 │       ├── JetBrainsMono-Medium.woff2     # NEW — binary asset
 │       └── JetBrainsMono-Bold.woff2       # NEW — binary asset
-mkdocs.yml                                 # MODIFY — add custom_dir, fonts, extra_css/js, palette
+mkdocs.yml                                 # MODIFY — add custom_dir: website/overrides, fonts, extra_css/js, palette
 ```
 
 ---
@@ -75,7 +78,7 @@ Replace the `theme:` block in `mkdocs.yml` and add `extra_css` / `extra_javascri
 ```yaml
 theme:
   name: material
-  custom_dir: overrides
+  custom_dir: website/overrides
   font: false
   palette:
     scheme: default
@@ -106,7 +109,7 @@ extra_javascript:
   - assets/js/install-tabs.js
 ```
 
-Note: `custom_dir: overrides` is relative to the *project root*, not `docs_dir`. Since `docs_dir: website`, the overrides path becomes `website/overrides/` automatically — Material resolves it relative to `mkdocs.yml`. Keep `docs_dir: website` and `site_dir: site` unchanged.
+**Verified path:** Material resolves `custom_dir` relative to the *project root* (where `mkdocs.yml` lives), NOT relative to `docs_dir`. Since `docs_dir: website`, the override directory is `website/overrides/` — and we must spell it that way in `mkdocs.yml`. Keep `docs_dir: website` and `site_dir: site` unchanged.
 
 - [ ] **Step 2: Create overrides directory and a no-op main.html**
 
@@ -1469,53 +1472,76 @@ git commit -m "feat(site): landing go-deeper cards + footer; drop README leftove
 ### Task 11: Docs page header + sidebar restyle
 
 **Files:**
-- Modify: `website/overrides/main.html`
+- Modify: `website/overrides/main.html` (only adds extrahead theme-color meta)
+- Create: `website/overrides/partials/header.html` (overrides Material's partial — preserves search/palette/source detection)
 - Modify: `website/assets/css/brutalist.css`
 
-- [ ] **Step 1: Override Material header brand in main.html**
+**Why a partial override, not a block override.** Material 9.7's `partials/header.html` already handles search detection (`"material/search" in config.plugins`), palette toggle, alternate-language switcher, and `repo_url` source link. Overriding the whole `{% block header %}` in main.html would force us to re-implement all of that. Overriding the partial keeps Material's includes intact and only swaps the brand wordmark and link list.
+
+- [ ] **Step 1: Add a small extrahead bump in main.html**
 
 Replace `website/overrides/main.html` with:
 
 ```html
 {% extends "base.html" %}
 
-{% block site_meta %}
-  {{ super() }}
-{% endblock %}
-
 {% block extrahead %}
   {{ super() }}
   <meta name="theme-color" content="#f5f3ee">
 {% endblock %}
-
-{% block announce %}{% endblock %}
-
-{# Replace the Material logo + site name with a brutalist wordmark #}
-{% block header %}
-<header class="md-header brut-docs-header" data-md-component="header">
-  <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href="{{ config.site_url | d(nav.homepage.url, true) | url }}" class="brut-docs-brand">
-      <span class="brut-bracket">[</span>&nbsp;{{ config.site_name }}&nbsp;<span class="brut-bracket">]</span>
-    </a>
-    <div class="brut-docs-header-links">
-      <a href="{{ '/#install' | url }}">install</a>
-      <a href="{{ 'configuration/' | url }}">docs</a>
-      <a href="{{ config.repo_url }}">github</a>
-    </div>
-    {% if "search" in config.plugins or config.theme.features and "search.suggest" in config.theme.features %}
-      <label class="md-header__button md-icon" for="__search">
-        {% include ".icons/material/magnify.svg" %}
-      </label>
-      <div class="md-search" data-md-component="search" role="dialog">
-        {% include "partials/search.html" %}
-      </div>
-    {% endif %}
-  </nav>
-</header>
-{% endblock %}
 ```
 
-This replaces the Material logo + nav with a wordmark and three top-level links, while preserving the search drawer.
+That's it. Everything else flows through Material's defaults plus our `partials/header.html` override.
+
+- [ ] **Step 2: Create the header partial override**
+
+Create `website/overrides/partials/header.html`. Material's stock `partials/header.html` (verified against mkdocs-material==9.7.6) wraps everything in `<header class="md-header" data-md-component="header"><nav class="md-header__inner md-grid">…</nav></header>` and includes search, palette, source link conditionally. We replicate the structural skeleton but swap the logo+title+drawer for a wordmark + three text links:
+
+```html
+{#-
+  Brutalist header partial. Replaces Material's partials/header.html.
+  Verified against mkdocs-material==9.7.6 — preserves the same conditional
+  includes for search, palette, and repo source so we don't have to
+  re-implement them.
+-#}
+{% set class = "md-header brut-docs-header" %}
+{% if "navigation.tabs.sticky" in features %}
+  {% set class = class ~ " md-header--shadow md-header--lifted" %}
+{% endif %}
+<header class="{{ class }}" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="{{ lang.t('header') }}">
+    <a href="{{ config.extra.homepage | d(nav.homepage.url, true) | url }}" title="{{ config.site_name | e }}" class="brut-docs-brand" aria-label="{{ config.site_name }}">
+      <span class="brut-bracket">[</span>&nbsp;{{ config.site_name }}&nbsp;<span class="brut-bracket">]</span>
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      {% set icon = config.theme.icon.menu or "material/menu" %}
+      {% include ".icons/" ~ icon ~ ".svg" %}
+    </label>
+    <div class="brut-docs-header-links">
+      <a href="{{ '#install' | url }}">install</a>
+      <a href="{{ 'configuration/' | url }}">docs</a>
+      {% if config.repo_url %}<a href="{{ config.repo_url }}">github</a>{% endif %}
+    </div>
+    {% if "material/search" in config.plugins %}
+      {% set search = config.plugins["material/search"] | attr("config") %}
+      {% if search.enabled %}
+        <label class="md-header__button md-icon" for="__search">
+          {% set icon = config.theme.icon.search or "material/magnify" %}
+          {% include ".icons/" ~ icon ~ ".svg" %}
+        </label>
+        {% include "partials/search.html" %}
+      {% endif %}
+    {% endif %}
+  </nav>
+  {% if "navigation.tabs.sticky" in features %}
+    {% if "navigation.tabs" in features %}
+      {% include "partials/tabs.html" %}
+    {% endif %}
+  {% endif %}
+</header>
+```
+
+The `lang.t('header')` call requires Material's `lang` macro context — it's available inside partials. The mobile drawer label (`__drawer`) is preserved so the responsive sidebar still works on small screens.
 
 - [ ] **Step 2: Add docs-page-scope CSS**
 
@@ -1691,7 +1717,7 @@ Expected: pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add website/overrides/main.html website/assets/css/brutalist.css
+git add website/overrides/main.html website/overrides/partials/header.html website/assets/css/brutalist.css
 git commit -m "feat(site): brutalist restyle for docs pages (header, sidebar, TOC)"
 ```
 
