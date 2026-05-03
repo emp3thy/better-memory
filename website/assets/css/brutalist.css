@@ -305,3 +305,105 @@ html, body, .md-typeset {
   .brut-nav-links { gap: 16px; }
   .brut-hero-section { padding-top: 56px; padding-bottom: 64px; }
 }
+
+/* ============================================================
+   Landing — common section primitives
+   ============================================================ */
+
+.brut-num {
+  font-family: var(--brut-mono);
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  color: var(--brut-muted);
+  margin-bottom: 8px;
+}
+
+.brut-section-h {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: clamp(36px, 5vw, 56px);
+  line-height: 1.0;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  margin: 0 0 16px;
+  color: var(--brut-ink);
+}
+
+.brut-lede.brut-muted { color: var(--brut-muted); }
+
+.brut-section .highlight,
+.brut-section pre {
+  margin-top: 16px;
+  background: var(--brut-paper-shade);
+  border: none;
+  padding: 18px 20px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.brut-shade .highlight,
+.brut-shade pre {
+  background: var(--brut-paper);
+}
+
+/* ============================================================
+   Landing — three buckets (03)
+   ============================================================ */
+
+.brut-buckets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid var(--brut-ink);
+  margin-top: 28px;
+}
+
+.brut-bucket {
+  padding: 24px 22px;
+  border-right: 1px solid var(--brut-ink);
+}
+.brut-bucket:last-child { border-right: none; }
+
+.brut-bucket-do {
+  border-left: 4px solid var(--brut-amber);
+  margin-left: -1px;
+}
+
+.brut-bucket-name {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: 36px;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  line-height: 1.0;
+  color: var(--brut-ink);
+}
+
+.brut-bucket-role {
+  font-family: var(--brut-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brut-muted);
+  margin-top: 6px;
+}
+
+.brut-bucket-ex {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  margin-top: 16px;
+  color: var(--brut-ink);
+}
+
+.brut-bucket-sub {
+  font-family: var(--brut-mono);
+  font-size: 14px;
+  color: var(--brut-muted);
+  margin-top: 18px;
+}
+
+@media (max-width: 720px) {
+  .brut-buckets { grid-template-columns: 1fr; }
+  .brut-bucket { border-right: none; border-bottom: 1px solid var(--brut-ink); }
+  .brut-bucket:last-child { border-bottom: none; }
+}
