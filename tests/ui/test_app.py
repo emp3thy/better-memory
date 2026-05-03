@@ -111,7 +111,7 @@ class TestStaticAssets:
         response = client.get("/static/app.css")
         assert response.status_code == 200
         assert response.content_type.startswith("text/css")
-        assert b".app-header" in response.data
+        assert b".rail" in response.data
 
 
 class TestShutdown:

@@ -73,9 +73,9 @@ class TestEpisodesPageRenders:
         page.goto(url)  # bare /
         page.wait_for_url(f"{url}/episodes")
 
-        # Both tabs visible in the nav.
-        expect(page.locator(".tab", has_text="Episodes")).to_be_visible()
-        expect(page.locator(".tab", has_text="Reflections")).to_be_visible()
+        # Both nav links visible in the rail.
+        expect(page.locator(".rail-link", has_text="Episodes")).to_be_visible()
+        expect(page.locator(".rail-link", has_text="Reflections")).to_be_visible()
 
         # Empty-state shows when no episodes seeded yet (HTMX loads
         # the panel partial after page render).
