@@ -346,6 +346,12 @@ html, body, .md-typeset {
   background: var(--brut-paper);
 }
 
+/* Inline code pills on shaded sections need the inverse background */
+.brut-shade code,
+.brut-shade .md-typeset code {
+  background: var(--brut-paper);
+}
+
 /* ============================================================
    Landing — three buckets (03)
    ============================================================ */
