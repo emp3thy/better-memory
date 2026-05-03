@@ -67,7 +67,7 @@ def create_app(
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
     db_path: Path | None = None,
-    synth_timeout: float = 60.0,
+    synth_timeout: float = 180.0,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -83,7 +83,9 @@ def create_app(
         ``_check_idle`` is still registered so tests can drive it
         synchronously without spawning threads.
     synth_timeout:
-        Seconds before a synthesize call is abandoned. Default 60.0.
+        Seconds before a synthesize call is abandoned. Default 180.0.
+        Cold-start Ollama runs (model not yet loaded into memory) regularly
+        take 60-120s, so the timeout has to comfortably exceed that.
     """
     app = Flask(__name__)
 

@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <title>{% block title %}better-memory{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..700&family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Geist+Mono:wght@300..600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
   {# HTMX 2.x default responseHandling skips swaps on 4xx/5xx, so error
@@ -24,19 +27,37 @@
   </script>
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand">better-memory</div>
-    <nav class="tabs">
-      <a class="tab {% if active_tab == 'episodes' %}active{% endif %}" href="{{ url_for('episodes') }}">Episodes</a>
-      <a class="tab {% if active_tab == 'observations' %}active{% endif %}" href="{{ url_for('observations') }}">Observations</a>
-      <a class="tab {% if active_tab == 'reflections' %}active{% endif %}" href="{{ url_for('reflections') }}">Reflections</a>
-      <a class="tab {% if active_tab == 'diagnostics' %}active{% endif %}" href="{{ url_for('diagnostics') }}">Diagnostics</a>
+  <aside class="rail">
+    <div class="rail-brand">
+      <span class="rail-brand-mark">b<span class="rail-brand-dot">·</span>m</span>
+      <span class="rail-brand-name">better-memory</span>
+    </div>
+    <hr class="rail-rule">
+    <nav class="rail-nav">
+      <a class="rail-link {% if active_tab == 'episodes' %}active{% endif %}" href="{{ url_for('episodes') }}">
+        <span class="rail-num">I</span>
+        <span class="rail-label">Episodes</span>
+      </a>
+      <a class="rail-link {% if active_tab == 'observations' %}active{% endif %}" href="{{ url_for('observations') }}">
+        <span class="rail-num">II</span>
+        <span class="rail-label">Observations</span>
+      </a>
+      <a class="rail-link {% if active_tab == 'reflections' %}active{% endif %}" href="{{ url_for('reflections') }}">
+        <span class="rail-num">III</span>
+        <span class="rail-label">Reflections</span>
+      </a>
+      <a class="rail-link {% if active_tab == 'diagnostics' %}active{% endif %}" href="{{ url_for('diagnostics') }}">
+        <span class="rail-num">IV</span>
+        <span class="rail-label">Diagnostics</span>
+      </a>
     </nav>
-    <button class="close-ui"
-            hx-post="{{ url_for('shutdown') }}"
-            hx-confirm="Shut down the UI?"
-            hx-swap="none">Close UI</button>
-  </header>
+    <div class="rail-foot">
+      <button class="rail-close"
+              hx-post="{{ url_for('shutdown') }}"
+              hx-confirm="Shut down the UI?"
+              hx-swap="none">close UI</button>
+    </div>
+  </aside>
   <main>
     {% block main %}{% endblock %}
   </main>

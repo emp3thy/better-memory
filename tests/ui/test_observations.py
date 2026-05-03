@@ -267,7 +267,7 @@ class TestNavTab:
     ):
         response = client.get("/observations")
         body = response.get_data(as_text=True)
-        assert 'class="tab active"' in body
+        assert 'rail-link active' in body
         assert "Observations" in body
 
 
