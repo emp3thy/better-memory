@@ -427,3 +427,46 @@ html, body, .md-typeset {
 }
 
 .brut-shade .mermaid { background: var(--brut-paper-shade); }
+
+/* ============================================================
+   Landing — install tabs (05)
+   ============================================================ */
+
+.brut-tabs {
+  display: flex;
+  gap: 0;
+  margin-top: 24px;
+  border-bottom: 2px solid var(--brut-ink);
+}
+
+.brut-tab {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  text-transform: lowercase;
+  padding: 8px 18px;
+  background: var(--brut-paper-shade);
+  color: var(--brut-ink);
+  border: 2px solid var(--brut-ink);
+  border-bottom: none;
+  margin-right: -2px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.brut-tab:hover { background: var(--brut-paper); }
+
+.brut-tab-active,
+.brut-tab-active:hover {
+  background: var(--brut-ink);
+  color: var(--brut-paper);
+}
+
+.brut-tab-pane { display: none; }
+.brut-tab-pane-active { display: block; }
+
+.brut-tab-pane > .highlight,
+.brut-tab-pane > pre {
+  margin-top: 0;
+  border: 2px solid var(--brut-ink);
+  border-top: none;
+}

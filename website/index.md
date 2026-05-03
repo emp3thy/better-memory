@@ -95,3 +95,73 @@ stateDiagram-v2
 
   </div>
 </section>
+
+<section class="brut-section" id="install">
+  <div class="brut-container">
+    <div class="brut-num">05 — INSTALL</div>
+    <h2 class="brut-section-h">three commands, one paste</h2>
+    <p class="brut-lede brut-muted">Clone, run setup, paste the printed JSON snippets into your Claude Code config.</p>
+
+```bash
+git clone https://github.com/emp3thy/better-memory
+cd better-memory
+./scripts/setup.sh
+```
+
+    <div class="brut-tabs" data-brut-tabs>
+      <button class="brut-tab brut-tab-active" data-os="macos">macos</button>
+      <button class="brut-tab" data-os="linux">linux</button>
+      <button class="brut-tab" data-os="windows">windows</button>
+    </div>
+
+    <div class="brut-tab-pane brut-tab-pane-active" data-os-pane="macos">
+
+```json
+{
+  "mcpServers": {
+    "better-memory": {
+      "type": "stdio",
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["-m", "better_memory.mcp"]
+    }
+  }
+}
+```
+
+    </div>
+
+    <div class="brut-tab-pane" data-os-pane="linux">
+
+```json
+{
+  "mcpServers": {
+    "better-memory": {
+      "type": "stdio",
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["-m", "better_memory.mcp"]
+    }
+  }
+}
+```
+
+    </div>
+
+    <div class="brut-tab-pane" data-os-pane="windows">
+
+```json
+{
+  "mcpServers": {
+    "better-memory": {
+      "type": "stdio",
+      "command": "C:/absolute/path/to/.venv/Scripts/pythonw.exe",
+      "args": ["-m", "better_memory.mcp"]
+    }
+  }
+}
+```
+
+    </div>
+
+    <p style="margin-top:18px"><a href="configuration/">full setup guide →</a></p>
+  </div>
+</section>
