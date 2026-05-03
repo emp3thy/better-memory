@@ -186,6 +186,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
+        assert detail is not None, "episode_detail should return for ep_id seeded above"
         assert [o.id for o in detail.observations] == ["obs-new", "obs-old"]
         assert detail.observations[0].component == "comp"
         assert detail.observations[0].theme == "decision"
@@ -215,6 +216,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
+        assert detail is not None, "episode_detail should return reflections for the seeded episode"
         assert len(detail.reflections) == 1
         r = detail.reflections[0]
         assert r.id == "refl-1"
@@ -249,6 +251,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
+        assert detail is not None, "episode_detail should return for ep_id with two shared-reflection observations"
         assert len(detail.reflections) == 1
 
     def test_includes_observations_regardless_of_status(self, conn):
@@ -264,6 +267,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
+        assert detail is not None, "episode_detail should return for ep_id with an archived observation"
         ids = [o.id for o in detail.observations]
         assert "obs-arch" in ids
 
@@ -291,6 +295,7 @@ class TestEpisodeDetail:
         conn.commit()
 
         detail = episode_detail(conn, episode_id=ep_id)
+        assert detail is not None, "episode_detail should return for ep_id with a retired reflection"
         assert len(detail.reflections) == 1
         assert detail.reflections[0].status == "retired"
 
