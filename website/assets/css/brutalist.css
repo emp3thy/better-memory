@@ -33,3 +33,117 @@
   font-display: swap;
   src: url("../fonts/JetBrainsMono-Bold.woff2") format("woff2");
 }
+
+/* ============================================================
+   Design tokens
+   ============================================================ */
+
+:root,
+[data-md-color-scheme="default"] {
+  /* Color */
+  --brut-ink: #0d0d0d;
+  --brut-paper: #f5f3ee;
+  --brut-paper-shade: #ebe8e1;
+  --brut-amber: #ff8c2b;
+  --brut-amber-ink: #0d0d0d;
+  --brut-muted: #6b6862;
+  --brut-rule: #d8d4cb;
+
+  /* Type */
+  --brut-display: "Inter", "Helvetica Neue", Arial, sans-serif;
+  --brut-mono: "JetBrains Mono", "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
+
+  /* Layout */
+  --brut-content-w: 880px;
+  --brut-hero-w: 1100px;
+  --brut-section-y: 96px;
+  --brut-section-y-docs: 56px;
+
+  /* Override Material's primary/accent so anywhere it leaks through, we're consistent */
+  --md-primary-fg-color: var(--brut-ink);
+  --md-primary-fg-color--light: var(--brut-ink);
+  --md-primary-fg-color--dark: var(--brut-ink);
+  --md-accent-fg-color: var(--brut-amber);
+  --md-default-bg-color: var(--brut-paper);
+  --md-default-fg-color: var(--brut-ink);
+  --md-typeset-color: var(--brut-ink);
+  --md-typeset-a-color: var(--brut-ink);
+}
+
+/* ============================================================
+   Base typography
+   ============================================================ */
+
+html, body, .md-typeset {
+  font-family: var(--brut-mono);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--brut-ink);
+  background: var(--brut-paper);
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  color: var(--brut-ink);
+}
+
+.md-typeset h1 { font-size: 3.25rem; line-height: 0.96; margin: 0 0 1.25rem; }
+.md-typeset h2 { font-size: 2.25rem; line-height: 1.0;  margin: 2rem 0 0.75rem; }
+.md-typeset h3 { font-size: 1.5rem;  line-height: 1.1;  margin: 1.5rem 0 0.5rem; }
+.md-typeset h4 { font-size: 1.15rem; line-height: 1.2;  margin: 1.25rem 0 0.5rem; }
+
+.md-typeset p { margin: 0 0 1rem; }
+
+.md-typeset a {
+  color: var(--brut-ink);
+  text-decoration: none;
+  border-bottom: 2px solid var(--brut-amber);
+  padding-bottom: 1px;
+  transition: background 120ms ease;
+}
+.md-typeset a:hover { background: var(--brut-amber); color: var(--brut-amber-ink); }
+
+.md-typeset code {
+  font-family: var(--brut-mono);
+  background: var(--brut-paper-shade);
+  border-radius: 0;
+  padding: 1px 5px;
+  font-size: 0.92em;
+  color: var(--brut-ink);
+}
+
+.md-typeset pre,
+.md-typeset .highlight,
+.md-typeset .highlight pre {
+  border-radius: 0;
+  background: var(--brut-paper-shade);
+  border: none;
+}
+
+.md-typeset table:not([class]) {
+  font-family: var(--brut-mono);
+  font-size: 0.9rem;
+  border: none;
+}
+
+.md-typeset table:not([class]) th {
+  background: transparent;
+  border-bottom: 2px solid var(--brut-ink);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--brut-ink);
+}
+
+.md-typeset table:not([class]) td {
+  border-bottom: 1px solid var(--brut-rule);
+}
