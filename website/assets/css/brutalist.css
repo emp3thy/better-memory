@@ -516,3 +516,91 @@ html, body, .md-typeset {
   background: var(--brut-amber);
   color: var(--brut-amber-ink);
 }
+
+/* ============================================================
+   Landing — doc cards (07)
+   ============================================================ */
+
+.brut-docs-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-top: 1px solid var(--brut-rule);
+  margin-top: 28px;
+}
+
+.brut-doc-card {
+  display: block;
+  padding: 26px 24px;
+  border-bottom: 1px solid var(--brut-rule);
+  border-right: 1px solid var(--brut-rule);
+  text-decoration: none;
+  color: var(--brut-ink);
+  transition: background 120ms ease;
+}
+.brut-doc-card:nth-child(2n) { border-right: none; }
+.brut-doc-card:hover {
+  background: var(--brut-paper-shade);
+  border-bottom: 1px solid var(--brut-rule);
+}
+
+.brut-doc-title {
+  font-family: var(--brut-display);
+  font-weight: 800;
+  font-size: 32px;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+  margin-bottom: 6px;
+  color: var(--brut-ink);
+}
+
+.brut-doc-desc {
+  font-family: var(--brut-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--brut-muted);
+}
+
+.brut-doc-arrow {
+  font-family: var(--brut-mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--brut-amber);
+  margin-top: 14px;
+}
+
+@media (max-width: 720px) {
+  .brut-docs-grid { grid-template-columns: 1fr; }
+  .brut-doc-card { border-right: none; }
+}
+
+/* ============================================================
+   Landing — footer (08)
+   ============================================================ */
+
+.brut-footer {
+  background: var(--brut-paper);
+  border-top: 2px solid var(--brut-ink);
+  padding: 28px 32px;
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-family: var(--brut-mono);
+  font-size: 12px;
+  color: var(--brut-muted);
+}
+
+.brut-footer a {
+  color: var(--brut-muted);
+  text-decoration: none;
+  border-bottom: 1px solid var(--brut-rule);
+  padding-bottom: 1px;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.brut-footer a:hover {
+  background: var(--brut-amber);
+  color: var(--brut-amber-ink);
+  border-bottom-color: var(--brut-ink);
+}
+
+.brut-footer-sep { margin: 0 8px; }

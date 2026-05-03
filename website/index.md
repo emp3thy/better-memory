@@ -186,3 +186,41 @@ cd better-memory
     </table>
   </div>
 </section>
+
+<section class="brut-section">
+  <div class="brut-container">
+    <div class="brut-num">07 — GO DEEPER</div>
+    <h2 class="brut-section-h">documentation</h2>
+    <div class="brut-docs-grid">
+      <a href="architecture/" class="brut-doc-card">
+        <div class="brut-doc-title">architecture</div>
+        <div class="brut-doc-desc">Four-layer epistemic hierarchy, hybrid search, reinforcement-weighted ranking.</div>
+        <div class="brut-doc-arrow">→</div>
+      </a>
+      <a href="configuration/" class="brut-doc-card">
+        <div class="brut-doc-title">configuration</div>
+        <div class="brut-doc-desc">Env vars, project-name overrides, MCP wiring.</div>
+        <div class="brut-doc-arrow">→</div>
+      </a>
+      <a href="observation-lifecycle/" class="brut-doc-card">
+        <div class="brut-doc-title">observation lifecycle</div>
+        <div class="brut-doc-desc">Active → consumed → archived. Synthesis, retention, prune.</div>
+        <div class="brut-doc-arrow">→</div>
+      </a>
+      <a href="contributing/" class="brut-doc-card">
+        <div class="brut-doc-title">contributing</div>
+        <div class="brut-doc-desc">Setup, testing, conventions.</div>
+        <div class="brut-doc-arrow">→</div>
+      </a>
+    </div>
+  </div>
+</section>
+
+<footer class="brut-footer">
+  <div class="brut-footer-left">better-memory · v0.1.0 · MIT</div>
+  <div class="brut-footer-right">
+    <a href="https://github.com/emp3thy/better-memory">github</a>
+    <span class="brut-footer-sep">·</span>
+    <span>built with <a href="https://docs.astral.sh/uv/">uv</a> · <a href="https://www.sqlite.org/">sqlite</a> · <a href="https://ollama.com/">ollama</a></span>
+  </div>
+</footer>
