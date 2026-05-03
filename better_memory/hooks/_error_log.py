@@ -49,7 +49,7 @@ def record_hook_error(*, hook_name: str, exc: BaseException) -> None:
                     hook_name,
                     type(exc).__name__,
                     str(exc),
-                    traceback.format_exc(),
+                    "".join(traceback.format_exception(exc)),
                     cwd,
                 ),
             )
