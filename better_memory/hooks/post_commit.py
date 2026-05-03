@@ -28,10 +28,10 @@ import subprocess
 import sys
 import time
 from datetime import UTC, datetime
-
-from better_memory.config import project_name
 from pathlib import Path
 from uuid import uuid4
+
+from better_memory.config import project_name
 
 _MAX_STDIN_BYTES = 1_048_576
 
