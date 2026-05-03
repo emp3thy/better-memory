@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from better_memory.config import project_name
+from better_memory.config import project_name, resolve_home
 
 _MAX_STDIN_BYTES = 1_048_576
 
@@ -43,10 +43,8 @@ _TRAILER_KEY = "closes-episode"
 
 
 def _default_spool_dir() -> Path:
-    home = os.environ.get("BETTER_MEMORY_HOME")
-    if home:
-        return Path(home).expanduser() / "spool"
-    return Path.home() / ".better-memory" / "spool"
+    """Return ``$BETTER_MEMORY_HOME/spool``, defaulting to ``~/.better-memory``."""
+    return resolve_home() / "spool"
 
 
 def _safe_timestamp(raw: str | None) -> str:

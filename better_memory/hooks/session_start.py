@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from better_memory.config import project_name
+from better_memory.config import project_name, resolve_home
 
 # Mirror the observer cap: reject any stdin payload above 1 MiB without
 # raising. Hooks must never fail.
@@ -28,15 +28,8 @@ _MAX_STDIN_BYTES = 1_048_576
 
 
 def _default_spool_dir() -> Path:
-    """Return ``$BETTER_MEMORY_HOME/spool``, defaulting to ``~/.better-memory``.
-
-    Mirrors the observer hook. Kept duplicated to avoid a cross-module import
-    that would slow hook startup.
-    """
-    home = os.environ.get("BETTER_MEMORY_HOME")
-    if home:
-        return Path(home).expanduser() / "spool"
-    return Path.home() / ".better-memory" / "spool"
+    """Return ``$BETTER_MEMORY_HOME/spool``, defaulting to ``~/.better-memory``."""
+    return resolve_home() / "spool"
 
 
 def _safe_timestamp(raw: str | None) -> str:
