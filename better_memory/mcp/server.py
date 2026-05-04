@@ -484,7 +484,12 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 trigger_type=args.get("trigger_type"),
                 outcome=args.get("outcome", "neutral"),
                 tech=args.get("tech"),
-                scope=args.get("scope", "project"),
+                # `or "project"` (not `, "project"` default) defends against
+                # MCP clients sending {"scope": null} — dict.get returns the
+                # default only when the key is absent, not when its value is
+                # None. Without this, scope=None propagates to ObservationService
+                # .create() which raises ValueError.
+                scope=args.get("scope") or "project",
             )
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 

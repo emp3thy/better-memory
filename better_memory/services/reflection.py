@@ -74,7 +74,7 @@ class EpisodeForPrompt:
 
     id: str
     project: str  # populated from the row by _pick_oldest_pending; lets _load_episode_context query reflections without a subquery
-    goal: str
+    goal: str | None  # episodes.goal is nullable (e.g. background episodes from session_start markers)
     tech: str | None
     outcome: str
 
@@ -423,7 +423,9 @@ class ReflectionSynthesisService:
         )
         lines.append("")
         lines.append("EPISODE")
-        lines.append(f"  goal:    {ctx.episode.goal}")
+        lines.append(
+            f"  goal:    {ctx.episode.goal if ctx.episode.goal else '(unspecified)'}"
+        )
         lines.append(
             f"  tech:    {ctx.episode.tech if ctx.episode.tech else '(unspecified)'}"
         )
