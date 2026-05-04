@@ -225,7 +225,7 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         versions = [r["version"] for r in rows]
-        assert versions == ["0001", "0002", "0003", "0004", "0005"]
+        assert versions == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
     finally:
         conn.close()
 
@@ -693,100 +693,6 @@ def test_reflection_sources_composite_pk_and_fks(tmp_memory_db: Path) -> None:
         conn.close()
 
 
-def test_synthesis_runs_exists(tmp_memory_db: Path) -> None:
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        cols = _column_names(conn, "synthesis_runs")
-        assert {"project", "tech", "last_run_at"}.issubset(cols)
-    finally:
-        conn.close()
-
-
-def test_synthesis_runs_composite_pk(tmp_memory_db: Path) -> None:
-    """(project, tech) is a primary key; tech defaults to '' (not NULL)."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        # Two rows with same project but different tech — both succeed.
-        conn.execute(
-            "INSERT INTO synthesis_runs (project, tech, last_run_at) "
-            "VALUES (?, ?, ?)",
-            ("p", "python", "2026-04-20T10:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO synthesis_runs (project, tech, last_run_at) "
-            "VALUES (?, ?, ?)",
-            ("p", "sqlite", "2026-04-20T10:00:00Z"),
-        )
-        conn.commit()
-
-        # Default tech is '' — project without tech is a distinct PK.
-        conn.execute(
-            "INSERT INTO synthesis_runs (project, last_run_at) VALUES (?, ?)",
-            ("p", "2026-04-20T10:00:00Z"),
-        )
-        conn.commit()
-
-        # Duplicate (project, tech) rejected.
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO synthesis_runs (project, tech, last_run_at) "
-                "VALUES (?, ?, ?)",
-                ("p", "python", "2026-04-20T11:00:00Z"),
-            )
-
-        # tech NOT NULL — explicit NULL rejected.
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO synthesis_runs (project, tech, last_run_at) "
-                "VALUES (?, ?, ?)",
-                ("p2", None, "2026-04-20T10:00:00Z"),
-            )
-    finally:
-        conn.close()
-
-
-def test_synthesis_runs_has_last_goal_column(tmp_memory_db: Path) -> None:
-    """0003 migration adds last_goal column to synthesis_runs."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        cols = _column_names(conn, "synthesis_runs")
-        assert "last_goal" in cols, f"Missing: last_goal. Got: {cols}"
-
-        # Back-compat: rows can still be inserted without last_goal.
-        conn.execute(
-            "INSERT INTO synthesis_runs (project, tech, last_run_at) "
-            "VALUES (?, ?, ?)",
-            ("p", "python", "2026-04-22T10:00:00+00:00"),
-        )
-        conn.commit()
-        row = conn.execute(
-            "SELECT last_goal FROM synthesis_runs WHERE project = ?", ("p",)
-        ).fetchone()
-        assert row["last_goal"] is None  # nullable, default NULL
-    finally:
-        conn.close()
-
-
-def test_synthesis_runs_last_goal_round_trips(tmp_memory_db: Path) -> None:
-    """Explicit last_goal value stored and readable."""
-    conn = connect(tmp_memory_db)
-    try:
-        apply_migrations(conn)
-        conn.execute(
-            "INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal) "
-            "VALUES (?, ?, ?, ?)",
-            ("p", "python", "2026-04-22T10:00:00+00:00", "implement feature X"),
-        )
-        conn.commit()
-        row = conn.execute(
-            "SELECT last_goal FROM synthesis_runs WHERE project = ?", ("p",)
-        ).fetchone()
-        assert row["last_goal"] == "implement feature X"
-    finally:
-        conn.close()
 
 
 class TestStatusChangedAtColumn:
@@ -847,3 +753,28 @@ class TestStatusChangedAtColumn:
             "AND name = 'idx_observations_status_changed_at'"
         ).fetchone()
         assert idx is not None
+
+
+def test_episodes_has_synthesized_at_column(tmp_memory_db: Path) -> None:
+    with connect(tmp_memory_db) as conn:
+        apply_migrations(conn)
+        cols = _column_names(conn, "episodes")
+        assert "synthesized_at" in cols
+
+
+def test_episodes_has_synth_failed_at_column(tmp_memory_db: Path) -> None:
+    with connect(tmp_memory_db) as conn:
+        apply_migrations(conn)
+        cols = _column_names(conn, "episodes")
+        assert "synth_failed_at" in cols
+
+
+def test_idx_episodes_pending_synth_partial_index_exists(tmp_memory_db: Path) -> None:
+    with connect(tmp_memory_db) as conn:
+        apply_migrations(conn)
+        rows = conn.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='index' AND name='idx_episodes_pending_synth'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert "synthesized_at IS NULL" in rows[0][1]

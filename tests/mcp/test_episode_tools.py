@@ -161,25 +161,6 @@ class TestCloseEpisodeNoActiveIsSilentNoop:
 class TestStartEpisodeReturnsReflections:
     """Phase 5: memory.start_episode returns {episode_id, reflections}."""
 
-    def test_service_level_returns_reflections(self, conn):
-        """ReflectionSynthesisService.synthesize returns bucketed reflections."""
-        import asyncio
-        import json as _json
-
-        from better_memory.llm.fake import FakeChat
-        from better_memory.services.reflection import ReflectionSynthesisService
-
-        fake = FakeChat(
-            responses=[_json.dumps({
-                "new": [], "augment": [], "merge": [], "ignore": []
-            })]
-        )
-        svc = ReflectionSynthesisService(conn, chat=fake)
-        result = asyncio.run(
-            svc.synthesize(goal="g", tech=None, project="p")
-        )
-        assert set(result.keys()) == {"do", "dont", "neutral"}
-
     def test_start_episode_tool_still_registered(self):
         from better_memory.mcp.server import _tool_definitions
         tool_names = {t.name for t in _tool_definitions()}
@@ -225,6 +206,153 @@ class TestStartEpisodeReturnsReflections:
             assert "memory.start_episode" in names
         finally:
             asyncio.run(cleanup())
+
+
+class TestStartEpisodeDrainsPending:
+    """The drain-loop pattern in memory.start_episode (post-Phase-X redesign):
+    `while (await synthesize_next(project=...)).processed: pass`.
+
+    Tests the SERVICE-level loop directly (mirroring the existing
+    test_service_level_returns_reflections pattern); the MCP tool is a
+    thin wrapper.
+    """
+
+    def test_drains_all_pending_then_returns_tech_filtered_buckets(self, conn):
+        import asyncio
+        import json as _json
+
+        from better_memory.llm.fake import FakeChat
+        from better_memory.services.reflection import ReflectionSynthesisService
+        from tests.conftest import seed_pending_episodes
+
+        ids = seed_pending_episodes(conn, project="p1", n=3, tech=None)
+
+        empty_response = _json.dumps(
+            {"new": [], "augment": [], "merge": [], "ignore": []}
+        )
+        fake = FakeChat(responses=[empty_response, empty_response, empty_response])
+        svc = ReflectionSynthesisService(conn, chat=fake)
+
+        async def _drain():
+            while (await svc.synthesize_next(project="p1")).processed:
+                pass
+
+        asyncio.run(_drain())
+
+        for eid in ids:
+            row = conn.execute(
+                "SELECT synthesized_at FROM episodes WHERE id = ?", (eid,)
+            ).fetchone()
+            assert row[0] is not None, f"{eid} not marked synthesized"
+
+        assert len(fake.responses) == 0
+        assert len(fake.calls) == 3
+
+        buckets = svc.retrieve_reflections(project="p1")
+        assert set(buckets.keys()) == {"do", "dont", "neutral"}
+
+    def test_no_pending_returns_immediately_without_llm_calls(self, conn):
+        import asyncio
+
+        from better_memory.llm.fake import FakeChat
+        from better_memory.services.reflection import ReflectionSynthesisService
+        from tests.conftest import seed_pending_episodes
+
+        ids = seed_pending_episodes(conn, project="p1", n=2)
+        for eid in ids:
+            conn.execute(
+                "UPDATE episodes SET synthesized_at = '2026-04-22T10:00:00+00:00' "
+                "WHERE id = ?", (eid,)
+            )
+        conn.commit()
+
+        fake = FakeChat(responses=[])
+        svc = ReflectionSynthesisService(conn, chat=fake)
+
+        async def _drain():
+            while (await svc.synthesize_next(project="p1")).processed:
+                pass
+
+        asyncio.run(_drain())
+        assert len(fake.calls) == 0
+
+    def test_loop_terminates_on_persistent_failure(self, conn):
+        """Without the cooldown filter, this would infinite-loop."""
+        import asyncio
+
+        from better_memory.llm.ollama import ChatError
+        from better_memory.services.reflection import ReflectionSynthesisService
+        from tests.conftest import seed_pending_episodes
+
+        ids = seed_pending_episodes(conn, project="p1", n=3)
+
+        class AlwaysFailChat:
+            calls = 0
+            async def complete(self, prompt: str) -> str:
+                AlwaysFailChat.calls += 1
+                if AlwaysFailChat.calls > 10:
+                    raise AssertionError("loop did not terminate")
+                raise ChatError("simulated persistent failure")
+
+        svc = ReflectionSynthesisService(conn, chat=AlwaysFailChat())
+
+        async def _drain():
+            while (await svc.synthesize_next(project="p1")).processed:
+                pass
+
+        asyncio.run(_drain())
+
+        assert AlwaysFailChat.calls == 3
+        for eid in ids:
+            row = conn.execute(
+                "SELECT synthesized_at, synth_failed_at FROM episodes WHERE id = ?",
+                (eid,),
+            ).fetchone()
+            assert row["synthesized_at"] is None
+            assert row["synth_failed_at"] is not None
+
+    def test_partial_failure_continues_past_failed_episode(self, conn):
+        """One episode fails; the others still get processed."""
+        import asyncio
+        import json as _json
+
+        from better_memory.llm.ollama import ChatError
+        from better_memory.services.reflection import ReflectionSynthesisService
+        from tests.conftest import seed_pending_episodes
+
+        ids = seed_pending_episodes(conn, project="p1", n=3)
+
+        empty_response = _json.dumps(
+            {"new": [], "augment": [], "merge": [], "ignore": []}
+        )
+
+        class FlakyChat:
+            calls = 0
+            async def complete(self, prompt: str) -> str:
+                FlakyChat.calls += 1
+                if FlakyChat.calls == 1:
+                    raise ChatError("transient")
+                return empty_response
+
+        svc = ReflectionSynthesisService(conn, chat=FlakyChat())
+
+        async def _drain():
+            while (await svc.synthesize_next(project="p1")).processed:
+                pass
+
+        asyncio.run(_drain())
+
+        oldest_row = conn.execute(
+            "SELECT synthesized_at, synth_failed_at FROM episodes WHERE id = ?",
+            (ids[0],),
+        ).fetchone()
+        assert oldest_row["synthesized_at"] is None
+        assert oldest_row["synth_failed_at"] is not None
+        for eid in ids[1:]:
+            row = conn.execute(
+                "SELECT synthesized_at FROM episodes WHERE id = ?", (eid,)
+            ).fetchone()
+            assert row["synthesized_at"] is not None
 
 
 class TestServerStartupDrainsSessionStart:

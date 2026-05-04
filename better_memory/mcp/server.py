@@ -127,6 +127,15 @@ def _tool_definitions() -> list[Tool]:
                         "enum": ["success", "failure", "neutral"],
                     },
                     "tech": {"type": "string"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["project", "general"],
+                        "description": (
+                            "'project' (default) for project-scoped observations; "
+                            "'general' for cross-project workflow rules that should "
+                            "surface in every project's memory_retrieve."
+                        ),
+                    },
                 },
             },
         ),
@@ -487,6 +496,12 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 trigger_type=args.get("trigger_type"),
                 outcome=args.get("outcome", "neutral"),
                 tech=args.get("tech"),
+                # `or "project"` (not `, "project"` default) defends against
+                # MCP clients sending {"scope": null} — dict.get returns the
+                # default only when the key is absent, not when its value is
+                # None. Without this, scope=None propagates to ObservationService
+                # .create() which raises ValueError.
+                scope=args.get("scope") or "project",
             )
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
@@ -580,10 +595,11 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 goal=args["goal"],
                 tech=args.get("tech"),
             )
-            buckets = await reflections.synthesize(
-                goal=args["goal"],
-                tech=args.get("tech"),
-                project=project,
+            # Drain pending episodes so the new episode's reflection context is fresh.
+            while (await reflections.synthesize_next(project=project)).processed:
+                pass
+            buckets = reflections.retrieve_reflections(
+                project=project, tech=args.get("tech"),
             )
             return [
                 TextContent(

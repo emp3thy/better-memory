@@ -510,12 +510,8 @@ def create_app(
                         svc = ReflectionSynthesisService(
                             local_conn, chat=chat
                         )
-                        result = await svc.synthesize(
-                            goal="manual synthesis",
-                            tech=None,
-                            project=project,
-                        )
-                        return result, dict(svc.last_run_counts)
+                        step = await svc.synthesize_next(project=project)
+                        return step
                     finally:
                         # Cleanup must NOT mask the synthesize result or
                         # exception (memory 777c89b2). Each cleanup gets
@@ -546,7 +542,7 @@ def create_app(
 
             worker_dispatched = True
             try:
-                result, run_counts = run_async_in_worker(
+                step = run_async_in_worker(
                     _build_coro, timeout=synth_timeout,
                 )
             except WorkerTimeout:
@@ -588,11 +584,10 @@ def create_app(
                     500, {},
                 )
 
-            bucket_counts = {k: len(v) for k, v in result.items()}
             rendered = render_template(
-                "fragments/observations_synth_banner.html",
-                counts=bucket_counts,
-                run_counts=run_counts,
+                "fragments/synth_step_banner.html",
+                step=step,
+                queue=step.queue,
             )
             return (
                 rendered, 200, {"HX-Trigger": "observations-synthesized"}

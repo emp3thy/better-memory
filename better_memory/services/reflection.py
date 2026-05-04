@@ -1,23 +1,22 @@
 """Reflection synthesis service.
 
-Orchestrates the Phase 5 synthesis flow defined in spec §5: load
-context (existing reflections + new observations joined with episode
-outcome), prompt an LLM for a structured response, and apply the
-response atomically (new reflections, augmentations, merges,
-ignores), updating the ``synthesis_runs`` watermark.
+Orchestrates per-episode synthesis: for each closed-but-unsynthesized
+episode, loads its observations and tech-filtered reflections, calls the
+LLM once, and applies new/augment/merge/ignore actions atomically inside
+a per-episode SAVEPOINT.
 
 This module provides:
 - Typed read models for LLM consumption (:class:`ReflectionForPrompt`,
   :class:`ObservationForPrompt`).
-- :class:`SynthesisContext` aggregating them plus the watermark.
-- :class:`ReflectionSynthesisService` with a ``load_context`` method
-  (Task 2) that Tasks 3-10 build on.
+- Per-episode types: :class:`EpisodeForPrompt`, :class:`EpisodeContext`,
+  :class:`EpisodeQueueCounts`, :class:`SynthesisStep`.
+- :class:`ReflectionSynthesisService` with ``synthesize_next`` as the
+  primary entry point.
 
 Design notes:
 - The service owns writes within its own transaction envelope
   (SAVEPOINT + commit), matching the convention used by
   ObservationService and EpisodeService.
-- Context loading is read-only and commits nothing.
 - The LLM client is injected via a ``ChatCompleter`` Protocol so
   tests can swap :class:`better_memory.llm.fake.FakeChat` in
   without touching Ollama.
@@ -29,9 +28,9 @@ import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from better_memory.llm.ollama import ChatCompleter
+from better_memory.llm.ollama import ChatCompleter, ChatError
 
 
 def _default_clock() -> datetime:
@@ -55,7 +54,7 @@ class ReflectionForPrompt:
 
 @dataclass(frozen=True)
 class ObservationForPrompt:
-    """Read model for a new observation, joined with its episode's goal and outcome."""
+    """Read model for an observation, joined with episode context."""
 
     id: str
     content: str
@@ -66,15 +65,51 @@ class ObservationForPrompt:
     created_at: str
     episode_goal: str | None
     episode_outcome: str | None
+    status: str = "active"
 
 
 @dataclass(frozen=True)
-class SynthesisContext:
-    """Inputs to the synthesis prompt plus the last-run watermark."""
+class EpisodeForPrompt:
+    """Read model for one episode, the unit of per-episode synthesis."""
 
-    reflections: list[ReflectionForPrompt]
-    observations: list[ObservationForPrompt]
-    last_run_at: str | None  # ISO-8601 timestamp of the last synthesis, or None
+    id: str
+    project: str  # populated from the row by _pick_oldest_pending; lets _load_episode_context query reflections without a subquery
+    goal: str | None  # episodes.goal is nullable (e.g. background episodes from session_start markers)
+    tech: str | None
+    outcome: str
+
+
+@dataclass(frozen=True)
+class EpisodeContext:
+    """Inputs to a per-episode synthesis prompt."""
+
+    episode: EpisodeForPrompt
+    observations: list[ObservationForPrompt]   # ALL observations, regardless of status
+    reflections: list[ReflectionForPrompt]     # tech-filtered: tech == episode.tech OR tech IS NULL
+
+
+@dataclass(frozen=True)
+class EpisodeQueueCounts:
+    """Single-source-of-truth queue counts, computed from one connection."""
+
+    done: int
+    pending: int
+    in_cooldown: int
+
+    @property
+    def total(self) -> int:
+        return self.done + self.pending + self.in_cooldown
+
+
+@dataclass(frozen=True)
+class SynthesisStep:
+    """Result of one synthesize_next call."""
+
+    processed: bool                       # False ⇔ no pending episode (queue empty or all in cooldown)
+    episode_id: str | None                # which episode was processed (None if processed=False)
+    counts: dict[str, int]                # this-step counters: created/augmented/merged/ignored/auto_ignored
+    queue: EpisodeQueueCounts             # post-step queue snapshot, single connection, single moment
+    failure: str | None                   # set if LLM-class error was caught
 
 
 class SynthesisResponseError(ValueError):
@@ -239,12 +274,10 @@ class ReflectionSynthesisService:
     """Orchestrates pre-start synthesis: load, prompt, parse, apply, return.
 
     Connection ownership: the service writes within its own SAVEPOINT +
-    commit envelope for apply methods. ``load_context`` is read-only.
+    commit envelope for apply methods.
     Callers must not share a connection that already has an open
     outer transaction with other services.
     """
-
-    _SHORT_CIRCUIT_WINDOW_MINUTES = 10
 
     _ZERO_COUNTS: dict[str, int] = {
         "created": 0, "augmented": 0, "merged": 0,
@@ -261,82 +294,103 @@ class ReflectionSynthesisService:
         self._conn = conn
         self._chat = chat
         self._clock: Callable[[], datetime] = clock or _default_clock
-        self._last_run_counts: dict[str, int] = dict(self._ZERO_COUNTS)
-
-    @property
-    def last_run_counts(self) -> dict[str, int]:
-        """Per-action counts from the most recent synthesize() call.
-
-        Keys: ``created``, ``augmented``, ``merged``, ``ignored`` (LLM-
-        emitted ignore list), ``auto_ignored`` (input batch observations
-        the LLM did not cite, marked consumed_without_reflection so the
-        active set stays honest after the watermark advances).
-
-        All zeros after a short-circuit (no LLM call). Reset to all-zero
-        at the start of each synthesize(), so a caller observing this
-        attribute always sees the freshest run's numbers.
-        """
-        return dict(self._last_run_counts)
-
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
         # Mirror EpisodeService.start_foreground / ObservationService.create
         # so case-mismatched tech doesn't silently miss on retrieval.
         return tech.lower() if tech else None
 
-    # -------------------------------------------------------------- load_context
-    def load_context(
-        self, *, project: str, tech: str | None
-    ) -> SynthesisContext:
-        """Fetch reflections + new observations for the synthesis prompt.
+    # ------------------------------------------------------- _pick_oldest_pending
+    def _pick_oldest_pending(
+        self, project: str
+    ) -> EpisodeForPrompt | None:
+        """Return the oldest closed-but-unsynthesized episode for project.
 
-        Reflections: ``status IN ('pending_review', 'confirmed')`` for
-        ``project``. When ``tech`` is given, rows match either the same
-        ``tech`` exactly OR ``tech IS NULL`` (cross-tech reflections
-        are surfaced regardless of the incoming tech tag).
+        Excludes:
+        - episodes still open (outcome IS NULL)
+        - episodes already synthesized (synthesized_at IS NOT NULL)
+        - episodes in the 300s failure cooldown window
 
-        Observations: rows written since the synthesis watermark
-        (``synthesis_runs.last_run_at`` for ``(project, tech_key)``
-        where ``tech_key`` is ``tech`` or ``''`` when tech is None).
-        Filtered to episodes with ``outcome IS NOT NULL`` (i.e. closed
-        episodes — the four allowed outcomes are ``success``,
-        ``partial``, ``abandoned``, and ``no_outcome``). Includes
-        ``no_outcome`` because Phase 2's interim ``superseded`` close
-        path writes ``outcome='no_outcome'`` and those observations
-        are exactly the freshest data the user just generated under
-        the prior goal — synthesis must see them. Each observation is
-        returned with its owning episode's ``goal`` and ``outcome``
-        joined in.
-
-        When no prior synthesis run exists, the watermark is NULL and
-        all eligible observations are returned.
+        Returns None when nothing is eligible (queue is empty or all candidates
+        are in cooldown).
         """
-        tech = self._normalize_tech(tech)
-        # --- Reflections --------------------------------------------------
+        cooldown_cutoff = (self._clock() - timedelta(seconds=300)).isoformat()
+        row = self._conn.execute(
+            """
+            SELECT id, project, goal, tech, outcome
+              FROM episodes
+             WHERE project = ?
+               AND outcome IS NOT NULL
+               AND synthesized_at IS NULL
+               AND (synth_failed_at IS NULL
+                    OR synth_failed_at < ?)
+             ORDER BY ended_at ASC
+             LIMIT 1
+            """,
+            (project, cooldown_cutoff),
+        ).fetchone()
+        if row is None:
+            return None
+        return EpisodeForPrompt(
+            id=row["id"],
+            project=row["project"],
+            goal=row["goal"],
+            tech=row["tech"],
+            outcome=row["outcome"],
+        )
+
+    # --------------------------------------------------- _load_episode_context
+    def _load_episode_context(
+        self, episode: EpisodeForPrompt
+    ) -> EpisodeContext:
+        """Load all observations for the episode + tech-filtered reflections."""
+        obs_rows = self._conn.execute(
+            """
+            SELECT id, content, outcome, component, theme, tech,
+                   created_at, status
+              FROM observations
+             WHERE episode_id = ?
+             ORDER BY created_at ASC, rowid ASC
+            """,
+            (episode.id,),
+        ).fetchall()
+        observations = [
+            ObservationForPrompt(
+                id=r["id"], content=r["content"], outcome=r["outcome"],
+                component=r["component"], theme=r["theme"], tech=r["tech"],
+                created_at=r["created_at"],
+                episode_goal=episode.goal,
+                episode_outcome=episode.outcome,
+                status=r["status"],
+            )
+            for r in obs_rows
+        ]
+
+        tech = self._normalize_tech(episode.tech)
         if tech is None:
             refl_rows = self._conn.execute(
                 """
                 SELECT id, title, tech, phase, polarity, use_cases, hints,
                        confidence, status
-                FROM reflections
-                WHERE project = ?
-                  AND status IN ('pending_review', 'confirmed')
-                ORDER BY confidence DESC, updated_at DESC
+                  FROM reflections
+                 WHERE (project = ? OR scope = 'general')
+                   AND status IN ('pending_review', 'confirmed')
+                 ORDER BY confidence DESC, updated_at DESC
                 """,
-                (project,),
+                (episode.project,),
             ).fetchall()
         else:
             refl_rows = self._conn.execute(
                 """
                 SELECT id, title, tech, phase, polarity, use_cases, hints,
                        confidence, status
-                FROM reflections
-                WHERE project = ?
-                  AND status IN ('pending_review', 'confirmed')
-                  AND (tech = ? OR tech IS NULL)
-                ORDER BY confidence DESC, updated_at DESC
+                  FROM reflections
+                 WHERE (project = ? OR scope = 'general')
+                   AND status IN ('pending_review', 'confirmed')
+                   AND (tech = ? OR tech IS NULL)
+                 ORDER BY confidence DESC, updated_at DESC
                 """,
-                (project, tech),
+                (episode.project, tech),
             ).fetchall()
 
         reflections = [
@@ -348,86 +402,61 @@ class ReflectionSynthesisService:
             )
             for r in refl_rows
         ]
-
-        # --- Watermark ----------------------------------------------------
-        tech_key = tech if tech is not None else ""
-        run_row = self._conn.execute(
-            "SELECT last_run_at FROM synthesis_runs "
-            "WHERE project = ? AND tech = ?",
-            (project, tech_key),
-        ).fetchone()
-        last_run_at = run_row["last_run_at"] if run_row is not None else None
-
-        # --- Observations -------------------------------------------------
-        # Join observations → episodes so we can (a) filter by episode.outcome
-        # and (b) surface episode.goal / episode.outcome to the LLM.
-        params: list[object] = [project]
-        obs_sql = """
-            SELECT o.id, o.content, o.outcome, o.component, o.theme, o.tech,
-                   o.created_at, e.goal AS episode_goal,
-                   e.outcome AS episode_outcome
-            FROM observations o
-            JOIN episodes e ON e.id = o.episode_id
-            WHERE o.project = ?
-              AND o.status = 'active'
-              AND e.outcome IN (
-                  'success', 'partial', 'abandoned', 'no_outcome'
-              )
-        """
-        if last_run_at is not None:
-            obs_sql += " AND o.created_at > ?"
-            params.append(last_run_at)
-        obs_sql += " ORDER BY o.created_at ASC, o.rowid ASC"
-
-        obs_rows = self._conn.execute(obs_sql, params).fetchall()
-
-        observations = [
-            ObservationForPrompt(
-                id=r["id"], content=r["content"], outcome=r["outcome"],
-                component=r["component"], theme=r["theme"], tech=r["tech"],
-                created_at=r["created_at"],
-                episode_goal=r["episode_goal"],
-                episode_outcome=r["episode_outcome"],
-            )
-            for r in obs_rows
-        ]
-
-        return SynthesisContext(
-            reflections=reflections,
+        return EpisodeContext(
+            episode=episode,
             observations=observations,
-            last_run_at=last_run_at,
+            reflections=reflections,
         )
 
-    # ------------------------------------------------------------- build_prompt
-    def build_prompt(
-        self,
-        *,
-        goal: str,
-        tech: str | None,
-        context: SynthesisContext,
-    ) -> str:
-        """Render the synthesis prompt per spec §5.2.
+    # ------------------------------------------------- _build_episode_prompt
+    def _build_episode_prompt(self, ctx: EpisodeContext) -> str:
+        """Render the per-episode synthesis prompt.
 
-        Deterministic in its inputs — same goal/tech/context always
-        produces the same prompt. Safe to cache.
+        Spec: docs/superpowers/specs/2026-05-03-episodic-synthesis-design.md
+        "Per-episode prompt template".
+
+        Deterministic in its inputs.
         """
         lines: list[str] = []
         lines.append(
-            "You are evaluating memory consolidation for a coding project."
+            "You are evaluating one coding episode for memory consolidation."
         )
         lines.append("")
-        lines.append(f"GOAL: {goal}")
-        lines.append(f"TECH: {tech if tech else '(unspecified)'}")
+        lines.append("EPISODE")
+        lines.append(
+            f"  goal:    {ctx.episode.goal if ctx.episode.goal else '(unspecified)'}"
+        )
+        lines.append(
+            f"  tech:    {ctx.episode.tech if ctx.episode.tech else '(unspecified)'}"
+        )
+        lines.append(f"  outcome: {ctx.episode.outcome}")
         lines.append("")
 
-        # Existing reflections section.
         lines.append(
-            "EXISTING REFLECTIONS (you may augment or merge these):"
+            "OBSERVATIONS from this episode (all of them, regardless of prior status):"
         )
-        if not context.reflections:
+        if not ctx.observations:
             lines.append("  (none)")
         else:
-            for r in context.reflections:
+            for o in ctx.observations:
+                tech_str = o.tech if o.tech else "any-tech"
+                lines.append(
+                    f"- id={o.id} (outcome={o.outcome}, "
+                    f"component={o.component or '-'}, "
+                    f"theme={o.theme or '-'}, tech={tech_str})"
+                )
+                lines.append(f"  status: {o.status}")
+                lines.append(f"  content: {o.content}")
+        lines.append("")
+
+        lines.append(
+            "EXISTING REFLECTIONS for this tech "
+            "(you may augment, merge, leave alone):"
+        )
+        if not ctx.reflections:
+            lines.append("  (none)")
+        else:
+            for r in ctx.reflections:
                 tech_str = r.tech if r.tech else "any-tech"
                 lines.append(
                     f"- id={r.id} [{r.polarity}/{r.phase}/{tech_str}] "
@@ -438,32 +467,9 @@ class ReflectionSynthesisService:
                 lines.append(f"  hints: {r.hints}")
         lines.append("")
 
-        # New observations section.
         lines.append(
-            "NEW OBSERVATIONS since last synthesis (summarise "
-            "into new reflections, augment existing, merge duplicates, "
-            "or ignore):"
-        )
-        if not context.observations:
-            lines.append("  (none)")
-        else:
-            for o in context.observations:
-                tech_str = o.tech if o.tech else "any-tech"
-                lines.append(
-                    f"- id={o.id} (outcome={o.outcome}, "
-                    f"component={o.component or '-'}, "
-                    f"theme={o.theme or '-'}, tech={tech_str})"
-                )
-                lines.append(
-                    f'  episode goal="{o.episode_goal or ""}" '
-                    f"episode outcome={o.episode_outcome or ''}"
-                )
-                lines.append(f"  content: {o.content}")
-        lines.append("")
-
-        # Response-shape instructions.
-        lines.append(
-            "Respond ONLY with a JSON object matching this exact shape:"
+            "Decide what to do with this episode's observations. "
+            "Respond ONLY with this JSON shape:"
         )
         lines.append("{")
         lines.append('  "new": [')
@@ -504,6 +510,46 @@ class ReflectionSynthesisService:
         lines.append("}")
 
         return "\n".join(lines)
+
+    # --------------------------------------------------------- _mark_synthesized
+    def _mark_synthesized(self, episode_id: str) -> None:
+        """Set synthesized_at = clock() for the given episode."""
+        self._conn.execute(
+            "UPDATE episodes SET synthesized_at = ? WHERE id = ?",
+            (self._clock().isoformat(), episode_id),
+        )
+
+    # ------------------------------------------------------- _read_queue_counts
+    def _read_queue_counts(self, project: str) -> EpisodeQueueCounts:
+        """Snapshot the per-project queue state in one statement.
+
+        Single-source-of-truth for the route's banner — eliminates the race
+        that would exist if `done` and `pending` were read from different
+        connections at different times.
+        """
+        # Compute the cooldown cutoff via the injected clock so tests with
+        # fixed_clock get deterministic semantics matching _pick_oldest_pending.
+        cooldown_cutoff = (self._clock() - timedelta(seconds=300)).isoformat()
+        row = self._conn.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE synthesized_at IS NOT NULL)
+                AS done,
+              COUNT(*) FILTER (WHERE synthesized_at IS NULL
+                                 AND (synth_failed_at IS NULL
+                                      OR synth_failed_at < ?))
+                AS pending,
+              COUNT(*) FILTER (WHERE synthesized_at IS NULL
+                                 AND synth_failed_at >= ?)
+                AS in_cooldown
+            FROM episodes
+            WHERE project = ? AND outcome IS NOT NULL
+            """,
+            (cooldown_cutoff, cooldown_cutoff, project),
+        ).fetchone()
+        return EpisodeQueueCounts(
+            done=row["done"], pending=row["pending"], in_cooldown=row["in_cooldown"],
+        )
 
     # ----------------------------------------------------------- parse_response
     def parse_response(self, raw: str) -> SynthesisResponse:
@@ -582,21 +628,22 @@ class ReflectionSynthesisService:
 
             confidence = max(0.1, min(1.0, action.confidence))
             reflection_id = uuid4().hex
+            scope = self._derive_new_reflection_scope(valid_sources)
 
             self._conn.execute(
                 """
                 INSERT INTO reflections (
                     id, title, project, tech, phase, polarity, use_cases,
                     hints, confidence, status, evidence_count,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_review', ?, ?, ?)
+                    created_at, updated_at, scope
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_review', ?, ?, ?, ?)
                 """,
                 (
                     reflection_id, action.title, project,
                     self._normalize_tech(action.tech),
                     action.phase, action.polarity, action.use_cases,
                     json.dumps(action.hints), confidence,
-                    len(valid_sources), now, now,
+                    len(valid_sources), now, now, scope,
                 ),
             )
             for obs_id in valid_sources:
@@ -612,6 +659,25 @@ class ReflectionSynthesisService:
                 f"WHERE id IN ({placeholders})",
                 [now, *valid_sources],
             )
+
+    def _derive_new_reflection_scope(
+        self, source_obs_ids: list[str]
+    ) -> str:
+        """Return 'general' iff every source observation has scope='general'.
+
+        Empty source list defaults to 'project' (defensive — _apply_new
+        already filters out new actions with no valid sources).
+        """
+        if not source_obs_ids:
+            return "project"
+        placeholders = ",".join("?" * len(source_obs_ids))
+        rows = self._conn.execute(
+            f"SELECT scope FROM observations WHERE id IN ({placeholders})",
+            source_obs_ids,
+        ).fetchall()
+        if not rows:
+            return "project"
+        return "general" if all(r["scope"] == "general" for r in rows) else "project"
 
     def _filter_existing_observations(
         self, ids: list[str]
@@ -863,143 +929,82 @@ class ReflectionSynthesisService:
         )
         return cur.rowcount or 0
 
-    # --------------------------------------------------------- _upsert_watermark
-    def _upsert_watermark(
-        self, *, project: str, tech: str | None, goal: str
-    ) -> None:
-        """Record that synthesis just ran for (project, tech) with the given goal."""
-        tech_key = tech if tech is not None else ""
-        now = self._clock().isoformat()
-        self._conn.execute(
-            """
-            INSERT INTO synthesis_runs (project, tech, last_run_at, last_goal)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(project, tech) DO UPDATE SET
-                last_run_at = excluded.last_run_at,
-                last_goal   = excluded.last_goal
-            """,
-            (project, tech_key, now, goal),
-        )
+    # --------------------------------------------------------- synthesize_next
+    async def synthesize_next(self, *, project: str) -> SynthesisStep:
+        """Process the oldest closed-but-unsynthesized episode for project.
 
-    # ----------------------------------------------------- _should_short_circuit
-    def _should_short_circuit(
-        self, *, project: str, tech: str | None, goal: str
-    ) -> bool:
-        """Return True if this call exactly matches a recent synthesis.
+        One LLM call per episode. Returns a SynthesisStep describing what
+        happened. Caller (UI route or MCP loop) drives the iteration.
 
-        Conditions (all must hold):
-        1. A synthesis_runs row exists for (project, tech).
-        2. last_goal == goal.
-        3. now - last_run_at < SHORT_CIRCUIT_WINDOW_MINUTES.
-        4. No observations have been written after last_run_at for (project, tech).
+        Spec: docs/superpowers/specs/2026-05-03-episodic-synthesis-design.md
         """
-        from datetime import timedelta
-        tech = self._normalize_tech(tech)
-        tech_key = tech if tech is not None else ""
-        row = self._conn.execute(
-            "SELECT last_run_at, last_goal FROM synthesis_runs "
-            "WHERE project = ? AND tech = ?",
-            (project, tech_key),
-        ).fetchone()
-        if row is None:
-            return False
-        if row["last_goal"] != goal:
-            return False
+        episode = self._pick_oldest_pending(project)
+        if episode is None:
+            return SynthesisStep(
+                processed=False, episode_id=None,
+                counts=dict(self._ZERO_COUNTS),
+                queue=self._read_queue_counts(project),
+                failure=None,
+            )
 
-        # Within the short-circuit window?
+        self._conn.execute("SAVEPOINT episode_synthesize")
         try:
-            last_run_dt = datetime.fromisoformat(row["last_run_at"])
-        except (TypeError, ValueError):
-            return False
-        if last_run_dt.tzinfo is None:
-            last_run_dt = last_run_dt.replace(tzinfo=UTC)
-        elapsed = self._clock() - last_run_dt
-        if elapsed >= timedelta(minutes=self._SHORT_CIRCUIT_WINDOW_MINUTES):
-            return False
+            ctx = self._load_episode_context(episode)
+            prompt = self._build_episode_prompt(ctx)
+            raw = await self._chat.complete(prompt)
+            response = self.parse_response(raw)
 
-        # Any new observations since last_run_at?
-        # Mirror load_context exactly — same outcome filter AND the
-        # same `o.status = 'active'` filter — so a same-goal resume
-        # short-circuits whenever load_context would return nothing.
-        new_count = self._conn.execute(
-            """
-            SELECT COUNT(*) AS c
-            FROM observations o
-            JOIN episodes e ON e.id = o.episode_id
-            WHERE o.project = ?
-              AND o.status = 'active'
-              AND e.outcome IN (
-                  'success', 'partial', 'abandoned', 'no_outcome'
-              )
-              AND o.created_at > ?
-            """,
-            (project, row["last_run_at"]),
-        ).fetchone()["c"]
-        return new_count == 0
-
-    # ----------------------------------------------------------------- synthesize
-    async def synthesize(
-        self, *, goal: str, tech: str | None, project: str
-    ) -> dict[str, list[dict]]:
-        """End-to-end synthesis. Short-circuits on same-goal resume.
-
-        Short-circuit conditions (spec §5):
-        - Prior synthesis run exists for (project, tech) with last_goal == goal.
-        - Now - last_run_at < 10 minutes.
-        - No new observations since last_run_at.
-
-        When short-circuiting, returns the current reflection buckets
-        without calling the LLM.
-        """
-        # Reset per-run counters; short-circuit returns all-zero counts.
-        self._last_run_counts = dict(self._ZERO_COUNTS)
-        tech = self._normalize_tech(tech)
-        if self._should_short_circuit(project=project, tech=tech, goal=goal):
-            return self._bucketed_reflections(project=project, tech=tech)
-
-        context = self.load_context(project=project, tech=tech)
-        input_obs_ids = [o.id for o in context.observations]
-        prompt = self.build_prompt(goal=goal, tech=tech, context=context)
-        raw = await self._chat.complete(prompt)
-        response = self.parse_response(raw)
-
-        conn = self._conn
-        conn.execute("SAVEPOINT reflection_synthesize")
-        try:
             self._apply_new(response.new, project=project)
             self._apply_augment(response.augment)
             self._apply_merge(response.merge)
             self._apply_ignore(response.ignore)
-            auto_ignored = self._auto_ignore_unused(input_obs_ids)
-            self._upsert_watermark(project=project, tech=tech, goal=goal)
-        except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT reflection_synthesize")
-            conn.execute("RELEASE SAVEPOINT reflection_synthesize")
+            active_ids = [o.id for o in ctx.observations if o.status == "active"]
+            auto_ignored = self._auto_ignore_unused(active_ids)
+            self._mark_synthesized(episode.id)
+        except (ChatError, SynthesisResponseError) as exc:
+            # LLM-class failure: ROLLBACK so partial reflection_sources/inserts
+            # don't land, then stamp synth_failed_at OUTSIDE the savepoint so
+            # the cooldown record persists. Without the cooldown stamp,
+            # _pick_oldest_pending would return the same episode every call →
+            # MCP drain loop spins forever and the UI auto-fire chain re-shows
+            # the same failure card 67 times.
+            self._conn.execute("ROLLBACK TO SAVEPOINT episode_synthesize")
+            self._conn.execute("RELEASE SAVEPOINT episode_synthesize")
+            self._conn.execute(
+                "UPDATE episodes SET synth_failed_at = ? WHERE id = ?",
+                (self._clock().isoformat(), episode.id),
+            )
+            self._conn.commit()
+            return SynthesisStep(
+                processed=True, episode_id=episode.id,
+                counts=dict(self._ZERO_COUNTS),
+                queue=self._read_queue_counts(project),
+                failure=str(exc),
+            )
+        except BaseException:
+            # Structural / DB / unexpected: rollback and propagate.
+            # Synthesized_at and synth_failed_at both stay NULL; the route
+            # surfaces a 500 and stops the chain.
+            self._conn.execute("ROLLBACK TO SAVEPOINT episode_synthesize")
+            self._conn.execute("RELEASE SAVEPOINT episode_synthesize")
             raise
         else:
-            conn.execute("RELEASE SAVEPOINT reflection_synthesize")
-        conn.commit()
+            self._conn.execute("RELEASE SAVEPOINT episode_synthesize")
+        self._conn.commit()
 
-        self._last_run_counts = {
+        counts = {
             "created": len(response.new),
             "augmented": len(response.augment),
             "merged": len(response.merge),
             "ignored": len(response.ignore),
             "auto_ignored": auto_ignored,
         }
-
-        return self._bucketed_reflections(project=project, tech=tech)
-
-    def _bucketed_reflections(
-        self, *, project: str, tech: str | None
-    ) -> dict[str, list[dict]]:
-        """Return current reflections for (project, tech?) bucketed by polarity.
-
-        Thin wrapper over :meth:`retrieve_reflections` to keep the
-        synthesize-internal call site unchanged while sharing the SQL
-        and bucketing logic with the public retrieve API.
-        """
-        return self.retrieve_reflections(project=project, tech=tech)
+        return SynthesisStep(
+            processed=True, episode_id=episode.id,
+            counts=counts,
+            queue=self._read_queue_counts(project),
+            failure=None,
+        )
 
     # --------------------------------------------------------- retrieve_reflections
     def retrieve_reflections(
@@ -1025,7 +1030,7 @@ class ReflectionSynthesisService:
         """
         tech = self._normalize_tech(tech)
         clauses = [
-            "project = ?",
+            "(project = ? OR scope = 'general')",
             "status IN ('pending_review', 'confirmed')",
         ]
         params: list[object] = [project]
@@ -1149,9 +1154,9 @@ class ReflectionService:
         contract: one hint per line). Internally stored as
         ``json.dumps(list[str])`` to match
         ``ReflectionSynthesisService``'s contract — synthesis
-        round-trips ``hints`` through ``json.loads()`` at three call
-        sites (``_apply_augment``, ``_bucketed_reflections``,
-        ``retrieve_reflections``), so plain-text storage would crash
+        round-trips ``hints`` through ``json.loads()`` at two call
+        sites (``_apply_augment``, ``retrieve_reflections``), so plain-text
+        storage would crash
         the LLM read path.
 
         Blocked on retired/superseded — once a reflection has left the
