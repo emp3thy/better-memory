@@ -568,17 +568,14 @@ def create_app(
         scope = request.form.get("scope") or "project"
         svc = SemanticMemoryService(conn)
         try:
-            memory_id = svc.create_from_observation(
-                observation_id=id, scope=scope,
-            )
+            svc.create_from_observation(observation_id=id, scope=scope)
         except ValueError as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
                 400, {},
             )
         rendered = render_template(
-            "fragments/observation_promoted_card.html",
-            memory_id=memory_id, scope=scope,
+            "fragments/observation_promoted_card.html", scope=scope,
         )
         return (
             rendered, 200,

@@ -1151,11 +1151,8 @@ class TestPromoteToSemantic:
 
     def test_promote_creates_memory_and_flips_status(
         self, client: FlaskClient, tmp_db: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ):
         import sqlite3
-        from better_memory.ui import app as app_module
-        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         with sqlite3.connect(tmp_db) as seed_conn:
             self._seed_active_observation(seed_conn, obs_id="o1")
         response = client.post(
@@ -1183,11 +1180,8 @@ class TestPromoteToSemantic:
 
     def test_promote_default_scope_is_project(
         self, client: FlaskClient, tmp_db: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ):
         import sqlite3
-        from better_memory.ui import app as app_module
-        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         with sqlite3.connect(tmp_db) as seed_conn:
             self._seed_active_observation(seed_conn, obs_id="o1")
         response = client.post(
@@ -1203,11 +1197,8 @@ class TestPromoteToSemantic:
 
     def test_promote_already_consumed_returns_400(
         self, client: FlaskClient, tmp_db: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ):
         import sqlite3
-        from better_memory.ui import app as app_module
-        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         with sqlite3.connect(tmp_db) as seed_conn:
             seed_conn.execute(
                 "INSERT INTO episodes (id, project, started_at) VALUES "
@@ -1230,15 +1221,36 @@ class TestPromoteToSemantic:
 
     def test_promote_missing_observation_returns_400(
         self, client: FlaskClient,
-        monkeypatch: pytest.MonkeyPatch,
     ):
-        from better_memory.ui import app as app_module
-        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         response = client.post(
             "/observations/ghost/promote-to-semantic",
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 400
+
+    def test_promote_invalid_scope_returns_400(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            self._seed_active_observation(seed_conn, obs_id="o1")
+        response = client.post(
+            "/observations/o1/promote-to-semantic",
+            data={"scope": "bogus"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+        body = response.get_data(as_text=True)
+        assert "card-error" in body
+        with sqlite3.connect(tmp_db) as check:
+            count = check.execute(
+                "SELECT COUNT(*) FROM semantic_memories"
+            ).fetchone()[0]
+            obs_status = check.execute(
+                "SELECT status FROM observations WHERE id='o1'"
+            ).fetchone()[0]
+        assert count == 0
+        assert obs_status == "active"
 
 
 class TestObservationDrawerPromoteForm:
@@ -1259,11 +1271,8 @@ class TestObservationDrawerPromoteForm:
 
     def test_drawer_shows_promote_form_when_active(
         self, client: FlaskClient, tmp_db: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ):
         import sqlite3
-        from better_memory.ui import app as app_module
-        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         with sqlite3.connect(tmp_db) as seed_conn:
             body = self._drawer_for(client, seed_conn, "o1", "active")
         assert "promote-to-semantic" in body
@@ -1273,11 +1282,8 @@ class TestObservationDrawerPromoteForm:
 
     def test_drawer_hides_promote_form_when_consumed(
         self, client: FlaskClient, tmp_db: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ):
         import sqlite3
-        from better_memory.ui import app as app_module
-        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         with sqlite3.connect(tmp_db) as seed_conn:
             body = self._drawer_for(client, seed_conn, "o1", "consumed_into_reflection")
         assert "promote-to-semantic" not in body
