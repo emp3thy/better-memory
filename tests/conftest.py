@@ -59,3 +59,49 @@ def tmp_knowledge_base(tmp_path: Path) -> Iterator[Path]:
     kb = tmp_path / "knowledge-base"
     kb.mkdir()
     yield kb
+
+
+def seed_pending_episodes(
+    conn,
+    project: str,
+    n: int,
+    obs_per_episode: int = 2,
+    tech: str | None = None,
+) -> list[str]:
+    """Seed N closed-pending episodes (synthesized_at NULL), each with M active observations.
+
+    Returns episode ids in creation order. Each episode is closed
+    (outcome='success', close_reason='goal_complete'), starts at
+    increasing wall-clock minutes so ORDER BY ended_at is deterministic.
+
+    Used by service / UI / MCP tests that need a pre-populated pending
+    queue without re-implementing fixture SQL each time.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    base = datetime(2026, 4, 1, 0, 0, 0, tzinfo=UTC)
+    ids: list[str] = []
+    for i in range(n):
+        eid = f"seeded-ep-{i:03d}"
+        started = base + timedelta(minutes=i * 10)
+        ended = started + timedelta(minutes=5)
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal, tech, synthesized_at) "
+            "VALUES (?, ?, ?, ?, 'success', 'goal_complete', ?, ?, NULL)",
+            (eid, project, started.isoformat(), ended.isoformat(),
+             f"goal {i}", tech),
+        )
+        for j in range(obs_per_episode):
+            obs_id = f"{eid}-obs-{j}"
+            obs_time = (started + timedelta(minutes=j + 1)).isoformat()
+            conn.execute(
+                "INSERT INTO observations (id, content, project, episode_id, "
+                "status, outcome, created_at, status_changed_at, tech) "
+                "VALUES (?, ?, ?, ?, 'active', 'success', ?, ?, ?)",
+                (obs_id, f"obs content {j}", project, eid,
+                 obs_time, obs_time, tech),
+            )
+        ids.append(eid)
+    conn.commit()
+    return ids

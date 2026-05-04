@@ -568,10 +568,11 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 goal=args["goal"],
                 tech=args.get("tech"),
             )
-            buckets = await reflections.synthesize(
-                goal=args["goal"],
-                tech=args.get("tech"),
-                project=project,
+            # Drain pending episodes so the new episode's reflection context is fresh.
+            while (await reflections.synthesize_next(project=project)).processed:
+                pass
+            buckets = reflections.retrieve_reflections(
+                project=project, tech=args.get("tech"),
             )
             return [
                 TextContent(
