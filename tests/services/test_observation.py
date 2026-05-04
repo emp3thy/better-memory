@@ -689,3 +689,37 @@ class TestStatusChangedAtOnInsert:
         assert row["status_changed_at"] is not None
         # On a fresh insert: status_changed_at == created_at (both = now).
         assert row["status_changed_at"] == row["created_at"]
+
+
+# ---------------------------------------------------------------------------
+# Scope field on create()
+# ---------------------------------------------------------------------------
+
+
+class TestObservationScope:
+    @pytest.mark.asyncio
+    async def test_create_defaults_to_project_scope(
+        self, conn: sqlite3.Connection, service: ObservationService
+    ) -> None:
+        obs_id = await service.create(content="x", component="auth")
+        row = conn.execute(
+            "SELECT scope FROM observations WHERE id = ?", (obs_id,)
+        ).fetchone()
+        assert row[0] == "project"
+
+    @pytest.mark.asyncio
+    async def test_create_with_explicit_general_scope(
+        self, conn: sqlite3.Connection, service: ObservationService
+    ) -> None:
+        obs_id = await service.create(content="rule", component="auth", scope="general")
+        row = conn.execute(
+            "SELECT scope FROM observations WHERE id = ?", (obs_id,)
+        ).fetchone()
+        assert row[0] == "general"
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_invalid_scope(
+        self, conn: sqlite3.Connection, service: ObservationService
+    ) -> None:
+        with pytest.raises(ValueError, match="scope"):
+            await service.create(content="x", component="auth", scope="invalid")

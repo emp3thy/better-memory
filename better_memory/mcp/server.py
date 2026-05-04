@@ -127,6 +127,15 @@ def _tool_definitions() -> list[Tool]:
                         "enum": ["success", "failure", "neutral"],
                     },
                     "tech": {"type": "string"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["project", "general"],
+                        "description": (
+                            "'project' (default) for project-scoped observations; "
+                            "'general' for cross-project workflow rules that should "
+                            "surface in every project's memory_retrieve."
+                        ),
+                    },
                 },
             },
         ),
@@ -475,6 +484,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 trigger_type=args.get("trigger_type"),
                 outcome=args.get("outcome", "neutral"),
                 tech=args.get("tech"),
+                scope=args.get("scope", "project"),
             )
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 

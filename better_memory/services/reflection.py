@@ -373,7 +373,7 @@ class ReflectionSynthesisService:
                 SELECT id, title, tech, phase, polarity, use_cases, hints,
                        confidence, status
                   FROM reflections
-                 WHERE project = ?
+                 WHERE (project = ? OR scope = 'general')
                    AND status IN ('pending_review', 'confirmed')
                  ORDER BY confidence DESC, updated_at DESC
                 """,
@@ -385,7 +385,7 @@ class ReflectionSynthesisService:
                 SELECT id, title, tech, phase, polarity, use_cases, hints,
                        confidence, status
                   FROM reflections
-                 WHERE project = ?
+                 WHERE (project = ? OR scope = 'general')
                    AND status IN ('pending_review', 'confirmed')
                    AND (tech = ? OR tech IS NULL)
                  ORDER BY confidence DESC, updated_at DESC
@@ -626,21 +626,22 @@ class ReflectionSynthesisService:
 
             confidence = max(0.1, min(1.0, action.confidence))
             reflection_id = uuid4().hex
+            scope = self._derive_new_reflection_scope(valid_sources)
 
             self._conn.execute(
                 """
                 INSERT INTO reflections (
                     id, title, project, tech, phase, polarity, use_cases,
                     hints, confidence, status, evidence_count,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_review', ?, ?, ?)
+                    created_at, updated_at, scope
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_review', ?, ?, ?, ?)
                 """,
                 (
                     reflection_id, action.title, project,
                     self._normalize_tech(action.tech),
                     action.phase, action.polarity, action.use_cases,
                     json.dumps(action.hints), confidence,
-                    len(valid_sources), now, now,
+                    len(valid_sources), now, now, scope,
                 ),
             )
             for obs_id in valid_sources:
@@ -656,6 +657,25 @@ class ReflectionSynthesisService:
                 f"WHERE id IN ({placeholders})",
                 [now, *valid_sources],
             )
+
+    def _derive_new_reflection_scope(
+        self, source_obs_ids: list[str]
+    ) -> str:
+        """Return 'general' iff every source observation has scope='general'.
+
+        Empty source list defaults to 'project' (defensive — _apply_new
+        already filters out new actions with no valid sources).
+        """
+        if not source_obs_ids:
+            return "project"
+        placeholders = ",".join("?" * len(source_obs_ids))
+        rows = self._conn.execute(
+            f"SELECT scope FROM observations WHERE id IN ({placeholders})",
+            source_obs_ids,
+        ).fetchall()
+        if not rows:
+            return "project"
+        return "general" if all(r["scope"] == "general" for r in rows) else "project"
 
     def _filter_existing_observations(
         self, ids: list[str]
@@ -1008,7 +1028,7 @@ class ReflectionSynthesisService:
         """
         tech = self._normalize_tech(tech)
         clauses = [
-            "project = ?",
+            "(project = ? OR scope = 'general')",
             "status IN ('pending_review', 'confirmed')",
         ]
         params: list[object] = [project]

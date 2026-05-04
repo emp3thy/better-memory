@@ -162,8 +162,13 @@ class ObservationService:
         scope_path: str | None = None,
         project: str | None = None,
         tech: str | None = None,
+        scope: str = "project",
     ) -> str:
         """Insert a new observation, embedding and audit row; return its id."""
+        if scope not in ("project", "general"):
+            raise ValueError(
+                f"scope must be 'project' or 'general', got {scope!r}"
+            )
         obs_id = uuid4().hex
 
         resolved_project = project if project is not None else self._project_resolver()
@@ -203,8 +208,8 @@ class ObservationService:
                 INSERT INTO observations (
                     id, content, project, component, theme, session_id,
                     trigger_type, outcome, reinforcement_score, scope_path,
-                    created_at, status_changed_at, episode_id, tech
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?)
+                    created_at, status_changed_at, episode_id, tech, scope
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     obs_id,
@@ -220,6 +225,7 @@ class ObservationService:
                     now,
                     episode_id,
                     tech_normalised,
+                    scope,
                 ),
             )
 

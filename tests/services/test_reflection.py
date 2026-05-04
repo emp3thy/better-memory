@@ -1880,3 +1880,157 @@ class TestSynthesizeNextFailurePaths:
         ).fetchone()
         assert row["synthesized_at"] is None
         assert row["synth_failed_at"] is None
+
+
+class TestSynthesisScopeDerivation:
+    def test_apply_new_creates_general_when_all_sources_general(self, conn, fixed_clock):
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal) VALUES "
+            "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','g')"
+        )
+        for i in (1, 2):
+            _insert_obs(
+                conn, obs_id=f"o{i}", project="p1", episode_id="ep1",
+                content=f"obs {i}", status="active",
+            )
+            conn.execute(
+                "UPDATE observations SET scope='general' WHERE id=?", (f"o{i}",)
+            )
+        conn.commit()
+
+        from better_memory.services.reflection import NewAction
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        svc._apply_new(
+            [NewAction(
+                title="general rule", phase="general", polarity="do",
+                use_cases="uc", hints=["h"], tech=None, confidence=0.5,
+                source_observation_ids=["o1", "o2"],
+            )],
+            project="p1",
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT scope FROM reflections WHERE title='general rule'"
+        ).fetchone()
+        assert row[0] == "general"
+
+    def test_apply_new_creates_project_when_any_source_project(self, conn, fixed_clock):
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal) VALUES "
+            "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','g')"
+        )
+        _insert_obs(conn, obs_id="o-general", project="p1", episode_id="ep1",
+                    content="general obs", status="active")
+        conn.execute("UPDATE observations SET scope='general' WHERE id='o-general'")
+        _insert_obs(conn, obs_id="o-project", project="p1", episode_id="ep1",
+                    content="project obs", status="active")
+        conn.commit()
+
+        from better_memory.services.reflection import NewAction
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        svc._apply_new(
+            [NewAction(
+                title="mixed rule", phase="general", polarity="do",
+                use_cases="uc", hints=["h"], tech=None, confidence=0.5,
+                source_observation_ids=["o-general", "o-project"],
+            )],
+            project="p1",
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT scope FROM reflections WHERE title='mixed rule'"
+        ).fetchone()
+        assert row[0] == "project"
+
+    def test_apply_augment_preserves_general_scope(self, conn, fixed_clock):
+        _insert_reflection(conn, refl_id="r-general", project="p1")
+        conn.execute("UPDATE reflections SET scope='general' WHERE id='r-general'")
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal) VALUES "
+            "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','g')"
+        )
+        _insert_obs(conn, obs_id="o-proj", project="p1", episode_id="ep1",
+                    content="project obs", status="active")
+        conn.commit()
+
+        from better_memory.services.reflection import AugmentAction
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        svc._apply_augment([AugmentAction(
+            reflection_id="r-general", add_hints=["new"], rewrite_use_cases=None,
+            confidence_delta=0.1, add_source_observation_ids=["o-proj"],
+        )])
+        conn.commit()
+        row = conn.execute(
+            "SELECT scope FROM reflections WHERE id='r-general'"
+        ).fetchone()
+        assert row[0] == "general"
+
+    def test_load_episode_context_includes_general_reflections_from_other_projects(
+        self, conn, fixed_clock,
+    ):
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal, tech) VALUES "
+            "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','g',NULL)"
+        )
+        _insert_reflection(conn, refl_id="r-other-general", project="p2", tech=None)
+        conn.execute("UPDATE reflections SET scope='general' WHERE id='r-other-general'")
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        episode = EpisodeForPrompt(
+            id="ep1", project="p1", goal="g", tech=None, outcome="success",
+        )
+        ctx = svc._load_episode_context(episode)
+        assert "r-other-general" in {r.id for r in ctx.reflections}
+
+
+class TestRetrieveReflectionsScope:
+    def test_retrieve_reflections_includes_general_from_other_projects(
+        self, conn, fixed_clock,
+    ):
+        _insert_reflection(conn, refl_id="r-p1", project="p1")
+        _insert_reflection(conn, refl_id="r-p2-general", project="p2")
+        conn.execute(
+            "UPDATE reflections SET scope='general' WHERE id='r-p2-general'"
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        buckets = svc.retrieve_reflections(project="p1")
+        all_ids = {r["id"] for bucket in buckets.values() for r in bucket}
+        assert "r-p1" in all_ids
+        assert "r-p2-general" in all_ids
+
+    def test_retrieve_reflections_excludes_general_from_other_status(
+        self, conn, fixed_clock,
+    ):
+        _insert_reflection(
+            conn, refl_id="r-retired-general", project="p2", status="retired",
+        )
+        conn.execute(
+            "UPDATE reflections SET scope='general' WHERE id='r-retired-general'"
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(
+            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+        )
+        buckets = svc.retrieve_reflections(project="p1")
+        all_ids = {r["id"] for bucket in buckets.values() for r in bucket}
+        assert "r-retired-general" not in all_ids
