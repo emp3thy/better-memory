@@ -135,12 +135,11 @@ class ObservationService:
         # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var > uuid4().
         # The env var makes hook-written events (which read CLAUDE_SESSION_ID)
         # and MCP-written observations share the same session id.
-        if session_id is not None:
-            self._session_id = session_id
-        else:
-            self._session_id = (
-                os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex
-            )
+        self.session_id: str = (
+            session_id
+            if session_id is not None
+            else (os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex)
+        )
         # ``None`` defers to the resolved config value so tests can inject
         # ``False`` without having to monkeypatch the environment.
         self._audit_log_retrieved: bool = (
@@ -177,10 +176,10 @@ class ObservationService:
                 "ObservationService.create requires an EpisodeService "
                 "(episodes=...). Wire one at construction time."
             )
-        active = self._episodes.active_episode(self._session_id)
+        active = self._episodes.active_episode(self.session_id)
         if active is None:
             episode_id = self._episodes.open_background(
-                session_id=self._session_id,
+                session_id=self.session_id,
                 project=resolved_project,
             )
         else:
@@ -212,7 +211,7 @@ class ObservationService:
                     resolved_project,
                     component,
                     theme,
-                    self._session_id,
+                    self.session_id,
                     trigger_type,
                     outcome,
                     resolved_scope,
@@ -597,6 +596,6 @@ class ObservationService:
             entity_id=entity_id,
             action=action,
             actor="ai",
-            session_id=self._session_id,
+            session_id=self.session_id,
             detail=detail,
         )
