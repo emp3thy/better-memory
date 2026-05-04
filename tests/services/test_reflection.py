@@ -1153,8 +1153,9 @@ class TestArchivedObservationGuards:
     """Archived observations must not feed synthesis nor be
     de-archived by apply methods. Two layers:
 
-    1. ``load_context`` filters ``status = 'active'`` so archived
-       rows never reach the LLM prompt.
+    1. ``_load_episode_context`` loads observations for the episode
+       being synthesized; the apply layer respects status to avoid
+       re-flipping consumed rows back to anything different.
     2. ``_filter_existing_observations`` enforces ``status = 'active'``
        so even if the LLM hallucinates an archived id, the apply
        methods skip it (no UPDATE → no de-archiving).
