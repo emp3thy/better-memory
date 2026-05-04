@@ -363,6 +363,38 @@ class TestCreateFromObservation:
         ).fetchone()[0]
         assert count == 0
 
+    def test_create_from_observation_rejects_empty_observation_content(
+        self, conn, fixed_clock,
+    ):
+        """Mirrors create() and update_text() guards against empty content.
+        DB schema only enforces NOT NULL; whitespace-only content would
+        otherwise silently produce a useless semantic memory."""
+        from better_memory.services.semantic import SemanticMemoryService
+        conn.execute(
+            "INSERT OR IGNORE INTO episodes (id, project, started_at) VALUES "
+            "('ep1', 'p1', '2026-04-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id, status, "
+            "outcome, created_at, status_changed_at) VALUES "
+            "('o1','   ','p1','ep1','active','success',"
+            "'2026-05-04T12:00:00+00:00','2026-05-04T12:00:00+00:00')"
+        )
+        conn.commit()
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="empty"):
+            svc.create_from_observation(observation_id="o1")
+        # Source observation unchanged.
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'o1'"
+        ).fetchone()
+        assert row["status"] == "active"
+        # No semantic memory created.
+        count = conn.execute(
+            "SELECT COUNT(*) FROM semantic_memories"
+        ).fetchone()[0]
+        assert count == 0
+
     def test_create_from_observation_atomic_on_failure(
         self, conn, fixed_clock,
     ):

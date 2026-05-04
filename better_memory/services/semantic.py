@@ -144,6 +144,10 @@ class SemanticMemoryService:
                 f"observation {observation_id} is not active "
                 f"(status={row['status']!r}); cannot promote"
             )
+        if not row["content"].strip():
+            raise ValueError(
+                "observation content is empty; cannot promote"
+            )
 
         memory_id = uuid4().hex
         now = self._clock().isoformat()

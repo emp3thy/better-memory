@@ -30,6 +30,9 @@ class TestSemanticPanel:
         body = response.get_data(as_text=True)
         assert "No semantic memories yet" in body
         assert 'id="semantic-create-form"' in body
+        # Form must include an error feedback target so 400 responses
+        # surface to the user (htmx hx-swap=innerHTML target).
+        assert 'id="semantic-create-error"' in body
 
     def test_renders_seeded_rows_newest_first(
         self, client: FlaskClient, tmp_db: Path,
