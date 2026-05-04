@@ -563,7 +563,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
         if name == "memory.start_episode":
             project = project_name()
             episode_id = episodes.start_foreground(
-                session_id=observations._session_id,
+                session_id=observations.session_id,
                 project=project,
                 goal=args["goal"],
                 tech=args.get("tech"),
@@ -594,7 +594,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             close_reason = args.get("close_reason") or default_reasons[outcome]
             try:
                 closed_id = episodes.close_active(
-                    session_id=observations._session_id,
+                    session_id=observations.session_id,
                     outcome=outcome,
                     close_reason=close_reason,
                     summary=args.get("summary"),
@@ -623,7 +623,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
 
         if name == "memory.reconcile_episodes":
             open_episodes = episodes.unclosed_episodes(
-                exclude_session_ids={observations._session_id}
+                exclude_session_ids={observations.session_id}
             )
             payload = [
                 {

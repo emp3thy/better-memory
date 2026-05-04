@@ -409,7 +409,7 @@ def test_session_id_resolves_from_env_var(
         project_resolver=lambda: "test-project",
         episodes=EpisodeService(conn),
     )
-    assert svc._session_id == "claude-sess-abc"
+    assert svc.session_id == "claude-sess-abc"
 
 
 def test_session_id_kwarg_overrides_env_var(
@@ -427,7 +427,7 @@ def test_session_id_kwarg_overrides_env_var(
         session_id="explicit-sess",
         episodes=EpisodeService(conn),
     )
-    assert svc._session_id == "explicit-sess"
+    assert svc.session_id == "explicit-sess"
 
 
 def test_session_id_falls_back_to_uuid_when_no_env(
@@ -444,9 +444,9 @@ def test_session_id_falls_back_to_uuid_when_no_env(
         project_resolver=lambda: "test-project",
         episodes=EpisodeService(conn),
     )
-    assert svc._session_id  # non-empty
-    assert svc._session_id != "claude-sess-abc"  # random, unpredictable
-    assert len(svc._session_id) == 32  # uuid4().hex length
+    assert svc.session_id  # non-empty
+    assert svc.session_id != "claude-sess-abc"  # random, unpredictable
+    assert len(svc.session_id) == 32  # uuid4().hex length
 
 
 # ---------------------------------------------------------------------------
