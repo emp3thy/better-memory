@@ -431,6 +431,18 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     # succeed on their next call without a restart.
     _probe_ollama(config.ollama_host)
 
+    # Concurrency invariant: the five memory-side services below
+    # (EpisodeService, ObservationService, ReflectionSynthesisService,
+    # RetentionService, SpoolService) all share ``memory_conn``. Each
+    # service's docstring documents that it owns the connection and the
+    # caller must not share it with another service that has an open
+    # transaction. That contract holds here only because the MCP stdio
+    # transport serialises requests — _call_tool runs one tool invocation
+    # at a time, so at most one service's SAVEPOINT is ever in flight.
+    # If any future change introduces async fan-out, a background task,
+    # or a worker thread that writes to ``memory_conn``, this assumption
+    # breaks and the services must be reworked to use per-task
+    # connections (or a connection pool with explicit checkout).
     episodes = EpisodeService(memory_conn)
     observations = ObservationService(memory_conn, embedder, episodes=episodes)
 
