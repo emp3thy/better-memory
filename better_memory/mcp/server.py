@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import urllib.error
 import urllib.request
@@ -67,6 +68,23 @@ _MEMORY_MIGRATIONS = Path(__file__).parent.parent / "db" / "migrations"
 _KNOWLEDGE_MIGRATIONS = Path(__file__).parent.parent / "db" / "knowledge_migrations"
 
 _OLLAMA_PROBE_TIMEOUT_SEC = 2.0
+
+logger = logging.getLogger(__name__)
+
+
+def _run_best_effort(operation: str, fn: Callable[[], Any]) -> None:
+    """Run ``fn`` swallowing any ``Exception`` but logging it via the module logger.
+
+    Used by best-effort hooks inside ``memory.retrieve`` (spool drain,
+    retention scheduler) where a failure must NEVER block the call but
+    must still produce a discoverable diagnostic. The previous behaviour
+    silently dropped the exception, so a broken background path could
+    fail invisibly for weeks.
+    """
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — best-effort wrapper
+        logger.exception("best-effort %s failed", operation)
 
 
 def _probe_ollama(host: str) -> None:
@@ -629,21 +647,18 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             # 1. Drain spool — must happen before any retrieval so fresh
             #    hook events (session_start, commit_close) are processed.
             #    SpoolService.drain is idempotent.
-            try:
-                spool.drain()
-            except Exception:  # noqa: BLE001 — drain is best-effort
-                pass
+            _run_best_effort("spool.drain", spool.drain)
 
             # 2. Maybe run retention. Guard ensures at most once per 24h
             #    regardless of how often retrieve is called. Best-effort:
             #    a retention failure must NEVER block memory.retrieve.
-            try:
-                config = get_config()
+            def _retention_step() -> None:
+                cfg = get_config()
                 RetentionScheduler(
-                    memory_conn, auto_prune=config.auto_prune
+                    memory_conn, auto_prune=cfg.auto_prune
                 ).maybe_run(triggered_by="retrieve")
-            except Exception:  # noqa: BLE001 — retention is best-effort
-                pass
+
+            _run_best_effort("retention scheduler", _retention_step)
 
             project = args.get("project") or project_name()
             limit_per_bucket = args.get("limit_per_bucket", 20)
