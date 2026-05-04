@@ -558,6 +558,33 @@ def create_app(
             "fragments/observation_drawer.html", detail=detail
         )
 
+    @app.post("/observations/<id>/promote-to-semantic")
+    def observation_promote_to_semantic(
+        id: str,
+    ) -> tuple[str, int, dict[str, str]]:
+        from better_memory.services.semantic import SemanticMemoryService
+        from markupsafe import escape
+        conn = app.extensions["db_connection"]
+        scope = request.form.get("scope") or "project"
+        svc = SemanticMemoryService(conn)
+        try:
+            memory_id = svc.create_from_observation(
+                observation_id=id, scope=scope,
+            )
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">{escape(str(exc))}</div>',
+                400, {},
+            )
+        rendered = render_template(
+            "fragments/observation_promoted_card.html",
+            memory_id=memory_id, scope=scope,
+        )
+        return (
+            rendered, 200,
+            {"HX-Trigger": "observations-changed semantic-changed"},
+        )
+
     @app.post("/observations/synthesize")
     def observations_synthesize() -> tuple[str, int, dict[str, str]]:
         # Concurrency guard: only one synthesize at a time per process.

@@ -37,6 +37,22 @@
     </section>
   {% endif %}
 
+  {% if detail.observation.status == 'active' %}
+    <section class="promote-section">
+      <h4>Promote to semantic memory</h4>
+      <form hx-post="{{ url_for('observation_promote_to_semantic', id=detail.observation.id) }}"
+            hx-target="closest .drawer"
+            hx-swap="outerHTML"
+            class="promote-form">
+        <select name="scope">
+          <option value="project" selected>project</option>
+          <option value="general">general</option>
+        </select>
+        <button type="submit">Promote</button>
+      </form>
+    </section>
+  {% endif %}
+
   {% if detail.audit %}
     <section class="audit">
       <h4>Audit</h4>
