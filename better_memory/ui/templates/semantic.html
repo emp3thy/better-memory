@@ -2,8 +2,11 @@
 {% block title %}Semantic memories — better-memory{% endblock %}
 {% block main %}
 <section class="semantic">
+  {% include "fragments/semantic_filter_form.html" %}
+
   <div id="semantic-panel"
        hx-get="{{ url_for('semantic_panel') }}"
+       hx-include="#semantic-filter-form"
        hx-trigger="load, every 30s, semantic-changed from:body"
        hx-swap="innerHTML">
   </div>

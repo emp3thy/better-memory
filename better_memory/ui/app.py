@@ -426,15 +426,25 @@ def create_app(
 
     @app.get("/semantic")
     def semantic() -> str:
-        return render_template("semantic.html", active_tab="semantic")
+        return render_template(
+            "semantic.html",
+            active_tab="semantic",
+            initial_filters={"scope_filter": "", "search": ""},
+        )
 
     @app.get("/semantic/panel")
     def semantic_panel() -> str:
         from better_memory.services.semantic import SemanticMemoryService
         conn = app.extensions["db_connection"]
         project = request.args.get("project") or project_name()
+        scope_filter = (request.args.get("scope_filter") or "").strip() or None
+        if scope_filter not in ("project", "general", None):
+            scope_filter = None
+        search = (request.args.get("search") or "").strip() or None
         svc = SemanticMemoryService(conn)
-        rows = svc.list_for_project(project=project)
+        rows = svc.list_for_project(
+            project=project, scope_filter=scope_filter, search=search,
+        )
         return render_template(
             "fragments/panel_semantic.html", rows=rows, project=project,
         )

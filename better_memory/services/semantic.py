@@ -183,17 +183,53 @@ class SemanticMemoryService:
         )
         self._conn.commit()
 
-    def list_for_project(self, *, project: str) -> list[SemanticMemory]:
-        """Project rows + general-scope rows from any project, newest first."""
-        rows = self._conn.execute(
-            """
-            SELECT id, content, project, scope, created_at, updated_at
-              FROM semantic_memories
-             WHERE project = ? OR scope = 'general'
-             ORDER BY created_at DESC
-            """,
-            (project,),
-        ).fetchall()
+    def list_for_project(
+        self,
+        *,
+        project: str,
+        scope_filter: str | None = None,
+        search: str | None = None,
+    ) -> list[SemanticMemory]:
+        """Project rows + general-scope rows from any project, newest first.
+
+        Args:
+            project: project key for project-scope filtering.
+            scope_filter: ``None`` (default) returns project-scope rows for
+                ``project`` plus all general-scope rows. ``'project'``
+                returns only project-scope rows for ``project``.
+                ``'general'`` returns only general-scope rows (any project).
+            search: optional case-insensitive substring match on
+                ``content``. ``%`` and ``_`` in the input are escaped so
+                they match literally rather than as LIKE wildcards.
+        """
+        where_clauses: list[str] = []
+        params: list[object] = []
+
+        if scope_filter == "project":
+            where_clauses.append("project = ? AND scope = 'project'")
+            params.append(project)
+        elif scope_filter == "general":
+            where_clauses.append("scope = 'general'")
+        else:
+            where_clauses.append("(project = ? OR scope = 'general')")
+            params.append(project)
+
+        if search:
+            escaped = (
+                search.replace("\\", "\\\\")
+                      .replace("%", "\\%")
+                      .replace("_", "\\_")
+            )
+            where_clauses.append("content LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+
+        sql = (
+            "SELECT id, content, project, scope, created_at, updated_at "
+            "FROM semantic_memories "
+            f"WHERE {' AND '.join(where_clauses)} "
+            "ORDER BY created_at DESC"
+        )
+        rows = self._conn.execute(sql, params).fetchall()
         return [
             SemanticMemory(
                 id=r["id"], content=r["content"], project=r["project"],
