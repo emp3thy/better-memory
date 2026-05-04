@@ -51,6 +51,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pyright]
 include = ["better_memory", "tests"]
+exclude = ["**/.worktrees/**", "**/__pycache__"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 venvPath = "."

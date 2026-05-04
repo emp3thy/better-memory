@@ -140,6 +140,81 @@ def _tool_definitions() -> list[Tool]:
             },
         ),
         Tool(
+            name="memory.semantic_observe",
+            description=(
+                "Record a user-stated fact or preference. Distinct from "
+                "memory.observe (episodic): semantic memories are "
+                "user-asserted current truths, retrieved at session "
+                "startup. Set scope='general' for cross-project rules."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["content"],
+                "additionalProperties": False,
+                "properties": {
+                    "content": {"type": "string"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["project", "general"],
+                        "description": (
+                            "'project' (default) for project-scoped rules; "
+                            "'general' for cross-project workflow rules."
+                        ),
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="memory.semantic_retrieve",
+            description=(
+                "Return user-stated facts/preferences for the current "
+                "project, merged with all general-scope semantic memories. "
+                "Flat list ordered newest-first."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": (
+                            "Optional project override; "
+                            "defaults to cwd-derived."
+                        ),
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="memory.semantic_update",
+            description=(
+                "Edit a semantic memory's content in place. Bumps updated_at."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["id", "content"],
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            },
+        ),
+        Tool(
+            name="memory.semantic_delete",
+            description=(
+                "Remove a semantic memory. Idempotent — no error if id absent."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["id"],
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                },
+            },
+        ),
+        Tool(
             name="memory.retrieve",
             description=(
                 "Retrieve reflections (do / dont / neutral lessons distilled "
@@ -504,6 +579,51 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 scope=args.get("scope") or "project",
             )
             return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
+
+        if name == "memory.semantic_observe":
+            from better_memory.services.semantic import SemanticMemoryService
+            project = project_name()
+            svc = SemanticMemoryService(memory_conn)
+            # `args.get("scope") or "project"` (not `, "project"` default) defends
+            # against MCP clients sending {"scope": null} — dict.get returns the
+            # default only when the key is absent, not when its value is None.
+            # Same fix as PR #25's BugBot finding on memory.observe.
+            memory_id = svc.create(
+                content=args["content"],
+                project=project,
+                scope=args.get("scope") or "project",
+            )
+            return [TextContent(type="text", text=json.dumps({"id": memory_id}))]
+
+        if name == "memory.semantic_retrieve":
+            from better_memory.services.semantic import SemanticMemoryService
+            project = args.get("project") or project_name()
+            svc = SemanticMemoryService(memory_conn)
+            memories = svc.list_for_project(project=project)
+            payload = [
+                {
+                    "id": m.id,
+                    "content": m.content,
+                    "project": m.project,
+                    "scope": m.scope,
+                    "created_at": m.created_at,
+                    "updated_at": m.updated_at,
+                }
+                for m in memories
+            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.semantic_update":
+            from better_memory.services.semantic import SemanticMemoryService
+            svc = SemanticMemoryService(memory_conn)
+            svc.update_text(id=args["id"], content=args["content"])
+            return [TextContent(type="text", text=json.dumps({"ok": True}))]
+
+        if name == "memory.semantic_delete":
+            from better_memory.services.semantic import SemanticMemoryService
+            svc = SemanticMemoryService(memory_conn)
+            svc.delete(id=args["id"])
+            return [TextContent(type="text", text=json.dumps({"ok": True}))]
 
         if name == "memory.retrieve":
             # 1. Drain spool — must happen before any retrieval so fresh
