@@ -1,0 +1,14 @@
+<form id="semantic-create-form"
+      class="semantic-create-form"
+      hx-post="{{ url_for('semantic_create') }}"
+      hx-target="#semantic-panel"
+      hx-swap="none">
+  <textarea name="content" rows="2" placeholder="Add a semantic memory…" required></textarea>
+  <div class="form-row">
+    <select name="scope">
+      <option value="project" selected>project</option>
+      <option value="general">general</option>
+    </select>
+    <button type="submit">Add memory</button>
+  </div>
+</form>

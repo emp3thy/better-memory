@@ -1,0 +1,14 @@
+{% include "fragments/semantic_create_form.html" %}
+
+{% if not rows %}
+  <div class="empty-state">
+    <p>No semantic memories yet. Use the form above to add one, or
+       promote an observation from the Observations tab.</p>
+  </div>
+{% else %}
+  <div class="semantic-list">
+    {% for row in rows %}
+      {% include "fragments/semantic_row.html" %}
+    {% endfor %}
+  </div>
+{% endif %}

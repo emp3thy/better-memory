@@ -1,0 +1,32 @@
+<div class="semantic-drawer" id="semantic-drawer-{{ memory.id }}">
+  <header class="drawer-header">
+    <h3>Edit semantic memory</h3>
+    <button class="close-drawer"
+            type="button"
+            onclick="document.getElementById('semantic-drawer').innerHTML = '';">
+      ×
+    </button>
+  </header>
+
+  <form hx-post="{{ url_for('semantic_update', id=memory.id) }}"
+        hx-target="#semantic-drawer"
+        hx-swap="innerHTML">
+    <label>
+      Content
+      <textarea name="content" rows="4" required>{{ memory.content }}</textarea>
+    </label>
+    <div class="drawer-meta">
+      <span>Project: {{ memory.project }}</span>
+      <span>Scope: <strong>{{ memory.scope }}</strong></span>
+      <span>Updated: {{ memory.updated_at }}</span>
+    </div>
+    <div class="drawer-actions">
+      <button type="submit">Save</button>
+      <button type="button"
+              class="cancel"
+              onclick="document.getElementById('semantic-drawer').innerHTML = '';">
+        Cancel
+      </button>
+    </div>
+  </form>
+</div>

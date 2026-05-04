@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Semantic memories — better-memory{% endblock %}
+{% block main %}
+<section class="semantic">
+  <div id="semantic-panel"
+       hx-get="{{ url_for('semantic_panel') }}"
+       hx-trigger="load, every 30s, semantic-changed from:body"
+       hx-swap="innerHTML">
+  </div>
+
+  <div id="semantic-drawer"></div>
+</section>
+{% endblock %}

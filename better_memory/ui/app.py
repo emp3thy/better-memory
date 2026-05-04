@@ -424,6 +424,95 @@ def create_app(
         )
         return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
+    @app.get("/semantic")
+    def semantic() -> str:
+        return render_template("semantic.html", active_tab="semantic")
+
+    @app.get("/semantic/panel")
+    def semantic_panel() -> str:
+        from better_memory.services.semantic import SemanticMemoryService
+        conn = app.extensions["db_connection"]
+        project = request.args.get("project") or project_name()
+        svc = SemanticMemoryService(conn)
+        rows = svc.list_for_project(project=project)
+        return render_template(
+            "fragments/panel_semantic.html", rows=rows, project=project,
+        )
+
+    @app.post("/semantic")
+    def semantic_create() -> tuple[str, int, dict[str, str]]:
+        from better_memory.services.semantic import SemanticMemoryService
+        conn = app.extensions["db_connection"]
+        project = project_name()
+        content = request.form.get("content", "").strip()
+        scope = request.form.get("scope") or "project"
+        svc = SemanticMemoryService(conn)
+        try:
+            svc.create(content=content, project=project, scope=scope)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">{escape(str(exc))}</div>',
+                400, {},
+            )
+        return ("", 200, {"HX-Trigger": "semantic-changed"})
+
+    @app.post("/semantic/<id>/scope")
+    def semantic_scope(id: str) -> tuple[str, int, dict[str, str]]:
+        from better_memory.services.semantic import SemanticMemoryService
+        conn = app.extensions["db_connection"]
+        scope = request.form.get("scope") or "project"
+        svc = SemanticMemoryService(conn)
+        try:
+            svc.set_scope(id=id, scope=scope)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">{escape(str(exc))}</div>',
+                400, {},
+            )
+        return ("", 200, {"HX-Trigger": "semantic-changed"})
+
+    @app.post("/semantic/<id>/delete")
+    def semantic_delete(id: str) -> tuple[str, int, dict[str, str]]:
+        from better_memory.services.semantic import SemanticMemoryService
+        conn = app.extensions["db_connection"]
+        svc = SemanticMemoryService(conn)
+        svc.delete(id=id)  # idempotent
+        return ("", 200, {"HX-Trigger": "semantic-changed"})
+
+    @app.get("/semantic/<id>/drawer")
+    def semantic_drawer(id: str):
+        conn = app.extensions["db_connection"]
+        row = conn.execute(
+            "SELECT id, content, project, scope, created_at, updated_at "
+            "FROM semantic_memories WHERE id = ?",
+            (id,),
+        ).fetchone()
+        if row is None:
+            abort(404)
+        memory = {
+            "id": row["id"], "content": row["content"],
+            "project": row["project"], "scope": row["scope"],
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+        }
+        return render_template(
+            "fragments/semantic_drawer.html", memory=memory,
+        )
+
+    @app.post("/semantic/<id>/update")
+    def semantic_update(id: str) -> tuple[str, int, dict[str, str]]:
+        from better_memory.services.semantic import SemanticMemoryService
+        conn = app.extensions["db_connection"]
+        content = request.form.get("content", "").strip()
+        svc = SemanticMemoryService(conn)
+        try:
+            svc.update_text(id=id, content=content)
+        except ValueError as exc:
+            return (
+                f'<div class="card card-error">{escape(str(exc))}</div>',
+                400, {},
+            )
+        return ("", 200, {"HX-Trigger": "semantic-changed"})
+
     @app.get("/observations")
     def observations() -> str:
         conn = app.extensions["db_connection"]
