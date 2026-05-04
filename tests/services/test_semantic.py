@@ -207,3 +207,197 @@ class TestListForProject:
 
         memories = svc.list_for_project(project="p1")
         assert [m.id for m in memories] == [third_id, second_id, first_id]
+
+
+class TestSetScope:
+    def test_set_scope_changes_value(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        memory_id = svc.create(content="rule", project="p1")
+        svc.set_scope(id=memory_id, scope="general")
+        row = conn.execute(
+            "SELECT scope FROM semantic_memories WHERE id = ?", (memory_id,),
+        ).fetchone()
+        assert row["scope"] == "general"
+
+    def test_set_scope_round_trip(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        memory_id = svc.create(content="rule", project="p1", scope="general")
+        svc.set_scope(id=memory_id, scope="project")
+        row = conn.execute(
+            "SELECT scope FROM semantic_memories WHERE id = ?", (memory_id,),
+        ).fetchone()
+        assert row["scope"] == "project"
+
+    def test_set_scope_bumps_updated_at(self, conn, fixed_clock):
+        from datetime import timedelta
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        memory_id = svc.create(content="rule", project="p1")
+        svc._clock = lambda: fixed_clock() + timedelta(hours=1)
+        svc.set_scope(id=memory_id, scope="general")
+        row = conn.execute(
+            "SELECT created_at, updated_at FROM semantic_memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        assert row["updated_at"] != row["created_at"]
+
+    def test_set_scope_rejects_invalid(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        memory_id = svc.create(content="rule", project="p1")
+        with pytest.raises(ValueError, match="scope"):
+            svc.set_scope(id=memory_id, scope="invalid")
+
+    def test_set_scope_raises_on_missing_id(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="not found"):
+            svc.set_scope(id="nope", scope="general")
+
+    def test_set_scope_missing_id_rolls_back_implicit_transaction(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="not found"):
+            svc.set_scope(id="nope", scope="general")
+        assert conn.in_transaction is False
+
+
+class TestCreateFromObservation:
+    def _seed_active_observation(self, conn, *, obs_id="o1", project="p1",
+                                 content="bug found", episode_id=None):
+        if episode_id is None:
+            episode_id = "ep-default"
+            conn.execute(
+                "INSERT OR IGNORE INTO episodes (id, project, started_at) VALUES "
+                "(?, ?, '2026-04-01T00:00:00+00:00')",
+                (episode_id, project),
+            )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id, status, "
+            "outcome, created_at, status_changed_at) VALUES "
+            "(?, ?, ?, ?, 'active', 'success', "
+            "'2026-05-04T12:00:00+00:00','2026-05-04T12:00:00+00:00')",
+            (obs_id, content, project, episode_id),
+        )
+        conn.commit()
+
+    def test_create_from_observation_happy_path(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        self._seed_active_observation(conn, obs_id="o1", content="rule text")
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        memory_id = svc.create_from_observation(observation_id="o1")
+        mem_row = conn.execute(
+            "SELECT content, project, scope FROM semantic_memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        assert mem_row["content"] == "rule text"
+        assert mem_row["project"] == "p1"
+        assert mem_row["scope"] == "project"
+        obs_row = conn.execute(
+            "SELECT status, status_changed_at FROM observations WHERE id = 'o1'"
+        ).fetchone()
+        assert obs_row["status"] == "consumed_without_reflection"
+        assert obs_row["status_changed_at"] == "2026-05-04T12:00:00+00:00"
+
+    def test_create_from_observation_with_general_scope(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        self._seed_active_observation(conn, obs_id="o1")
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        memory_id = svc.create_from_observation(
+            observation_id="o1", scope="general",
+        )
+        row = conn.execute(
+            "SELECT scope FROM semantic_memories WHERE id = ?", (memory_id,),
+        ).fetchone()
+        assert row["scope"] == "general"
+
+    def test_create_from_observation_rejects_invalid_scope(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        self._seed_active_observation(conn, obs_id="o1")
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="scope"):
+            svc.create_from_observation(observation_id="o1", scope="invalid")
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'o1'"
+        ).fetchone()
+        assert row["status"] == "active"
+
+    def test_create_from_observation_raises_on_missing_observation(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="observation not found"):
+            svc.create_from_observation(observation_id="ghost")
+
+    def test_create_from_observation_raises_on_already_consumed(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        conn.execute(
+            "INSERT OR IGNORE INTO episodes (id, project, started_at) VALUES "
+            "('ep1', 'p1', '2026-04-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id, status, "
+            "outcome, created_at, status_changed_at) VALUES "
+            "('o1','x','p1','ep1','consumed_into_reflection','success',"
+            "'2026-05-04T12:00:00+00:00','2026-05-04T12:00:00+00:00')"
+        )
+        conn.commit()
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="not active"):
+            svc.create_from_observation(observation_id="o1")
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'o1'"
+        ).fetchone()
+        assert row["status"] == "consumed_into_reflection"
+        count = conn.execute(
+            "SELECT COUNT(*) FROM semantic_memories"
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_create_from_observation_atomic_on_failure(
+        self, conn, fixed_clock,
+    ):
+        from unittest.mock import MagicMock
+        from better_memory.services.semantic import SemanticMemoryService
+        self._seed_active_observation(conn, obs_id="o1")
+
+        # Wrap the real connection so we can intercept a specific SQL statement.
+        # sqlite3.Connection is a C type — its .execute slot is not patchable
+        # via monkeypatch.setattr, so we wrap at the service level instead.
+        original_execute = conn.execute
+
+        class _FailingConn:
+            """Thin proxy that raises on UPDATE observations to simulate a
+            mid-promote crash, so we can verify the SAVEPOINT rolls back."""
+
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+            def execute(self, sql, *args, **kwargs):
+                if "UPDATE observations" in sql:
+                    raise RuntimeError("simulated failure mid-promote")
+                return original_execute(sql, *args, **kwargs)
+
+        svc = SemanticMemoryService(_FailingConn(), clock=fixed_clock)  # type: ignore[arg-type]
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            svc.create_from_observation(observation_id="o1")
+
+        # Verify atomicity via the real connection (SAVEPOINT rolled back).
+        count = conn.execute(
+            "SELECT COUNT(*) FROM semantic_memories"
+        ).fetchone()[0]
+        assert count == 0
+        row = conn.execute(
+            "SELECT status FROM observations WHERE id = 'o1'"
+        ).fetchone()
+        assert row["status"] == "active"

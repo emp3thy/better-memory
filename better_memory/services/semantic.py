@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 
+
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -90,6 +91,86 @@ class SemanticMemoryService:
             self._conn.rollback()
             raise ValueError(f"semantic memory not found: {id}")
         self._conn.commit()
+
+    def set_scope(self, *, id: str, scope: str) -> None:
+        """Toggle a semantic memory's scope between 'project' and 'general'.
+
+        Bumps updated_at. No-op-style: setting scope to the same value
+        still bumps updated_at (the update is real DB-side; we don't
+        short-circuit). Raises ValueError on invalid scope or missing id.
+        """
+        if scope not in _VALID_SCOPES:
+            raise ValueError(
+                f"scope must be 'project' or 'general', got {scope!r}"
+            )
+        now = self._clock().isoformat()
+        cur = self._conn.execute(
+            "UPDATE semantic_memories SET scope = ?, updated_at = ? "
+            "WHERE id = ?",
+            (scope, now, id),
+        )
+        if cur.rowcount == 0:
+            self._conn.rollback()
+            raise ValueError(f"semantic memory not found: {id}")
+        self._conn.commit()
+
+    def create_from_observation(
+        self, *, observation_id: str, scope: str = "project"
+    ) -> str:
+        """Promote an active observation into a new semantic memory.
+
+        Atomically (within SAVEPOINT promote_observation):
+        1. Read the observation; raise if missing or not status='active'.
+        2. INSERT a new semantic_memories row with the observation's
+           content + project, the requested scope, and current timestamp.
+        3. UPDATE the observation status='consumed_without_reflection'
+           and bump status_changed_at.
+
+        Raises ValueError on invalid scope, missing observation, or
+        already-consumed observation. Returns the new memory id.
+        """
+        if scope not in _VALID_SCOPES:
+            raise ValueError(
+                f"scope must be 'project' or 'general', got {scope!r}"
+            )
+        row = self._conn.execute(
+            "SELECT content, project, status FROM observations WHERE id = ?",
+            (observation_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"observation not found: {observation_id}")
+        if row["status"] != "active":
+            raise ValueError(
+                f"observation {observation_id} is not active "
+                f"(status={row['status']!r}); cannot promote"
+            )
+
+        memory_id = uuid4().hex
+        now = self._clock().isoformat()
+        self._conn.execute("SAVEPOINT promote_observation")
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO semantic_memories
+                    (id, content, project, scope, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (memory_id, row["content"], row["project"], scope, now, now),
+            )
+            self._conn.execute(
+                "UPDATE observations "
+                "SET status = 'consumed_without_reflection', status_changed_at = ? "
+                "WHERE id = ?",
+                (now, observation_id),
+            )
+        except BaseException:
+            self._conn.execute("ROLLBACK TO SAVEPOINT promote_observation")
+            self._conn.execute("RELEASE SAVEPOINT promote_observation")
+            raise
+        else:
+            self._conn.execute("RELEASE SAVEPOINT promote_observation")
+        self._conn.commit()
+        return memory_id
 
     def delete(self, *, id: str) -> None:
         """Idempotent — no error if id absent."""
