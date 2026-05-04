@@ -1,0 +1,40 @@
+<div class="semantic-row scope-{{ row.scope }}">
+  <div class="row-content">{{ row.content }}</div>
+  <div class="row-meta">
+    <span class="scope-badge scope-{{ row.scope }}">{{ row.scope }}</span>
+    <span class="updated-at">{{ row.updated_at }}</span>
+  </div>
+  <div class="row-actions">
+    <button type="button"
+            class="action-edit"
+            hx-get="{{ url_for('semantic_drawer', id=row.id) }}"
+            hx-target="#semantic-drawer"
+            hx-swap="innerHTML">
+      Edit
+    </button>
+    {% if row.scope == 'project' %}
+      <button type="button"
+              class="action-scope"
+              hx-post="{{ url_for('semantic_scope', id=row.id) }}"
+              hx-vals='{"scope": "general"}'
+              hx-swap="none">
+        Make general
+      </button>
+    {% else %}
+      <button type="button"
+              class="action-scope"
+              hx-post="{{ url_for('semantic_scope', id=row.id) }}"
+              hx-vals='{"scope": "project"}'
+              hx-swap="none">
+        Make project
+      </button>
+    {% endif %}
+    <button type="button"
+            class="action-delete"
+            hx-post="{{ url_for('semantic_delete', id=row.id) }}"
+            hx-confirm="Delete this semantic memory?"
+            hx-swap="none">
+      Delete
+    </button>
+  </div>
+</div>

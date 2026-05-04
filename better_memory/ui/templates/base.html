@@ -46,8 +46,12 @@
         <span class="rail-num">III</span>
         <span class="rail-label">Reflections</span>
       </a>
-      <a class="rail-link {% if active_tab == 'diagnostics' %}active{% endif %}" href="{{ url_for('diagnostics') }}">
+      <a class="rail-link {% if active_tab == 'semantic' %}active{% endif %}" href="{{ url_for('semantic') }}">
         <span class="rail-num">IV</span>
+        <span class="rail-label">Semantic</span>
+      </a>
+      <a class="rail-link {% if active_tab == 'diagnostics' %}active{% endif %}" href="{{ url_for('diagnostics') }}">
+        <span class="rail-num">V</span>
         <span class="rail-label">Diagnostics</span>
       </a>
     </nav>

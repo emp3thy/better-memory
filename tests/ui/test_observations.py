@@ -1131,3 +1131,159 @@ class TestSynthMutex:
         token3 = _try_acquire_synth()
         assert token3 is not None
         _release_synth(token3)
+
+
+class TestPromoteToSemantic:
+    def _seed_active_observation(self, conn, *, obs_id="o1", project="proj-a"):
+        conn.execute(
+            "INSERT OR IGNORE INTO episodes (id, project, started_at) VALUES "
+            "('ep1', ?, '2026-04-01T00:00:00+00:00')",
+            (project,),
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id, status, "
+            "outcome, created_at, status_changed_at) VALUES "
+            "(?, 'durable rule', ?, 'ep1', 'active', 'success',"
+            " '2026-05-04T12:00:00+00:00','2026-05-04T12:00:00+00:00')",
+            (obs_id, project),
+        )
+        conn.commit()
+
+    def test_promote_creates_memory_and_flips_status(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            self._seed_active_observation(seed_conn, obs_id="o1")
+        response = client.post(
+            "/observations/o1/promote-to-semantic",
+            data={"scope": "general"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "general" in body
+        trigger = response.headers.get("HX-Trigger") or ""
+        assert "observations-changed" in trigger
+        assert "semantic-changed" in trigger
+        with sqlite3.connect(tmp_db) as check:
+            mem = check.execute(
+                "SELECT content, scope, project FROM semantic_memories"
+            ).fetchone()
+            obs = check.execute(
+                "SELECT status FROM observations WHERE id='o1'"
+            ).fetchone()
+        assert mem[0] == "durable rule"
+        assert mem[1] == "general"
+        assert mem[2] == "proj-a"
+        assert obs[0] == "consumed_without_reflection"
+
+    def test_promote_default_scope_is_project(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            self._seed_active_observation(seed_conn, obs_id="o1")
+        response = client.post(
+            "/observations/o1/promote-to-semantic",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        with sqlite3.connect(tmp_db) as check:
+            row = check.execute(
+                "SELECT scope FROM semantic_memories"
+            ).fetchone()
+        assert row[0] == "project"
+
+    def test_promote_already_consumed_returns_400(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            seed_conn.execute(
+                "INSERT INTO episodes (id, project, started_at) VALUES "
+                "('ep1', 'proj-a', '2026-04-01T00:00:00+00:00')"
+            )
+            seed_conn.execute(
+                "INSERT INTO observations (id, content, project, episode_id, "
+                "status, outcome, created_at, status_changed_at) VALUES "
+                "('o1','x','proj-a','ep1','consumed_into_reflection','success',"
+                " '2026-05-04T12:00:00+00:00','2026-05-04T12:00:00+00:00')"
+            )
+            seed_conn.commit()
+        response = client.post(
+            "/observations/o1/promote-to-semantic",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+        body = response.get_data(as_text=True)
+        assert "card-error" in body
+
+    def test_promote_missing_observation_returns_400(
+        self, client: FlaskClient,
+    ):
+        response = client.post(
+            "/observations/ghost/promote-to-semantic",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+
+    def test_promote_invalid_scope_returns_400(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            self._seed_active_observation(seed_conn, obs_id="o1")
+        response = client.post(
+            "/observations/o1/promote-to-semantic",
+            data={"scope": "bogus"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+        body = response.get_data(as_text=True)
+        assert "card-error" in body
+        with sqlite3.connect(tmp_db) as check:
+            count = check.execute(
+                "SELECT COUNT(*) FROM semantic_memories"
+            ).fetchone()[0]
+            obs_status = check.execute(
+                "SELECT status FROM observations WHERE id='o1'"
+            ).fetchone()[0]
+        assert count == 0
+        assert obs_status == "active"
+
+
+class TestObservationDrawerPromoteForm:
+    def _drawer_for(self, client, conn, obs_id, status):
+        conn.execute(
+            "INSERT OR IGNORE INTO episodes (id, project, started_at) VALUES "
+            "('ep1', 'proj-a', '2026-04-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content, project, episode_id, "
+            "status, outcome, created_at, status_changed_at) VALUES "
+            "(?, 'rule text', 'proj-a', 'ep1', ?, 'success',"
+            " '2026-05-04T12:00:00+00:00','2026-05-04T12:00:00+00:00')",
+            (obs_id, status),
+        )
+        conn.commit()
+        return client.get(f"/observations/{obs_id}/drawer").get_data(as_text=True)
+
+    def test_drawer_shows_promote_form_when_active(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            body = self._drawer_for(client, seed_conn, "o1", "active")
+        assert "promote-to-semantic" in body
+        assert 'name="scope"' in body
+        assert 'value="project"' in body
+        assert 'value="general"' in body
+
+    def test_drawer_hides_promote_form_when_consumed(
+        self, client: FlaskClient, tmp_db: Path,
+    ):
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            body = self._drawer_for(client, seed_conn, "o1", "consumed_into_reflection")
+        assert "promote-to-semantic" not in body
