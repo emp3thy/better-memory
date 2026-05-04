@@ -272,29 +272,30 @@ class TestNavTab:
 
 
 class TestObservationsSynthesize:
-    def test_calls_service_and_returns_banner(
+    def test_success_step_renders_step_banner_with_auto_fire(
         self, client: FlaskClient, tmp_db: Path,
         monkeypatch: pytest.MonkeyPatch,
     ):
+        """Success step with pending > 0 → step banner + auto-fire div."""
         from better_memory.services.reflection import (
+            EpisodeQueueCounts,
             ReflectionSynthesisService,
+            SynthesisStep,
         )
         from better_memory.ui import app as app_module
 
         monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
-        async def fake_synthesize(self, *, goal, tech, project):
-            assert goal == "manual synthesis"
-            assert tech is None
-            assert project == "proj-a"
-            return {
-                "do": [{"id": "r1"}, {"id": "r2"}],
-                "dont": [{"id": "r3"}],
-                "neutral": [],
-            }
-
+        async def fake(self, *, project):
+            return SynthesisStep(
+                processed=True, episode_id="ep1",
+                counts={"created": 1, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=3, pending=2, in_cooldown=0),
+                failure=None,
+            )
         monkeypatch.setattr(
-            ReflectionSynthesisService, "synthesize", fake_synthesize
+            ReflectionSynthesisService, "synthesize_next", fake
         )
 
         response = client.post(
@@ -302,14 +303,50 @@ class TestObservationsSynthesize:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 200
-        assert response.headers.get("HX-Trigger") == (
-            "observations-synthesized"
-        )
+        assert response.headers.get("HX-Trigger") == "observations-synthesized"
         body = response.get_data(as_text=True)
-        # Banner mentions the bucket counts.
-        assert "2" in body and "do" in body
-        assert "1" in body and "dont" in body
-        assert "0" in body and "neutral" in body
+        assert "synth-step" in body
+        assert "Episode" in body and "3/5" in body
+        assert "1 new" in body
+        # Auto-fire div present (queue.pending > 0).
+        assert 'hx-post="/observations/synthesize"' in body
+        assert 'hx-trigger="load delay:200ms"' in body
+
+    def test_done_step_renders_done_banner_without_auto_fire(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Empty-queue step → synth-done card, no auto-fire div."""
+        from better_memory.services.reflection import (
+            EpisodeQueueCounts,
+            ReflectionSynthesisService,
+            SynthesisStep,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+
+        async def fake(self, *, project):
+            return SynthesisStep(
+                processed=False, episode_id=None,
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=5, pending=0, in_cooldown=0),
+                failure=None,
+            )
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize_next", fake
+        )
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "synth-done" in body
+        assert "Synthesis complete" in body
+        assert 'hx-trigger="load delay:200ms"' not in body
 
     def test_returns_500_card_error_on_service_failure(
         self, client: FlaskClient, tmp_db: Path,
@@ -322,11 +359,11 @@ class TestObservationsSynthesize:
 
         monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
-        async def boom(self, *, goal, tech, project):
+        async def boom(self, *, project):
             raise RuntimeError("ollama unreachable")
 
         monkeypatch.setattr(
-            ReflectionSynthesisService, "synthesize", boom
+            ReflectionSynthesisService, "synthesize_next", boom
         )
 
         response = client.post(
@@ -350,16 +387,28 @@ class TestObservationsSynthesize:
         (the lowest LLM-touching boundary) so the real synthesize body
         runs against a real per-thread connection.
         """
+        import json as _json
+        import sqlite3
         from better_memory.llm.ollama import OllamaChat
         from better_memory.ui import app as app_module
 
         monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
-        # Return a parseable empty SynthesisResponse so the synthesize
-        # body finishes without producing reflections — we don't care
-        # about output, only that no ProgrammingError fires.
-        async def fake_complete(self, prompt: str) -> str:
-            return '{"new": [], "augment": [], "merge": [], "ignore": []}'
+        # Seed a closed pending episode so _pick_oldest_pending returns
+        # something and synthesize_next proceeds past the "no work" path.
+        with sqlite3.connect(tmp_db) as seed_conn:
+            seed_conn.execute(
+                "INSERT INTO episodes (id, project, started_at, ended_at, "
+                "outcome, close_reason, goal) VALUES "
+                "('seed-ep','proj-a','2026-04-01T00:00:00+00:00',"
+                "'2026-04-01T01:00:00+00:00','success','goal_complete','g')"
+            )
+            seed_conn.commit()
+
+        # Return parseable empty JSON so synthesize_next finishes without
+        # producing reflections — we care only that no ProgrammingError fires.
+        async def fake_complete(self, prompt):
+            return _json.dumps({"new": [], "augment": [], "merge": [], "ignore": []})
 
         monkeypatch.setattr(OllamaChat, "complete", fake_complete)
 
@@ -395,14 +444,25 @@ class TestObservationsSynthesize:
 
         monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
+        from better_memory.services.reflection import (
+            EpisodeQueueCounts,
+            SynthesisStep,
+        )
+
         call_count = [0]
 
-        async def fake_synthesize(self, *, goal, tech, project):
+        async def fake_synthesize_next(self, *, project):
             call_count[0] += 1
-            return {"do": [], "dont": [], "neutral": []}
+            return SynthesisStep(
+                processed=False, episode_id=None,
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=0, pending=0, in_cooldown=0),
+                failure=None,
+            )
 
         monkeypatch.setattr(
-            ReflectionSynthesisService, "synthesize", fake_synthesize
+            ReflectionSynthesisService, "synthesize_next", fake_synthesize_next
         )
 
         first = client.post(
@@ -463,11 +523,22 @@ class TestObservationsSynthesize:
 
         monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
 
-        async def fake_synthesize(self, *, goal, tech, project):
-            return {"do": [], "dont": [], "neutral": []}
+        from better_memory.services.reflection import (
+            EpisodeQueueCounts,
+            SynthesisStep,
+        )
+
+        async def fake_synthesize_next(self, *, project):
+            return SynthesisStep(
+                processed=False, episode_id=None,
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=0, pending=0, in_cooldown=0),
+                failure=None,
+            )
 
         monkeypatch.setattr(
-            ReflectionSynthesisService, "synthesize", fake_synthesize
+            ReflectionSynthesisService, "synthesize_next", fake_synthesize_next
         )
 
         aclose_count = [0]
@@ -512,6 +583,7 @@ class TestObservationsSynthesize:
         """If the worker exceeds the timeout, the route returns 504
         with a clear error card. The test creates an app with a tiny
         synth_timeout to avoid actually waiting 60s."""
+        import sqlite3
         from better_memory.ui.app import create_app
 
         async def _slow_complete(self, prompt):
@@ -526,12 +598,33 @@ class TestObservationsSynthesize:
         with connect(db_path) as c:
             apply_migrations(c)
 
+        # Seed a closed pending episode so synthesize_next reaches the
+        # LLM call and can actually time out.
+        with sqlite3.connect(db_path) as seed_conn:
+            seed_conn.execute(
+                "INSERT INTO episodes (id, project, started_at, ended_at, "
+                "outcome, close_reason, goal) VALUES "
+                "('seed-ep','proj-a','2026-04-01T00:00:00+00:00',"
+                "'2026-04-01T01:00:00+00:00','success','goal_complete','g')"
+            )
+            seed_conn.commit()
+
         app = create_app(
             db_path=db_path,
             start_watchdog=False,
             synth_timeout=0.5,
         )
         c = app.test_client()
+
+        from better_memory.ui import app as _app_module
+        _app_module._synth_busy = False
+
+        # Route requires CORS Origin header.
+        with c.application.test_request_context():
+            _app_module.project_name = lambda: "proj-a"
+
+        monkeypatch.setattr(_app_module, "project_name", lambda: "proj-a")
+
         resp = c.post(
             "/observations/synthesize",
             headers={"Origin": "http://localhost"},
@@ -544,6 +637,7 @@ class TestObservationsSynthesize:
     ):
         """After a synthesis completes (success path), _synth_busy is
         False so the next call goes through."""
+        import sqlite3
         from better_memory.ui import app as _app_module
         from better_memory.ui.app import create_app
 
@@ -561,6 +655,7 @@ class TestObservationsSynthesize:
         app = create_app(
             db_path=db_path, start_watchdog=False
         )
+        monkeypatch.setattr(_app_module, "project_name", lambda: "proj-a")
         c = app.test_client()
 
         resp1 = c.post(
@@ -581,6 +676,7 @@ class TestObservationsSynthesize:
     ):
         """If the synthesize coroutine raises, _synth_busy is still
         cleared (cleanup happens in the inner finally)."""
+        import sqlite3
         from better_memory.ui import app as _app_module
         from better_memory.ui.app import create_app
 
@@ -595,9 +691,21 @@ class TestObservationsSynthesize:
         with connect(db_path) as c:
             apply_migrations(c)
 
+        # Seed a closed pending episode so synthesize_next reaches the
+        # LLM call and the RuntimeError actually fires.
+        with sqlite3.connect(db_path) as seed_conn:
+            seed_conn.execute(
+                "INSERT INTO episodes (id, project, started_at, ended_at, "
+                "outcome, close_reason, goal) VALUES "
+                "('seed-ep','proj-a','2026-04-01T00:00:00+00:00',"
+                "'2026-04-01T01:00:00+00:00','success','goal_complete','g')"
+            )
+            seed_conn.commit()
+
         app = create_app(
             db_path=db_path, start_watchdog=False
         )
+        monkeypatch.setattr(_app_module, "project_name", lambda: "proj-a")
         c = app.test_client()
 
         resp = c.post(
@@ -851,3 +959,175 @@ class TestObservationsSynthesize:
             )
         finally:
             client.application.extensions["db_path"] = original_db_path
+
+    def test_failure_step_with_pending_includes_auto_fire(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Failure on episode N with pending > 0 → failure card + auto-fire."""
+        from better_memory.services.reflection import (
+            EpisodeQueueCounts,
+            ReflectionSynthesisService,
+            SynthesisStep,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+
+        async def fake(self, *, project):
+            return SynthesisStep(
+                processed=True, episode_id="ep-bad",
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=2, pending=3, in_cooldown=1),
+                failure="ollama unreachable",
+            )
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize_next", fake
+        )
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "card-warning" in body
+        assert "Episode 2/6 failed" in body
+        assert "ollama unreachable" in body
+        assert 'hx-trigger="load delay:200ms"' in body
+
+    def test_failure_step_without_pending_omits_auto_fire(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Failure on the LAST pending episode → failure card, no auto-fire."""
+        from better_memory.services.reflection import (
+            EpisodeQueueCounts,
+            ReflectionSynthesisService,
+            SynthesisStep,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+
+        async def fake(self, *, project):
+            return SynthesisStep(
+                processed=True, episode_id="ep-last",
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=4, pending=0, in_cooldown=1),
+                failure="parse error",
+            )
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize_next", fake
+        )
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "card-warning" in body
+        assert 'hx-trigger="load delay:200ms"' not in body
+
+    def test_hx_trigger_fires_on_every_step_including_done(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """observations-synthesized fires on success, failure, AND done steps."""
+        from better_memory.services.reflection import (
+            EpisodeQueueCounts,
+            ReflectionSynthesisService,
+            SynthesisStep,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+
+        states = [
+            SynthesisStep(
+                processed=True, episode_id="ep1",
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=1, pending=2, in_cooldown=0),
+                failure=None,
+            ),
+            SynthesisStep(
+                processed=True, episode_id="ep2",
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=1, pending=1, in_cooldown=1),
+                failure="boom",
+            ),
+            SynthesisStep(
+                processed=False, episode_id=None,
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=3, pending=0, in_cooldown=0),
+                failure=None,
+            ),
+        ]
+        iter_state = iter(states)
+        async def fake(self, *, project):
+            return next(iter_state)
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize_next", fake
+        )
+
+        for _ in states:
+            response = client.post(
+                "/observations/synthesize",
+                headers={"Origin": "http://localhost"},
+            )
+            assert response.status_code == 200
+            assert response.headers.get("HX-Trigger") == "observations-synthesized"
+
+    def test_banner_uses_step_queue_counts_not_external_query(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Banner counts come from step.queue, not from a second SQL query."""
+        from better_memory.services.reflection import (
+            EpisodeQueueCounts,
+            ReflectionSynthesisService,
+            SynthesisStep,
+        )
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+
+        async def fake(self, *, project):
+            return SynthesisStep(
+                processed=True, episode_id="ep1",
+                counts={"created": 0, "augmented": 0, "merged": 0,
+                        "ignored": 0, "auto_ignored": 0},
+                queue=EpisodeQueueCounts(done=42, pending=7, in_cooldown=3),
+                failure=None,
+            )
+        monkeypatch.setattr(
+            ReflectionSynthesisService, "synthesize_next", fake
+        )
+
+        response = client.post(
+            "/observations/synthesize",
+            headers={"Origin": "http://localhost"},
+        )
+        body = response.get_data(as_text=True)
+        assert "42/52" in body  # done/total = 42/(42+7+3)
+
+
+class TestSynthMutex:
+    def test_try_acquire_synth_returns_none_when_already_busy(self):
+        """Mutex primitive: second acquire while busy returns None."""
+        from better_memory.ui.app import _try_acquire_synth, _release_synth
+        token1 = _try_acquire_synth()
+        assert token1 is not None
+        token2 = _try_acquire_synth()
+        assert token2 is None
+        _release_synth(token1)
+        # After release, acquire works again
+        token3 = _try_acquire_synth()
+        assert token3 is not None
+        _release_synth(token3)

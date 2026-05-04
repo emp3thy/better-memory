@@ -1,0 +1,36 @@
+{# better_memory/ui/templates/fragments/synth_step_banner.html
+   4-state banner for per-episode synthesis. The auto-fire div is present
+   iff queue.pending > 0; chain stops naturally when pending hits zero.
+   Spec: docs/superpowers/specs/2026-05-03-episodic-synthesis-design.md #}
+
+{% if not step.processed %}
+  <div class="card synth-done">
+    <p><strong>Synthesis complete.</strong> {{ queue.done }} episodes processed.
+      {% if queue.in_cooldown %} ({{ queue.in_cooldown }} in cooldown after recent failures){% endif %}
+    </p>
+  </div>
+{% elif step.failure %}
+  <div class="card card-warning synth-step">
+    <p><strong>Episode {{ queue.done }}/{{ queue.total }} failed:</strong> {{ step.failure }}</p>
+    {% if queue.pending > 0 %}
+      <div hx-post="/observations/synthesize"
+           hx-trigger="load delay:200ms"
+           hx-target="closest .synth-step"
+           hx-swap="outerHTML">⏵ Continuing…</div>
+    {% endif %}
+  </div>
+{% else %}
+  <div class="card synth-step">
+    <p>Episode <strong>{{ queue.done }}/{{ queue.total }}</strong> processed
+      ({{ step.counts.created }} new,
+       {{ step.counts.augmented }} augmented,
+       {{ step.counts.merged }} merged,
+       {{ step.counts.auto_ignored }} auto-ignored)</p>
+    {% if queue.pending > 0 %}
+      <div hx-post="/observations/synthesize"
+           hx-trigger="load delay:200ms"
+           hx-target="closest .synth-step"
+           hx-swap="outerHTML">⏵ Continuing…</div>
+    {% endif %}
+  </div>
+{% endif %}
