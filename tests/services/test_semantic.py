@@ -101,6 +101,23 @@ class TestUpdateText:
         with pytest.raises(ValueError, match="not found"):
             svc.update_text(id="nope", content="x")
 
+    def test_update_missing_id_rolls_back_implicit_transaction(
+        self, conn, fixed_clock,
+    ):
+        """Regression for BugBot finding on PR #34: sqlite3 with default
+        isolation_level opens an implicit BEGIN before the UPDATE; raising
+        ValueError without rollback would strand the WAL write lock for
+        any caller sharing this connection. Mirror of the
+        ObservationService.set_outcome pattern.
+        """
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="not found"):
+            svc.update_text(id="nope", content="x")
+        # After the failed call, the connection must not be in a
+        # transaction — otherwise the WAL write lock is still held.
+        assert conn.in_transaction is False
+
     def test_update_rejects_empty_content(self, conn, fixed_clock):
         from better_memory.services.semantic import SemanticMemoryService
         svc = SemanticMemoryService(conn, clock=fixed_clock)

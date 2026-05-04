@@ -83,6 +83,11 @@ class SemanticMemoryService:
             (content, now, id),
         )
         if cur.rowcount == 0:
+            # No row updated — roll back the implicit BEGIN that sqlite3
+            # opened before the UPDATE so we don't strand the WAL write
+            # lock for callers sharing this connection. Mirrors
+            # ObservationService.set_outcome (better_memory/services/observation.py:435).
+            self._conn.rollback()
             raise ValueError(f"semantic memory not found: {id}")
         self._conn.commit()
 
