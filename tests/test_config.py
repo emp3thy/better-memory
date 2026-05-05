@@ -91,18 +91,6 @@ def test_tmp_knowledge_base_fixture(tmp_knowledge_base: Path) -> None:
     assert list(tmp_knowledge_base.iterdir()) == []
 
 
-def test_consolidate_model_defaults_to_llama3(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CONSOLIDATE_MODEL", raising=False)
-    cfg = get_config()
-    assert cfg.consolidate_model == "llama3"
-
-
-def test_consolidate_model_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CONSOLIDATE_MODEL", "mistral")
-    cfg = get_config()
-    assert cfg.consolidate_model == "mistral"
-
-
 def test_config_auto_prune_defaults_false(monkeypatch) -> None:
     """Config.auto_prune defaults to False when env var unset."""
     monkeypatch.delenv("BETTER_MEMORY_AUTO_PRUNE", raising=False)

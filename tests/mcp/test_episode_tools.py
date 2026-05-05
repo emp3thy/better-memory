@@ -167,12 +167,13 @@ class TestStartEpisodeReturnsReflections:
         assert "memory.start_episode" in tool_names
 
     def test_create_server_wires_reflection_service(self, tmp_path, monkeypatch):
-        """Factory constructs without error — full Phase 5 wiring chain.
+        """Factory constructs without error — full wiring chain.
 
-        Catches import errors, missing attributes on OllamaChat, bad kwargs
-        on service constructors, and any typo that would crash create_server()
-        before a single tool call fires. We use a monkeypatched OllamaChat
-        that never touches the network — just needs to satisfy ChatCompleter.
+        Catches import errors, bad kwargs on service constructors, and
+        any typo that would crash create_server() before a single tool
+        call fires. Synthesis no longer holds an LLM client (the
+        IDE-LLM drives synthesis via memory.synthesize_next_*), so no
+        chat stub is needed.
         """
         import asyncio
 
@@ -181,178 +182,18 @@ class TestStartEpisodeReturnsReflections:
         (home / "knowledge-base").mkdir()
         monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
 
-        # Stub OllamaChat so create_server doesn't try to connect.
-        class _NoNetChat:
-            async def complete(self, prompt: str) -> str:
-                raise RuntimeError("test did not expect a real chat call")
-            async def aclose(self) -> None:
-                return None
-
-        monkeypatch.setattr(
-            "better_memory.mcp.server.OllamaChat",
-            lambda **kw: _NoNetChat(),
-        )
-
         from better_memory.mcp.server import create_server
 
         server, cleanup = create_server()
         try:
-            # Server object exists and has the expected handler-registration shape.
             assert server is not None
-            # The tool is registered in the factory's _list_tools closure.
-            # Fetching the list exercises the registered decorator.
             from better_memory.mcp.server import _tool_definitions
             names = {t.name for t in _tool_definitions()}
             assert "memory.start_episode" in names
+            assert "memory.synthesize_next_get_context" in names
+            assert "memory.synthesize_next_apply" in names
         finally:
             asyncio.run(cleanup())
-
-
-class TestStartEpisodeDrainsPending:
-    """The drain-loop pattern in memory.start_episode (post-Phase-X redesign):
-    `while (await synthesize_next(project=...)).processed: pass`.
-
-    Tests the SERVICE-level loop directly (mirroring the existing
-    test_service_level_returns_reflections pattern); the MCP tool is a
-    thin wrapper.
-    """
-
-    def test_drains_all_pending_then_returns_tech_filtered_buckets(self, conn):
-        import asyncio
-        import json as _json
-
-        from better_memory.llm.fake import FakeChat
-        from better_memory.services.reflection import ReflectionSynthesisService
-        from tests.conftest import seed_pending_episodes
-
-        ids = seed_pending_episodes(conn, project="p1", n=3, tech=None)
-
-        empty_response = _json.dumps(
-            {"new": [], "augment": [], "merge": [], "ignore": []}
-        )
-        fake = FakeChat(responses=[empty_response, empty_response, empty_response])
-        svc = ReflectionSynthesisService(conn, chat=fake)
-
-        async def _drain():
-            while (await svc.synthesize_next(project="p1")).processed:
-                pass
-
-        asyncio.run(_drain())
-
-        for eid in ids:
-            row = conn.execute(
-                "SELECT synthesized_at FROM episodes WHERE id = ?", (eid,)
-            ).fetchone()
-            assert row[0] is not None, f"{eid} not marked synthesized"
-
-        assert len(fake.responses) == 0
-        assert len(fake.calls) == 3
-
-        buckets = svc.retrieve_reflections(project="p1")
-        assert set(buckets.keys()) == {"do", "dont", "neutral"}
-
-    def test_no_pending_returns_immediately_without_llm_calls(self, conn):
-        import asyncio
-
-        from better_memory.llm.fake import FakeChat
-        from better_memory.services.reflection import ReflectionSynthesisService
-        from tests.conftest import seed_pending_episodes
-
-        ids = seed_pending_episodes(conn, project="p1", n=2)
-        for eid in ids:
-            conn.execute(
-                "UPDATE episodes SET synthesized_at = '2026-04-22T10:00:00+00:00' "
-                "WHERE id = ?", (eid,)
-            )
-        conn.commit()
-
-        fake = FakeChat(responses=[])
-        svc = ReflectionSynthesisService(conn, chat=fake)
-
-        async def _drain():
-            while (await svc.synthesize_next(project="p1")).processed:
-                pass
-
-        asyncio.run(_drain())
-        assert len(fake.calls) == 0
-
-    def test_loop_terminates_on_persistent_failure(self, conn):
-        """Without the cooldown filter, this would infinite-loop."""
-        import asyncio
-
-        from better_memory.llm.ollama import ChatError
-        from better_memory.services.reflection import ReflectionSynthesisService
-        from tests.conftest import seed_pending_episodes
-
-        ids = seed_pending_episodes(conn, project="p1", n=3)
-
-        class AlwaysFailChat:
-            calls = 0
-            async def complete(self, prompt: str) -> str:
-                AlwaysFailChat.calls += 1
-                if AlwaysFailChat.calls > 10:
-                    raise AssertionError("loop did not terminate")
-                raise ChatError("simulated persistent failure")
-
-        svc = ReflectionSynthesisService(conn, chat=AlwaysFailChat())
-
-        async def _drain():
-            while (await svc.synthesize_next(project="p1")).processed:
-                pass
-
-        asyncio.run(_drain())
-
-        assert AlwaysFailChat.calls == 3
-        for eid in ids:
-            row = conn.execute(
-                "SELECT synthesized_at, synth_failed_at FROM episodes WHERE id = ?",
-                (eid,),
-            ).fetchone()
-            assert row["synthesized_at"] is None
-            assert row["synth_failed_at"] is not None
-
-    def test_partial_failure_continues_past_failed_episode(self, conn):
-        """One episode fails; the others still get processed."""
-        import asyncio
-        import json as _json
-
-        from better_memory.llm.ollama import ChatError
-        from better_memory.services.reflection import ReflectionSynthesisService
-        from tests.conftest import seed_pending_episodes
-
-        ids = seed_pending_episodes(conn, project="p1", n=3)
-
-        empty_response = _json.dumps(
-            {"new": [], "augment": [], "merge": [], "ignore": []}
-        )
-
-        class FlakyChat:
-            calls = 0
-            async def complete(self, prompt: str) -> str:
-                FlakyChat.calls += 1
-                if FlakyChat.calls == 1:
-                    raise ChatError("transient")
-                return empty_response
-
-        svc = ReflectionSynthesisService(conn, chat=FlakyChat())
-
-        async def _drain():
-            while (await svc.synthesize_next(project="p1")).processed:
-                pass
-
-        asyncio.run(_drain())
-
-        oldest_row = conn.execute(
-            "SELECT synthesized_at, synth_failed_at FROM episodes WHERE id = ?",
-            (ids[0],),
-        ).fetchone()
-        assert oldest_row["synthesized_at"] is None
-        assert oldest_row["synth_failed_at"] is not None
-        for eid in ids[1:]:
-            row = conn.execute(
-                "SELECT synthesized_at FROM episodes WHERE id = ?", (eid,)
-            ).fetchone()
-            assert row["synthesized_at"] is not None
 
 
 class TestServerStartupDrainsSessionStart:
@@ -420,7 +261,6 @@ class TestRetrieveReturnsReflections:
     """Phase 6: memory.retrieve returns reflections, not observations."""
 
     def test_retrieve_via_service_returns_reflection_buckets(self, conn):
-        from better_memory.llm.fake import FakeChat
         from better_memory.services.reflection import ReflectionSynthesisService
 
         # Seed two reflections.
@@ -437,7 +277,7 @@ class TestRetrieveReturnsReflections:
             )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]))
+        svc = ReflectionSynthesisService(conn)
         result = svc.retrieve_reflections(project="p")
         assert {r["title"] for r in result["do"]} == {"Do this"}
         assert {r["title"] for r in result["dont"]} == {"Don't that"}

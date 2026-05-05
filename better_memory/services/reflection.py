@@ -30,9 +30,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from better_memory.llm.ollama import ChatCompleter, ChatError
-
-
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -288,11 +285,9 @@ class ReflectionSynthesisService:
         self,
         conn: sqlite3.Connection,
         *,
-        chat: ChatCompleter,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
-        self._chat = chat
         self._clock: Callable[[], datetime] = clock or _default_clock
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
@@ -469,45 +464,111 @@ class ReflectionSynthesisService:
 
         lines.append(
             "Decide what to do with this episode's observations. "
-            "Respond ONLY with this JSON shape:"
+            "Respond ONLY with one JSON object — no prose, no commentary."
+        )
+        lines.append("")
+        lines.append("RULES:")
+        lines.append(
+            '- The four top-level keys "new", "augment", "merge", "ignore" '
+            "are ALL REQUIRED. Use [] for any category that has no real "
+            "entries. DO NOT invent or fabricate entries to mimic the "
+            "example below — the example is illustrative only."
+        )
+        lines.append(
+            '- "new" entries: ONLY add a reflection if the observation(s) '
+            "express a generalizable lesson worth surfacing in future "
+            "sessions. If nothing in this episode rises to that bar, use [] "
+            'and put the observation ids in "ignore" instead.'
+        )
+        lines.append(
+            '- "augment" entries: ONLY use when an EXISTING reflection '
+            "(from the EXISTING REFLECTIONS section above) gains new "
+            "evidence from this episode's observations. If no existing "
+            "reflection applies, use []."
+        )
+        lines.append(
+            '- "merge" entries: ONLY use to combine TWO existing '
+            "reflection ids (both must appear in the EXISTING "
+            "REFLECTIONS section above) that name the SAME lesson. "
+            "If no two reflections need merging, use []. NEVER emit "
+            "a merge entry with null, empty, or invented ids."
+        )
+        lines.append(
+            '- For each entry in "new", ALL FIELDS ARE REQUIRED: '
+            "title, phase, polarity, use_cases, hints, tech, "
+            "confidence, source_observation_ids. Set tech to null if "
+            "not language-specific. Do not omit any field."
+        )
+        lines.append(
+            '- For each entry in "augment", ALL FIELDS ARE REQUIRED: '
+            "reflection_id, add_hints, rewrite_use_cases, "
+            "confidence_delta, add_source_observation_ids. Set "
+            "rewrite_use_cases to null to leave the existing text "
+            "unchanged. Do not omit any field."
+        )
+        lines.append(
+            '- For each entry in "merge", ALL FIELDS ARE REQUIRED: '
+            "source_id, target_id, justification. All three must be "
+            "non-null strings."
+        )
+        lines.append(
+            "- source_observation_ids and add_source_observation_ids "
+            "must contain the actual observation ids shown above (the "
+            "values after `id=`), NOT placeholders."
+        )
+        lines.append(
+            '- phase must be one of: "planning", "implementation", "general".'
+        )
+        lines.append(
+            '- polarity must be one of: "do", "dont", "neutral".'
+        )
+        lines.append("- confidence is a number between 0.1 and 1.0.")
+        lines.append("")
+        lines.append(
+            "EXAMPLE response (illustrative — use the actual ids "
+            "from THIS episode, not these placeholders):"
         )
         lines.append("{")
         lines.append('  "new": [')
+        lines.append("    {")
+        lines.append('      "title": "Prefer pathlib over os.path",')
+        lines.append('      "phase": "implementation",')
+        lines.append('      "polarity": "do",')
         lines.append(
-            "    {"
-            '"title": "...", '
-            '"phase": "planning"|"implementation"|"general", '
-            '"polarity": "do"|"dont"|"neutral", '
-            '"use_cases": "...", '
-            '"hints": ["..."], '
-            '"tech": "..." or null, '
-            '"confidence": 0.1..1.0, '
-            '"source_observation_ids": ["..."]'
-            "}"
+            '      "use_cases": "When manipulating filesystem paths in Python",'
         )
+        lines.append(
+            '      "hints": ["pathlib.Path is cross-platform", '
+            '"supports / for joining"],'
+        )
+        lines.append('      "tech": "python",')
+        lines.append('      "confidence": 0.7,')
+        lines.append('      "source_observation_ids": ["o-abc123"]')
+        lines.append("    }")
         lines.append("  ],")
         lines.append('  "augment": [')
+        lines.append("    {")
+        lines.append('      "reflection_id": "r-existing",')
         lines.append(
-            "    {"
-            '"reflection_id": "...", '
-            '"add_hints": ["..."], '
-            '"rewrite_use_cases": "..." or null, '
-            '"confidence_delta": 0.0, '
-            '"add_source_observation_ids": ["..."]'
-            "}"
+            '      "add_hints": ["new evidence: also helps with relative paths"],'
         )
+        lines.append('      "rewrite_use_cases": null,')
+        lines.append('      "confidence_delta": 0.1,')
+        lines.append('      "add_source_observation_ids": ["o-def456"]')
+        lines.append("    }")
         lines.append("  ],")
-        lines.append('  "merge": [')
-        lines.append(
-            "    {"
-            '"source_id": "...", '
-            '"target_id": "...", '
-            '"justification": "..."'
-            "}"
-        )
-        lines.append("  ],")
-        lines.append('  "ignore": ["observation_id", ...]')
+        lines.append('  "merge": [],')
+        lines.append('  "ignore": ["o-noise789"]')
         lines.append("}")
+        lines.append("")
+        lines.append(
+            '(Note: in this example "merge" is [] because no two '
+            "existing reflections need combining. That is the common "
+            'case. If you also have nothing to add or augment, all '
+            'four arrays may be []. That is a valid response.)'
+        )
+        lines.append("")
+        lines.append("Now produce the JSON for THIS episode:")
 
         return "\n".join(lines)
 
@@ -553,7 +614,23 @@ class ReflectionSynthesisService:
 
     # ----------------------------------------------------------- parse_response
     def parse_response(self, raw: str) -> SynthesisResponse:
-        """Parse and validate the LLM response JSON.
+        """Parse and validate the LLM response JSON string.
+
+        Thin wrapper around :meth:`parse_response_dict` that handles the
+        ``json.loads`` step. Use :meth:`parse_response_dict` directly when
+        the caller already has a parsed dict (e.g. an MCP handler whose
+        framework decoded the JSON before dispatch — avoids a redundant
+        encode/decode round-trip).
+        """
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SynthesisResponseError(f"invalid JSON: {exc}") from exc
+        return self.parse_response_dict(data)
+
+    # ------------------------------------------------------ parse_response_dict
+    def parse_response_dict(self, data: object) -> SynthesisResponse:
+        """Validate an already-parsed decision dict and return a SynthesisResponse.
 
         Shape check:
         - Top level must be an object with keys ``new``, ``augment``,
@@ -567,11 +644,6 @@ class ReflectionSynthesisService:
         happens in the apply methods, not here, because it needs
         DB access.
         """
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise SynthesisResponseError(f"invalid JSON: {exc}") from exc
-
         if not isinstance(data, dict):
             raise SynthesisResponseError(
                 "top-level response must be a JSON object"
@@ -929,62 +1001,86 @@ class ReflectionSynthesisService:
         )
         return cur.rowcount or 0
 
-    # --------------------------------------------------------- synthesize_next
-    async def synthesize_next(self, *, project: str) -> SynthesisStep:
-        """Process the oldest closed-but-unsynthesized episode for project.
+    # ------------------------------------------------- get_next_pending_context
+    def get_next_pending_context(
+        self, *, project: str
+    ) -> EpisodeContext | None:
+        """Return the next pending episode's full context, or None when empty.
 
-        One LLM call per episode. Returns a SynthesisStep describing what
-        happened. Caller (UI route or MCP loop) drives the iteration.
-
-        Spec: docs/superpowers/specs/2026-05-03-episodic-synthesis-design.md
+        The IDE-driving LLM consumes this, produces a decision JSON, and
+        submits it back via :meth:`apply_decision`. The two-call shape
+        replaces the old ``synthesize_next`` (which embedded an Ollama
+        client call between load and apply).
         """
         episode = self._pick_oldest_pending(project)
         if episode is None:
-            return SynthesisStep(
-                processed=False, episode_id=None,
-                counts=dict(self._ZERO_COUNTS),
-                queue=self._read_queue_counts(project),
-                failure=None,
+            return None
+        return self._load_episode_context(episode)
+
+    # ----------------------------------------------------------- apply_decision
+    def apply_decision(
+        self,
+        *,
+        episode_id: str,
+        response: SynthesisResponse,
+        project: str,
+    ) -> SynthesisStep:
+        """Apply a parsed decision against ``episode_id`` atomically.
+
+        Wraps all four ``_apply_*`` methods plus ``_auto_ignore_unused``
+        and ``_mark_synthesized`` inside one SAVEPOINT. On structural /
+        DB error: rollback and re-raise — the caller decides how to
+        surface the failure (the schema invariant is broken; further
+        applies on this episode would just produce more bad rows).
+
+        Validates ownership BEFORE entering the SAVEPOINT:
+        - episode must exist
+        - episode.project must match the supplied ``project`` (otherwise
+          a caller could have ``_apply_new`` create reflections under
+          project B while ``_mark_synthesized`` stamps project A's row)
+        - episode must NOT already be synthesized (without this, a
+          retry duplicates reflections — the old ``synthesize_next``
+          was protected by ``_pick_oldest_pending``, which the split
+          design no longer routes through)
+
+        Decision-JSON validation lives in :meth:`parse_response`; the
+        caller is expected to call that first and surface any
+        :class:`SynthesisResponseError` to the producing LLM directly
+        rather than stamping the episode failed.
+        """
+        row = self._conn.execute(
+            "SELECT project, synthesized_at FROM episodes WHERE id = ?",
+            (episode_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Episode {episode_id!r} not found")
+        if row["project"] != project:
+            raise ValueError(
+                f"Episode {episode_id!r} belongs to project "
+                f"{row['project']!r}, not {project!r}"
+            )
+        if row["synthesized_at"] is not None:
+            raise ValueError(
+                f"Episode {episode_id!r} is already synthesized "
+                f"(synthesized_at={row['synthesized_at']})"
             )
 
         self._conn.execute("SAVEPOINT episode_synthesize")
         try:
-            ctx = self._load_episode_context(episode)
-            prompt = self._build_episode_prompt(ctx)
-            raw = await self._chat.complete(prompt)
-            response = self.parse_response(raw)
+            active_rows = self._conn.execute(
+                "SELECT id FROM observations "
+                "WHERE episode_id = ? AND status = 'active'",
+                (episode_id,),
+            ).fetchall()
+            active_ids = [r["id"] for r in active_rows]
 
             self._apply_new(response.new, project=project)
             self._apply_augment(response.augment)
             self._apply_merge(response.merge)
             self._apply_ignore(response.ignore)
-            active_ids = [o.id for o in ctx.observations if o.status == "active"]
             auto_ignored = self._auto_ignore_unused(active_ids)
-            self._mark_synthesized(episode.id)
-        except (ChatError, SynthesisResponseError) as exc:
-            # LLM-class failure: ROLLBACK so partial reflection_sources/inserts
-            # don't land, then stamp synth_failed_at OUTSIDE the savepoint so
-            # the cooldown record persists. Without the cooldown stamp,
-            # _pick_oldest_pending would return the same episode every call →
-            # MCP drain loop spins forever and the UI auto-fire chain re-shows
-            # the same failure card 67 times.
-            self._conn.execute("ROLLBACK TO SAVEPOINT episode_synthesize")
-            self._conn.execute("RELEASE SAVEPOINT episode_synthesize")
-            self._conn.execute(
-                "UPDATE episodes SET synth_failed_at = ? WHERE id = ?",
-                (self._clock().isoformat(), episode.id),
-            )
-            self._conn.commit()
-            return SynthesisStep(
-                processed=True, episode_id=episode.id,
-                counts=dict(self._ZERO_COUNTS),
-                queue=self._read_queue_counts(project),
-                failure=str(exc),
-            )
+            self._mark_synthesized(episode_id)
         except BaseException:
-            # Structural / DB / unexpected: rollback and propagate.
-            # Synthesized_at and synth_failed_at both stay NULL; the route
-            # surfaces a 500 and stops the chain.
             self._conn.execute("ROLLBACK TO SAVEPOINT episode_synthesize")
             self._conn.execute("RELEASE SAVEPOINT episode_synthesize")
             raise
@@ -1000,7 +1096,7 @@ class ReflectionSynthesisService:
             "auto_ignored": auto_ignored,
         }
         return SynthesisStep(
-            processed=True, episode_id=episode.id,
+            processed=True, episode_id=episode_id,
             counts=counts,
             queue=self._read_queue_counts(project),
             failure=None,
