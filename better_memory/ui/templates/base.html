@@ -25,8 +25,12 @@
       ];
     });
 
-    // Row selection: mark the clicked row in the list pane and clear it
-    // when the drawer is closed via close-drawer or back-link.
+    // Row selection: persist per-pane selected id so we can re-mark
+    // after the list polls every 30s (which wipes innerHTML and the
+    // .selected class with it). Closing the drawer (back-link or close
+    // button inside the detail pane) clears state and detail content.
+    const selectedIds = new WeakMap();
+
     document.addEventListener("click", function (e) {
       const row = e.target.closest(
         ".episode-row, .reflection-row, .observation-row, .semantic-row"
@@ -38,13 +42,42 @@
             r.classList.remove("selected");
           });
           row.classList.add("selected");
+          const id = row.dataset.rowId;
+          if (id) selectedIds.set(list, id);
         }
       }
-      if (e.target.closest(".close-drawer, .back-link")) {
-        document.querySelectorAll(".list-pane .selected").forEach(function (r) {
-          r.classList.remove("selected");
+
+      const closer = e.target.closest(
+        ".back-link, .close-drawer, .semantic-drawer .cancel"
+      );
+      if (closer) {
+        const pane = closer.closest(".detail-pane");
+        if (pane) {
+          pane.querySelectorAll(":scope > div").forEach(function (d) {
+            d.innerHTML = "";
+          });
+        }
+        document.querySelectorAll(".list-pane").forEach(function (list) {
+          list.querySelectorAll(".selected").forEach(function (r) {
+            r.classList.remove("selected");
+          });
+          selectedIds.delete(list);
         });
       }
+    });
+
+    // After any HTMX swap that lands inside a list pane (e.g. the 30s
+    // poll repainting the panel), reapply the .selected class to the
+    // row matching the persisted id.
+    document.addEventListener("htmx:afterSettle", function (e) {
+      const list = e.target.closest && e.target.closest(".list-pane");
+      if (!list) return;
+      const id = selectedIds.get(list);
+      if (!id) return;
+      const row = list.querySelector(
+        '[data-row-id="' + CSS.escape(id) + '"]'
+      );
+      if (row) row.classList.add("selected");
     });
   </script>
 </head>

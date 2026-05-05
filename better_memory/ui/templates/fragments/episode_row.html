@@ -1,4 +1,5 @@
 <div class="episode-row {% if row.outcome %}outcome-{{ row.outcome }}{% endif %}"
+     data-row-id="{{ row.id }}"
      hx-get="{{ url_for('episodes_drawer', id=row.id) }}"
      hx-target="#drawer"
      hx-swap="innerHTML">
