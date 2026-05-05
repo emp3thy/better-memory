@@ -1040,7 +1040,11 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             episode_id = args["episode_id"]
             decision = args["decision"]
             try:
-                response = reflections.parse_response(json.dumps(decision))
+                # ``decision`` is already a parsed dict (the MCP framework
+                # decoded it before dispatch). Use the dict-shape parser
+                # directly to skip a redundant json.dumps → json.loads
+                # round-trip.
+                response = reflections.parse_response_dict(decision)
             except SynthesisResponseError as exc:
                 payload = _serialize_synth_apply_validation_error(str(exc))
                 return [TextContent(type="text", text=json.dumps(payload))]

@@ -614,7 +614,23 @@ class ReflectionSynthesisService:
 
     # ----------------------------------------------------------- parse_response
     def parse_response(self, raw: str) -> SynthesisResponse:
-        """Parse and validate the LLM response JSON.
+        """Parse and validate the LLM response JSON string.
+
+        Thin wrapper around :meth:`parse_response_dict` that handles the
+        ``json.loads`` step. Use :meth:`parse_response_dict` directly when
+        the caller already has a parsed dict (e.g. an MCP handler whose
+        framework decoded the JSON before dispatch — avoids a redundant
+        encode/decode round-trip).
+        """
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SynthesisResponseError(f"invalid JSON: {exc}") from exc
+        return self.parse_response_dict(data)
+
+    # ------------------------------------------------------ parse_response_dict
+    def parse_response_dict(self, data: object) -> SynthesisResponse:
+        """Validate an already-parsed decision dict and return a SynthesisResponse.
 
         Shape check:
         - Top level must be an object with keys ``new``, ``augment``,
@@ -628,11 +644,6 @@ class ReflectionSynthesisService:
         happens in the apply methods, not here, because it needs
         DB access.
         """
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise SynthesisResponseError(f"invalid JSON: {exc}") from exc
-
         if not isinstance(data, dict):
             raise SynthesisResponseError(
                 "top-level response must be a JSON object"

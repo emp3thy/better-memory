@@ -117,6 +117,47 @@ class TestParseResponse:
         assert resp.merge == []
         assert resp.ignore == []
 
+    def test_parse_response_dict_skips_string_round_trip(self, conn, fixed_clock):
+        """parse_response_dict accepts an already-parsed dict so callers
+        whose framework decoded the JSON before dispatch (the MCP handler)
+        can avoid a json.dumps → json.loads cycle."""
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        decision = {
+            "new": [{
+                "title": "t", "phase": "general", "polarity": "do",
+                "use_cases": "uc", "hints": ["h1"], "tech": None,
+                "confidence": 0.7, "source_observation_ids": ["o1"],
+            }],
+            "augment": [], "merge": [], "ignore": ["o2"],
+        }
+        resp = svc.parse_response_dict(decision)
+        assert len(resp.new) == 1
+        assert resp.new[0].title == "t"
+        assert resp.ignore == ["o2"]
+
+    def test_parse_response_dict_rejects_non_dict_top_level(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.reflection import SynthesisResponseError
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        with pytest.raises(SynthesisResponseError, match="JSON object"):
+            svc.parse_response_dict(["not", "a", "dict"])
+
+    def test_parse_response_and_dict_yield_equivalent_results(
+        self, conn, fixed_clock,
+    ):
+        """The string and dict entry points must produce identical output
+        for identical input (one is a thin wrapper over the other)."""
+        import json as _json
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        decision = {
+            "new": [], "augment": [], "merge": [],
+            "ignore": ["o-skip"],
+        }
+        from_str = svc.parse_response(_json.dumps(decision))
+        from_dict = svc.parse_response_dict(decision)
+        assert from_str == from_dict
+
     def test_valid_new_action(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         resp = svc.parse_response(

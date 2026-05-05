@@ -1,5 +1,13 @@
 # Episodic Synthesis Implementation Plan
 
+> ⚠️ **SUPERSEDED — historical reference only. Do not execute.**
+>
+> This plan describes the Ollama-driven per-episode architecture that was implemented in [PR #25](https://github.com/emp3thy/better-memory/pull/25) and then superseded by [PR #40](https://github.com/emp3thy/better-memory/pull/40), which removed Ollama entirely and moved synthesis to the IDE-LLM via two new MCP tools (`memory.synthesize_next_get_context` / `_apply`).
+>
+> Test snippets below import from `better_memory.llm.fake` and pass `chat=` to `ReflectionSynthesisService`. **Both no longer exist** — `better_memory/llm/` was deleted and the constructor takes no `chat` parameter. The current public API is `get_next_pending_context(*, project)` + `apply_decision(*, episode_id, response, project)`. See `.claude/skills/better-memory-synthesize/SKILL.md` for the live workflow and `tests/services/test_reflection.py::TestApplyDecision` for the live test patterns.
+>
+> Kept on disk because the design rationale below (per-episode atomicity, SAVEPOINT pattern, queue-driven loop, scope propagation) all still applies and is referenced by the live design doc `2026-05-03-episodic-synthesis-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the watermark-driven batch synthesis with an episode-driven loop. Each closed episode becomes one atomic LLM call; the UI's `/observations/synthesize` route processes one episode per HTTP request and is auto-chained by an htmx self-firing fragment until the pending queue is empty.
