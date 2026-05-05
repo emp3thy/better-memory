@@ -1,12 +1,9 @@
 <div class="reflection-drawer polarity-{{ detail.reflection.polarity }}"
      id="reflection-drawer-{{ detail.reflection.id }}">
+  <button class="back-link" type="button">reflections</button>
   <header class="drawer-header">
     <h3>{{ detail.reflection.title }}</h3>
-    <button class="close-drawer"
-            type="button"
-            onclick="document.getElementById('reflection-drawer').innerHTML = '';">
-      ×
-    </button>
+    <button class="close-drawer" type="button">×</button>
   </header>
 
   <dl class="drawer-meta">

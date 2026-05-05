@@ -1,11 +1,8 @@
 <div class="semantic-drawer" id="semantic-drawer-{{ memory.id }}">
+  <button class="back-link" type="button">semantic</button>
   <header class="drawer-header">
     <h3>Edit semantic memory</h3>
-    <button class="close-drawer"
-            type="button"
-            onclick="document.getElementById('semantic-drawer').innerHTML = '';">
-      ×
-    </button>
+    <button class="close-drawer" type="button">×</button>
   </header>
 
   <form hx-post="{{ url_for('semantic_update', id=memory.id) }}"
@@ -22,11 +19,7 @@
     </div>
     <div class="drawer-actions">
       <button type="submit">Save</button>
-      <button type="button"
-              class="cancel"
-              onclick="document.getElementById('semantic-drawer').innerHTML = '';">
-        Cancel
-      </button>
+      <button type="button" class="cancel">Cancel</button>
     </div>
   </form>
 </div>

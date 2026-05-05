@@ -4,13 +4,19 @@
 <section class="observations">
   {% include "fragments/observation_filter_form.html" %}
 
-  <div id="observation-panel"
-       hx-get="{{ url_for('observations_panel') }}"
-       hx-include="#observation-filter-form"
-       hx-trigger="load, every 30s"
-       hx-swap="innerHTML">
+  <div class="split">
+    <div class="pane list-pane">
+      <div id="observation-panel"
+           hx-get="{{ url_for('observations_panel') }}"
+           hx-include="#observation-filter-form"
+           hx-trigger="load, every 30s"
+           hx-swap="innerHTML">
+      </div>
+    </div>
+    <div class="split-rule"></div>
+    <div class="pane detail-pane">
+      <div id="observation-drawer"></div>
+    </div>
   </div>
-
-  <div id="observation-drawer"></div>
 </section>
 {% endblock %}

@@ -1,4 +1,5 @@
 <div class="episode-drawer" id="episode-drawer-{{ detail.episode.id }}">
+  <button class="back-link" type="button">episodes</button>
   <header class="drawer-header">
     <h3>
       {% if detail.episode.goal %}
@@ -7,11 +8,7 @@
         background session
       {% endif %}
     </h3>
-    <button class="close-drawer"
-            type="button"
-            onclick="document.getElementById('drawer').innerHTML = '';">
-      &times;
-    </button>
+    <button class="close-drawer" type="button">&times;</button>
   </header>
 
   <dl class="drawer-meta">

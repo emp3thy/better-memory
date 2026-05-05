@@ -1,4 +1,5 @@
 <div class="reflection-row polarity-{{ row.polarity }}"
+     data-row-id="{{ row.id }}"
      hx-get="{{ url_for('reflections_drawer', id=row.id) }}"
      hx-target="#reflection-drawer"
      hx-swap="innerHTML">

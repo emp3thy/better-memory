@@ -1,4 +1,5 @@
 <div class="card observation-row"
+     data-row-id="{{ row.id }}"
      hx-get="{{ url_for('observation_drawer', id=row.id) }}"
      hx-target="#observation-drawer"
      hx-swap="innerHTML">

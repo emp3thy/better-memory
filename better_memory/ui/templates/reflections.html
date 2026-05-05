@@ -4,13 +4,19 @@
 <section class="reflections">
   {% include "fragments/reflection_filter_form.html" %}
 
-  <div id="reflection-panel"
-       hx-get="{{ url_for('reflections_panel') }}"
-       hx-include="#reflection-filter-form"
-       hx-trigger="load, every 30s, reflection-changed from:body"
-       hx-swap="innerHTML">
+  <div class="split">
+    <div class="pane list-pane">
+      <div id="reflection-panel"
+           hx-get="{{ url_for('reflections_panel') }}"
+           hx-include="#reflection-filter-form"
+           hx-trigger="load, every 30s, reflection-changed from:body"
+           hx-swap="innerHTML">
+      </div>
+    </div>
+    <div class="split-rule"></div>
+    <div class="pane detail-pane">
+      <div id="reflection-drawer"></div>
+    </div>
   </div>
-
-  <div id="reflection-drawer"></div>
 </section>
 {% endblock %}

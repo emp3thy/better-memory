@@ -4,13 +4,19 @@
 <section class="semantic">
   {% include "fragments/semantic_filter_form.html" %}
 
-  <div id="semantic-panel"
-       hx-get="{{ url_for('semantic_panel') }}"
-       hx-include="#semantic-filter-form"
-       hx-trigger="load, every 30s, semantic-changed from:body"
-       hx-swap="innerHTML">
+  <div class="split">
+    <div class="pane list-pane">
+      <div id="semantic-panel"
+           hx-get="{{ url_for('semantic_panel') }}"
+           hx-include="#semantic-filter-form"
+           hx-trigger="load, every 30s, semantic-changed from:body"
+           hx-swap="innerHTML">
+      </div>
+    </div>
+    <div class="split-rule"></div>
+    <div class="pane detail-pane">
+      <div id="semantic-drawer"></div>
+    </div>
   </div>
-
-  <div id="semantic-drawer"></div>
 </section>
 {% endblock %}
