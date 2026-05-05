@@ -2,18 +2,18 @@
      hx-get="{{ url_for('reflections_drawer', id=row.id) }}"
      hx-target="#reflection-drawer"
      hx-swap="innerHTML">
-  <div class="row-main">
-    <span class="title">{{ row.title }}</span>
+  <span class="title">{{ row.title }}</span>
+  <div class="refl-foot">
     <span class="use-cases">{{ row.use_cases | truncate(120, True) }}</span>
-  </div>
-  <div class="row-side">
-    <span class="phase-badge phase-{{ row.phase }}">{{ row.phase }}</span>
-    <span class="polarity-badge polarity-{{ row.polarity }}">{{ row.polarity }}</span>
-    {% if row.tech %}<span class="tech">{{ row.tech }}</span>{% endif %}
-    <div class="confidence-bar" title="confidence {{ '%.2f' | format(row.confidence) }}">
-      <div class="confidence-fill" style="width: {{ (row.confidence * 100) | round(0) }}%"></div>
+    <div class="row-side">
+      <span class="phase-badge phase-{{ row.phase }}">{{ row.phase }}</span>
+      <span class="polarity-badge polarity-{{ row.polarity }}">{{ row.polarity }}</span>
+      {% if row.tech %}<span class="tech">{{ row.tech }}</span>{% endif %}
+      <span class="evidence-count">
+        <span><span class="n">{{ row.evidence_count }}</span> obs</span>
+        <span><span class="n">{{ (row.confidence * 100) | round(0) | int }}%</span> con</span>
+      </span>
+      <span class="status-{{ row.status }}">{{ row.status }}</span>
     </div>
-    <span class="evidence-count">{{ row.evidence_count }} obs</span>
-    <span class="status-{{ row.status }}">{{ row.status }}</span>
   </div>
 </div>
