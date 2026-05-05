@@ -1,0 +1,19 @@
+<form id="semantic-filter-form"
+      class="filter-form"
+      hx-get="{{ url_for('semantic_panel') }}"
+      hx-target="#semantic-panel"
+      hx-trigger="change delay:200ms, keyup delay:200ms changed, submit"
+      hx-swap="innerHTML">
+  <label>
+    Scope
+    <select name="scope_filter">
+      <option value=""        {% if not initial_filters.scope_filter %}selected{% endif %}>all</option>
+      <option value="project" {% if initial_filters.scope_filter == 'project' %}selected{% endif %}>project only</option>
+      <option value="general" {% if initial_filters.scope_filter == 'general' %}selected{% endif %}>general only</option>
+    </select>
+  </label>
+  <label>
+    Search
+    <input name="search" value="{{ initial_filters.search }}" placeholder="substring of content">
+  </label>
+</form>

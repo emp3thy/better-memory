@@ -209,6 +209,87 @@ class TestListForProject:
         assert [m.id for m in memories] == [third_id, second_id, first_id]
 
 
+class TestListForProjectFilters:
+    def test_scope_filter_project_only_excludes_general(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.create(content="p1 project rule", project="p1", scope="project")
+        svc.create(content="p1 general rule", project="p1", scope="general")
+        svc.create(content="p2 general rule", project="p2", scope="general")
+        memories = svc.list_for_project(project="p1", scope_filter="project")
+        assert {m.content for m in memories} == {"p1 project rule"}
+
+    def test_scope_filter_general_only_returns_all_general_rows(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.create(content="p1 project rule", project="p1", scope="project")
+        svc.create(content="p1 general rule", project="p1", scope="general")
+        svc.create(content="p2 general rule", project="p2", scope="general")
+        memories = svc.list_for_project(project="p1", scope_filter="general")
+        assert {m.content for m in memories} == {
+            "p1 general rule", "p2 general rule",
+        }
+
+    def test_scope_filter_none_matches_default_behavior(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.create(content="p1 project rule", project="p1", scope="project")
+        svc.create(content="p2 general rule", project="p2", scope="general")
+        svc.create(content="p2 project rule", project="p2", scope="project")
+        default = svc.list_for_project(project="p1")
+        explicit_none = svc.list_for_project(project="p1", scope_filter=None)
+        assert {m.content for m in default} == {
+            "p1 project rule", "p2 general rule",
+        }
+        assert {m.content for m in explicit_none} == {m.content for m in default}
+
+    def test_search_substring_case_insensitive(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.create(content="Prefer terse replies", project="p1")
+        svc.create(content="use ruff for linting", project="p1")
+        svc.create(content="general fact", project="p1", scope="general")
+        memories = svc.list_for_project(project="p1", search="RUFF")
+        assert {m.content for m in memories} == {"use ruff for linting"}
+
+    def test_search_escapes_like_wildcards(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.create(content="literal 50% off promo", project="p1")
+        svc.create(content="no percent here", project="p1")
+        # The '%' must match literally, not as a wildcard.
+        memories = svc.list_for_project(project="p1", search="50%")
+        assert {m.content for m in memories} == {"literal 50% off promo"}
+
+    def test_search_combines_with_scope_filter(self, conn, fixed_clock):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.create(content="ruff project rule", project="p1", scope="project")
+        svc.create(content="ruff general rule", project="p1", scope="general")
+        svc.create(content="other project rule", project="p1", scope="project")
+        memories = svc.list_for_project(
+            project="p1", scope_filter="project", search="ruff",
+        )
+        assert {m.content for m in memories} == {"ruff project rule"}
+
+    def test_empty_search_string_treated_as_no_filter(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.create(content="rule one", project="p1")
+        svc.create(content="rule two", project="p1")
+        # Empty string should not constrain results — treated like None.
+        memories = svc.list_for_project(project="p1", search="")
+        assert len(memories) == 2
+
+
 class TestSetScope:
     def test_set_scope_changes_value(self, conn, fixed_clock):
         from better_memory.services.semantic import SemanticMemoryService

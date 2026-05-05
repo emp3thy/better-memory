@@ -80,6 +80,99 @@ class TestSemanticPanel:
         assert "proj-b general rule" in body
 
 
+class TestSemanticPanelFilters:
+    def _seed(self, tmp_db: Path) -> None:
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            seed_conn.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) VALUES "
+                "('m1','use ruff for linting','proj-a','project',"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00'),"
+                "('m2','prefer terse replies','proj-a','general',"
+                " '2026-05-02T10:00:00+00:00','2026-05-02T10:00:00+00:00'),"
+                "('m3','python 3.12 only','proj-b','general',"
+                " '2026-05-03T10:00:00+00:00','2026-05-03T10:00:00+00:00')"
+            )
+            seed_conn.commit()
+
+    def test_page_renders_filter_form(
+        self, client: FlaskClient, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        response = client.get("/semantic")
+        body = response.get_data(as_text=True)
+        assert 'id="semantic-filter-form"' in body
+        assert 'name="scope_filter"' in body
+        assert 'name="search"' in body
+
+    def test_panel_default_returns_project_and_general_rows(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db)
+        response = client.get("/semantic/panel")
+        body = response.get_data(as_text=True)
+        assert "use ruff for linting" in body
+        assert "prefer terse replies" in body
+        assert "python 3.12 only" in body  # general from proj-b
+
+    def test_panel_scope_filter_project_only(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db)
+        response = client.get("/semantic/panel?scope_filter=project")
+        body = response.get_data(as_text=True)
+        assert "use ruff for linting" in body
+        assert "prefer terse replies" not in body
+        assert "python 3.12 only" not in body
+
+    def test_panel_scope_filter_general_only(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db)
+        response = client.get("/semantic/panel?scope_filter=general")
+        body = response.get_data(as_text=True)
+        assert "use ruff for linting" not in body
+        assert "prefer terse replies" in body
+        assert "python 3.12 only" in body
+
+    def test_panel_search_filters_by_substring_case_insensitive(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db)
+        response = client.get("/semantic/panel?search=RUFF")
+        body = response.get_data(as_text=True)
+        assert "use ruff for linting" in body
+        assert "prefer terse replies" not in body
+        assert "python 3.12 only" not in body
+
+    def test_panel_unknown_scope_filter_falls_back_to_default(
+        self, client: FlaskClient, tmp_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db)
+        response = client.get("/semantic/panel?scope_filter=garbage")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "use ruff for linting" in body
+        assert "prefer terse replies" in body
+
+
 class TestSemanticCreate:
     def test_creates_row_and_returns_hx_trigger(
         self, client: FlaskClient, tmp_db: Path,
