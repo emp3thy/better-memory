@@ -81,17 +81,32 @@ When an EXISTING reflection (in the `reflections` array of get_context) gains ne
 
 ### `merge` entries (fields ALL REQUIRED)
 
-ONLY use to combine TWO existing reflection ids that name the SAME lesson. Both ids MUST appear in the `reflections` array. **NEVER emit a merge entry with null, empty, or invented ids.**
+Use to combine TWO existing reflection ids that name the SAME lesson OR are complementary aspects of the same use case (see "Merge criteria" below). Both ids MUST appear in the `reflections` array of the current `get_context` response. **NEVER emit a merge entry with null, empty, or invented ids.**
 
 ```json
 {
   "source_id": "r-narrower",
   "target_id": "r-broader",
-  "justification": "Why these are the same lesson, ~1 sentence"
+  "justification": "Why these belong as one reflection, ~1 sentence"
 }
 ```
 
 `source` is superseded into `target`. Target absorbs source's observation links and stays active. Source becomes status='superseded'.
+
+**Merge criteria — when to combine:**
+
+- **Same lesson, different framing** — both reflections describe the same fact/rule with different words. Strong merge.
+- **Complementary lessons, shared use case** — reflection B is a required step / special case / corollary of reflection A, and they trigger together (same `use_cases`). Example: "Bridge async via worker thread + new_event_loop" + "Worker-thread bridge must wrap entire body in try/except" — one is HOW to do the pattern, the other is a required correctness step OF that pattern. Merge: target the broader one, fold the narrower's hints in.
+- **Special case of a general rule** — reflection B names a specific instance of the general rule in reflection A. Example: "Use getattr for platform-only stdlib attributes" + "Windows DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP needs only these flags" — the second is a worked example of the first.
+
+**Anti-patterns — when NOT to merge:**
+
+- **Same domain, different mechanisms** — three distinct HTMX gotchas (event bubbling vs non-2xx responses vs hx-swap=none) share the tech tag but have different triggers, different fixes, and different failure modes. Keep separate.
+- **Same library, unrelated lifecycles** — e.g. mkdocs `| url` filter behavior vs mkdocs `md_in_html` blank-line requirement. Same library, but a developer hits one or the other, never both at once.
+- **Generic / parent reflection** — don't merge a specific lesson INTO a vague catch-all (e.g. don't merge anything into "Prioritize Root Cause Fixing"). Better to retire the vague one separately.
+- **One is `do`, the other is `dont` on the same axis** — keep separate; the polarity carries information for retrieval.
+
+When in doubt, prefer NOT to merge — it's easier to merge later than to split a bloated reflection.
 
 ### `ignore` is an array of observation id strings
 
@@ -105,18 +120,23 @@ Observations you don't address (neither in `new`, `augment`, nor `ignore`) are a
 
 ## Decision rubric
 
-For each observation, ask:
+**Step 0 — scan the existing `reflections` array for merge candidates BEFORE looking at this episode's observations.**
+
+The `get_context` response gives you a tech-filtered slice of all active reflections. Skim titles + use_cases for clusters that should be one reflection (see "Merge criteria" above). Each call is your only opportunity to merge the pairs that appear together — `merge` cannot operate cross-episode.
+
+Don't force merges every call. Most calls will produce zero merge entries. But the skim is non-optional.
+
+**Step 1 — for each observation in the episode, ask:**
 
 1. **Is this a generalizable lesson worth surfacing in future sessions?**
    - Yes, and it's NEW → `new`
    - Yes, and it CONFIRMS / EXTENDS an existing reflection → `augment`
    - No (ephemeral, routine, or episode-specific) → omit (auto-ignored) or list in `ignore`
 
-2. **Are there two existing reflections naming the same lesson?**
-   - Yes → `merge`
-
-3. **Is an existing reflection too narrow given new evidence?**
+2. **Is an existing reflection too narrow given new evidence?**
    - Yes → `augment` with `rewrite_use_cases`
+
+3. **Before adding a `new` entry**, confirm no existing reflection (in the response's `reflections` array) covers the same use case. If it does, `augment` instead — and consider whether your would-be `new` is actually evidence that two existing reflections should `merge`.
 
 ## Worked example
 
@@ -206,6 +226,8 @@ loop:
 - **Augmenting retired reflections**: the apply layer drops them silently. The reflections array won't include `retired` / `superseded` reflections so this should not occur, but if you ever cache ids across iterations, a previously-merged source may now be `superseded`.
 - **Over-confident new entries**: a single observation rarely warrants `confidence > 0.7`.
 - **Sycophantic ignore**: don't dump everything into `ignore` to clear the queue. The point is to extract real lessons. If you genuinely cannot find a lesson, ignore is correct — but think first.
+- **Skipping the merge scan**: the `reflections` array isn't just for cross-checking your `new` entries — it's the only place you can act on accumulated similarity drift. Skim it every call.
+- **Over-merging**: don't collapse three distinct gotchas into one bloated reflection because they share a tech tag. Different mechanism + different fix = keep separate. See "Anti-patterns" under merge criteria.
 
 ## Reporting
 
