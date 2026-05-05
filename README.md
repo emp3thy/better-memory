@@ -151,6 +151,22 @@ The `better_memory/skills/` directory contains four markdown skills the AI shoul
 
 Plus `CLAUDE.snippet.md` — paste into your project's `CLAUDE.md` to teach the AI about better-memory.
 
+### Synthesis skill (Claude Code)
+
+Reflection synthesis is driven by Claude — episode by episode — via two MCP tools (`memory.synthesize_next_get_context` / `_apply`). The walkthrough lives at `.claude/skills/better-memory-synthesize/SKILL.md`.
+
+For cross-project availability (so Claude triggers it in any repo where better-memory is configured, not just this one), mirror the skill into your user-level `~/.claude/skills/`. Symlink keeps the repo as the source of truth:
+
+```bash
+# Linux / macOS
+ln -s "$PWD/.claude/skills/better-memory-synthesize" ~/.claude/skills/better-memory-synthesize
+
+# Windows (PowerShell, run from this repo)
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\better-memory-synthesize" -Target "$PWD\.claude\skills\better-memory-synthesize"
+```
+
+Then add a section to `~/.claude/CLAUDE.md` telling Claude to invoke the skill when `mcp__better-memory__memory_start_episode` reports `pending_synthesis.pending > 0`.
+
 ## Development
 
 ```bash
