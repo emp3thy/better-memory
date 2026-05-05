@@ -34,6 +34,7 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.mcp.server import (
     _serialize_synth_apply_ok,
+    _serialize_synth_apply_state_error,
     _serialize_synth_apply_validation_error,
     _serialize_synth_get_context,
     _tool_definitions,
@@ -282,6 +283,18 @@ class TestApplyValidationErrorSerializer:
         }
 
 
+class TestApplyStateErrorSerializer:
+    def test_returns_state_error_shape(self) -> None:
+        payload = _serialize_synth_apply_state_error(
+            "Episode 'ep1' is already synthesized"
+        )
+        assert payload == {
+            "ok": False,
+            "error": "state",
+            "message": "Episode 'ep1' is already synthesized",
+        }
+
+
 # ----------------------------------------------------- end-to-end via service
 
 
@@ -453,6 +466,62 @@ class TestEndToEndApplyDecision:
         ).fetchone()
         assert row["synthesized_at"] is None
         assert row["synth_failed_at"] is None
+
+    def test_state_error_when_episode_belongs_to_other_project(
+        self, conn, fixed_clock,
+    ):
+        """The MCP layer turns ValueError from apply_decision into a
+        structured state-error payload (so the LLM can refetch context
+        instead of retrying the same stale id)."""
+        _seed_episode(conn, eid="ep1", project="project_a")
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+
+        empty = {"new": [], "augment": [], "merge": [], "ignore": []}
+        response = svc.parse_response(json.dumps(empty))
+        # Mirror the handler: catch ValueError → state-error payload.
+        try:
+            svc.apply_decision(
+                episode_id="ep1", response=response, project="project_b",
+            )
+        except ValueError as exc:
+            payload = _serialize_synth_apply_state_error(str(exc))
+        else:
+            pytest.fail("apply_decision should have raised ValueError")
+
+        assert payload["ok"] is False
+        assert payload["error"] == "state"
+        assert "project" in payload["message"]
+        # Episode untouched.
+        row = conn.execute(
+            "SELECT synthesized_at FROM episodes WHERE id='ep1'"
+        ).fetchone()
+        assert row[0] is None
+
+    def test_state_error_when_episode_already_synthesized(
+        self, conn, fixed_clock,
+    ):
+        _seed_episode(conn, eid="ep1")
+        conn.execute(
+            "UPDATE episodes SET synthesized_at = ? WHERE id = 'ep1'",
+            ("2026-04-01T02:00:00+00:00",),
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+
+        empty = {"new": [], "augment": [], "merge": [], "ignore": []}
+        response = svc.parse_response(json.dumps(empty))
+        try:
+            svc.apply_decision(
+                episode_id="ep1", response=response, project="p1",
+            )
+        except ValueError as exc:
+            payload = _serialize_synth_apply_state_error(str(exc))
+        else:
+            pytest.fail("apply_decision should have raised ValueError")
+
+        assert payload["error"] == "state"
+        assert "already synthesized" in payload["message"]
 
     def test_empty_decision_marks_episode_synthesized(
         self, conn, fixed_clock,

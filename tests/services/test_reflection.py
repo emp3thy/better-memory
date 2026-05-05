@@ -1837,6 +1837,69 @@ class TestApplyDecision:
         ).fetchone()[0]
         assert status == "consumed_without_reflection"
 
+    def test_raises_when_episode_id_does_not_exist(self, conn, fixed_clock):
+        """Unknown episode_id must raise — no silent no-op write.
+
+        Without this guard, a caller passing a typo'd or stale id could
+        silently get back a SynthesisStep with done=0 / pending=0 and
+        believe the work was applied.
+        """
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="not found"):
+            svc.apply_decision(
+                episode_id="nonexistent", response=self._empty(), project="p1",
+            )
+
+    def test_raises_when_episode_belongs_to_other_project(
+        self, conn, fixed_clock,
+    ):
+        """Episode_id from project A with project=B must raise.
+
+        BugBot finding (PR #40 PRRT_kwDOSGIXI85_vo36): without this
+        guard, _apply_new(project=B) creates reflections under project
+        B while _mark_synthesized stamps project A's episode.
+        """
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal) VALUES "
+            "('ep1','project_a','2026-04-01T00:00:00+00:00',"
+            "'2026-04-01T01:00:00+00:00','success','goal_complete','g')"
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="project"):
+            svc.apply_decision(
+                episode_id="ep1", response=self._empty(), project="project_b",
+            )
+        # Episode untouched — synthesized_at still NULL.
+        row = conn.execute(
+            "SELECT synthesized_at FROM episodes WHERE id='ep1'"
+        ).fetchone()
+        assert row[0] is None
+
+    def test_raises_when_episode_already_synthesized(
+        self, conn, fixed_clock,
+    ):
+        """Calling apply_decision twice on the same episode must raise.
+
+        BugBot finding (PR #40 PRRT_kwDOSGIXI85_vo3_): without this
+        guard, an accidental retry creates duplicate reflections with
+        the same source observations.
+        """
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal, synthesized_at) VALUES "
+            "('ep1','p1','2026-04-01T00:00:00+00:00',"
+            "'2026-04-01T01:00:00+00:00','success','goal_complete','g',"
+            "'2026-04-01T02:00:00+00:00')"
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="already synthesized"):
+            svc.apply_decision(
+                episode_id="ep1", response=self._empty(), project="p1",
+            )
+
     def test_db_integrity_error_propagates_and_no_synthesized_at(
         self, conn, fixed_clock, monkeypatch,
     ):

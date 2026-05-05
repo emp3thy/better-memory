@@ -661,6 +661,22 @@ def _serialize_synth_apply_validation_error(message: str) -> dict[str, Any]:
     }
 
 
+def _serialize_synth_apply_state_error(message: str) -> dict[str, Any]:
+    """Build the JSON payload for an episode-state failure.
+
+    Surfaces apply-time precondition violations (episode not found,
+    wrong project, already synthesized) without raising into the MCP
+    framework's generic isError surface. Caller should NOT retry the
+    same episode_id; pull fresh context via
+    ``memory.synthesize_next_get_context`` first.
+    """
+    return {
+        "ok": False,
+        "error": "state",
+        "message": message,
+    }
+
+
 # --------------------------------------------------------------------------- factory
 
 
@@ -1028,11 +1044,19 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             except SynthesisResponseError as exc:
                 payload = _serialize_synth_apply_validation_error(str(exc))
                 return [TextContent(type="text", text=json.dumps(payload))]
-            step = reflections.apply_decision(
-                episode_id=episode_id,
-                response=response,
-                project=project,
-            )
+            try:
+                step = reflections.apply_decision(
+                    episode_id=episode_id,
+                    response=response,
+                    project=project,
+                )
+            except ValueError as exc:
+                # Episode-state preconditions: not found / wrong project /
+                # already synthesized. Surface as structured error so the
+                # IDE-LLM can refetch context instead of retrying the same
+                # stale id.
+                payload = _serialize_synth_apply_state_error(str(exc))
+                return [TextContent(type="text", text=json.dumps(payload))]
             return [
                 TextContent(
                     type="text",

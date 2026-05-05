@@ -1022,11 +1022,38 @@ class ReflectionSynthesisService:
         surface the failure (the schema invariant is broken; further
         applies on this episode would just produce more bad rows).
 
+        Validates ownership BEFORE entering the SAVEPOINT:
+        - episode must exist
+        - episode.project must match the supplied ``project`` (otherwise
+          a caller could have ``_apply_new`` create reflections under
+          project B while ``_mark_synthesized`` stamps project A's row)
+        - episode must NOT already be synthesized (without this, a
+          retry duplicates reflections — the old ``synthesize_next``
+          was protected by ``_pick_oldest_pending``, which the split
+          design no longer routes through)
+
         Decision-JSON validation lives in :meth:`parse_response`; the
         caller is expected to call that first and surface any
         :class:`SynthesisResponseError` to the producing LLM directly
         rather than stamping the episode failed.
         """
+        row = self._conn.execute(
+            "SELECT project, synthesized_at FROM episodes WHERE id = ?",
+            (episode_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Episode {episode_id!r} not found")
+        if row["project"] != project:
+            raise ValueError(
+                f"Episode {episode_id!r} belongs to project "
+                f"{row['project']!r}, not {project!r}"
+            )
+        if row["synthesized_at"] is not None:
+            raise ValueError(
+                f"Episode {episode_id!r} is already synthesized "
+                f"(synthesized_at={row['synthesized_at']})"
+            )
+
         self._conn.execute("SAVEPOINT episode_synthesize")
         try:
             active_rows = self._conn.execute(
