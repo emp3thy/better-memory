@@ -7,7 +7,7 @@
   <div id="observation-panel"
        hx-get="{{ url_for('observations_panel') }}"
        hx-include="#observation-filter-form"
-       hx-trigger="load, every 30s, observations-synthesized from:body"
+       hx-trigger="load, every 30s"
        hx-swap="innerHTML">
   </div>
 

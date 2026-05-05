@@ -9,18 +9,15 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.llm.fake import FakeChat
 from better_memory.services.episode import EpisodeService
 from better_memory.services.reflection import (
     EpisodeContext,
     EpisodeForPrompt,
-    EpisodeQueueCounts,
     ObservationForPrompt,
     ReflectionForPrompt,
     ReflectionSynthesisService,
-    SynthesisStep,
+    SynthesisResponse,
 )
-from tests.conftest import run_async
 
 
 @pytest.fixture
@@ -111,7 +108,7 @@ from better_memory.services.reflection import (  # noqa: E402
 
 class TestParseResponse:
     def test_empty_response_returns_empty_buckets(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         resp = svc.parse_response(
             '{"new": [], "augment": [], "merge": [], "ignore": []}'
         )
@@ -121,7 +118,7 @@ class TestParseResponse:
         assert resp.ignore == []
 
     def test_valid_new_action(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         resp = svc.parse_response(
             '{"new": [{"title": "t", "phase": "general", "polarity": "do", '
             '"use_cases": "uc", "hints": ["h1"], "tech": null, '
@@ -140,7 +137,7 @@ class TestParseResponse:
         assert n.source_observation_ids == ["o1", "o2"]
 
     def test_valid_augment_action(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         resp = svc.parse_response(
             '{"new": [], "augment": [{"reflection_id": "r1", '
             '"add_hints": ["x"], "rewrite_use_cases": null, '
@@ -156,7 +153,7 @@ class TestParseResponse:
         assert a.add_source_observation_ids == ["o1"]
 
     def test_valid_merge_action(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         resp = svc.parse_response(
             '{"new": [], "augment": [], "merge": [{"source_id": "s", '
             '"target_id": "t", "justification": "dupes"}], "ignore": []}'
@@ -168,30 +165,30 @@ class TestParseResponse:
         assert m.justification == "dupes"
 
     def test_valid_ignore(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         resp = svc.parse_response(
             '{"new": [], "augment": [], "merge": [], "ignore": ["o1", "o2"]}'
         )
         assert resp.ignore == ["o1", "o2"]
 
     def test_malformed_json_raises(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         with pytest.raises(SynthesisResponseError):
             svc.parse_response("not json")
 
     def test_missing_top_level_key_raises(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         with pytest.raises(SynthesisResponseError):
             svc.parse_response('{"new": []}')  # missing augment/merge/ignore
 
     def test_wrong_top_level_type_raises(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         with pytest.raises(SynthesisResponseError):
             svc.parse_response('["not", "an", "object"]')
 
     def test_unknown_extra_field_silently_dropped(self, conn, fixed_clock):
         """LLMs may add commentary — we drop unknown keys rather than reject."""
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         resp = svc.parse_response(
             '{"new": [], "augment": [], "merge": [], "ignore": [], '
             '"rationale": "some extra commentary from the LLM"}'
@@ -202,14 +199,14 @@ class TestParseResponse:
         assert resp.ignore == []
 
     def test_new_missing_required_field_raises(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         with pytest.raises(SynthesisResponseError):
             svc.parse_response(
                 '{"new": [{"title": "t"}], "augment": [], "merge": [], "ignore": []}'
             )
 
     def test_new_invalid_enum_raises(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         with pytest.raises(SynthesisResponseError):
             svc.parse_response(
                 '{"new": [{"title": "t", "phase": "bogus", "polarity": "do", '
@@ -229,7 +226,7 @@ class TestApplyNew:
         _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = NewAction(
             title="Always test", phase="general", polarity="do",
             use_cases="when writing code", hints=["write tests first"],
@@ -269,7 +266,7 @@ class TestApplyNew:
         _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = NewAction(
             title="t", phase="general", polarity="do",
             use_cases="uc", hints=[], tech=None,
@@ -292,7 +289,7 @@ class TestApplyNew:
         _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = NewAction(
             title="t", phase="general", polarity="do",
             use_cases="uc", hints=[], tech=None,
@@ -316,7 +313,7 @@ class TestApplyNew:
         _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = NewAction(
             title="t", phase="general", polarity="do",
             use_cases="uc", hints=[], tech=None, confidence=0.5,
@@ -341,7 +338,7 @@ class TestApplyNew:
         assert {s["observation_id"] for s in sources} == {"obs-1"}
 
     def test_skips_entry_when_all_sources_invalid(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = NewAction(
             title="t", phase="general", polarity="do",
             use_cases="uc", hints=[], tech=None, confidence=0.5,
@@ -362,7 +359,7 @@ class TestApplyAugment:
             hints='["old-hint"]', confidence=0.5, evidence_count=1,
         )
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = AugmentAction(
             reflection_id="r1",
             add_hints=["old-hint", "new-hint-1", "new-hint-2"],
@@ -385,7 +382,7 @@ class TestApplyAugment:
             conn, refl_id="r1", project="p", use_cases="old uc",
         )
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = AugmentAction(
             reflection_id="r1", add_hints=[],
             rewrite_use_cases="new uc",
@@ -403,7 +400,7 @@ class TestApplyAugment:
             conn, refl_id="r1", project="p", use_cases="keep me",
         )
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = AugmentAction(
             reflection_id="r1", add_hints=[],
             rewrite_use_cases=None,
@@ -424,7 +421,7 @@ class TestApplyAugment:
             conn, refl_id="r2", project="p", confidence=0.2,
         )
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         svc._apply_augment(
             [
                 AugmentAction(
@@ -471,7 +468,7 @@ class TestApplyAugment:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = AugmentAction(
             reflection_id="r1", add_hints=[],
             rewrite_use_cases=None,
@@ -496,7 +493,7 @@ class TestApplyAugment:
         assert {s["status"] for s in statuses} == {"consumed_into_reflection"}
 
     def test_drops_unknown_reflection_id(self, conn, fixed_clock):
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = AugmentAction(
             reflection_id="nope", add_hints=["h"],
             rewrite_use_cases=None, confidence_delta=0.0,
@@ -514,7 +511,7 @@ class TestApplyAugment:
             conn, refl_id="r1", project="p", status="retired", confidence=0.5,
         )
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = AugmentAction(
             reflection_id="r1", add_hints=["h"],
             rewrite_use_cases=None, confidence_delta=0.3,
@@ -554,7 +551,7 @@ class TestApplyMerge:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         action = MergeAction(
             source_id="src", target_id="tgt",
             justification="dupes",
@@ -601,7 +598,7 @@ class TestApplyMerge:
             )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         svc._apply_merge(
             [MergeAction(source_id="src", target_id="tgt", justification="")]
         )
@@ -615,7 +612,7 @@ class TestApplyMerge:
     def test_drops_unknown_source(self, conn, fixed_clock):
         _insert_reflection(conn, refl_id="tgt", project="p")
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         svc._apply_merge(
             [MergeAction(source_id="nope", target_id="tgt", justification="")]
         )
@@ -629,7 +626,7 @@ class TestApplyMerge:
     def test_drops_unknown_target(self, conn, fixed_clock):
         _insert_reflection(conn, refl_id="src", project="p")
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         svc._apply_merge(
             [MergeAction(source_id="src", target_id="nope", justification="")]
         )
@@ -645,7 +642,7 @@ class TestApplyMerge:
         )
         _insert_reflection(conn, refl_id="tgt", project="p")
         conn.commit()
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         svc._apply_merge(
             [MergeAction(source_id="src", target_id="tgt", justification="")]
         )
@@ -677,7 +674,7 @@ class TestApplyMerge:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         svc._apply_merge(
             [MergeAction(source_id="r1", target_id="r1", justification="bogus")]
         )
@@ -706,7 +703,7 @@ class TestApplyIgnore:
         _insert_obs(conn, obs_id="obs-2", project="p", episode_id=ep)
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         svc._apply_ignore(["obs-1", "obs-2", "obs-bogus"])
         conn.commit()
 
@@ -738,7 +735,7 @@ class TestRetrieveReflections:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         result = svc.retrieve_reflections(project="p")
         assert {r["id"] for r in result["do"]} == {"r1"}
         assert {r["id"] for r in result["dont"]} == {"r2"}
@@ -759,7 +756,7 @@ class TestRetrieveReflections:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         result = svc.retrieve_reflections(project="p")
         assert {r["id"] for r in result["do"]} == {"r-ok"}
 
@@ -778,7 +775,7 @@ class TestRetrieveReflections:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         result = svc.retrieve_reflections(project="p", phase="planning")
         assert {r["id"] for r in result["do"]} == {"r-plan"}
 
@@ -793,7 +790,7 @@ class TestRetrieveReflections:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         result = svc.retrieve_reflections(project="p", polarity="dont")
         assert result["do"] == []
         assert {r["id"] for r in result["dont"]} == {"r-dont"}
@@ -814,7 +811,7 @@ class TestRetrieveReflections:
         )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         result = svc.retrieve_reflections(project="p")
         assert [r["id"] for r in result["do"]] == ["r-high", "r-mid", "r-low"]
 
@@ -833,7 +830,7 @@ class TestRetrieveReflectionsLimit:
                 )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
 
         result = svc.retrieve_reflections(project="p", limit_per_bucket=2)
         assert len(result["do"]) == 2
@@ -849,7 +846,7 @@ class TestRetrieveReflectionsLimit:
             )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         result = svc.retrieve_reflections(project="p")
         assert len(result["do"]) == 20
 
@@ -863,7 +860,7 @@ class TestRetrieveReflectionsLimit:
             )
         conn.commit()
 
-        svc = ReflectionSynthesisService(conn, chat=FakeChat(responses=[]), clock=fixed_clock)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         result = svc.retrieve_reflections(project="p", limit_per_bucket=3)
         assert [r["id"] for r in result["do"]] == ["r-0", "r-1", "r-2"]
 
@@ -885,7 +882,7 @@ class TestStatusChangedAtOnTransition:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+            conn, clock=fixed_clock
         )
         action = NewAction(
             title="Always test", phase="general", polarity="do",
@@ -917,7 +914,7 @@ class TestStatusChangedAtOnTransition:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+            conn, clock=fixed_clock
         )
         action = AugmentAction(
             reflection_id="r1", add_hints=["another hint"],
@@ -948,7 +945,7 @@ class TestStatusChangedAtOnTransition:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+            conn, clock=fixed_clock
         )
         svc._apply_ignore(["obs-1"])
         conn.commit()
@@ -983,7 +980,7 @@ class TestTechNormalization:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+            conn, clock=fixed_clock
         )
         result = svc.retrieve_reflections(project="p", tech="REACT")
         assert {r["id"] for r in result["do"]} == {"r-react"}
@@ -998,7 +995,7 @@ class TestTechNormalization:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock
+            conn, clock=fixed_clock
         )
         action = NewAction(
             title="Mixed-case tech from LLM",
@@ -1065,7 +1062,7 @@ class TestApplyAugmentTimestampFreshness:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=counter_clock,
+            conn, clock=counter_clock,
         )
         action_with = AugmentAction(
             reflection_id="r1", add_hints=[],
@@ -1125,7 +1122,7 @@ class TestApplyMergeTimestampFreshness:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=counter_clock,
+            conn, clock=counter_clock,
         )
         merge1 = MergeAction(
             source_id="src1", target_id="tgt1",
@@ -1174,7 +1171,7 @@ class TestArchivedObservationGuards:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         # Hallucinated archived id from the LLM's ignore list.
         svc._apply_ignore(["obs-archived"])
@@ -1204,7 +1201,7 @@ class TestArchivedObservationGuards:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         action = NewAction(
             title="t", phase="general", polarity="do",
@@ -1258,7 +1255,7 @@ class TestApplyNewTimestampFreshness:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=counter_clock,
+            conn, clock=counter_clock,
         )
         action_a = NewAction(
             title="ref-A", phase="general", polarity="do",
@@ -1288,7 +1285,7 @@ class TestPickOldestPending:
         self, conn, fixed_clock,
     ):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         result = svc._pick_oldest_pending(project="p1")
         assert result is None
@@ -1300,7 +1297,7 @@ class TestPickOldestPending:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         assert svc._pick_oldest_pending(project="p1") is None
 
@@ -1315,7 +1312,7 @@ class TestPickOldestPending:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         result = svc._pick_oldest_pending(project="p1")
         assert result is not None
@@ -1334,7 +1331,7 @@ class TestPickOldestPending:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         assert svc._pick_oldest_pending(project="p1") is None
 
@@ -1351,7 +1348,7 @@ class TestPickOldestPending:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         assert svc._pick_oldest_pending(project="p1") is None
 
@@ -1368,7 +1365,7 @@ class TestPickOldestPending:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         result = svc._pick_oldest_pending(project="p1")
         assert result is not None
@@ -1397,7 +1394,7 @@ class TestLoadEpisodeContext:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         episode = EpisodeForPrompt(
             id="ep1", project="p1", goal="test goal", tech="python", outcome="success",
@@ -1422,7 +1419,7 @@ class TestLoadEpisodeContext:
         _insert_reflection(conn, refl_id="r-rust", project="p1", tech="rust")
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         episode = EpisodeForPrompt(
             id="ep1", project="p1", goal="goal", tech="python", outcome="success",
@@ -1445,7 +1442,7 @@ class TestLoadEpisodeContext:
         _insert_reflection(conn, refl_id="r-any", project="p1", tech=None)
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         episode = EpisodeForPrompt(
             id="ep1", project="p1", goal="goal", tech=None, outcome="success",
@@ -1468,7 +1465,7 @@ class TestLoadEpisodeContext:
         _insert_reflection(conn, refl_id="r-super", project="p1", status="superseded")
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         episode = EpisodeForPrompt(
             id="ep1", project="p1", goal="goal", tech=None, outcome="success",
@@ -1491,7 +1488,7 @@ class TestBuildEpisodePrompt:
 
     def test_includes_episode_metadata(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         prompt = svc._build_episode_prompt(self._ctx())
         assert "EPISODE" in prompt
@@ -1501,14 +1498,14 @@ class TestBuildEpisodePrompt:
 
     def test_renders_unspecified_tech_when_none(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         prompt = svc._build_episode_prompt(self._ctx(tech=None))
         assert "(unspecified)" in prompt
 
     def test_includes_each_observation_with_status(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         obs = ObservationForPrompt(
             id="o-1", content="found bug", outcome="success",
@@ -1524,7 +1521,7 @@ class TestBuildEpisodePrompt:
 
     def test_marks_consumed_observations_status(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         obs = ObservationForPrompt(
             id="o-c", content="historical", outcome="success",
@@ -1538,7 +1535,7 @@ class TestBuildEpisodePrompt:
 
     def test_includes_existing_reflections(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         refl = ReflectionForPrompt(
             id="r-1", title="prefer try/except over LBYL",
@@ -1554,13 +1551,85 @@ class TestBuildEpisodePrompt:
 
     def test_includes_json_shape_instructions(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         prompt = svc._build_episode_prompt(self._ctx())
         assert '"new"' in prompt
         assert '"augment"' in prompt
         assert '"merge"' in prompt
         assert '"ignore"' in prompt
+
+    def test_prompt_states_all_fields_are_required(self, conn, fixed_clock):
+        """3B-class models drop fields silently unless told ALL are required.
+
+        Real-world failure: llama3.2:3b returned a 'new' entry without
+        'source_observation_ids', which is a hard requirement enforced by
+        _parse_new. Without explicit emphasis the model treats the schema
+        as illustrative.
+        """
+        svc = ReflectionSynthesisService(
+            conn, clock=fixed_clock,
+        )
+        prompt = svc._build_episode_prompt(self._ctx())
+        # Some form of explicit required-field emphasis must be present.
+        assert "REQUIRED" in prompt
+
+    def test_prompt_includes_worked_example_with_all_required_fields(
+        self, conn, fixed_clock,
+    ):
+        """Concrete examples beat schema placeholders for small models.
+
+        '"..."' placeholders confuse 3B-class models — they sometimes
+        emit the literal '"..."' or omit the field entirely. A populated
+        example shows the shape unambiguously.
+        """
+        svc = ReflectionSynthesisService(
+            conn, clock=fixed_clock,
+        )
+        prompt = svc._build_episode_prompt(self._ctx())
+        assert "EXAMPLE" in prompt
+        # The example must show source_observation_ids populated, which is
+        # the field the model was previously dropping.
+        assert "source_observation_ids" in prompt
+        # Augment entries also have a sources field that must be shown.
+        assert "add_source_observation_ids" in prompt
+
+    def test_prompt_warns_against_inventing_entries(self, conn, fixed_clock):
+        """3B models invent entries to mimic the example shape.
+
+        Real-world failure: llama3.2:3b emitted a 'merge' entry with
+        source_id=null when there was nothing to merge — pattern-matching
+        the example's structure rather than treating it as illustrative.
+        Prompt must explicitly tell the model to use [] when a category
+        has no real entries.
+        """
+        svc = ReflectionSynthesisService(
+            conn, clock=fixed_clock,
+        )
+        prompt = svc._build_episode_prompt(self._ctx())
+        # Anti-invention guidance must mention either "invent" or "fabricate".
+        assert "invent" in prompt.lower() or "fabricate" in prompt.lower()
+
+    def test_prompt_clarifies_merge_semantics(self, conn, fixed_clock):
+        """Merge entries must reference REAL existing reflection ids.
+
+        The model emitting null source_id is the visible failure; the
+        underlying issue is that 'merge' is the most-likely category
+        to be inappropriately filled because it's the only one that
+        operates on existing reflections (which may be absent). Prompt
+        must explain: merge is only for combining two real reflection
+        ids that name the same lesson.
+        """
+        svc = ReflectionSynthesisService(
+            conn, clock=fixed_clock,
+        )
+        prompt = svc._build_episode_prompt(self._ctx())
+        # The prompt must mention merge alongside guidance like "real",
+        # "existing", or "only when". Loose check; the key signal is
+        # that merge gets explicit "use [] if not needed" wording.
+        lower = prompt.lower()
+        assert "merge" in lower
+        assert "existing reflection" in lower or "real reflection" in lower
 
 
 class TestMarkSynthesized:
@@ -1575,7 +1644,7 @@ class TestMarkSynthesized:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         svc._mark_synthesized("ep1")
         row = conn.execute(
@@ -1587,7 +1656,7 @@ class TestMarkSynthesized:
 class TestReadQueueCounts:
     def test_counts_zero_for_empty_project(self, conn, fixed_clock):
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         counts = svc._read_queue_counts(project="empty")
         assert counts.done == 0
@@ -1620,7 +1689,7 @@ class TestReadQueueCounts:
             )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         counts = svc._read_queue_counts(project="p1")
         assert counts.done == 2
@@ -1635,53 +1704,69 @@ class TestReadQueueCounts:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         counts = svc._read_queue_counts(project="p1")
         assert counts.total == 0
 
 
-class TestSynthesizeNextHappyPath:
-    def _empty_response(self) -> str:
-        import json
-        return json.dumps(
-            {"new": [], "augment": [], "merge": [], "ignore": []}
-        )
+class TestGetNextPendingContext:
+    def test_returns_none_when_queue_empty(self, conn, fixed_clock):
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        assert svc.get_next_pending_context(project="p1") is None
 
-    def test_returns_processed_false_when_empty_queue(
-        self, conn, fixed_clock,
-    ):
-        chat = FakeChat(responses=[])
-        svc = ReflectionSynthesisService(
-            conn, chat=chat, clock=fixed_clock,
-        )
-        step = run_async(svc.synthesize_next(project="p1"))
-        assert step.processed is False
-        assert step.episode_id is None
-        assert step.failure is None
-        assert step.queue.total == 0
-        assert chat.calls == []
-
-    def test_processes_oldest_pending_and_marks_synthesized(
-        self, conn, fixed_clock,
-    ):
+    def test_returns_oldest_pending_context(self, conn, fixed_clock):
         conn.execute(
             "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
-            "close_reason, goal, tech, synthesized_at) VALUES "
+            "close_reason, goal, tech) VALUES "
             "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
-            "'success','goal_complete','test goal','python',NULL)"
+            "'success','goal_complete','test goal','python')"
         )
         _insert_obs(
             conn, obs_id="o1", project="p1", episode_id="ep1",
             content="bug found", status="active",
-            created_at="2026-04-01T00:30:00+00:00",
         )
         conn.commit()
-        chat = FakeChat(responses=[self._empty_response()])
-        svc = ReflectionSynthesisService(
-            conn, chat=chat, clock=fixed_clock,
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        ctx = svc.get_next_pending_context(project="p1")
+        assert ctx is not None
+        assert ctx.episode.id == "ep1"
+        assert ctx.episode.goal == "test goal"
+        assert ctx.episode.tech == "python"
+        assert [o.id for o in ctx.observations] == ["o1"]
+
+    def test_oldest_first_order(self, conn, fixed_clock):
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal) VALUES "
+            "('newer','p1','2026-04-02T00:00:00+00:00','2026-04-02T01:00:00+00:00',"
+            "'success','goal_complete','newer goal'),"
+            "('older','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','older goal')"
         )
-        step = run_async(svc.synthesize_next(project="p1"))
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        ctx = svc.get_next_pending_context(project="p1")
+        assert ctx is not None
+        assert ctx.episode.id == "older"
+
+
+class TestApplyDecision:
+    def _empty(self) -> SynthesisResponse:
+        return SynthesisResponse(new=[], augment=[], merge=[], ignore=[])
+
+    def test_marks_synthesized_and_returns_step(self, conn, fixed_clock):
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal) VALUES "
+            "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','goal')"
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        step = svc.apply_decision(
+            episode_id="ep1", response=self._empty(), project="p1",
+        )
         assert step.processed is True
         assert step.episode_id == "ep1"
         assert step.failure is None
@@ -1693,7 +1778,6 @@ class TestSynthesizeNextHappyPath:
         assert step.queue.pending == 0
 
     def test_counts_reflect_apply_actions(self, conn, fixed_clock):
-        import json
         conn.execute(
             "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
             "close_reason, goal) VALUES "
@@ -1705,21 +1789,19 @@ class TestSynthesizeNextHappyPath:
             content="bug", status="active",
         )
         conn.commit()
-        response = json.dumps({
-            "new": [{
-                "title": "lesson", "phase": "implementation",
-                "polarity": "do", "use_cases": "uc",
-                "hints": ["h1"], "tech": None, "confidence": 0.5,
-                "source_observation_ids": ["o1"],
-            }],
-            "augment": [], "merge": [], "ignore": [],
-        })
-        chat = FakeChat(responses=[response])
-        svc = ReflectionSynthesisService(
-            conn, chat=chat, clock=fixed_clock,
+        from better_memory.services.reflection import NewAction
+        response = SynthesisResponse(
+            new=[NewAction(
+                title="lesson", phase="implementation", polarity="do",
+                use_cases="uc", hints=["h1"], tech=None, confidence=0.5,
+                source_observation_ids=["o1"],
+            )],
+            augment=[], merge=[], ignore=[],
         )
-        step = run_async(svc.synthesize_next(project="p1"))
-        assert step.processed is True
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        step = svc.apply_decision(
+            episode_id="ep1", response=response, project="p1",
+        )
         assert step.counts["created"] == 1
         assert step.counts["augmented"] == 0
         n = conn.execute(
@@ -1727,132 +1809,44 @@ class TestSynthesizeNextHappyPath:
         ).fetchone()[0]
         assert n == 1
 
-    def test_oldest_first_order(self, conn, fixed_clock):
+    def test_auto_ignores_leftover_active_observations(self, conn, fixed_clock):
+        """Active observations the LLM didn't address must flip to consumed_*.
+
+        Without this, an episode would be marked synthesized but its
+        observations would stay active — invisible to future synthesis
+        and stranded forever in the active pool.
+        """
         conn.execute(
             "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
-            "close_reason, goal, synthesized_at) VALUES "
-            "('newer','p1','2026-04-02T00:00:00+00:00','2026-04-02T01:00:00+00:00',"
-            "'success','goal_complete','newer goal',NULL),"
-            "('older','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
-            "'success','goal_complete','older goal',NULL)"
-        )
-        conn.commit()
-        chat = FakeChat(responses=[self._empty_response()])
-        svc = ReflectionSynthesisService(
-            conn, chat=chat, clock=fixed_clock,
-        )
-        step = run_async(svc.synthesize_next(project="p1"))
-        assert step.episode_id == "older"
-        assert step.queue.pending == 1
-        chat.responses.append(self._empty_response())
-        step2 = run_async(svc.synthesize_next(project="p1"))
-        assert step2.episode_id == "newer"
-        assert step2.queue.pending == 0
-
-
-class TestSynthesizeNextFailurePaths:
-    def test_chat_error_stamps_synth_failed_at_and_returns_failure(
-        self, conn, fixed_clock,
-    ):
-        from better_memory.llm.ollama import ChatError
-
-        conn.execute(
-            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
-            "close_reason, goal, synthesized_at) VALUES "
+            "close_reason, goal) VALUES "
             "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
-            "'success','goal_complete','goal',NULL)"
+            "'success','goal_complete','goal')"
+        )
+        _insert_obs(
+            conn, obs_id="o1", project="p1", episode_id="ep1",
+            content="active leftover", status="active",
         )
         conn.commit()
-
-        class BoomChat:
-            calls: list[str] = []
-            async def complete(self, prompt: str) -> str:
-                self.calls.append(prompt)
-                raise ChatError("ollama unreachable")
-
-        svc = ReflectionSynthesisService(
-            conn, chat=BoomChat(), clock=fixed_clock,
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        step = svc.apply_decision(
+            episode_id="ep1", response=self._empty(), project="p1",
         )
-        step = run_async(svc.synthesize_next(project="p1"))
-        assert step.processed is True
-        assert step.episode_id == "ep1"
-        assert step.failure == "ollama unreachable"
-        assert step.counts == {"created": 0, "augmented": 0, "merged": 0,
-                               "ignored": 0, "auto_ignored": 0}
+        assert step.counts["auto_ignored"] == 1
+        status = conn.execute(
+            "SELECT status FROM observations WHERE id='o1'"
+        ).fetchone()[0]
+        assert status == "consumed_without_reflection"
 
-        row = conn.execute(
-            "SELECT synthesized_at, synth_failed_at FROM episodes WHERE id='ep1'"
-        ).fetchone()
-        assert row["synthesized_at"] is None
-        assert row["synth_failed_at"] is not None
-
-    def test_parse_error_stamps_synth_failed_at(self, conn, fixed_clock):
-        conn.execute(
-            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
-            "close_reason, goal, synthesized_at) VALUES "
-            "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
-            "'success','goal_complete','goal',NULL)"
-        )
-        conn.commit()
-
-        chat = FakeChat(responses=["not even valid json{{{"])
-        svc = ReflectionSynthesisService(
-            conn, chat=chat, clock=fixed_clock,
-        )
-        step = run_async(svc.synthesize_next(project="p1"))
-        assert step.processed is True
-        assert step.failure is not None
-        row = conn.execute(
-            "SELECT synthesized_at, synth_failed_at FROM episodes WHERE id='ep1'"
-        ).fetchone()
-        assert row["synthesized_at"] is None
-        assert row["synth_failed_at"] is not None
-
-    def test_cooldown_excludes_failed_episode_from_next_pick(
-        self, conn, fixed_clock,
-    ):
-        from better_memory.llm.ollama import ChatError
-
-        conn.execute(
-            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
-            "close_reason, goal, synthesized_at) VALUES "
-            "('older','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
-            "'success','goal_complete','o',NULL),"
-            "('newer','p1','2026-04-02T00:00:00+00:00','2026-04-02T01:00:00+00:00',"
-            "'success','goal_complete','n',NULL)"
-        )
-        conn.commit()
-
-        class FlakyChat:
-            calls = 0
-            async def complete(self, prompt: str) -> str:
-                FlakyChat.calls += 1
-                if FlakyChat.calls == 1:
-                    raise ChatError("transient")
-                import json
-                return json.dumps({"new": [], "augment": [], "merge": [], "ignore": []})
-
-        svc = ReflectionSynthesisService(
-            conn, chat=FlakyChat(), clock=fixed_clock,
-        )
-        step1 = run_async(svc.synthesize_next(project="p1"))
-        assert step1.episode_id == "older"
-        assert step1.failure is not None
-
-        step2 = run_async(svc.synthesize_next(project="p1"))
-        assert step2.episode_id == "newer"
-        assert step2.failure is None
-
-    def test_db_integrity_error_propagates_and_no_synth_failed_at(
+    def test_db_integrity_error_propagates_and_no_synthesized_at(
         self, conn, fixed_clock, monkeypatch,
     ):
         import sqlite3
 
         conn.execute(
             "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
-            "close_reason, goal, synthesized_at) VALUES "
+            "close_reason, goal) VALUES "
             "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
-            "'success','goal_complete','goal',NULL)"
+            "'success','goal_complete','goal')"
         )
         conn.commit()
 
@@ -1862,25 +1856,54 @@ class TestSynthesizeNextFailurePaths:
         monkeypatch.setattr(
             ReflectionSynthesisService, "_apply_new", boom
         )
-
-        import json
-        chat = FakeChat(responses=[json.dumps({
-            "new": [{"title": "x", "phase": "general", "polarity": "do",
-                     "use_cases": "u", "hints": ["h"], "tech": None,
-                     "confidence": 0.5, "source_observation_ids": []}],
-            "augment": [], "merge": [], "ignore": [],
-        })])
-        svc = ReflectionSynthesisService(
-            conn, chat=chat, clock=fixed_clock,
+        from better_memory.services.reflection import NewAction
+        response = SynthesisResponse(
+            new=[NewAction(
+                title="x", phase="general", polarity="do",
+                use_cases="u", hints=["h"], tech=None,
+                confidence=0.5, source_observation_ids=[],
+            )],
+            augment=[], merge=[], ignore=[],
         )
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         with pytest.raises(sqlite3.IntegrityError):
-            run_async(svc.synthesize_next(project="p1"))
+            svc.apply_decision(
+                episode_id="ep1", response=response, project="p1",
+            )
 
         row = conn.execute(
-            "SELECT synthesized_at, synth_failed_at FROM episodes WHERE id='ep1'"
+            "SELECT synthesized_at FROM episodes WHERE id='ep1'"
         ).fetchone()
         assert row["synthesized_at"] is None
-        assert row["synth_failed_at"] is None
+
+
+class TestCooldown:
+    def test_pick_oldest_excludes_episode_within_cooldown_window(
+        self, conn, fixed_clock,
+    ):
+        """Episodes with a recent ``synth_failed_at`` are skipped.
+
+        The synth_failed_at column is no longer auto-stamped (the IDE-LLM
+        retries directly), but the cooldown semantics remain available
+        for future skip-this-episode tooling.
+        """
+        from datetime import timedelta
+        cooldown_recent = (fixed_clock() - timedelta(seconds=30)).isoformat()
+        cooldown_expired = (fixed_clock() - timedelta(seconds=600)).isoformat()
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal, synth_failed_at) VALUES "
+            "('inside','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','i',?),"
+            "('outside','p1','2026-04-02T00:00:00+00:00','2026-04-02T01:00:00+00:00',"
+            "'success','goal_complete','o',?)",
+            (cooldown_recent, cooldown_expired),
+        )
+        conn.commit()
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        ctx = svc.get_next_pending_context(project="p1")
+        assert ctx is not None
+        assert ctx.episode.id == "outside"
 
 
 class TestSynthesisScopeDerivation:
@@ -1903,7 +1926,7 @@ class TestSynthesisScopeDerivation:
 
         from better_memory.services.reflection import NewAction
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         svc._apply_new(
             [NewAction(
@@ -1935,7 +1958,7 @@ class TestSynthesisScopeDerivation:
 
         from better_memory.services.reflection import NewAction
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         svc._apply_new(
             [NewAction(
@@ -1966,7 +1989,7 @@ class TestSynthesisScopeDerivation:
 
         from better_memory.services.reflection import AugmentAction
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         svc._apply_augment([AugmentAction(
             reflection_id="r-general", add_hints=["new"], rewrite_use_cases=None,
@@ -1992,7 +2015,7 @@ class TestSynthesisScopeDerivation:
         conn.commit()
 
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         episode = EpisodeForPrompt(
             id="ep1", project="p1", goal="g", tech=None, outcome="success",
@@ -2012,7 +2035,7 @@ class TestRetrieveReflectionsScope:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         buckets = svc.retrieve_reflections(project="p1")
         all_ids = {r["id"] for bucket in buckets.values() for r in bucket}
@@ -2030,7 +2053,7 @@ class TestRetrieveReflectionsScope:
         )
         conn.commit()
         svc = ReflectionSynthesisService(
-            conn, chat=FakeChat(responses=[]), clock=fixed_clock,
+            conn, clock=fixed_clock,
         )
         buckets = svc.retrieve_reflections(project="p1")
         all_ids = {r["id"] for bucket in buckets.values() for r in bucket}

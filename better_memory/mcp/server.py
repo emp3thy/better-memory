@@ -1,4 +1,4 @@
-"""MCP stdio server exposing better-memory's six tools.
+"""MCP stdio server exposing better-memory's tools.
 
 The server wires together the existing service classes and presents them
 as MCP tools over stdio. On startup, the knowledge-base is reindexed
@@ -6,14 +6,18 @@ as MCP tools over stdio. On startup, the knowledge-base is reindexed
 
 Tools
 -----
-* ``memory.observe``       — create a new observation; returns ``{"id": ...}``.
-* ``memory.retrieve``      — reflections bucketed by polarity (do/dont/neutral),
-                             filtered by project/tech/phase/polarity, capped 20 per bucket.
-                             Drains the spool before retrieving.
-* ``memory.record_use``    — record re-use (optionally with outcome).
-* ``knowledge.search``     — BM25 search against the knowledge-base FTS.
-* ``knowledge.list``       — list indexed knowledge documents.
-* ``memory.start_ui``      — spawn or reuse the management UI; returns ``{url, reused}``.
+* ``memory.observe``                      — create an observation.
+* ``memory.retrieve``                     — reflections bucketed by polarity.
+* ``memory.retrieve_observations``        — raw observation drill-down.
+* ``memory.record_use``                   — record re-use of a memory.
+* ``memory.semantic_observe`` / _retrieve / _update / _delete — user-stated facts.
+* ``memory.start_ui``                     — spawn or reuse the management UI.
+* ``memory.start_episode`` / _close_episode / _list_episodes / _reconcile_episodes
+                                          — episode lifecycle.
+* ``memory.synthesize_next_get_context``  — episode-context fetch for synthesis.
+* ``memory.synthesize_next_apply``        — apply IDE-LLM's decision JSON.
+* ``memory.run_retention``                — apply spec §9 retention rules.
+* ``knowledge.search`` / ``knowledge.list`` — knowledge-base introspection.
 
 Connection ownership
 --------------------
@@ -48,7 +52,6 @@ from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.llm.ollama import OllamaChat
 from better_memory.services import ui_launcher
 from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
@@ -57,7 +60,12 @@ from better_memory.services.knowledge import (
     KnowledgeService,
 )
 from better_memory.services.observation import ObservationService
-from better_memory.services.reflection import ReflectionSynthesisService
+from better_memory.services.reflection import (
+    EpisodeContext,
+    EpisodeQueueCounts,
+    ReflectionSynthesisService,
+    SynthesisStep,
+)
 from better_memory.services.retention import RetentionService
 from better_memory.services.retention_scheduler import RetentionScheduler
 from better_memory.services.spool import SpoolService
@@ -435,6 +443,70 @@ def _tool_definitions() -> list[Tool]:
             },
         ),
         Tool(
+            name="memory.synthesize_next_get_context",
+            description=(
+                "Return the next pending episode's full context for "
+                "consolidation: episode metadata, all observations on it, "
+                "and tech-filtered existing reflections. The IDE-LLM "
+                "consumes this, decides what new/augment/merge/ignore "
+                "actions to take, and submits the decision via "
+                "memory.synthesize_next_apply. Returns "
+                '{"episode_id": null, "queue": {...}} when the queue is '
+                "empty. See the better-memory-synthesize skill for the "
+                "full workflow and decision schema."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": (
+                            "Optional project override; defaults to "
+                            "cwd-derived."
+                        ),
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="memory.synthesize_next_apply",
+            description=(
+                "Apply a synthesis decision for one episode. Atomically "
+                "creates new reflections, augments existing ones, merges "
+                "duplicates, and marks observations as consumed (or "
+                "ignored). Marks the episode synthesized. Returns a "
+                "step summary {episode_id, counts, queue, failure}. "
+                "decision shape: {new: [...], augment: [...], "
+                "merge: [...], ignore: [...]} — see the "
+                "better-memory-synthesize skill for the per-entry "
+                "field schema."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["episode_id", "decision"],
+                "additionalProperties": False,
+                "properties": {
+                    "episode_id": {"type": "string"},
+                    "decision": {
+                        "type": "object",
+                        "description": (
+                            "Decision JSON; validation errors are "
+                            "returned to the caller without stamping "
+                            "the episode failed (caller can retry)."
+                        ),
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": (
+                            "Optional project override; defaults to "
+                            "cwd-derived."
+                        ),
+                    },
+                },
+            },
+        ),
+        Tool(
             name="memory.run_retention",
             description=(
                 "Apply spec §9 retention rules — flip eligible "
@@ -505,6 +577,90 @@ def _serialize_knowledge_doc(doc: KnowledgeDocument) -> dict[str, Any]:
     }
 
 
+def _serialize_queue(queue: EpisodeQueueCounts) -> dict[str, int]:
+    return {
+        "pending": queue.pending,
+        "in_cooldown": queue.in_cooldown,
+        "done": queue.done,
+    }
+
+
+def _serialize_synth_get_context(
+    ctx: EpisodeContext | None,
+    queue: EpisodeQueueCounts,
+) -> dict[str, Any]:
+    """Build the JSON payload for ``memory.synthesize_next_get_context``.
+
+    Returns ``{"episode_id": null, "queue": {...}}`` when the queue is
+    empty. Otherwise returns the full episode + observations + reflections
+    bundle the IDE-LLM consumes to decide on synthesis actions.
+    """
+    queue_json = _serialize_queue(queue)
+    if ctx is None:
+        return {"episode_id": None, "queue": queue_json}
+    return {
+        "episode_id": ctx.episode.id,
+        "queue": queue_json,
+        "episode": {
+            "id": ctx.episode.id,
+            "project": ctx.episode.project,
+            "goal": ctx.episode.goal,
+            "tech": ctx.episode.tech,
+            "outcome": ctx.episode.outcome,
+        },
+        "observations": [
+            {
+                "id": o.id,
+                "content": o.content,
+                "outcome": o.outcome,
+                "component": o.component,
+                "theme": o.theme,
+                "tech": o.tech,
+                "created_at": o.created_at,
+                "status": o.status,
+            }
+            for o in ctx.observations
+        ],
+        "reflections": [
+            {
+                "id": r.id,
+                "title": r.title,
+                "tech": r.tech,
+                "phase": r.phase,
+                "polarity": r.polarity,
+                "use_cases": r.use_cases,
+                "hints": json.loads(r.hints) if r.hints else [],
+                "confidence": r.confidence,
+                "status": r.status,
+            }
+            for r in ctx.reflections
+        ],
+    }
+
+
+def _serialize_synth_apply_ok(step: SynthesisStep) -> dict[str, Any]:
+    """Build the JSON payload for a successful ``memory.synthesize_next_apply``."""
+    return {
+        "ok": True,
+        "episode_id": step.episode_id,
+        "counts": step.counts,
+        "queue": _serialize_queue(step.queue),
+    }
+
+
+def _serialize_synth_apply_validation_error(message: str) -> dict[str, Any]:
+    """Build the JSON payload for a decision-validation failure.
+
+    Validation errors do NOT stamp ``synth_failed_at``; the caller can
+    retry with a corrected payload.
+    """
+    return {
+        "ok": False,
+        "error": "validation",
+        "message": message,
+    }
+
+
 # --------------------------------------------------------------------------- factory
 
 
@@ -512,9 +668,9 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     """Wire services and register tools.
 
     Returns a ``(server, cleanup)`` tuple where ``cleanup`` is an idempotent
-    async function that closes the two SQLite connections and the Ollama
-    embedder's HTTP client. Callers must await ``cleanup`` on shutdown
-    (typically in a ``finally`` around ``server.run``).
+    async function that closes the two SQLite connections and the embedder's
+    HTTP client. Callers must await ``cleanup`` on shutdown (typically in a
+    ``finally`` around ``server.run``).
     """
     config = get_config()
 
@@ -548,9 +704,10 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     episodes = EpisodeService(memory_conn)
     observations = ObservationService(memory_conn, embedder, episodes=episodes)
 
-    # LLM client for reflection synthesis.
-    chat = OllamaChat(host=config.ollama_host, model=config.consolidate_model)
-    reflections = ReflectionSynthesisService(memory_conn, chat=chat)
+    # Reflection synthesis is driven by the IDE-LLM via two MCP tools
+    # (memory.synthesize_next_get_context / _apply). The service no
+    # longer holds a chat client.
+    reflections = ReflectionSynthesisService(memory_conn)
     retention = RetentionService(conn=memory_conn)
 
     knowledge = KnowledgeService(
@@ -730,9 +887,12 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 goal=args["goal"],
                 tech=args.get("tech"),
             )
-            # Drain pending episodes so the new episode's reflection context is fresh.
-            while (await reflections.synthesize_next(project=project)).processed:
-                pass
+            # Reflection synthesis is now interactive — driven by the IDE-LLM
+            # via memory.synthesize_next_get_context / _apply. We surface the
+            # current pending count so the LLM knows whether it should run
+            # synthesis (typically before treating retrieved reflections as
+            # canonical).
+            queue = reflections._read_queue_counts(project=project)
             buckets = reflections.retrieve_reflections(
                 project=project, tech=args.get("tech"),
             )
@@ -740,7 +900,11 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 TextContent(
                     type="text",
                     text=json.dumps(
-                        {"episode_id": episode_id, "reflections": buckets}
+                        {
+                            "episode_id": episode_id,
+                            "reflections": buckets,
+                            "pending_synthesis": _serialize_queue(queue),
+                        }
                     ),
                 )
             ]
@@ -845,6 +1009,37 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             ]
             return [TextContent(type="text", text=json.dumps(payload))]
 
+        if name == "memory.synthesize_next_get_context":
+            project = args.get("project") or project_name()
+            ctx = reflections.get_next_pending_context(project=project)
+            queue = reflections._read_queue_counts(project=project)
+            payload = _serialize_synth_get_context(ctx, queue)
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.synthesize_next_apply":
+            from better_memory.services.reflection import (
+                SynthesisResponseError,
+            )
+            project = args.get("project") or project_name()
+            episode_id = args["episode_id"]
+            decision = args["decision"]
+            try:
+                response = reflections.parse_response(json.dumps(decision))
+            except SynthesisResponseError as exc:
+                payload = _serialize_synth_apply_validation_error(str(exc))
+                return [TextContent(type="text", text=json.dumps(payload))]
+            step = reflections.apply_decision(
+                episode_id=episode_id,
+                response=response,
+                project=project,
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(_serialize_synth_apply_ok(step)),
+                )
+            ]
+
         raise ValueError(f"Unknown tool: {name}")
 
     cleaned = False
@@ -870,10 +1065,6 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             pass
         try:
             await embedder.aclose()
-        except Exception:  # noqa: BLE001 — best-effort shutdown
-            pass
-        try:
-            await chat.aclose()
         except Exception:  # noqa: BLE001 — best-effort shutdown
             pass
 

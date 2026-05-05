@@ -30,17 +30,4 @@
   <label>Component
     <input type="text" name="component" placeholder="(any)">
   </label>
-  <button type="button"
-          class="primary btn-synth"
-          hx-post="{{ url_for('observations_synthesize') }}"
-          hx-target="#observations-synth-banner"
-          hx-swap="innerHTML"
-          hx-disabled-elt="this">
-    <span class="btn-idle">Run synthesis</span>
-    <span class="btn-running">
-      <span class="spinner"></span>
-      Synthesising<span class="dots"><span>.</span><span>.</span><span>.</span></span>
-    </span>
-  </button>
-  <div id="observations-synth-banner"></div>
 </form>
