@@ -1,4 +1,9 @@
 <div class="episode-drawer" id="episode-drawer-{{ detail.episode.id }}">
+  <button class="back-link"
+          type="button"
+          onclick="document.getElementById('drawer').innerHTML = '';">
+    episodes
+  </button>
   <header class="drawer-header">
     <h3>
       {% if detail.episode.goal %}

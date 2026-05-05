@@ -20,6 +20,7 @@
   --brut-mono: 'JetBrains Mono', 'SFMono-Regular', 'Menlo', 'Consolas', monospace;
 
   --rail-w: 240px;
+  --split-breakpoint: 1080px;
 }
 
 * { box-sizing: border-box; }
@@ -39,7 +40,8 @@ html, body {
 body {
   display: grid;
   grid-template-columns: var(--rail-w) 1fr;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 /* ============================================================
@@ -146,14 +148,93 @@ body {
 .rail-close:hover { background: var(--brut-ink); color: var(--brut-paper); }
 
 /* ============================================================
+   Responsive rail — flip to a horizontal top bar at narrow widths
+   ============================================================ */
+@media (max-width: 1080px) {
+  body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .rail {
+    position: sticky; top: 0;
+    height: auto;
+    width: 100%;
+    border-right: none;
+    border-bottom: 2px solid var(--brut-ink);
+    flex-direction: row;
+    align-items: stretch;
+    padding: 0;
+    z-index: 5;
+  }
+
+  .rail-brand {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px;
+    border-bottom: none;
+    border-right: 1px solid var(--brut-rule);
+  }
+  .rail-brand-mark { font-size: 24px; }
+  .rail-brand-name { display: none; }
+
+  .rail-nav { flex-direction: row; flex: 1; margin-top: 0; }
+
+  .rail-link {
+    grid-template-columns: auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    border-bottom: none;
+    border-right: 1px solid var(--brut-rule);
+    border-left: none;
+    border-top: 4px solid transparent;
+  }
+  .rail-link.active {
+    border-top-color: var(--brut-amber);
+    border-left-color: transparent;
+  }
+  .rail-num { font-size: 11px; }
+  .rail-label { font-size: 14px; }
+
+  .rail-foot {
+    padding: 8px 12px;
+    display: flex; align-items: center;
+  }
+  .rail-close {
+    font-size: 10px;
+    padding: 6px 12px;
+    width: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .rail-link { padding: 0 10px; }
+  .rail-label { display: none; }
+  .rail-foot { display: none; }
+}
+
+/* ============================================================
    Main
    ============================================================ */
 main {
-  padding: 22px 32px 48px;
+  padding: 22px 32px 0;
   max-width: 1280px;
   width: 100%;
   min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   animation: page-enter 280ms ease-out both;
+}
+
+main > section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 @keyframes page-enter {
@@ -539,6 +620,89 @@ textarea { resize: vertical; line-height: 1.55; }
 }
 
 /* ============================================================
+   Split layout — list pane | hairline | detail pane
+   The split fills remaining vertical space inside main. Each pane
+   scrolls independently. When the detail pane has content the
+   layout switches from single-column (list full width) to two
+   columns. At narrow widths the panes swap into drill-in mode:
+   selecting an item replaces the list with the detail.
+   ============================================================ */
+.split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  border-top: 2px solid var(--brut-ink);
+  margin-top: 14px;
+}
+.split:has(.detail-pane > div > *) {
+  grid-template-columns: minmax(360px, 0.9fr) 2px minmax(420px, 1.1fr);
+}
+.split-rule { background: var(--brut-ink); width: 2px; }
+.split:not(:has(.detail-pane > div > *)) .split-rule { display: none; }
+
+.pane {
+  overflow-y: auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 16px 24px 32px 0;
+}
+.pane.detail-pane {
+  padding: 0 24px 32px 24px;
+}
+.split:not(:has(.detail-pane > div > *)) .detail-pane { display: none; }
+
+/* List rows tighten when the split is in two-column mode */
+.split:has(.detail-pane > div > *) .episode-row .meta .time { display: none; }
+.split:has(.detail-pane > div > *) .episode-row .row-side .counts { display: none; }
+.split:has(.detail-pane > div > *) .episode-row .row-side .close-reason { display: none; }
+
+/* Selected row marker — applies to any row class */
+.list-pane .selected,
+.list-pane .episode-row.selected,
+.list-pane .reflection-row.selected,
+.list-pane .observation-row.selected,
+.list-pane .semantic-row.selected {
+  background: var(--brut-paper-shade);
+  border-color: var(--brut-ink);
+  border-left-color: var(--brut-amber);
+  border-left-width: 6px;
+}
+
+/* Back-link — appears only in narrow drill-in mode (see media query below) */
+.back-link {
+  display: none;
+  font-family: var(--brut-mono);
+  font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--brut-muted);
+  background: var(--brut-paper);
+  border: 1.5px solid var(--brut-ink);
+  padding: 5px 10px;
+  margin: 12px 0 14px;
+  width: fit-content;
+  cursor: pointer;
+}
+.back-link:hover { background: var(--brut-amber); color: var(--brut-amber-ink); }
+.back-link::before { content: "← "; }
+
+/* Narrow viewport — drill-in mode */
+@media (max-width: 1080px) {
+  .split:has(.detail-pane > div > *) {
+    grid-template-columns: 1fr;
+  }
+  .split:has(.detail-pane > div > *) .list-pane { display: none; }
+  .split:has(.detail-pane > div > *) .detail-pane { padding: 0 0 32px 0; }
+  .split:has(.detail-pane > div > *) .back-link { display: inline-block; }
+
+  /* At narrow width the row chrome is restored since list owns full canvas */
+  .split:has(.detail-pane > div > *) .episode-row .meta .time,
+  .split:has(.detail-pane > div > *) .episode-row .row-side .counts,
+  .split:has(.detail-pane > div > *) .episode-row .row-side .close-reason {
+    display: initial;
+  }
+}
+
+/* ============================================================
    Drawer
    ============================================================ */
 .episode-drawer, .reflection-drawer, .observation-drawer,
@@ -550,6 +714,20 @@ textarea { resize: vertical; line-height: 1.55; }
   color: var(--brut-ink);
   position: relative;
   animation: drawer-enter 220ms ease-out both;
+}
+
+/* When rendered inside the detail pane the drawer drops its outer
+   chrome — the pane's left rule and the page surrounds already
+   frame it, and a second border would look boxy. */
+.detail-pane > div > .episode-drawer,
+.detail-pane > div > .reflection-drawer,
+.detail-pane > div > .observation-drawer,
+.detail-pane > div > .semantic-drawer,
+.detail-pane > div > .drawer {
+  background: transparent;
+  border: none;
+  padding: 18px 0 0;
+  margin-top: 0;
 }
 
 @keyframes drawer-enter {

@@ -1,4 +1,9 @@
 <aside class="drawer">
+  <button class="back-link"
+          type="button"
+          onclick="document.getElementById('observation-drawer').innerHTML = '';">
+    observations
+  </button>
   <header class="drawer-header">
     <span class="chip outcome-{{ detail.observation.outcome }}">{{ detail.observation.outcome }}</span>
     <span class="created-at">{{ detail.observation.created_at }}</span>

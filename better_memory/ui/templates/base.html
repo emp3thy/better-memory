@@ -24,6 +24,28 @@
         { code: ".*", swap: true }
       ];
     });
+
+    // Row selection: mark the clicked row in the list pane and clear it
+    // when the drawer is closed via close-drawer or back-link.
+    document.addEventListener("click", function (e) {
+      const row = e.target.closest(
+        ".episode-row, .reflection-row, .observation-row, .semantic-row"
+      );
+      if (row) {
+        const list = row.closest(".list-pane");
+        if (list) {
+          list.querySelectorAll(".selected").forEach(function (r) {
+            r.classList.remove("selected");
+          });
+          row.classList.add("selected");
+        }
+      }
+      if (e.target.closest(".close-drawer, .back-link")) {
+        document.querySelectorAll(".list-pane .selected").forEach(function (r) {
+          r.classList.remove("selected");
+        });
+      }
+    });
   </script>
 </head>
 <body>
