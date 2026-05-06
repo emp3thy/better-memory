@@ -1,6 +1,6 @@
 # Observation lifecycle
 
-Observations don't live forever. They flow through four states (`active` → `consumed_*` → `archived` → deleted) driven by two pipelines: **synthesis** (LLM-driven, runs from the management UI button or automatically by `memory.start_episode`) and **retention** (auto-fires once per 24h on `memory.retrieve`, plus manually via the MCP tool).
+Observations don't live forever. They flow through four states (`active` → `consumed_*` → `archived` → deleted) driven by two pipelines: **synthesis** (IDE-driven — Claude itself decides via the [`better-memory-synthesize`](https://github.com/emp3thy/better-memory/blob/main/.claude/skills/better-memory-synthesize/SKILL.md) skill, triggered when `memory.start_episode` reports `pending_synthesis.pending > 0`) and **retention** (auto-fires once per 24h on `memory.retrieve`, plus manually via the MCP tool).
 
 ## State machine
 

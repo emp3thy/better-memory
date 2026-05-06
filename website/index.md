@@ -22,7 +22,7 @@ hide:
   <div class="brut-container brut-wide">
     <div class="brut-eyebrow">// LOCAL-FIRST · MCP · CLAUDE-CODE</div>
     <h1 class="brut-display">memory that<br><span class="brut-hl">sticks</span> between sessions.</h1>
-    <p class="brut-lede">A semantic + episodic memory manager for Claude Code. SQLite, local Ollama, no cloud.</p>
+    <p class="brut-lede">A semantic + episodic memory manager for Claude Code. SQLite + local Ollama embeddings. Synthesis runs in your Claude Code session — no separate cloud dependency.</p>
     <div class="brut-ctas">
       <a class="brut-cta brut-cta-primary" href="#install">install →</a>
       <a class="brut-cta brut-cta-secondary" href="architecture/">read the spec →</a>
@@ -176,14 +176,19 @@ cd better-memory
         <tr><th>tool</th><th>purpose</th></tr>
       </thead>
       <tbody>
-        <tr><td><a href="mcp-tools/#memoryobserve">memory.observe</a></td><td>Create a new observation. Returns {"id": ...}.</td></tr>
-        <tr><td><a href="mcp-tools/#memoryretrieve">memory.retrieve</a></td><td>Three outcome buckets + insights + knowledge. Drains spool first.</td></tr>
+        <tr><td><a href="mcp-tools/#memoryobserve">memory.observe</a></td><td>Record an episodic observation at a decision point.</td></tr>
+        <tr><td><a href="mcp-tools/#memoryretrieve">memory.retrieve</a></td><td>Distilled reflections in three outcome buckets. Drains spool first.</td></tr>
         <tr><td><a href="mcp-tools/#memoryrecord_use">memory.record_use</a></td><td>Stamp reinforcement outcome on a memory after validation.</td></tr>
+        <tr><td><a href="mcp-tools/#memorysemantic_observe">memory.semantic_observe</a></td><td>Record a user-stated fact or preference (current truth, not history).</td></tr>
+        <tr><td><a href="mcp-tools/#memorysemantic_retrieve">memory.semantic_retrieve</a></td><td>Surface user-stated facts at session start.</td></tr>
+        <tr><td><a href="mcp-tools/#memorystart_episode">memory.start_episode</a></td><td>Open a foreground episode for a goal; reports pending synthesis.</td></tr>
+        <tr><td><a href="mcp-tools/#memorysynthesize_next_get_context">memory.synthesize_next_*</a></td><td>IDE-driven synthesis split: get_context fetches, apply commits Claude's decision.</td></tr>
         <tr><td><a href="mcp-tools/#knowledgesearch">knowledge.search</a></td><td>BM25 search against the knowledge base.</td></tr>
-        <tr><td><a href="mcp-tools/#knowledgelist">knowledge.list</a></td><td>List indexed knowledge docs.</td></tr>
+        <tr><td><a href="mcp-tools/#memoryrun_retention">memory.run_retention</a></td><td>Apply spec §9 retention rules; archive or hard-delete.</td></tr>
         <tr><td><a href="mcp-tools/#memorystart_ui">memory.start_ui</a></td><td>Spawn or reuse the management UI; returns {url, reused}.</td></tr>
       </tbody>
     </table>
+    <p style="margin-top:18px"><a href="mcp-tools/">complete tool reference (18 tools) →</a></p>
   </div>
 </section>
 
