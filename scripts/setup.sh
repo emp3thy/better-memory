@@ -194,73 +194,17 @@ mkdir -p "$BETTER_MEMORY_HOME/knowledge-base/projects"
 log "Runtime layout ready."
 
 # ---------------------------------------------------------------------------
-# 6. Print the Claude config snippets
+# 6. Install MCP server + hooks into Claude Code config files
 # ---------------------------------------------------------------------------
 
-PY_FOR_JSON="$(win_path "$VENV_PY")"
-PYW_FOR_JSON="$(win_path "$VENV_PYW")"
-HOME_FOR_JSON="$(win_path "$BETTER_MEMORY_HOME")"
-
-cat <<EOF
-
-================================================================================
- better-memory is installed. To enable it in Claude Code, paste the two
- snippets below into the listed files. Do NOT replace existing contents;
- merge the \`mcpServers\` and \`hooks\` keys.
-================================================================================
-
- 1) Add to ~/.claude.json under the top-level \`mcpServers\` key:
-
-    "better-memory": {
-      "type": "stdio",
-      "command": "$PY_FOR_JSON",
-      "args": ["-m", "better_memory.mcp"],
-      "env": {
-        "BETTER_MEMORY_HOME": "$HOME_FOR_JSON"
-      }
-    }
-
-    (If \`OLLAMA_HOST\` or \`EMBED_MODEL\` aren't the defaults —
-    http://localhost:11434 and nomic-embed-text — add them under \`env\`.)
-
- 2) Add to ~/.claude/settings.json under the top-level \`hooks\` key:
-
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$PYW_FOR_JSON\" -m better_memory.hooks.observer",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$PYW_FOR_JSON\" -m better_memory.hooks.session_close",
-            "async": true
-          }
-        ]
-      }
-    ]
-
-    If you already have PostToolUse or Stop arrays, append these objects —
-    don't replace the arrays.
-
- 3) Restart Claude Code. MCP servers don't hot-reload.
-    Hooks reload when you open the \`/hooks\` slash command once; restart
-    is simpler if anything else changed.
-
- 4) Verify: in a Claude Code session, ask it to call \`memory.observe\`
-    with a test content. Then \`memory.retrieve(query="...")\` should
-    return the \`do\`/\`dont\`/\`neutral\` buckets.
-
-================================================================================
-EOF
+log "Installing into ~/.claude.json and ~/.claude/settings.json..."
+(cd "$PROJECT_DIR" && uv run python -m better_memory.cli.install_hooks \
+    --venv-py "$(win_path "$VENV_PY")" \
+    --venv-pyw "$(win_path "$VENV_PYW")" \
+    --home "$BETTER_MEMORY_HOME") || {
+    error "install_hooks failed (see message above)."
+    error "scripts/setup.sh aborting; fix the issue and re-run."
+    exit 1
+}
 
 log "Done."
