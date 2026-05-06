@@ -288,3 +288,33 @@ class TestMergeSettingsJson:
         first = merge_settings_json({}, venv_pyw="/p/pyw")
         second = merge_settings_json(first, venv_pyw="/p/pyw")
         assert first == second
+
+
+from pathlib import Path
+
+from better_memory.cli.install_hooks import _load_or_empty
+
+
+class TestLoadOrEmpty:
+    def test_missing_file_returns_empty_dict(self, tmp_path: Path) -> None:
+        out = _load_or_empty(tmp_path / "missing.json")
+        assert out == {}
+
+    def test_valid_json_returns_parsed(self, tmp_path: Path) -> None:
+        p = tmp_path / "ok.json"
+        p.write_text('{"a": 1, "b": [2, 3]}', encoding="utf-8")
+        assert _load_or_empty(p) == {"a": 1, "b": [2, 3]}
+
+    def test_malformed_json_refuses_with_line_number(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        p = tmp_path / "bad.json"
+        p.write_text('{"a": 1,\nnotjson}', encoding="utf-8")
+        with pytest.raises(SystemExit) as excinfo:
+            _load_or_empty(p)
+        assert excinfo.value.code == 1
+        captured = capsys.readouterr()
+        # Path + line# in stderr.
+        assert str(p) in captured.err
+        assert ":2:" in captured.err or ":2 " in captured.err
+        assert "Fix the file then re-run" in captured.err

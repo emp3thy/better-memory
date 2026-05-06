@@ -139,3 +139,22 @@ def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
 
     config["hooks"] = hooks
     return config
+
+
+# ----------------------------------------------------------- I/O helpers
+
+
+def _load_or_empty(path: Path) -> dict:
+    """Read JSON from path. Missing → {}. Malformed → SystemExit(1) with line#."""
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        print(
+            f"[install_hooks] {path}:{exc.lineno}: {exc.msg}\n"
+            f"[install_hooks] Fix the file then re-run scripts/setup.sh.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
