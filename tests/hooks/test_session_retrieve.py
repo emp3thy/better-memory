@@ -110,3 +110,21 @@ def test_populated_db_renders_buckets(home_with_schema: Path, tmp_path: Path) ->
     assert "### do" in ctx
     assert "### dont" in ctx
     assert "memory_record_use" in ctx  # footer present
+
+
+def test_empty_db_injects_no_memory_yet_message(
+    home_with_schema: Path, tmp_path: Path
+) -> None:
+    project_dir = tmp_path / "fresh-project"
+    project_dir.mkdir()
+
+    result = _run_hook(home_with_schema, cwd=project_dir)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert "no reflections recorded yet" in ctx
+    assert "memory_observe" in ctx
+    # No bucket headings, no fallback "memory injection failed" text.
+    assert "### do" not in ctx
+    assert "memory injection failed" not in ctx
