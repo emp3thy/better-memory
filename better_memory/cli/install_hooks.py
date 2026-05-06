@@ -192,3 +192,61 @@ def _backup(
     dst = dst_dir / f"{src.name}.{timestamp}.bak"
     shutil.copy2(src, dst)
     return dst
+
+
+# --------------------------------------------------------------- orchestration
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="better_memory.cli.install_hooks")
+    parser.add_argument(
+        "--venv-py", required=True,
+        help="Path to venv python (Linux/macOS) or python.exe (Windows). MCP-server command.",
+    )
+    parser.add_argument(
+        "--venv-pyw", required=True,
+        help="Path to venv pythonw.exe (Windows) or python (Linux/macOS). Hook command.",
+    )
+    parser.add_argument(
+        "--home", required=True,
+        help="Resolved $BETTER_MEMORY_HOME (used for backup directory).",
+    )
+    args = parser.parse_args(argv)
+
+    home_dir = Path(args.home)
+    backup_dir = home_dir / "install-backups"
+
+    targets = [
+        (
+            "MCP server",
+            Path.home() / ".claude.json",
+            lambda d: merge_claude_json(
+                d, command=args.venv_py, home=args.home,
+            ),
+        ),
+        (
+            "hooks",
+            Path.home() / ".claude" / "settings.json",
+            lambda d: merge_settings_json(d, venv_pyw=args.venv_pyw),
+        ),
+    ]
+
+    print("[install_hooks] Installing better-memory MCP server + hooks...")
+    for label, path, merge in targets:
+        existing = _load_or_empty(path)  # may exit(1) on malformed JSON
+        backup_path = _backup(path, backup_dir)
+        merged = merge(existing)
+        _atomic_write(path, json.dumps(merged, indent=2) + "\n")
+        if backup_path:
+            try:
+                rel = backup_path.relative_to(home_dir)
+            except ValueError:
+                rel = backup_path
+            print(f"  OK {label}: {path} (backup: {rel})")
+        else:
+            print(f"  OK {label}: {path} (created fresh)")
+    print("[install_hooks] Restart Claude Code to load the new MCP server.")
+
+
+if __name__ == "__main__":
+    main()

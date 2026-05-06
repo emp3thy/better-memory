@@ -381,3 +381,91 @@ class TestBackup:
         assert result.read_text(encoding="utf-8") == "CONTENT"
         # Source unchanged.
         assert src.read_text(encoding="utf-8") == "CONTENT"
+
+
+import json as _json
+import os as _os
+import subprocess
+import sys
+
+
+@pytest.fixture
+def mock_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate ~/.claude.json + ~/.claude/settings.json under tmp_path."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_path / ".better-memory"))
+    (tmp_path / ".better-memory" / "install-backups").mkdir(parents=True)
+    (tmp_path / ".claude").mkdir()
+    return tmp_path
+
+
+def _run_cli(home: Path) -> subprocess.CompletedProcess[str]:
+    env = {
+        **_os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "BETTER_MEMORY_HOME": str(home / ".better-memory"),
+    }
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m", "better_memory.cli.install_hooks",
+            "--venv-py",  "/p/python",
+            "--venv-pyw", "/p/pythonw",
+            "--home",     str(home / ".better-memory"),
+        ],
+        text=True, capture_output=True, env=env, timeout=30,
+    )
+
+
+class TestCLIIntegration:
+    def test_fresh_install_writes_both_files(self, mock_home: Path) -> None:
+        result = _run_cli(mock_home)
+        assert result.returncode == 0, result.stderr
+
+        claude_json = mock_home / ".claude.json"
+        settings_json = mock_home / ".claude" / "settings.json"
+        assert claude_json.exists()
+        assert settings_json.exists()
+
+        cj = _json.loads(claude_json.read_text(encoding="utf-8"))
+        assert cj["mcpServers"]["better-memory"]["command"] == "/p/python"
+
+        sj = _json.loads(settings_json.read_text(encoding="utf-8"))
+        assert "SessionStart" in sj["hooks"]
+        assert "PostToolUse" in sj["hooks"]
+        assert "Stop" in sj["hooks"]
+
+    def test_idempotent_rerun_is_clean(self, mock_home: Path) -> None:
+        r1 = _run_cli(mock_home)
+        assert r1.returncode == 0
+        first_settings = (mock_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+
+        r2 = _run_cli(mock_home)
+        assert r2.returncode == 0
+        second_settings = (mock_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+
+        # Bytewise stable — JSON formatting + content unchanged on rerun.
+        assert first_settings == second_settings
+
+    def test_malformed_settings_refuses_without_writing(self, mock_home: Path) -> None:
+        settings = mock_home / ".claude" / "settings.json"
+        original = '{"hooks": {invalid'
+        settings.write_text(original, encoding="utf-8")
+
+        result = _run_cli(mock_home)
+        assert result.returncode == 1
+        # File is untouched.
+        assert settings.read_text(encoding="utf-8") == original
+        # stderr surfaces the path + a fix-and-re-run hint.
+        assert str(settings) in result.stderr
+        assert "Fix the file then re-run" in result.stderr
+
+    def test_summary_lines_printed_on_success(self, mock_home: Path) -> None:
+        result = _run_cli(mock_home)
+        assert result.returncode == 0
+        assert "Installing better-memory" in result.stdout
+        assert "MCP server" in result.stdout
+        assert "hooks" in result.stdout
+        assert "Restart Claude Code" in result.stdout
