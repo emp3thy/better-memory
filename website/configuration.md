@@ -43,3 +43,14 @@ Under `BETTER_MEMORY_HOME`:
 ```
 
 The two SQLite files are never shared between processes — the MCP server owns them for its lifetime, the management UI gets its own connection, and migrations run idempotently at startup.
+
+## Hooks
+
+Four Claude Code hooks ship with better-memory and read or write the filesystem layout above:
+
+- **`better_memory.hooks.session_start`** (SessionStart) — writes a marker JSON to `spool/` so the MCP server can lazy-open a background episode for the session.
+- **`better_memory.hooks.session_retrieve`** (SessionStart) — opens `memory.db` and injects the project's distilled reflections (`do` / `dont` / `neutral`, capped at 10 per bucket) as `additionalContext` for Claude's first turn. Failure-isolated: if injection breaks, a fallback directive is injected instead and the failure is recorded in the `hook_errors` table.
+- **`better_memory.hooks.observer`** (PostToolUse) — captures tool-call snapshots into `spool/` for later observation creation.
+- **`better_memory.hooks.session_close`** (Stop) — writes a session-close marker into `spool/`.
+
+See [`README.md`](https://github.com/emp3thy/better-memory/blob/main/README.md#manual-setup) for the exact `~/.claude/settings.json` registration JSON.
