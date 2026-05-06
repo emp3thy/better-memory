@@ -222,3 +222,30 @@ def test_hint_truncation(home_with_schema: Path, tmp_path: Path) -> None:
     assert truncated.endswith("…")
     # Short hint remained intact.
     assert "- short hint" in ctx
+
+
+def test_bucket_cap_top_10(home_with_schema: Path, tmp_path: Path) -> None:
+    project_dir = tmp_path / "cap-project"
+    project_dir.mkdir()
+    conn = connect(home_with_schema / "memory.db")
+    try:
+        # Seed 12 do-reflections with varying confidence so we can detect the cap.
+        for i in range(12):
+            _seed_reflection(
+                conn, title=f"Reflection-{i:02d}", project="cap-project",
+                polarity="do", confidence=0.5 + (i * 0.04),  # 0.50..0.94 ascending
+            )
+    finally:
+        conn.close()
+
+    result = _run_hook(home_with_schema, cwd=project_dir)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    rendered = [f"Reflection-{i:02d}" for i in range(12)]
+    present = [name for name in rendered if name in ctx]
+    assert len(present) == 10
+    # The two with lowest confidence (Reflection-00, Reflection-01) should be excluded.
+    assert "Reflection-00" not in ctx
+    assert "Reflection-01" not in ctx
