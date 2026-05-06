@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # better-memory setup script. Cross-platform bash (Linux, macOS, Git Bash on
-# Windows). Detects prerequisites, installs what's missing, creates the
-# runtime filesystem layout, and prints the JSON snippets you paste into
-# ~/.claude.json and ~/.claude/settings.json.
+# Windows). Detects prerequisites (Python, uv, Ollama), installs what's
+# missing, creates the runtime filesystem layout under ~/.better-memory,
+# then auto-installs the MCP server registration into ~/.claude.json and
+# the four hooks into ~/.claude/settings.json by shelling out to
+# `python -m better_memory.cli.install_hooks`.
 #
-# Does NOT auto-edit your Claude config — that's too high a blast radius
-# for a setup script. You review the printed snippets and paste them yourself.
+# The installer is idempotent and smart-merges — re-running yields the same
+# end state, and any user customizations (custom env values, non-better-
+# memory hooks) in the target files are preserved. Backups of pre-existing
+# config files are written to ~/.better-memory/install-backups/ before any
+# write.
 
 set -euo pipefail
 

@@ -35,6 +35,8 @@ The script:
 
 It does **not** auto-edit your Claude config — too high-blast-radius for a setup script. Review and paste the snippets yourself.
 
+> **Note:** `./scripts/setup.sh` writes both `~/.claude.json` and `~/.claude/settings.json` for you idempotently. The Manual setup section below is reference material — useful if you need to inspect or hand-edit the config, but not required for a normal install.
+
 ## Manual setup
 
 If you'd rather do it by hand:
