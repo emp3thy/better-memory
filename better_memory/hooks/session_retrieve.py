@@ -28,6 +28,11 @@ from better_memory.services.reflection import ReflectionSynthesisService
 _LIMIT_PER_BUCKET = 10
 _HINT_MAX_CHARS = 600
 
+# Bound stdin reads. Mirrors better_memory/hooks/session_start.py's cap so a
+# misbehaving parent (or future schema bloat) cannot deadlock the hook on the
+# critical path of every session start.
+_MAX_STDIN_BYTES = 1_048_576
+
 _FOOTER = (
     "Use mcp__better-memory__memory_record_use(id, success|failure) when a "
     "memory materially helps or misleads. Use mcp__better-memory__memory_observe "
@@ -114,7 +119,7 @@ def main() -> None:
     # Drain stdin defensively — Claude Code may pipe a session payload, but we
     # currently don't act on it. Reading prevents PIPE-related write blocking.
     try:
-        sys.stdin.read()
+        sys.stdin.read(_MAX_STDIN_BYTES + 1)
     except BaseException:  # noqa: BLE001
         pass
 
