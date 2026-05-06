@@ -318,3 +318,38 @@ class TestLoadOrEmpty:
         assert str(p) in captured.err
         assert ":2:" in captured.err or ":2 " in captured.err
         assert "Fix the file then re-run" in captured.err
+
+
+from better_memory.cli.install_hooks import _atomic_write
+
+
+class TestAtomicWrite:
+    def test_creates_missing_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "new.json"
+        _atomic_write(target, '{"x": 1}')
+        assert target.read_text(encoding="utf-8") == '{"x": 1}'
+
+    def test_replaces_existing_content(self, tmp_path: Path) -> None:
+        target = tmp_path / "existing.json"
+        target.write_text("OLD", encoding="utf-8")
+        _atomic_write(target, "NEW")
+        assert target.read_text(encoding="utf-8") == "NEW"
+
+    def test_tmp_remains_when_replace_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "x.json"
+        target.write_text("ORIGINAL", encoding="utf-8")
+
+        def boom(src: object, dst: object) -> None:  # noqa: ARG001
+            raise PermissionError("simulated")
+
+        monkeypatch.setattr("better_memory.cli.install_hooks.os.replace", boom)
+        with pytest.raises(PermissionError, match="simulated"):
+            _atomic_write(target, "NEW")
+        # Original is unchanged.
+        assert target.read_text(encoding="utf-8") == "ORIGINAL"
+        # The .tmp sibling persists for forensics.
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        assert tmp.exists()
+        assert tmp.read_text(encoding="utf-8") == "NEW"

@@ -158,3 +158,15 @@ def _load_or_empty(path: Path) -> dict:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write to ``{path}.tmp`` then ``os.replace``. Caller handles backups.
+
+    On failure during ``os.replace``, the tmp file persists for forensics
+    and the original (if any) is untouched.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
