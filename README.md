@@ -31,9 +31,11 @@ The script:
 3. Checks for Ollama; offers to install via `brew` / `apt` / `winget` if missing.
 4. Pulls `nomic-embed-text`.
 5. Creates `~/.better-memory/{spool,knowledge-base/...}`.
-6. Prints the JSON snippets you paste into `~/.claude.json` and `~/.claude/settings.json`.
+6. Auto-installs the MCP server registration into `~/.claude.json` and the four hooks into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
 
-It does **not** auto-edit your Claude config — too high-blast-radius for a setup script. Review and paste the snippets yourself.
+If you'd rather inspect or hand-edit the config, see [Manual setup](#manual-setup) below.
+
+> **Note:** `./scripts/setup.sh` writes both `~/.claude.json` and `~/.claude/settings.json` for you idempotently. The Manual setup section below is reference material — useful if you need to inspect or hand-edit the config, but not required for a normal install.
 
 ## Manual setup
 

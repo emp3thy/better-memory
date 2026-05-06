@@ -46,7 +46,7 @@ The two SQLite files are never shared between processes — the MCP server owns 
 
 ## Hooks
 
-Four Claude Code hooks ship with better-memory and read or write the filesystem layout above:
+Four Claude Code hooks ship with better-memory and read or write the filesystem layout above. They are installed automatically by `./scripts/setup.sh` (which calls `python -m better_memory.cli.install_hooks` to merge them idempotently into `~/.claude/settings.json`). The list below is reference material:
 
 - **`better_memory.hooks.session_start`** (SessionStart) — writes a marker JSON to `spool/` so the MCP server can lazy-open a background episode for the session.
 - **`better_memory.hooks.session_retrieve`** (SessionStart) — opens `memory.db` and injects the project's distilled reflections (`do` / `dont` / `neutral`, capped at 10 per bucket) as `additionalContext` for Claude's first turn. Failure-isolated: if injection breaks, a fallback directive is injected instead and the failure is recorded in the `hook_errors` table.
