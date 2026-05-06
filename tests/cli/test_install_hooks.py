@@ -462,6 +462,27 @@ class TestCLIIntegration:
         assert str(settings) in result.stderr
         assert "Fix the file then re-run" in result.stderr
 
+    def test_malformed_settings_leaves_claude_json_untouched(
+        self, mock_home: Path
+    ) -> None:
+        """Pre-validation: if settings.json is malformed, claude.json must
+        not be modified either. Otherwise we end up in a half-applied state
+        where the MCP server is registered but hooks aren't installed."""
+        settings = mock_home / ".claude" / "settings.json"
+        settings.write_text('{"hooks": {invalid', encoding="utf-8")
+        claude_json = mock_home / ".claude.json"
+        # Pre-condition: claude.json doesn't exist yet (will be created on a
+        # successful install). After a refused install it must STILL not exist.
+        assert not claude_json.exists()
+
+        result = _run_cli(mock_home)
+        assert result.returncode == 1
+
+        # Settings still untouched.
+        assert settings.read_text(encoding="utf-8") == '{"hooks": {invalid'
+        # Critical: claude.json was NOT written.
+        assert not claude_json.exists()
+
     def test_summary_lines_printed_on_success(self, mock_home: Path) -> None:
         result = _run_cli(mock_home)
         assert result.returncode == 0

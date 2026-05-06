@@ -232,8 +232,17 @@ def main(argv: list[str] | None = None) -> None:
     ]
 
     print("[install_hooks] Installing better-memory MCP server + hooks...")
+    # Pass 1 (VALIDATE): load + parse ALL targets before any writes. If any
+    # is malformed, _load_or_empty exits 1 here, and no target file has been
+    # modified yet. Prevents partial-install state where the first target
+    # gets written before the second is discovered to be malformed.
+    loaded: list[tuple[str, Path, Callable[[dict], dict], dict]] = []
     for label, path, merge in targets:
-        existing = _load_or_empty(path)  # may exit(1) on malformed JSON
+        existing = _load_or_empty(path)
+        loaded.append((label, path, merge, existing))
+
+    # Pass 2 (WRITE): backup + merge + atomic-write each target.
+    for label, path, merge, existing in loaded:
         backup_path = _backup(path, backup_dir)
         merged = merge(existing)
         _atomic_write(path, json.dumps(merged, indent=2) + "\n")
