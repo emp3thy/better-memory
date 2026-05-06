@@ -353,3 +353,31 @@ class TestAtomicWrite:
         tmp = target.with_suffix(target.suffix + ".tmp")
         assert tmp.exists()
         assert tmp.read_text(encoding="utf-8") == "NEW"
+
+
+from datetime import datetime as _datetime, timezone
+
+from better_memory.cli.install_hooks import _backup
+
+
+class TestBackup:
+    def test_missing_source_returns_none(self, tmp_path: Path) -> None:
+        result = _backup(
+            tmp_path / "missing.json",
+            tmp_path / "backups",
+        )
+        assert result is None
+        assert not (tmp_path / "backups").exists()
+
+    def test_existing_source_copied_with_timestamp(self, tmp_path: Path) -> None:
+        src = tmp_path / "ok.json"
+        src.write_text("CONTENT", encoding="utf-8")
+        dst_dir = tmp_path / "backups"
+
+        fixed = _datetime(2026, 5, 6, 19, 30, 7, tzinfo=timezone.utc)
+        result = _backup(src, dst_dir, clock=lambda: fixed)
+        assert result is not None
+        assert result.name == "ok.json.20260506-193007.bak"
+        assert result.read_text(encoding="utf-8") == "CONTENT"
+        # Source unchanged.
+        assert src.read_text(encoding="utf-8") == "CONTENT"

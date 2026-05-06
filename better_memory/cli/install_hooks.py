@@ -170,3 +170,25 @@ def _atomic_write(path: Path, content: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _backup(
+    src: Path,
+    dst_dir: Path,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> Path | None:
+    """Copy ``src`` into ``dst_dir`` with a timestamped name. Idempotent
+    in the sense that missing source → no-op (returns None).
+
+    Timestamp format: ``YYYYMMDD-HHMMSS`` (UTC if no clock injected; local
+    time of injected clock if injected).
+    """
+    if not src.exists():
+        return None
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    now = (clock or datetime.now)()
+    timestamp = now.strftime("%Y%m%d-%H%M%S")
+    dst = dst_dir / f"{src.name}.{timestamp}.bak"
+    shutil.copy2(src, dst)
+    return dst
