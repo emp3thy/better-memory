@@ -193,3 +193,32 @@ def test_simulated_sql_error_injects_fallback(
     assert len(rows) == 1
     assert rows[0]["hook_name"] == "session_retrieve"
     assert rows[0]["exception_type"] == "OperationalError"
+
+
+def test_hint_truncation(home_with_schema: Path, tmp_path: Path) -> None:
+    project_dir = tmp_path / "trunc-project"
+    project_dir.mkdir()
+    long_hint = "x" * 1500  # 2.5x the 600 cap
+    conn = connect(home_with_schema / "memory.db")
+    try:
+        _seed_reflection(
+            conn, title="Long-hint reflection", project="trunc-project",
+            polarity="do", hints=[long_hint, "short hint"],
+        )
+    finally:
+        conn.close()
+
+    result = _run_hook(home_with_schema, cwd=project_dir)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    # Find the long-hint line; assert it was truncated and ends with ellipsis.
+    long_lines = [ln for ln in ctx.split("\n") if ln.startswith("- xxxx")]
+    assert len(long_lines) == 1
+    truncated = long_lines[0]
+    # "- " prefix (2) + truncated hint (599 chars + "…" = 600) = 602 chars on the line
+    assert len(truncated) == 2 + 600
+    assert truncated.endswith("…")
+    # Short hint remained intact.
+    assert "- short hint" in ctx
