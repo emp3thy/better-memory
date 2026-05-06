@@ -249,3 +249,28 @@ def test_bucket_cap_top_10(home_with_schema: Path, tmp_path: Path) -> None:
     # The two with lowest confidence (Reflection-00, Reflection-01) should be excluded.
     assert "Reflection-00" not in ctx
     assert "Reflection-01" not in ctx
+
+
+def test_returncode_always_zero(home_with_schema: Path, tmp_path: Path) -> None:
+    """Belt-and-braces: hook MUST never exit non-zero, regardless of state."""
+    project_dir = tmp_path / "exit-project"
+    project_dir.mkdir()
+
+    # 1. Empty DB.
+    r1 = _run_hook(home_with_schema, cwd=project_dir)
+    assert r1.returncode == 0
+
+    # 2. Populated DB.
+    conn = connect(home_with_schema / "memory.db")
+    try:
+        _seed_reflection(conn, title="Some lesson", project="exit-project", polarity="do")
+    finally:
+        conn.close()
+    r2 = _run_hook(home_with_schema, cwd=project_dir)
+    assert r2.returncode == 0
+
+    # 3. Missing DB entirely.
+    no_db_home = tmp_path / "missing"
+    no_db_home.mkdir()
+    r3 = _run_hook(no_db_home, cwd=project_dir)
+    assert r3.returncode == 0
