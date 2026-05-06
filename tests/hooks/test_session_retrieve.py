@@ -128,3 +128,68 @@ def test_empty_db_injects_no_memory_yet_message(
     # No bucket headings, no fallback "memory injection failed" text.
     assert "### do" not in ctx
     assert "memory injection failed" not in ctx
+
+
+def _read_hook_errors(home: Path) -> list[dict]:
+    """Read the hook_errors table after a hook ran. Returns rows as dicts."""
+    conn = connect(home / "memory.db")
+    try:
+        rows = conn.execute(
+            "SELECT id, hook_name, exception_type, exception_message FROM hook_errors"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def test_missing_db_injects_fallback_directive(tmp_path: Path) -> None:
+    """No memory.db at all (first install before MCP server has booted)."""
+    home = tmp_path / "no-db-home"
+    home.mkdir()
+    project_dir = tmp_path / "demo"
+    project_dir.mkdir()
+
+    result = _run_hook(home, cwd=project_dir)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("better-memory: memory injection failed (")
+    assert "memory_retrieve manually" in ctx
+    assert "session_retrieve:" in result.stderr
+
+
+def test_simulated_sql_error_injects_fallback(
+    home_with_schema: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """retrieve_reflections raises → fallback path."""
+    project_dir = tmp_path / "demo"
+    project_dir.mkdir()
+
+    # Use a bootstrap script to monkeypatch the service inside the subprocess.
+    # subprocess.run's monkeypatch fixture only affects the parent process, so
+    # we point sys.executable at a -c that imports + patches + runs main().
+    bootstrap = (
+        "import sqlite3, sys\n"
+        "from better_memory.services import reflection as rmod\n"
+        "def _boom(self, **kw):\n"
+        "    raise sqlite3.OperationalError('simulated retrieve failure')\n"
+        "rmod.ReflectionSynthesisService.retrieve_reflections = _boom\n"
+        "from better_memory.hooks.session_retrieve import main\n"
+        "main()\n"
+    )
+    env = {**os.environ, "BETTER_MEMORY_HOME": str(home_with_schema)}
+    result = subprocess.run(
+        [sys.executable, "-c", bootstrap],
+        text=True, capture_output=True, env=env, timeout=30,
+        cwd=str(project_dir),
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert "memory injection failed (OperationalError: simulated retrieve failure" in ctx
+    rows = _read_hook_errors(home_with_schema)
+    assert len(rows) == 1
+    assert rows[0]["hook_name"] == "session_retrieve"
+    assert rows[0]["exception_type"] == "OperationalError"
