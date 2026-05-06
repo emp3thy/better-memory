@@ -105,3 +105,186 @@ class TestHookSpec:
         assert sc.event == "Stop"
         assert sc.matcher is None
         assert sc.is_async is True
+
+
+from better_memory.cli.install_hooks import merge_settings_json
+
+
+class TestMergeSettingsJson:
+    def test_empty_hooks_adds_all_four(self) -> None:
+        out = merge_settings_json({}, venv_pyw="/venv/bin/pythonw")
+        ss = out["hooks"]["SessionStart"]
+        assert len(ss) == 1  # one shared matcher-group
+        ss_hooks = ss[0]["hooks"]
+        cmds = [h["command"] for h in ss_hooks]
+        assert any("better_memory.hooks.session_start" in c for c in cmds)
+        assert any("better_memory.hooks.session_retrieve" in c for c in cmds)
+
+        ptu = out["hooks"]["PostToolUse"]
+        assert len(ptu) == 1
+        assert ptu[0]["matcher"] == "Write|Edit|Bash"
+        assert "better_memory.hooks.observer" in ptu[0]["hooks"][0]["command"]
+        assert ptu[0]["hooks"][0].get("async") is True
+
+        stop = out["hooks"]["Stop"]
+        assert len(stop) == 1
+        assert "matcher" not in stop[0]
+        assert "better_memory.hooks.session_close" in stop[0]["hooks"][0]["command"]
+        assert stop[0]["hooks"][0].get("async") is True
+
+    def test_existing_user_postooluse_preserved(self) -> None:
+        existing = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {"type": "command", "command": "echo hello"},
+                        ],
+                    },
+                ],
+            },
+        }
+        out = merge_settings_json(existing, venv_pyw="/p/pythonw")
+        ptu = out["hooks"]["PostToolUse"]
+        # User's group preserved.
+        assert any(
+            g.get("matcher") == "Bash"
+            and g["hooks"][0]["command"] == "echo hello"
+            for g in ptu
+        )
+        # Our group also present.
+        assert any(
+            g.get("matcher") == "Write|Edit|Bash"
+            and "better_memory.hooks.observer" in g["hooks"][0]["command"]
+            for g in ptu
+        )
+
+    def test_stale_better_memory_paths_refreshed(self) -> None:
+        existing = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Write|Edit|Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/old/path/pythonw -m better_memory.hooks.observer",
+                                "async": True,
+                            },
+                        ],
+                    },
+                ],
+            },
+        }
+        out = merge_settings_json(existing, venv_pyw="/new/path/pythonw")
+        observer_cmds = [
+            h["command"]
+            for g in out["hooks"]["PostToolUse"]
+            for h in g["hooks"]
+            if "better_memory.hooks.observer" in h["command"]
+        ]
+        # Exactly one observer entry; refreshed to new path.
+        assert len(observer_cmds) == 1
+        assert "/new/path/pythonw" in observer_cmds[0]
+        assert "/old/path/pythonw" not in observer_cmds[0]
+
+    def test_mixed_matcher_group_user_preserved(self) -> None:
+        existing = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Write|Edit|Bash",
+                        "hooks": [
+                            {"type": "command", "command": "echo user-hook"},
+                            {
+                                "type": "command",
+                                "command": "/p/pyw -m better_memory.hooks.observer",
+                                "async": True,
+                            },
+                        ],
+                    },
+                ],
+            },
+        }
+        out = merge_settings_json(existing, venv_pyw="/p/pyw")
+        # The user's hook stays in some matcher-group; ours moves to a fresh
+        # canonical group at the end. The original mixed-group has only the
+        # user's hook left.
+        all_groups = out["hooks"]["PostToolUse"]
+        user_groups = [
+            g for g in all_groups
+            if any(h["command"] == "echo user-hook" for h in g["hooks"])
+        ]
+        assert len(user_groups) == 1
+        # In the user-preserved group, our observer hook should be gone.
+        assert all(
+            "better_memory.hooks.observer" not in h["command"]
+            for h in user_groups[0]["hooks"]
+        )
+        # And there must be a separate group with our observer.
+        observer_groups = [
+            g for g in all_groups
+            if any("better_memory.hooks.observer" in h["command"] for h in g["hooks"])
+        ]
+        assert len(observer_groups) == 1
+
+    def test_empty_matcher_groups_pruned(self) -> None:
+        existing = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Write|Edit|Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/p/pyw -m better_memory.hooks.observer",
+                                "async": True,
+                            },
+                        ],
+                    },
+                ],
+            },
+        }
+        out = merge_settings_json(existing, venv_pyw="/p/pyw")
+        # Old group had ONLY our hook; after REMOVE pass it would be empty
+        # and is dropped. ADD pass adds a fresh canonical group.
+        assert len(out["hooks"]["PostToolUse"]) == 1
+
+    def test_session_start_pair_shares_matcher_group(self) -> None:
+        out = merge_settings_json({}, venv_pyw="/p/pyw")
+        ss = out["hooks"]["SessionStart"]
+        assert len(ss) == 1
+        assert len(ss[0]["hooks"]) == 2
+        modules = [h["command"] for h in ss[0]["hooks"]]
+        assert any("session_start" in m and "session_retrieve" not in m for m in modules)
+        assert any("session_retrieve" in m for m in modules)
+
+    def test_user_session_start_hook_preserved(self) -> None:
+        existing = {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "echo user-on-start"},
+                        ],
+                    },
+                ],
+            },
+        }
+        out = merge_settings_json(existing, venv_pyw="/p/pyw")
+        ss = out["hooks"]["SessionStart"]
+        # User's group preserved, our pair appended in its own group.
+        assert any(
+            g["hooks"][0]["command"] == "echo user-on-start"
+            for g in ss
+        )
+        assert any(
+            any("better_memory.hooks.session_start" in h["command"] for h in g["hooks"])
+            for g in ss
+        )
+
+    def test_idempotent_second_run_is_noop(self) -> None:
+        first = merge_settings_json({}, venv_pyw="/p/pyw")
+        second = merge_settings_json(first, venv_pyw="/p/pyw")
+        assert first == second

@@ -71,3 +71,71 @@ def merge_claude_json(existing: dict, *, command: str, home: str) -> dict:
     mcp_servers["better-memory"] = merged
     config["mcpServers"] = mcp_servers
     return config
+
+
+# ------------------------------------------------------- pure merge: settings
+
+
+def _hook_entry(spec: HookSpec, venv_pyw: str) -> dict:
+    """Build the JSON object for a single hook entry."""
+    entry: dict = {
+        "type": "command",
+        "command": f'"{venv_pyw}" -m {spec.module}',
+    }
+    if spec.is_async:
+        entry["async"] = True
+    return entry
+
+
+def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
+    """Smart-merge the four hook entries into ~/.claude/settings.json content.
+
+    Two-pass strategy:
+    1. REMOVE — walk every event's every matcher-group's every hook. If the
+       hook's ``command`` contains any of our 4 module paths, strip it.
+       Drop matcher-groups whose ``hooks`` array is empty after removal.
+    2. ADD — append canonical matcher-groups at the end of each event's
+       array. SessionStart pair shares one group; PostToolUse and Stop
+       each get their own group.
+
+    User's other (non-better-memory) hooks and matcher-groups are untouched.
+    """
+    config = dict(existing)
+    hooks = dict(config.get("hooks", {}))
+    our_module_paths = {spec.module for spec in _OUR_HOOKS}
+
+    # Pass 1: REMOVE
+    for event_name in list(hooks.keys()):
+        groups: list[dict] = []
+        for group in hooks[event_name]:
+            kept_hooks = [
+                h for h in group.get("hooks", [])
+                if not any(mp in h.get("command", "") for mp in our_module_paths)
+            ]
+            if kept_hooks:
+                new_group = dict(group)
+                new_group["hooks"] = kept_hooks
+                groups.append(new_group)
+            # else: empty after removal — drop it.
+        hooks[event_name] = groups
+
+    # Pass 2: ADD canonical groups.
+    session_start_specs = [s for s in _OUR_HOOKS if s.event == "SessionStart"]
+    if session_start_specs:
+        hooks.setdefault("SessionStart", []).append({
+            "hooks": [_hook_entry(s, venv_pyw) for s in session_start_specs],
+        })
+
+    for spec in (s for s in _OUR_HOOKS if s.event == "PostToolUse"):
+        group: dict = {"hooks": [_hook_entry(spec, venv_pyw)]}
+        if spec.matcher is not None:
+            group["matcher"] = spec.matcher
+        hooks.setdefault("PostToolUse", []).append(group)
+
+    for spec in (s for s in _OUR_HOOKS if s.event == "Stop"):
+        hooks.setdefault("Stop", []).append({
+            "hooks": [_hook_entry(spec, venv_pyw)],
+        })
+
+    config["hooks"] = hooks
+    return config
