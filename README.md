@@ -64,9 +64,25 @@ Then add to `~/.claude.json` (user-scope MCP — create the file if it doesn't e
 
 And add hooks to `~/.claude/settings.json`:
 
+Two SessionStart hooks ship: `session_start` writes a spool marker so the MCP server can lazy-open a background episode for the session, and `session_retrieve` queries `memory.db` and injects the project's reflections (`do` / `dont` / `neutral` buckets) as `additionalContext` so Claude has prior memory available without needing to call `memory_retrieve` first. Both should be registered — Claude Code concatenates `additionalContext` across hooks.
+
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_start"
+          },
+          {
+            "type": "command",
+            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_retrieve"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit|Bash",
