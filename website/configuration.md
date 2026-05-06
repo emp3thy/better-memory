@@ -7,9 +7,8 @@ One environment variable roots the runtime filesystem layout. Everything else ha
 | Variable | Default | Purpose |
 |---|---|---|
 | `BETTER_MEMORY_HOME` | `~/.better-memory` | Root directory for `memory.db`, `knowledge.db`, `spool/`, and `knowledge-base/` |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint (embeddings only — see [Architecture](architecture.md#synthesis-pipeline) for why synthesis no longer uses Ollama) |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model (must produce 768-dim vectors) |
-| `CONSOLIDATE_MODEL` | `llama3` | LLM used by the synthesis pipeline |
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
 | `BETTER_MEMORY_AUTO_PRUNE` | unset (`false`) | When `1`, the auto-retention runner that fires on `memory.retrieve` (throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 

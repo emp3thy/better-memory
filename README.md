@@ -1,6 +1,6 @@
 # better-memory
 
-A local-first semantic + episodic memory manager for Claude Code. All state lives on your machine — SQLite databases for observations and the knowledge base, and a local Ollama instance for embeddings.
+A local-first semantic + episodic memory manager for Claude Code. All state lives on your machine — SQLite databases for observations and the knowledge base, and a local Ollama instance for embeddings. Synthesis (turning observations into distilled reflections) runs inside your Claude Code session via an MCP-driven skill — no separate cloud LLM.
 
 ## What it gives you
 
@@ -14,7 +14,7 @@ A local-first semantic + episodic memory manager for Claude Code. All state live
 
 - **Python 3.12+**
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for environment management
-- **[Ollama](https://ollama.com/)** running locally with the `nomic-embed-text` model pulled
+- **[Ollama](https://ollama.com/)** running locally with the `nomic-embed-text` model pulled (embeddings only — synthesis is Claude-driven)
 - **Claude Code** installed
 
 SQLite ships with Python; `sqlite-vec` is installed as a pip dependency.
@@ -131,13 +131,54 @@ despite the shared name.
 
 ## MCP tools
 
+The server registers 18 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
+
+**Episodic memory** — observations the AI writes during a session.
+
 | Tool | Purpose |
 |---|---|
-| `memory.observe(content, component?, theme?, trigger_type?, outcome?)` | Create a new observation. Returns `{"id": ...}`. |
-| `memory.retrieve(query?, component?, window?='30d', scope_path?)` | Three outcome buckets + insights + knowledge. Drains spool first. |
+| `memory.observe(content, component?, theme?, trigger_type?, outcome?, tech?, scope?)` | Record an observation. Returns `{"id": ...}`. |
+| `memory.retrieve(project?, tech?, phase?, polarity?, limit_per_bucket?)` | Distilled reflections in `do` / `dont` / `neutral` buckets. Drains spool first. |
+| `memory.retrieve_observations(query?, component?, theme?, outcome?, episode_id?, project?, limit?)` | Raw-observation drill-down with hybrid FTS5 + vector search. |
 | `memory.record_use(id, outcome?)` | Stamp reinforcement outcome on a memory after validation. |
+
+**Semantic memory** — user-stated facts and preferences (current truth, not history).
+
+| Tool | Purpose |
+|---|---|
+| `memory.semantic_observe(content, scope?)` | Record a user-stated fact. `scope='general'` for cross-project rules. |
+| `memory.semantic_retrieve(project?)` | Project-scoped facts merged with all `general` ones. |
+| `memory.semantic_update(id, content)` | Edit a semantic memory in place. |
+| `memory.semantic_delete(id)` | Remove a semantic memory (idempotent). |
+
+**Episodes** — bounded sessions of work; observations and reflections scope to one.
+
+| Tool | Purpose |
+|---|---|
+| `memory.start_episode(goal, tech?)` | Open a foreground episode. Returns active episode id and `pending_synthesis` queue depth. |
+| `memory.close_episode(outcome, close_reason?, summary?)` | Close the active episode. `outcome` ∈ `success` / `partial` / `abandoned` / `no_outcome`. |
+| `memory.list_episodes(project?, outcome?, only_open?)` | List episodes for UI / introspection. |
+| `memory.reconcile_episodes()` | List episodes still open from prior sessions. |
+
+**Synthesis** — IDE-driven (Claude itself decides). See [`better-memory-synthesize`](.claude/skills/better-memory-synthesize/SKILL.md) skill.
+
+| Tool | Purpose |
+|---|---|
+| `memory.synthesize_next_get_context(project?)` | One pending episode's full context for the IDE-LLM to act on. |
+| `memory.synthesize_next_apply(episode_id, decision, project?)` | Atomically apply Claude's `new` / `augment` / `merge` / `ignore` decision. |
+
+**Knowledge** — human-authored markdown corpus.
+
+| Tool | Purpose |
+|---|---|
 | `knowledge.search(query, project?)` | BM25 search against the knowledge base. |
 | `knowledge.list(project?)` | List indexed knowledge docs. |
+
+**Operations**
+
+| Tool | Purpose |
+|---|---|
+| `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` | Apply spec §9 retention rules; archive or hard-delete. |
 | `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 
 ## Skills

@@ -98,6 +98,68 @@ Manually trigger the retention service. (Auto-fires on `memory.retrieve` once pe
 
 Spawn or reuse the management UI. Returns `{"url": "...", "reused": bool}`.
 
+## Semantic memory tools
+
+Episodic observations (`memory.observe`) record what happened during a session. Semantic memories are different: user-stated facts and preferences that should surface every session.
+
+### `memory.semantic_observe`
+
+Record a user-stated fact or preference. Distinct from `memory.observe` — semantic memories are user-asserted current truths, not historical observations.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `content` | string | yes | The factual statement. |
+| `scope` | `project` / `general` | optional | `project` (default) for project-scoped rules; `general` for cross-project workflow rules. |
+
+### `memory.semantic_retrieve`
+
+Return user-stated facts and preferences for the current project, merged with all general-scope semantic memories. Flat list ordered newest-first.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `project` | string | optional | Defaults to cwd-derived. |
+
+### `memory.semantic_update`
+
+Edit a semantic memory's content in place. Bumps `updated_at`.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `id` | string | yes |
+| `content` | string | yes |
+
+### `memory.semantic_delete`
+
+Remove a semantic memory. Idempotent — no error if `id` is absent.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `id` | string | yes |
+
+## Synthesis tools
+
+Synthesis runs in Claude itself, not on the server. The two tools below split the loop: the server hands one episode's context to the IDE, the IDE-LLM decides, the server commits the decision atomically. See the [`better-memory-synthesize`](https://github.com/emp3thy/better-memory/blob/main/.claude/skills/better-memory-synthesize/SKILL.md) skill for the full workflow and decision schema.
+
+### `memory.synthesize_next_get_context`
+
+Return the next pending episode's full context: episode metadata, all observations on it, and tech-filtered existing reflections. Returns `{"episode_id": null, "queue": {...}}` when the queue is empty.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `project` | string | optional | Defaults to cwd-derived. |
+
+### `memory.synthesize_next_apply`
+
+Apply a synthesis decision for one episode. Atomically creates new reflections, augments existing ones, merges duplicates, marks observations consumed (or ignored), and stamps the episode synthesized.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `episode_id` | string | yes | The episode being committed. |
+| `decision` | object | yes | Shape: `{new: [...], augment: [...], merge: [...], ignore: [...]}` — see the skill for per-entry field schemas. Validation errors are returned to the caller without stamping the episode failed (caller can retry). |
+| `project` | string | optional | Defaults to cwd-derived. |
+
+Returns a step summary: `{episode_id, counts, queue, failure}`.
+
 ## Knowledge tools
 
 ### `knowledge.search`

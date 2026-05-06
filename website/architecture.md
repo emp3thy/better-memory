@@ -37,12 +37,15 @@ This is the lever that keeps recall faithful: a well-validated `dont` will keep 
 
 ## Synthesis pipeline
 
-When `memory.start_episode` is called (or when triggered manually from the management UI), the synthesis service:
+Synthesis is **IDE-driven** — Claude itself is the LLM. better-memory ships no chat client; it exposes two MCP tools and a skill that orchestrates them.
 
-1. Reads recent observations not yet attached to a reflection.
-2. Sends batches to the LLM (`CONSOLIDATE_MODEL`) with a structured-output prompt.
-3. Applies one of four actions per observation: `new` (create a new reflection citing this observation), `augment` (add this observation as a source for an existing reflection), `merge` (combine two reflections), or `ignore` (mark this observation as not reflection-worthy).
-4. All actions are atomic per run — `audit_log` records them.
+The drain loop, per pending episode:
+
+1. **`memory.synthesize_next_get_context`** — server returns one closed-but-not-yet-synthesized episode's full context: episode metadata, all observations on it, and existing reflections filtered by tech.
+2. **Claude decides** — the [`better-memory-synthesize`](https://github.com/emp3thy/better-memory/blob/main/.claude/skills/better-memory-synthesize/SKILL.md) skill walks Claude through producing a JSON decision: lists of `new`, `augment`, `merge`, and `ignore` actions per observation.
+3. **`memory.synthesize_next_apply`** — server validates the decision JSON and applies it atomically: creates new reflections, augments existing ones, merges duplicates, marks observations consumed (or ignored), and stamps the episode synthesized. `audit_log` records each action.
+
+The trigger: when `memory.start_episode` returns `pending_synthesis.pending > 0`, the skill fires and drains the queue one episode at a time. Same skill is invoked manually when the user asks to consolidate or distill pending episodes.
 
 The lifecycle implications for observations are detailed in [Observation lifecycle](observation-lifecycle.md).
 
