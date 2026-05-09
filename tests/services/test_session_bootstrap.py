@@ -1,7 +1,10 @@
 """Unit tests for SessionBootstrapService."""
 from __future__ import annotations
 
+import json
 import subprocess
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,6 +14,34 @@ from better_memory.db.schema import apply_migrations
 from better_memory.services.session_bootstrap import SessionBootstrapService
 
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "better_memory" / "db" / "migrations"
+
+
+def _seed_semantic(conn, *, content: str, project: str, scope: str) -> str:
+    mid = uuid.uuid4().hex
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO semantic_memories "
+        "(id, content, project, scope, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (mid, content, project, scope, now, now),
+    )
+    conn.commit()
+    return mid
+
+
+def _seed_reflection(conn, *, project: str, polarity: str, scope: str = "project") -> str:
+    rid = uuid.uuid4().hex
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, tech, phase, polarity, use_cases, hints, "
+        " confidence, status, evidence_count, created_at, updated_at, scope) "
+        "VALUES (?, 't', ?, NULL, 'implementation', ?, 'uc', ?, 0.9, "
+        " 'confirmed', 1, ?, ?, ?)",
+        (rid, project, polarity, json.dumps(["h"]), now, now, scope),
+    )
+    conn.commit()
+    return rid
 
 
 @pytest.fixture
@@ -78,3 +109,20 @@ def test_cwd_not_in_git_uses_general_scope(conn, tmp_path: Path) -> None:
     result = svc.bootstrap(source="startup", session_id="sess-g", cwd=nongit)
 
     assert result.project == "general"
+
+
+def test_bootstrap_counts_retrieved_rows(conn, git_repo: Path) -> None:
+    proj = git_repo.name  # demo-repo
+    _seed_semantic(conn, content="proj-a", project=proj, scope="project")
+    _seed_semantic(conn, content="gen-a", project="anything", scope="general")
+    _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    _seed_reflection(conn, project=proj, polarity="dont", scope="project")
+    _seed_reflection(conn, project="anything", polarity="do", scope="general")
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source="startup", session_id="sess-r", cwd=git_repo)
+
+    assert result.semantic_count == 2  # 1 project + 1 general
+    assert result.reflections_counts["do"] == 2     # project + general
+    assert result.reflections_counts["dont"] == 1
+    assert result.reflections_counts["neutral"] == 0

@@ -23,6 +23,8 @@ from typing import Literal
 
 from better_memory.config import project_name
 from better_memory.services.episode import EpisodeService
+from better_memory.services.reflection import ReflectionSynthesisService
+from better_memory.services.semantic import SemanticMemoryService
 
 _VALID_SOURCES: frozenset[str] = frozenset({"startup", "resume", "clear", "compact"})
 
@@ -65,10 +67,30 @@ class SessionBootstrapService:
             episode_id = existing.id
             action = "reused"
 
+        semantic_svc = SemanticMemoryService(self._conn)
+        if project == "general":
+            semantic = semantic_svc.list_for_project(project=project, scope_filter="general")
+        else:
+            semantic = semantic_svc.list_for_project(project=project, scope_filter=None)
+
+        reflection_svc = ReflectionSynthesisService(self._conn)
+        buckets = reflection_svc.retrieve_reflections(
+            project=project, limit_per_bucket=None,
+        )
+
+        semantic_count = len(semantic)
+        reflections_counts = {
+            "do": len(buckets["do"]),
+            "dont": len(buckets["dont"]),
+            "neutral": len(buckets["neutral"]),
+        }
+
         return BootstrapResult(
             additional_context="",  # filled in Task 5
             project=project,
             source=coerced_source,
             episode_id=episode_id,
             episode_action=action,
+            semantic_count=semantic_count,
+            reflections_counts=reflections_counts,
         )
