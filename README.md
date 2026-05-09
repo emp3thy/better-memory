@@ -126,11 +126,20 @@ One env var roots the runtime filesystem layout:
 
 ### Project-name override
 
-Memory is bucketed by project name, derived from the cwd's leaf
-directory name (`Path.cwd().name`). For situations where the leaf name
-isn't right — multiple worktrees of the same logical project, or a
-deeply-nested cwd — drop a `.better-memory` file at the project root
-with a single line containing the desired project name:
+Memory is bucketed by project name, resolved in this order:
+
+1. **`.better-memory` override file** — if a `.better-memory` file
+   exists in the cwd, its first non-empty stripped line is used
+   verbatim. Use this only for the rare case where the git-derived
+   name isn't right.
+2. **Git common dir** — `git rev-parse --git-common-dir` resolves to
+   the main repo's `.git` directory even from inside a worktree, so
+   all worktrees of the same repo share one project bucket
+   automatically. The project name is the parent directory's name.
+3. **`general`** — fallback when the cwd isn't inside a git tree (or
+   git is unavailable).
+
+If you need an override (renamed repo, multi-repo monolith, etc.):
 
 ```bash
 echo "my-project" > .better-memory
@@ -145,7 +154,7 @@ despite the shared name.
 
 ## MCP tools
 
-The server registers 18 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
+The server registers 19 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
 
 **Episodic memory** — observations the AI writes during a session.
 
@@ -192,6 +201,7 @@ The server registers 18 tools, grouped below. Full schemas are in [`website/mcp-
 
 | Tool | Purpose |
 |---|---|
+| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. |
 | `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` | Apply spec §9 retention rules; archive or hard-delete. |
 | `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 

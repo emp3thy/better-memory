@@ -11,13 +11,10 @@ from pathlib import Path
 
 from playwright.sync_api import Page, expect
 
+from better_memory.config import project_name
 from better_memory.db.connection import connect
 
 pytest_plugins = ["tests.ui.conftest_browser"]
-
-
-def _project_name() -> str:
-    return Path.cwd().name
 
 
 def _seed_reflection(
@@ -49,7 +46,7 @@ def _seed_reflection(
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
             "'2026-04-26T10:00:00+00:00', '2026-04-26T10:00:00+00:00')",
             (
-                refl_id, title, _project_name(), tech, phase, polarity,
+                refl_id, title, project_name(), tech, phase, polarity,
                 use_cases, json.dumps(hints), confidence, status,
             ),
         )

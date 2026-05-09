@@ -235,3 +235,52 @@ def test_project_name_override_file_beats_git(tmp_path: Path) -> None:
     (repo / ".better-memory").write_text("override-name\n")
 
     assert project_name(repo) == "override-name"
+
+
+def test_project_name_handles_subprocess_filenotfound(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If git is not installed, project_name falls back to 'general'.
+
+    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
+    ``FileNotFoundError``) so a missing git binary cannot break the hook.
+    """
+    import better_memory.config as bm_config
+
+    def raise_filenotfound(*args, **kwargs):
+        raise FileNotFoundError("git not on PATH")
+
+    # Clear lru_cache so the monkeypatched subprocess.run is exercised.
+    bm_config._resolve_git_project.cache_clear()
+    monkeypatch.setattr(bm_config.subprocess, "run", raise_filenotfound)
+
+    try:
+        result = bm_config.project_name(tmp_path)
+        assert result == "general"
+    finally:
+        # Cache hygiene: drop the entry seeded by the patched subprocess
+        # so later tests don't observe a stale `None` for this path.
+        bm_config._resolve_git_project.cache_clear()
+
+
+def test_project_name_handles_subprocess_permissionerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If subprocess.run raises PermissionError (Windows ACL), fall back to 'general'.
+
+    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
+    ``PermissionError``) so a Windows ACL edge case cannot break the hook.
+    """
+    import better_memory.config as bm_config
+
+    def raise_permission(*args, **kwargs):
+        raise PermissionError("access denied")
+
+    bm_config._resolve_git_project.cache_clear()
+    monkeypatch.setattr(bm_config.subprocess, "run", raise_permission)
+
+    try:
+        result = bm_config.project_name(tmp_path)
+        assert result == "general"
+    finally:
+        bm_config._resolve_git_project.cache_clear()

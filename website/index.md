@@ -188,7 +188,7 @@ cd better-memory
         <tr><td><a href="mcp-tools/#memorystart_ui">memory.start_ui</a></td><td>Spawn or reuse the management UI; returns {url, reused}.</td></tr>
       </tbody>
     </table>
-    <p style="margin-top:18px"><a href="mcp-tools/">complete tool reference (18 tools) →</a></p>
+    <p style="margin-top:18px"><a href="mcp-tools/">complete tool reference (19 tools) →</a></p>
   </div>
 </section>
 
