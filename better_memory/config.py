@@ -17,6 +17,7 @@ vars because they're orthogonal to path layout.
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,19 +35,50 @@ def resolve_home() -> Path:
 def project_name(cwd: Path | None = None) -> str:
     """Return the canonical project name for ``cwd`` (defaults to ``Path.cwd()``).
 
-    A ``<cwd>/.better-memory`` file overrides the default ``cwd.name``: the
-    first non-empty stripped line is used. Used uniformly by knowledge
-    search, observation writes/reads, episode scoping, the UI panel filter,
-    and hook payloads — every subsystem that buckets state by project must
-    call this helper, never construct the name inline.
+    Resolution order:
+    1. ``<cwd>/.better-memory`` override file: first non-empty stripped line.
+    2. ``git rev-parse --git-common-dir`` (handles worktrees: returns the main
+       repo's .git directory). Project name = parent dir's ``.name``.
+    3. ``"general"`` if no git tree is found or git is unavailable.
+
+    Used uniformly by knowledge search, observation writes/reads, episode
+    scoping, the UI panel filter, and hook payloads — every subsystem that
+    buckets state by project must call this helper, never construct the
+    name inline.
     """
     cwd = cwd if cwd is not None else Path.cwd()
+
     override = cwd / ".better-memory"
     if override.is_file():
         text = override.read_text(encoding="utf-8").strip()
         if text:
             return text.splitlines()[0].strip()
-    return cwd.name
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return "general"
+
+    if result.returncode != 0:
+        return "general"
+
+    common_dir_str = result.stdout.strip()
+    if not common_dir_str:
+        return "general"
+
+    common_dir = Path(common_dir_str)
+    if not common_dir.is_absolute():
+        common_dir = (cwd / common_dir).resolve()
+
+    repo_root = common_dir.parent
+    if repo_root.name:
+        return repo_root.name
+    return "general"
 
 
 def _resolve_str(env_var: str, default: str) -> str:
