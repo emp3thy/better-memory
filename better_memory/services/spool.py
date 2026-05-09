@@ -57,11 +57,10 @@ class SpoolService:
     once the batch has been processed.
 
     When an ``EpisodeService`` is injected via the ``episodes`` kwarg, drain
-    also calls ``episodes.open_background(session_id, project)`` for each
-    ``session_start`` event it processes. Idempotent: skipped if the session
-    already has an active episode. Guarded by per-event try/except so the
-    side-effect can never cause drain to lose data. ``episodes=None`` (the
-    default) preserves Phase 1/2 behaviour exactly.
+    fires episode-lifecycle side-effects for ``commit_close`` and
+    ``session_end`` events. Each side-effect is guarded by per-event
+    try/except so the side-effect can never cause drain to lose data.
+    ``episodes=None`` (the default) preserves Phase 1/2 behaviour exactly.
 
     For ``commit_close`` events (Phase 4: opt-in post-commit hook), drain
     calls ``episodes.close_active(session_id=..., outcome='success',
@@ -144,9 +143,7 @@ class SpoolService:
         if self._episodes is not None:
             for payload in inserted_payloads:
                 event_type = payload.get("event_type")
-                if event_type == "session_start":
-                    self._maybe_open_episode_for_session_start(payload)
-                elif event_type == "commit_close":
+                if event_type == "commit_close":
                     self._maybe_close_episode_for_commit(payload)
                 elif event_type == "session_end":
                     self._maybe_close_episode_for_session_end(payload)
@@ -174,7 +171,7 @@ class SpoolService:
         """Parse ``path`` and INSERT its contents into ``hook_events``.
 
         Returns the parsed payload so callers can inspect ``event_type``
-        for post-commit side-effects (Phase 3 session_start handling).
+        for post-commit side-effects (commit_close / session_end handling).
         Raises on any validation or DB error so the caller can quarantine.
         """
         raw = path.read_text(encoding="utf-8")
@@ -205,31 +202,6 @@ class SpoolService:
             ),
         )
         return data
-
-    def _maybe_open_episode_for_session_start(
-        self, payload: dict[str, object]
-    ) -> None:
-        """Lazy-open a background episode for a drained session_start event.
-
-        Idempotent: if the session already has an active episode, skip.
-        Guarded by try/except so domain failures do not block drain's
-        main job of inserting hook_events rows or unlinking spool files.
-        """
-        if self._episodes is None:
-            return
-        session_id = payload.get("session_id")
-        project = payload.get("project")
-        if not isinstance(session_id, str) or not session_id:
-            return
-        if not isinstance(project, str) or not project:
-            return
-        try:
-            if self._episodes.active_episode(session_id) is None:
-                self._episodes.open_background(
-                    session_id=session_id, project=project
-                )
-        except Exception:  # noqa: BLE001 — drain side-effects must not fail drain
-            pass
 
     def _maybe_close_episode_for_commit(
         self, payload: dict[str, object]
