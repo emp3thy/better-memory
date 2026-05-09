@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1155,10 +1156,12 @@ class ReflectionSynthesisService:
             params,
         ).fetchall()
 
+        # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
+        cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize
         buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
         for r in rows:
             bucket = buckets[r["polarity"]]
-            if limit_per_bucket is not None and len(bucket) >= limit_per_bucket:
+            if len(bucket) >= cap:
                 continue
             bucket.append({
                 "id": r["id"],
