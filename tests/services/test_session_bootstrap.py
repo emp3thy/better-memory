@@ -44,6 +44,23 @@ def _seed_reflection(conn, *, project: str, polarity: str, scope: str = "project
     return rid
 
 
+def _seed_reflection_hints(
+    conn, *, project: str, polarity: str, hints: list[str], scope: str = "project"
+) -> str:
+    rid = uuid.uuid4().hex
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, tech, phase, polarity, use_cases, hints, "
+        " confidence, status, evidence_count, created_at, updated_at, scope) "
+        "VALUES (?, 't', ?, NULL, 'implementation', ?, 'uc', ?, 0.9, "
+        " 'confirmed', 1, ?, ?, ?)",
+        (rid, project, polarity, json.dumps(hints), now, now, scope),
+    )
+    conn.commit()
+    return rid
+
+
 @pytest.fixture
 def conn(tmp_path: Path):
     db = tmp_path / "memory.db"
@@ -182,3 +199,42 @@ def test_render_omits_empty_sections(conn, git_repo: Path) -> None:
     # but the header and footer should still render
     assert "## better-memory: session bootstrap" in text
     assert "memory_record_use" in text  # footer
+
+
+def test_render_truncates_long_hints(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    long_hint = "x" * 700
+    _seed_reflection_hints(conn, project=proj, polarity="do", hints=[long_hint])
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="t-trunc", cwd=git_repo).additional_context
+    assert "x" * 700 not in text
+    assert "…" in text
+    # The truncated form must be exactly 600 chars (599 x + 1 ellipsis).
+    # Confirm by checking that 599 x's followed by … is in the output.
+    assert ("x" * 599 + "…") in text
+
+
+def test_render_multi_item_bucket(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    rid1 = _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    rid2 = _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="t-multi", cwd=git_repo).additional_context
+
+    # Both ids appear.
+    assert f"_id: {rid1}_" in text
+    assert f"_id: {rid2}_" in text
+    # Header appears exactly once.
+    assert text.count("### Reflections — do (prior wins)") == 1
+
+
+def test_render_bucket_isolation(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="t-iso", cwd=git_repo).additional_context
+
+    # Only the do bucket header appears; dont and neutral are empty so absent.
+    assert "Reflections — do (prior wins)" in text
+    assert "Reflections — dont (approaches to avoid)" not in text
+    assert "Reflections — neutral (context)" not in text

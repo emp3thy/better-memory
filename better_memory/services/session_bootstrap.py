@@ -62,15 +62,17 @@ def _render_semantic(items) -> str:
 def _render_reflection_bucket(name: str, items) -> str:
     if not items:
         return ""
-    lines = [f"### Reflections — {name}"]
+    blocks: list[str] = []
     for item in items:
-        lines.append(f"**{item['title']}**")
-        lines.append(f"_{item['use_cases']}_")
+        lines = [
+            f"**{item['title']}**",
+            f"_{item['use_cases']}_",
+        ]
         for hint in item.get("hints", []):
             lines.append(f"- {_truncate(hint)}")
         lines.append(f"_id: {item['id']}_")
-        lines.append("")
-    return "\n".join(lines)
+        blocks.append("\n".join(lines))
+    return f"### Reflections — {name}\n" + "\n\n".join(blocks)
 
 
 @dataclass(frozen=True)
@@ -153,6 +155,7 @@ class SessionBootstrapService:
         neutral_section = _render_reflection_bucket("neutral (context)", buckets["neutral"])
         if neutral_section:
             sections.append(neutral_section)
+        sections.append("---")
         sections.append(_FOOTER)
 
         rendered = "\n\n".join(sections)
