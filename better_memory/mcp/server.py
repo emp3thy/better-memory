@@ -16,6 +16,7 @@ Tools
                                           — episode lifecycle.
 * ``memory.synthesize_next_get_context``  — episode-context fetch for synthesis.
 * ``memory.synthesize_next_apply``        — apply IDE-LLM's decision JSON.
+* ``memory.session_bootstrap``            — open/reuse a session episode + inject memories.
 * ``memory.run_retention``                — apply spec §9 retention rules.
 * ``knowledge.search`` / ``knowledge.list`` — knowledge-base introspection.
 
@@ -527,7 +528,14 @@ def _tool_definitions() -> list[Tool]:
                             "coerce to 'startup' inside the service."
                         ),
                     },
-                    "session_id": {"type": "string"},
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional SessionStart payload session_id. "
+                            "Defaults to $CLAUDE_SESSION_ID env var, or a "
+                            "fresh UUID."
+                        ),
+                    },
                     "cwd": {
                         "type": "string",
                         "description": (

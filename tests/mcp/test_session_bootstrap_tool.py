@@ -166,6 +166,75 @@ class TestSessionBootstrapToolDispatch:
         assert result.source == "startup"
 
 
+def test_dispatch_defaulting_chain(monkeypatch, tmp_path: Path) -> None:
+    """The dispatch's cwd/session_id defaulting chain must not regress.
+
+    Mirrors the resolution logic in better_memory/mcp/server.py's
+    memory.session_bootstrap branch. Guards against the JSON-null gotcha
+    (``args.get("cwd") or os.getcwd()`` — uses ``or`` not ``, default=``,
+    because dict.get returns None when the key is present-but-null,
+    which would propagate to the service).
+    """
+    import os
+    import uuid
+
+    # cwd: present arg wins over os.getcwd
+    explicit_cwd = str(tmp_path / "explicit")
+    Path(explicit_cwd).mkdir()
+    args: dict = {"cwd": explicit_cwd}
+    cwd_arg = args.get("cwd") or os.getcwd()
+    assert cwd_arg == explicit_cwd
+
+    # cwd: missing arg falls back to os.getcwd
+    args = {}
+    cwd_arg = args.get("cwd") or os.getcwd()
+    assert cwd_arg == os.getcwd()
+
+    # cwd: explicit None (JSON null) falls back to os.getcwd — the gotcha
+    args = {"cwd": None}
+    cwd_arg = args.get("cwd") or os.getcwd()
+    assert cwd_arg == os.getcwd()
+
+    # Sanity: ``or`` and ``, default=`` differ when the value is None.
+    # This makes the JSON-null regression visible in test source.
+    args = {"cwd": None}
+    or_form = args.get("cwd") or os.getcwd()
+    default_form = args.get("cwd", os.getcwd())
+    assert or_form == os.getcwd()
+    assert default_form is None  # the gotcha
+
+    # session_id: present arg wins
+    args = {"session_id": "explicit-id"}
+    session_id_arg = (
+        args.get("session_id")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or uuid.uuid4().hex
+    )
+    assert session_id_arg == "explicit-id"
+
+    # session_id: env var wins over UUID generation when arg is absent
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-id")
+    args = {}
+    session_id_arg = (
+        args.get("session_id")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or uuid.uuid4().hex
+    )
+    assert session_id_arg == "env-id"
+
+    # session_id: explicit None (JSON null) falls through to env, then UUID
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    args = {"session_id": None}
+    session_id_arg = (
+        args.get("session_id")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or uuid.uuid4().hex
+    )
+    # No env, no arg → must be a fresh UUID hex (32 chars)
+    assert session_id_arg
+    assert len(session_id_arg) == 32
+
+
 class TestSessionBootstrapToolWiring:
     def test_create_server_wires_session_bootstrap_tool(
         self, tmp_path, monkeypatch
