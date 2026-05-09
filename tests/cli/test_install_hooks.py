@@ -286,6 +286,31 @@ class TestMergeSettingsJson:
         second = merge_settings_json(first, venv_pyw="/p/pyw")
         assert first == second
 
+    def test_session_bootstrap_uses_venv_py_async_hooks_use_venv_pyw(self) -> None:
+        """Foreground bootstrap needs python.exe (stdout reaches Claude
+        Code); the two async hooks keep pythonw.exe so they don't flash
+        a console window on every tool call. setup.sh passes the same
+        path on non-Windows; the split only matters on Windows."""
+        out = merge_settings_json(
+            {}, venv_py="/venv/python.exe", venv_pyw="/venv/pythonw.exe",
+        )
+        ss_cmd = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "python.exe" in ss_cmd and "pythonw.exe" not in ss_cmd
+        assert "session_bootstrap" in ss_cmd
+
+        ptu_cmd = out["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert "pythonw.exe" in ptu_cmd
+
+        stop_cmd = out["hooks"]["Stop"][0]["hooks"][0]["command"]
+        assert "pythonw.exe" in stop_cmd
+
+    def test_default_venv_py_falls_back_to_venv_pyw(self) -> None:
+        """Back-compat: callers that only pass venv_pyw get the old
+        behavior (every hook uses the same interpreter)."""
+        out = merge_settings_json({}, venv_pyw="/legacy/path/pyw")
+        ss_cmd = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "/legacy/path/pyw" in ss_cmd
+
 
 def test_merge_settings_strips_legacy_session_start_and_session_retrieve():
     """Re-running install_hooks after upgrade scrubs the two old hook entries."""

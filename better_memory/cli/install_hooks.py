@@ -27,16 +27,21 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class HookSpec:
-    module: str          # e.g. "better_memory.hooks.session_start"
-    event: str           # "SessionStart" | "PostToolUse" | "Stop"
-    matcher: str | None  # None for SessionStart/Stop; "Write|Edit|Bash" for observer
-    is_async: bool       # True for PostToolUse + Stop
+    module: str           # e.g. "better_memory.hooks.session_start"
+    event: str            # "SessionStart" | "PostToolUse" | "Stop"
+    matcher: str | None   # None for SessionStart/Stop; "Write|Edit|Bash" for observer
+    is_async: bool        # True for PostToolUse + Stop
+    needs_stdout: bool    # True for SessionStart bootstrap — Claude Code reads
+                          # the hook's stdout for additionalContext, so the
+                          # interpreter MUST keep stdout attached. On Windows
+                          # pythonw.exe silently nulls sys.stdout; the bootstrap
+                          # would print nothing and Claude would get no context.
 
 
 _OUR_HOOKS: tuple[HookSpec, ...] = (
-    HookSpec("better_memory.hooks.session_bootstrap", "SessionStart", None,              False),
-    HookSpec("better_memory.hooks.observer",          "PostToolUse",  "Write|Edit|Bash", True),
-    HookSpec("better_memory.hooks.session_close",     "Stop",         None,              True),
+    HookSpec("better_memory.hooks.session_bootstrap", "SessionStart", None,              False, True),
+    HookSpec("better_memory.hooks.observer",          "PostToolUse",  "Write|Edit|Bash", True,  False),
+    HookSpec("better_memory.hooks.session_close",     "Stop",         None,              True,  False),
 )
 
 # Module paths that are no longer registered but may be present in users'
@@ -83,18 +88,28 @@ def merge_claude_json(existing: dict, *, command: str, home: str) -> dict:
 # ------------------------------------------------------- pure merge: settings
 
 
-def _hook_entry(spec: HookSpec, venv_pyw: str) -> dict:
-    """Build the JSON object for a single hook entry."""
+def _hook_entry(spec: HookSpec, venv_py: str, venv_pyw: str) -> dict:
+    """Build the JSON object for a single hook entry.
+
+    Interpreter selection: hooks marked ``needs_stdout`` use ``venv_py``
+    (python.exe on Windows) so Claude Code can read the hook's stdout
+    for ``additionalContext``. Other hooks use ``venv_pyw`` (pythonw.exe
+    on Windows) to avoid the brief console flash on each tool call.
+    On non-Windows systems setup.sh passes the same path for both.
+    """
+    interpreter = venv_py if spec.needs_stdout else venv_pyw
     entry: dict = {
         "type": "command",
-        "command": f'"{venv_pyw}" -m {spec.module}',
+        "command": f'"{interpreter}" -m {spec.module}',
     }
     if spec.is_async:
         entry["async"] = True
     return entry
 
 
-def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
+def merge_settings_json(
+    existing: dict, *, venv_pyw: str, venv_py: str | None = None,
+) -> dict:
     """Smart-merge our hook entries into ~/.claude/settings.json content.
 
     Two-pass strategy:
@@ -107,7 +122,15 @@ def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
        each get their own group.
 
     User's other (non-better-memory) hooks and matcher-groups are untouched.
+
+    ``venv_py`` defaults to ``venv_pyw`` for back-compat with callers that
+    only know about one interpreter. On Windows the two are different:
+    ``venv_py`` is python.exe (foreground, keeps stdout), ``venv_pyw`` is
+    pythonw.exe (background, no console). See ``_hook_entry`` for the
+    per-spec selection rule.
     """
+    if venv_py is None:
+        venv_py = venv_pyw
     config = dict(existing)
     hooks = dict(config.get("hooks", {}))
     our_module_paths = {spec.module for spec in _OUR_HOOKS}
@@ -132,18 +155,18 @@ def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
     session_start_specs = [s for s in _OUR_HOOKS if s.event == "SessionStart"]
     if session_start_specs:
         hooks.setdefault("SessionStart", []).append({
-            "hooks": [_hook_entry(s, venv_pyw) for s in session_start_specs],
+            "hooks": [_hook_entry(s, venv_py, venv_pyw) for s in session_start_specs],
         })
 
     for spec in (s for s in _OUR_HOOKS if s.event == "PostToolUse"):
-        group: dict = {"hooks": [_hook_entry(spec, venv_pyw)]}
+        group: dict = {"hooks": [_hook_entry(spec, venv_py, venv_pyw)]}
         if spec.matcher is not None:
             group["matcher"] = spec.matcher
         hooks.setdefault("PostToolUse", []).append(group)
 
     for spec in (s for s in _OUR_HOOKS if s.event == "Stop"):
         hooks.setdefault("Stop", []).append({
-            "hooks": [_hook_entry(spec, venv_pyw)],
+            "hooks": [_hook_entry(spec, venv_py, venv_pyw)],
         })
 
     config["hooks"] = hooks
