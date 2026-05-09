@@ -111,6 +111,27 @@ def test_cwd_not_in_git_uses_general_scope(conn, tmp_path: Path) -> None:
     assert result.project == "general"
 
 
+def test_general_project_excludes_project_scope_general_rows(
+    conn, tmp_path: Path
+) -> None:
+    """Spec §6 corner case: when project resolves to 'general', the default
+    union (project = ? OR scope = 'general') would also pull rows tagged
+    project='general', scope='project'. scope_filter='general' excludes them.
+    """
+    nongit = tmp_path / "loose"
+    nongit.mkdir()
+    # Corner case row: project='general', scope='project' — MUST be excluded.
+    _seed_semantic(conn, content="gen-proj", project="general", scope="project")
+    # Cross-project general row — MUST be included.
+    _seed_semantic(conn, content="other-gen", project="unrelated", scope="general")
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source="startup", session_id="sess-g-r", cwd=nongit)
+
+    assert result.project == "general"
+    assert result.semantic_count == 1
+
+
 def test_bootstrap_counts_retrieved_rows(conn, git_repo: Path) -> None:
     proj = git_repo.name  # demo-repo
     _seed_semantic(conn, content="proj-a", project=proj, scope="project")

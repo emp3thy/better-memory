@@ -68,6 +68,10 @@ class SessionBootstrapService:
             action = "reused"
 
         semantic_svc = SemanticMemoryService(self._conn)
+        # When project resolves to "general", scope_filter="general" excludes rows
+        # tagged project='general' with scope='project'. The default union
+        # (project = ? OR scope = 'general') would otherwise pull them.
+        # See spec §6.
         if project == "general":
             semantic = semantic_svc.list_for_project(project=project, scope_filter="general")
         else:
