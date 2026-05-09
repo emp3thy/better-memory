@@ -28,6 +28,50 @@ from better_memory.services.semantic import SemanticMemoryService
 
 _VALID_SOURCES: frozenset[str] = frozenset({"startup", "resume", "clear", "compact"})
 
+_HINT_MAX_CHARS = 600
+
+_FOOTER = (
+    "Use mcp__better-memory__memory_record_use(id, success|failure) when a "
+    "memory materially helps or misleads. Use mcp__better-memory__memory_observe "
+    "to write new ones."
+)
+
+
+def _truncate(s: str) -> str:
+    return s if len(s) <= _HINT_MAX_CHARS else s[: _HINT_MAX_CHARS - 1] + "…"
+
+
+def _render_header(*, project: str, source: str, action: str, episode_id: str) -> str:
+    short = episode_id[:8] if episode_id else ""
+    return (
+        f"## better-memory: session bootstrap\n"
+        f"Project: {project}  •  Source: {source}  •  "
+        f"Episode: {action} id={short}"
+    )
+
+
+def _render_semantic(items) -> str:
+    if not items:
+        return ""
+    lines = [f"### Semantic memories ({len(items)} entries)"]
+    for m in items:
+        lines.append(f"- [{m.id[:8]}] {_truncate(m.content)}")
+    return "\n".join(lines)
+
+
+def _render_reflection_bucket(name: str, items) -> str:
+    if not items:
+        return ""
+    lines = [f"### Reflections — {name}"]
+    for item in items:
+        lines.append(f"**{item['title']}**")
+        lines.append(f"_{item['use_cases']}_")
+        for hint in item.get("hints", []):
+            lines.append(f"- {_truncate(hint)}")
+        lines.append(f"_id: {item['id']}_")
+        lines.append("")
+    return "\n".join(lines)
+
 
 @dataclass(frozen=True)
 class BootstrapResult:
@@ -89,8 +133,32 @@ class SessionBootstrapService:
             "neutral": len(buckets["neutral"]),
         }
 
+        sections: list[str] = [
+            _render_header(
+                project=project,
+                source=coerced_source,
+                action=action,
+                episode_id=episode_id,
+            ),
+        ]
+        sem_section = _render_semantic(semantic)
+        if sem_section:
+            sections.append(sem_section)
+        do_section = _render_reflection_bucket("do (prior wins)", buckets["do"])
+        if do_section:
+            sections.append(do_section)
+        dont_section = _render_reflection_bucket("dont (approaches to avoid)", buckets["dont"])
+        if dont_section:
+            sections.append(dont_section)
+        neutral_section = _render_reflection_bucket("neutral (context)", buckets["neutral"])
+        if neutral_section:
+            sections.append(neutral_section)
+        sections.append(_FOOTER)
+
+        rendered = "\n\n".join(sections)
+
         return BootstrapResult(
-            additional_context="",  # filled in Task 5
+            additional_context=rendered,
             project=project,
             source=coerced_source,
             episode_id=episode_id,

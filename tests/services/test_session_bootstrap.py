@@ -147,3 +147,38 @@ def test_bootstrap_counts_retrieved_rows(conn, git_repo: Path) -> None:
     assert result.reflections_counts["do"] == 2     # project + general
     assert result.reflections_counts["dont"] == 1
     assert result.reflections_counts["neutral"] == 0
+
+
+def test_render_includes_header_with_project_source_episode(conn, git_repo: Path) -> None:
+    svc = SessionBootstrapService(conn)
+    result = svc.bootstrap(source="startup", session_id="sess-h", cwd=git_repo)
+
+    text = result.additional_context
+    assert "## better-memory: session bootstrap" in text
+    assert "Project: demo-repo" in text
+    assert "Source: startup" in text
+    assert "Episode: opened" in text
+
+
+def test_render_includes_semantic_and_reflections_sections(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    _seed_semantic(conn, content="my-fact", project=proj, scope="project")
+    _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    svc = SessionBootstrapService(conn)
+
+    text = svc.bootstrap(source="startup", session_id="sess-r2", cwd=git_repo).additional_context
+
+    assert "Semantic memories (1 entries)" in text
+    assert "my-fact" in text
+    assert "Reflections — do (prior wins)" in text
+
+
+def test_render_omits_empty_sections(conn, git_repo: Path) -> None:
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="sess-empty", cwd=git_repo).additional_context
+
+    assert "Semantic memories" not in text
+    assert "Reflections" not in text
+    # but the header and footer should still render
+    assert "## better-memory: session bootstrap" in text
+    assert "memory_record_use" in text  # footer
