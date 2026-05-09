@@ -422,3 +422,62 @@ class TestReflectionPromote:
         assert response.status_code == 409
         body = response.get_data(as_text=True)
         assert "card-error" in body
+
+
+class TestReflectionDrawerScope:
+    def test_drawer_shows_scope_meta_and_promote_button_for_active_project(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", status="pending_review", scope="project",
+        )
+        response = client.get("/reflections/r-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        # Scope meta row visible.
+        assert "Scope" in body
+        assert ">project<" in body
+        # Promote button rendered.
+        assert "Promote to general" in body
+        assert "action-promote" in body
+        assert "/reflections/r-1/promote" in body
+
+    def test_drawer_hides_promote_button_when_already_general(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", status="pending_review", scope="general",
+        )
+        response = client.get("/reflections/r-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        # Scope meta row still visible (now general).
+        assert "Scope" in body
+        assert ">general<" in body
+        # No promote button.
+        assert "Promote to general" not in body
+        assert "action-promote" not in body
+
+    def test_drawer_hides_promote_button_when_retired(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", status="retired", scope="project",
+        )
+        response = client.get("/reflections/r-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        # Scope meta row still visible.
+        assert "Scope" in body
+        # No promote button (existing actions block already hidden on retired).
+        assert "Promote to general" not in body
+        assert "action-promote" not in body
