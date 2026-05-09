@@ -34,11 +34,18 @@ class HookSpec:
 
 
 _OUR_HOOKS: tuple[HookSpec, ...] = (
-    HookSpec("better_memory.hooks.session_start",    "SessionStart", None,              False),
-    HookSpec("better_memory.hooks.session_retrieve", "SessionStart", None,              False),
-    HookSpec("better_memory.hooks.observer",         "PostToolUse",  "Write|Edit|Bash", True),
-    HookSpec("better_memory.hooks.session_close",    "Stop",         None,              True),
+    HookSpec("better_memory.hooks.session_bootstrap", "SessionStart", None,              False),
+    HookSpec("better_memory.hooks.observer",          "PostToolUse",  "Write|Edit|Bash", True),
+    HookSpec("better_memory.hooks.session_close",     "Stop",         None,              True),
 )
+
+# Module paths that are no longer registered but may be present in users'
+# settings.json from prior installs. Scrubbed by the REMOVE pass on every
+# install so upgrades land cleanly.
+_LEGACY_HOOK_MODULES: frozenset[str] = frozenset({
+    "better_memory.hooks.session_start",
+    "better_memory.hooks.session_retrieve",
+})
 
 
 # ---------------------------------------------------------- pure merge: claude
@@ -103,6 +110,7 @@ def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
     config = dict(existing)
     hooks = dict(config.get("hooks", {}))
     our_module_paths = {spec.module for spec in _OUR_HOOKS}
+    strip_modules = our_module_paths | _LEGACY_HOOK_MODULES
 
     # Pass 1: REMOVE
     for event_name in list(hooks.keys()):
@@ -110,7 +118,7 @@ def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
         for group in hooks[event_name]:
             kept_hooks = [
                 h for h in group.get("hooks", [])
-                if not any(mp in h.get("command", "") for mp in our_module_paths)
+                if not any(mp in h.get("command", "") for mp in strip_modules)
             ]
             if kept_hooks:
                 new_group = dict(group)
