@@ -1292,3 +1292,35 @@ class ReflectionService:
             (use_cases, json.dumps(hint_list), now, reflection_id),
         )
         self._conn.commit()
+
+    def promote_to_general(self, *, reflection_id: str) -> None:
+        """project → general; idempotent on already-general; raise on retired/superseded.
+
+        Mirrors the no-op-on-already-target semantics of ``confirm`` and
+        ``retire``: when the reflection is already general we return
+        without bumping ``updated_at`` so audit trails stay honest.
+
+        Status guard matches the UI gate in the drawer template — the
+        button is hidden on retired/superseded, but we enforce server
+        side too in case of direct API calls.
+        """
+        row = self._conn.execute(
+            "SELECT scope, status FROM reflections WHERE id = ?",
+            (reflection_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Reflection not found: {reflection_id}")
+        status = row["status"]
+        if status not in ("pending_review", "confirmed"):
+            raise ValueError(
+                f"Cannot promote reflection in status {status!r}"
+            )
+        if row["scope"] == "general":
+            return
+        now = self._clock().isoformat()
+        self._conn.execute(
+            "UPDATE reflections SET scope = 'general', updated_at = ? "
+            "WHERE id = ?",
+            (now, reflection_id),
+        )
+        self._conn.commit()

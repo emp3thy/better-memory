@@ -28,14 +28,17 @@ def fixed_clock():
     return lambda: fixed
 
 
-def _seed_reflection(conn, reflection_id: str, status: str = "pending_review") -> None:
+def _seed_reflection(
+    conn, reflection_id: str, status: str = "pending_review",
+    *, scope: str = "project",
+) -> None:
     conn.execute(
         "INSERT INTO reflections "
         "(id, title, project, phase, polarity, use_cases, hints, "
-        "confidence, status, created_at, updated_at) "
+        "confidence, status, scope, created_at, updated_at) "
         "VALUES (?, ?, 'proj-a', 'general', 'do', 'old uc', 'old h', "
-        "0.7, ?, '2026-04-25T00:00:00+00:00', '2026-04-25T00:00:00+00:00')",
-        (reflection_id, f"title-{reflection_id}", status),
+        "0.7, ?, ?, '2026-04-25T00:00:00+00:00', '2026-04-25T00:00:00+00:00')",
+        (reflection_id, f"title-{reflection_id}", status, scope),
     )
     conn.commit()
 
@@ -228,3 +231,58 @@ class TestUpdateText:
         # this through json.loads at retrieve_reflections / _apply_augment.
         decoded = json.loads(row["hints"])
         assert decoded == ["hint a", "hint b"]
+
+
+class TestPromoteToGeneral:
+    def test_promotes_pending_review_project_to_general(self, conn, fixed_clock):
+        _seed_reflection(conn, "r1", status="pending_review", scope="project")
+        svc = ReflectionService(conn, clock=fixed_clock)
+
+        svc.promote_to_general(reflection_id="r1")
+
+        row = conn.execute(
+            "SELECT scope, updated_at FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        assert row["scope"] == "general"
+        assert row["updated_at"] == "2026-04-26T12:00:00+00:00"
+
+    def test_promotes_confirmed_project_to_general(self, conn, fixed_clock):
+        _seed_reflection(conn, "r1", status="confirmed", scope="project")
+        svc = ReflectionService(conn, clock=fixed_clock)
+
+        svc.promote_to_general(reflection_id="r1")
+
+        row = conn.execute(
+            "SELECT scope FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        assert row["scope"] == "general"
+
+    def test_promote_is_idempotent_on_already_general(self, conn, fixed_clock):
+        _seed_reflection(conn, "r1", status="pending_review", scope="general")
+        svc = ReflectionService(conn, clock=fixed_clock)
+
+        svc.promote_to_general(reflection_id="r1")
+
+        row = conn.execute(
+            "SELECT scope, updated_at FROM reflections WHERE id = ?", ("r1",)
+        ).fetchone()
+        assert row["scope"] == "general"
+        # No-op: updated_at NOT bumped (matches confirm/retire idempotency).
+        assert row["updated_at"] == "2026-04-25T00:00:00+00:00"
+
+    def test_raises_when_reflection_does_not_exist(self, conn, fixed_clock):
+        svc = ReflectionService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="Reflection not found"):
+            svc.promote_to_general(reflection_id="nope")
+
+    def test_raises_when_retired(self, conn, fixed_clock):
+        _seed_reflection(conn, "r1", status="retired", scope="project")
+        svc = ReflectionService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="Cannot promote reflection in status 'retired'"):
+            svc.promote_to_general(reflection_id="r1")
+
+    def test_raises_when_superseded(self, conn, fixed_clock):
+        _seed_reflection(conn, "r1", status="superseded", scope="project")
+        svc = ReflectionService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="Cannot promote reflection in status 'superseded'"):
+            svc.promote_to_general(reflection_id="r1")
