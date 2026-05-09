@@ -1110,7 +1110,7 @@ class ReflectionSynthesisService:
         tech: str | None = None,
         phase: str | None = None,
         polarity: str | None = None,
-        limit_per_bucket: int = 20,
+        limit_per_bucket: int | None = 20,
     ) -> dict[str, list[dict]]:
         """Return reflections bucketed by polarity, ordered by confidence DESC.
 
@@ -1120,6 +1120,9 @@ class ReflectionSynthesisService:
         - ``phase``: optional exact match.
         - ``polarity``: optional exact match; non-matching buckets remain empty.
         - ``limit_per_bucket``: cap each polarity bucket. Default 20 per spec §7.
+          Pass ``None`` to disable the cap (returns every matching row per
+          bucket); used by SessionBootstrapService which injects all
+          reflections at session start.
 
         Excludes retired and superseded reflections. Includes pending_review
         + confirmed.
@@ -1155,7 +1158,7 @@ class ReflectionSynthesisService:
         buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
         for r in rows:
             bucket = buckets[r["polarity"]]
-            if len(bucket) >= limit_per_bucket:
+            if limit_per_bucket is not None and len(bucket) >= limit_per_bucket:
                 continue
             bucket.append({
                 "id": r["id"],

@@ -905,6 +905,21 @@ class TestRetrieveReflectionsLimit:
         result = svc.retrieve_reflections(project="p", limit_per_bucket=3)
         assert [r["id"] for r in result["do"]] == ["r-0", "r-1", "r-2"]
 
+    def test_retrieve_reflections_unlimited_bucket(self, conn, fixed_clock):
+        """limit_per_bucket=None returns every matching reflection."""
+        # Seed 25 confirmed 'do' reflections (more than default cap of 20).
+        for i in range(25):
+            _insert_reflection(
+                conn, refl_id=f"r-{i}", project="p", polarity="do",
+                status="confirmed", confidence=0.9,
+            )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p", limit_per_bucket=None)
+
+        assert len(result["do"]) == 25
+
 
 class TestStatusChangedAtOnTransition:
     def test_apply_new_bumps_status_changed_at(self, conn, fixed_clock):
