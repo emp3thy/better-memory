@@ -2,9 +2,9 @@
 
 Invoked by ``scripts/setup.sh`` after the filesystem-layout step. Merges
 canonical entries into ``~/.claude.json`` (MCP server) and
-``~/.claude/settings.json`` (4 hooks). Idempotent: running twice produces
-the same end state. Smart-merge: user's customizations (custom env values,
-non-better-memory hooks) are preserved.
+``~/.claude/settings.json`` (the configured hooks). Idempotent: running
+twice produces the same end state. Smart-merge: user's customizations
+(custom env values, non-better-memory hooks) are preserved.
 
 Public CLI: ``python -m better_memory.cli.install_hooks --venv-py X
 --venv-pyw Y --home Z``.
@@ -95,12 +95,13 @@ def _hook_entry(spec: HookSpec, venv_pyw: str) -> dict:
 
 
 def merge_settings_json(existing: dict, *, venv_pyw: str) -> dict:
-    """Smart-merge the four hook entries into ~/.claude/settings.json content.
+    """Smart-merge our hook entries into ~/.claude/settings.json content.
 
     Two-pass strategy:
     1. REMOVE — walk every event's every matcher-group's every hook. If the
-       hook's ``command`` contains any of our 4 module paths, strip it.
-       Drop matcher-groups whose ``hooks`` array is empty after removal.
+       hook's ``command`` contains any current or legacy better-memory module
+       path, strip it. Drop matcher-groups whose ``hooks`` array is empty
+       after removal.
     2. ADD — append canonical matcher-groups at the end of each event's
        array. SessionStart pair shares one group; PostToolUse and Stop
        each get their own group.
