@@ -76,7 +76,7 @@ def test_hook_handles_malformed_json(home_with_schema, git_cwd):
     assert "Source: startup" in out["hookSpecificOutput"]["additionalContext"]
 
 
-def test_hook_falls_back_on_db_failure(tmp_path, git_cwd, monkeypatch):
+def test_hook_falls_back_on_db_failure(tmp_path, git_cwd):
     # Point at a directory instead of a DB file → connect / migrations should fail.
     bad_home = tmp_path / "bad-home"
     bad_home.mkdir()
@@ -90,3 +90,51 @@ def test_hook_falls_back_on_db_failure(tmp_path, git_cwd, monkeypatch):
     text = out["hookSpecificOutput"]["additionalContext"]
     assert "session bootstrap failed" in text
     assert "memory_session_bootstrap" in text
+
+
+def test_hook_handles_oversized_stdin(home_with_schema, git_cwd):
+    # Pipe ~1.5 MiB of garbage. Hook must drop it and proceed with defaults.
+    big = "x" * (1_572_864)  # 1.5 MiB
+    proc = _run_hook(home_with_schema, stdin=big, cwd=git_cwd)
+
+    assert proc.returncode == 0
+    out = json.loads(proc.stdout)
+    # Defaults applied (source=startup); render must include the bootstrap header.
+    text = out["hookSpecificOutput"]["additionalContext"]
+    assert "## better-memory: session bootstrap" in text
+    assert "Source: startup" in text
+
+
+def test_hook_session_id_resolves_from_env_var(home_with_schema, git_cwd):
+    # Ensure env var leg of the session_id resolution chain is exercised.
+    env_overrides = {"CLAUDE_SESSION_ID": "env-fixed-id"}
+    env = {**os.environ, "BETTER_MEMORY_HOME": str(home_with_schema), **env_overrides}
+
+    proc1 = subprocess.run(
+        [sys.executable, "-m", "better_memory.hooks.session_bootstrap"],
+        input="",
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+        cwd=str(git_cwd),
+    )
+    assert proc1.returncode == 0
+    out1 = json.loads(proc1.stdout)
+    text1 = out1["hookSpecificOutput"]["additionalContext"]
+    assert "Episode: opened" in text1
+
+    # Second invocation with the same env var should reuse the episode.
+    proc2 = subprocess.run(
+        [sys.executable, "-m", "better_memory.hooks.session_bootstrap"],
+        input="",
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+        cwd=str(git_cwd),
+    )
+    assert proc2.returncode == 0
+    out2 = json.loads(proc2.stdout)
+    text2 = out2["hookSpecificOutput"]["additionalContext"]
+    assert "Episode: reused" in text2
