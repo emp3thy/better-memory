@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -351,11 +352,12 @@ def test_detect_languages_skips_vendor_dirs(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_project_for_defaults_to_cwd_name(tmp_path: Path) -> None:
+def test_project_for_defaults_to_general_outside_git(tmp_path: Path) -> None:
+    """Outside any git tree (and with no override file), project_for returns 'general'."""
     cwd = tmp_path / "my-service"
     cwd.mkdir()
     service = KnowledgeService.__new__(KnowledgeService)  # type: ignore[call-arg]
-    assert KnowledgeService.project_for(service, cwd) == "my-service"
+    assert KnowledgeService.project_for(service, cwd) == "general"
 
 
 def test_project_for_override_via_dot_better_memory(tmp_path: Path) -> None:
@@ -379,6 +381,10 @@ def test_load_session_returns_standards_languages_project(
     cwd = tmp_path / "auth"
     cwd.mkdir()
     (cwd / "pyproject.toml").write_text("[project]\nname='auth'\n", encoding="utf-8")
+    # project_name() now resolves via `git rev-parse --git-common-dir`, so the
+    # cwd must be inside a git tree for project='auth' to be picked up. Init a
+    # bare repo here so the dir's `.name` (='auth') becomes the project.
+    subprocess.run(["git", "init", "--quiet"], cwd=str(cwd), check=True)
 
     load = service.load_session(cwd)
     assert isinstance(load, SessionLoad)

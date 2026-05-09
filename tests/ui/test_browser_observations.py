@@ -7,13 +7,10 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Page, expect
 
+from better_memory.config import project_name
 from better_memory.db.connection import connect
 
 pytest_plugins = ["tests.ui.conftest_browser"]
-
-
-def _project_name() -> str:
-    return Path.cwd().name
 
 
 def _seed_episode(db_path: Path, *, eid: str = "ep-1") -> None:
@@ -22,7 +19,7 @@ def _seed_episode(db_path: Path, *, eid: str = "ep-1") -> None:
         conn.execute(
             "INSERT INTO episodes (id, project, started_at) "
             "VALUES (?, ?, '2026-04-26T10:00:00+00:00')",
-            (eid, _project_name()),
+            (eid, project_name()),
         )
         conn.commit()
     finally:
@@ -47,7 +44,7 @@ def _seed_obs(
             "VALUES "
             "(?, ?, ?, ?, 'bug', ?, ?, 'ep-1', "
             " '2026-04-26T10:00:00+00:00')",
-            (oid, content, _project_name(), component, outcome, status),
+            (oid, content, project_name(), component, outcome, status),
         )
         conn.commit()
     finally:

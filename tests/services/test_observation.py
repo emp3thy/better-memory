@@ -169,16 +169,20 @@ async def test_create_project_argument_overrides_resolver(
     assert row["project"] == "other-proj"
 
 
-async def test_create_defaults_project_to_cwd_name_when_no_resolver(
+async def test_create_defaults_project_to_project_name_when_no_resolver(
     conn: sqlite3.Connection, fixed_clock: Any
 ) -> None:
+    """Without an explicit project_resolver, the service falls back to the
+    module-level :func:`better_memory.config.project_name` for the current cwd."""
+    from better_memory.config import project_name
+
     embedder = _StubEmbedder()
     svc = ObservationService(conn, embedder, clock=fixed_clock, session_id="s", episodes=EpisodeService(conn))
     obs_id = await svc.create("no resolver")
     row = conn.execute(
         "SELECT project FROM observations WHERE id = ?", (obs_id,)
     ).fetchone()
-    assert row["project"] == Path.cwd().name
+    assert row["project"] == project_name()
 
 
 async def test_create_populates_fts_via_trigger(

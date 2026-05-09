@@ -98,6 +98,16 @@ Manually trigger the retention service. (Auto-fires on `memory.retrieve` once pe
 
 Spawn or reuse the management UI. Returns `{"url": "...", "reused": bool}`.
 
+### `memory.session_bootstrap`
+
+Open or reuse a session episode and inject all project + general semantic memories and reflections as `additionalContext` markdown. Mirrors what the SessionStart hook does; callable manually for recovery, testing, or post-`/clear` re-injection.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `source` | `startup` / `resume` / `clear` / `compact` | optional | SessionStart payload source. Unknown values coerce to `startup` inside the service. |
+| `session_id` | string | optional | Optional SessionStart payload `session_id`. Defaults to `$CLAUDE_SESSION_ID` env var, or a fresh UUID. |
+| `cwd` | string | optional | Optional working directory. Defaults to the server's process cwd. |
+
 ## Semantic memory tools
 
 Episodic observations (`memory.observe`) record what happened during a session. Semantic memories are different: user-stated facts and preferences that should surface every session.

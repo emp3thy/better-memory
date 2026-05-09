@@ -1,0 +1,240 @@
+"""Unit tests for SessionBootstrapService."""
+from __future__ import annotations
+
+import json
+import subprocess
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from better_memory.db.connection import connect
+from better_memory.db.schema import apply_migrations
+from better_memory.services.session_bootstrap import SessionBootstrapService
+
+_MIGRATIONS = Path(__file__).resolve().parents[2] / "better_memory" / "db" / "migrations"
+
+
+def _seed_semantic(conn, *, content: str, project: str, scope: str) -> str:
+    mid = uuid.uuid4().hex
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO semantic_memories "
+        "(id, content, project, scope, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (mid, content, project, scope, now, now),
+    )
+    conn.commit()
+    return mid
+
+
+def _seed_reflection(conn, *, project: str, polarity: str, scope: str = "project") -> str:
+    rid = uuid.uuid4().hex
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, tech, phase, polarity, use_cases, hints, "
+        " confidence, status, evidence_count, created_at, updated_at, scope) "
+        "VALUES (?, 't', ?, NULL, 'implementation', ?, 'uc', ?, 0.9, "
+        " 'confirmed', 1, ?, ?, ?)",
+        (rid, project, polarity, json.dumps(["h"]), now, now, scope),
+    )
+    conn.commit()
+    return rid
+
+
+def _seed_reflection_hints(
+    conn, *, project: str, polarity: str, hints: list[str], scope: str = "project"
+) -> str:
+    rid = uuid.uuid4().hex
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, tech, phase, polarity, use_cases, hints, "
+        " confidence, status, evidence_count, created_at, updated_at, scope) "
+        "VALUES (?, 't', ?, NULL, 'implementation', ?, 'uc', ?, 0.9, "
+        " 'confirmed', 1, ?, ?, ?)",
+        (rid, project, polarity, json.dumps(hints), now, now, scope),
+    )
+    conn.commit()
+    return rid
+
+
+@pytest.fixture
+def conn(tmp_path: Path):
+    db = tmp_path / "memory.db"
+    c = connect(db)
+    apply_migrations(c, migrations_dir=_MIGRATIONS)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "demo-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=str(repo), check=True)
+    return repo
+
+
+def test_startup_source_opens_new_episode(conn, git_repo: Path) -> None:
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source="startup", session_id="sess-1", cwd=git_repo)
+
+    assert result.project == "demo-repo"
+    assert result.source == "startup"
+    assert result.episode_action == "opened"
+    assert result.episode_id  # non-empty
+
+
+def test_compact_with_existing_episode_reuses(conn, git_repo: Path) -> None:
+    svc = SessionBootstrapService(conn)
+    first = svc.bootstrap(source="startup", session_id="sess-2", cwd=git_repo)
+
+    second = svc.bootstrap(source="compact", session_id="sess-2", cwd=git_repo)
+
+    assert second.episode_action == "reused"
+    assert second.episode_id == first.episode_id
+    assert second.source == "compact"
+
+
+def test_resume_with_no_existing_episode_opens(conn, git_repo: Path) -> None:
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source="resume", session_id="sess-cold", cwd=git_repo)
+
+    assert result.episode_action == "opened"
+    assert result.source == "resume"
+
+
+@pytest.mark.parametrize("bad_source", ["", "unknown", None, "STARTUP"])
+def test_bad_source_coerces_to_startup(conn, git_repo: Path, bad_source) -> None:
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source=bad_source, session_id="sess-x", cwd=git_repo)
+
+    assert result.source == "startup"
+
+
+def test_cwd_not_in_git_uses_general_scope(conn, tmp_path: Path) -> None:
+    nongit = tmp_path / "loose"
+    nongit.mkdir()
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source="startup", session_id="sess-g", cwd=nongit)
+
+    assert result.project == "general"
+
+
+def test_general_project_excludes_project_scope_general_rows(
+    conn, tmp_path: Path
+) -> None:
+    """Spec §6 corner case: when project resolves to 'general', the default
+    union (project = ? OR scope = 'general') would also pull rows tagged
+    project='general', scope='project'. scope_filter='general' excludes them.
+    """
+    nongit = tmp_path / "loose"
+    nongit.mkdir()
+    # Corner case row: project='general', scope='project' — MUST be excluded.
+    _seed_semantic(conn, content="gen-proj", project="general", scope="project")
+    # Cross-project general row — MUST be included.
+    _seed_semantic(conn, content="other-gen", project="unrelated", scope="general")
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source="startup", session_id="sess-g-r", cwd=nongit)
+
+    assert result.project == "general"
+    assert result.semantic_count == 1
+
+
+def test_bootstrap_counts_retrieved_rows(conn, git_repo: Path) -> None:
+    proj = git_repo.name  # demo-repo
+    _seed_semantic(conn, content="proj-a", project=proj, scope="project")
+    _seed_semantic(conn, content="gen-a", project="anything", scope="general")
+    _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    _seed_reflection(conn, project=proj, polarity="dont", scope="project")
+    _seed_reflection(conn, project="anything", polarity="do", scope="general")
+    svc = SessionBootstrapService(conn)
+
+    result = svc.bootstrap(source="startup", session_id="sess-r", cwd=git_repo)
+
+    assert result.semantic_count == 2  # 1 project + 1 general
+    assert result.reflections_counts["do"] == 2     # project + general
+    assert result.reflections_counts["dont"] == 1
+    assert result.reflections_counts["neutral"] == 0
+
+
+def test_render_includes_header_with_project_source_episode(conn, git_repo: Path) -> None:
+    svc = SessionBootstrapService(conn)
+    result = svc.bootstrap(source="startup", session_id="sess-h", cwd=git_repo)
+
+    text = result.additional_context
+    assert "## better-memory: session bootstrap" in text
+    assert "Project: demo-repo" in text
+    assert "Source: startup" in text
+    assert "Episode: opened" in text
+
+
+def test_render_includes_semantic_and_reflections_sections(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    _seed_semantic(conn, content="my-fact", project=proj, scope="project")
+    _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    svc = SessionBootstrapService(conn)
+
+    text = svc.bootstrap(source="startup", session_id="sess-r2", cwd=git_repo).additional_context
+
+    assert "Semantic memories (1 entries)" in text
+    assert "my-fact" in text
+    assert "Reflections — do (prior wins)" in text
+
+
+def test_render_omits_empty_sections(conn, git_repo: Path) -> None:
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="sess-empty", cwd=git_repo).additional_context
+
+    assert "Semantic memories" not in text
+    assert "Reflections" not in text
+    # but the header and footer should still render
+    assert "## better-memory: session bootstrap" in text
+    assert "memory_record_use" in text  # footer
+
+
+def test_render_truncates_long_hints(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    long_hint = "x" * 700
+    _seed_reflection_hints(conn, project=proj, polarity="do", hints=[long_hint])
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="t-trunc", cwd=git_repo).additional_context
+    assert "x" * 700 not in text
+    assert "…" in text
+    # The truncated form must be exactly 600 chars (599 x + 1 ellipsis).
+    # Confirm by checking that 599 x's followed by … is in the output.
+    assert ("x" * 599 + "…") in text
+
+
+def test_render_multi_item_bucket(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    rid1 = _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    rid2 = _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="t-multi", cwd=git_repo).additional_context
+
+    # Both ids appear.
+    assert f"_id: {rid1}_" in text
+    assert f"_id: {rid2}_" in text
+    # Header appears exactly once.
+    assert text.count("### Reflections — do (prior wins)") == 1
+
+
+def test_render_bucket_isolation(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    _seed_reflection(conn, project=proj, polarity="do", scope="project")
+    svc = SessionBootstrapService(conn)
+    text = svc.bootstrap(source="startup", session_id="t-iso", cwd=git_repo).additional_context
+
+    # Only the do bucket header appears; dont and neutral are empty so absent.
+    assert "Reflections — do (prior wins)" in text
+    assert "Reflections — dont (approaches to avoid)" not in text
+    assert "Reflections — neutral (context)" not in text

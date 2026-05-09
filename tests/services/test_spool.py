@@ -358,95 +358,16 @@ def test_drain_defaults_spool_dir_from_config(
     assert (tmp_path / "bm" / "spool").exists()
 
 
-class TestDrainSessionStartEvents:
-    """Phase 3: drain lazy-opens a background episode for session_start markers."""
+class TestDrainBenignSessionStartHistory:
+    """Pre-existing ``session_start`` markers parse + insert without side-effect.
 
-    def test_drain_opens_background_episode_for_session_start(
-        self, tmp_memory_db: Path, tmp_path: Path
-    ) -> None:
-        from better_memory.db.connection import connect
-        from better_memory.db.schema import apply_migrations
-        from better_memory.services.episode import EpisodeService
-        from better_memory.services.spool import SpoolService
-
-        spool = tmp_path / "spool"
-        spool.mkdir()
-        # Write a session_start marker to the spool.
-        marker = {
-            "event_type": "session_start",
-            "timestamp": "2026-04-21T10:00:00+00:00",
-            "session_id": "sess-new",
-            "cwd": "/some/project-xyz",
-            "project": "project-xyz",
-        }
-        (spool / "2026-04-21_session_start_abc.json").write_text(
-            __import__("json").dumps(marker), encoding="utf-8"
-        )
-
-        conn = connect(tmp_memory_db)
-        apply_migrations(conn)
-        try:
-            episodes = EpisodeService(conn)
-            svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
-            report = svc.drain()
-            assert report.drained == 1
-            assert report.quarantined == 0
-
-            # Episode should now exist bound to the session.
-            active = episodes.active_episode("sess-new")
-            assert active is not None
-            assert active.project == "project-xyz"
-            assert active.goal is None  # background
-        finally:
-            conn.close()
-
-    def test_drain_skips_session_start_when_episode_already_active(
-        self, tmp_memory_db: Path, tmp_path: Path
-    ) -> None:
-        """Idempotent: drain doesn't create a second episode for the same session."""
-        from better_memory.db.connection import connect
-        from better_memory.db.schema import apply_migrations
-        from better_memory.services.episode import EpisodeService
-        from better_memory.services.spool import SpoolService
-
-        spool = tmp_path / "spool"
-        spool.mkdir()
-        marker = {
-            "event_type": "session_start",
-            "timestamp": "2026-04-21T10:00:00+00:00",
-            "session_id": "sess-existing",
-            "cwd": "/some/p",
-            "project": "p",
-        }
-        (spool / "m.json").write_text(
-            __import__("json").dumps(marker), encoding="utf-8"
-        )
-
-        conn = connect(tmp_memory_db)
-        apply_migrations(conn)
-        try:
-            episodes = EpisodeService(conn)
-            # Pre-open an episode for this session (simulates lazy-open
-            # having already happened via ObservationService.create).
-            pre_existing = episodes.open_background(
-                session_id="sess-existing", project="p"
-            )
-
-            svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
-            report = svc.drain()
-            assert report.drained == 1
-
-            # Only one episode total.
-            count = conn.execute(
-                "SELECT COUNT(*) AS c FROM episodes"
-            ).fetchone()["c"]
-            assert count == 1
-            # And it's still the pre-existing one.
-            active = episodes.active_episode("sess-existing")
-            assert active is not None
-            assert active.id == pre_existing
-        finally:
-            conn.close()
+    Task 9 removed the lazy-open ``_maybe_open_episode_for_session_start``
+    branch from drain. Episodes now open eagerly in the
+    ``session_bootstrap`` hook. Any ``session_start`` markers still sitting
+    in users' spool dirs (from before the migration) must remain benign:
+    they parse, insert into ``hook_events`` as history, and unlink on the
+    next drain — no episode is created.
+    """
 
     def test_drain_without_episodes_dependency_still_works(
         self, tmp_memory_db: Path, tmp_path: Path
@@ -489,10 +410,13 @@ class TestDrainSessionStartEvents:
         finally:
             conn.close()
 
-    def test_drain_session_close_does_not_touch_episodes(
+    def test_drain_session_start_with_episodes_does_not_open_episode(
         self, tmp_memory_db: Path, tmp_path: Path
     ) -> None:
-        """session_close still drains as before, does not side-effect on episodes."""
+        """Even with episodes injected, a session_start payload no longer
+        triggers lazy-open after Task 9. The marker drains benignly into
+        hook_events; the hook_events row remains the only artefact.
+        """
         from better_memory.db.connection import connect
         from better_memory.db.schema import apply_migrations
         from better_memory.services.episode import EpisodeService
@@ -501,10 +425,11 @@ class TestDrainSessionStartEvents:
         spool = tmp_path / "spool"
         spool.mkdir()
         marker = {
-            "event_type": "session_end",
+            "event_type": "session_start",
             "timestamp": "2026-04-21T10:00:00+00:00",
-            "session_id": "sess-y",
+            "session_id": "sess-stale",
             "cwd": "/p",
+            "project": "p",
         }
         (spool / "m.json").write_text(
             __import__("json").dumps(marker), encoding="utf-8"
@@ -517,11 +442,20 @@ class TestDrainSessionStartEvents:
             svc = SpoolService(conn, spool_dir=spool, episodes=episodes)
             report = svc.drain()
             assert report.drained == 1
-            # No episodes created or modified.
+            assert report.quarantined == 0
+
+            # No episode opened — the lazy-open path is gone.
+            assert episodes.active_episode("sess-stale") is None
             count = conn.execute(
                 "SELECT COUNT(*) AS c FROM episodes"
             ).fetchone()["c"]
             assert count == 0
+            # hook_events row is durable.
+            rows = conn.execute(
+                "SELECT event_type FROM hook_events"
+            ).fetchall()
+            assert len(rows) == 1
+            assert rows[0]["event_type"] == "session_start"
         finally:
             conn.close()
 

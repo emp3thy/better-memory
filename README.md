@@ -31,7 +31,7 @@ The script:
 3. Checks for Ollama; offers to install via `brew` / `apt` / `winget` if missing.
 4. Pulls `nomic-embed-text`.
 5. Creates `~/.better-memory/{spool,knowledge-base/...}`.
-6. Auto-installs the MCP server registration into `~/.claude.json` and the four hooks into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
+6. Auto-installs the MCP server registration into `~/.claude.json` and the three hooks (`session_bootstrap`, `observer`, `session_close`) into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
 
 If you'd rather inspect or hand-edit the config, see [Manual setup](#manual-setup) below.
 
@@ -66,7 +66,7 @@ Then add to `~/.claude.json` (user-scope MCP — create the file if it doesn't e
 
 And add hooks to `~/.claude/settings.json`:
 
-Two SessionStart hooks ship: `session_start` writes a spool marker so the MCP server can lazy-open a background episode for the session, and `session_retrieve` queries `memory.db` and injects the project's reflections (`do` / `dont` / `neutral` buckets) as `additionalContext` so Claude has prior memory available without needing to call `memory_retrieve` first. Both should be registered — Claude Code concatenates `additionalContext` across hooks.
+A single SessionStart hook ships: `session_bootstrap` opens (or reuses) a background episode for the session and injects the project's curated context — both project-scoped and general-scope semantic memories plus all distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext` so Claude has prior memory available without needing to call any retrieval tool first. The hook does its work in-process against `memory.db`; if it fails for any reason, a fallback directive is injected instructing Claude to call `mcp__better-memory__memory_session_bootstrap` manually.
 
 ```json
 {
@@ -76,11 +76,7 @@ Two SessionStart hooks ship: `session_start` writes a spool marker so the MCP se
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_start"
-          },
-          {
-            "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_retrieve"
+            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_bootstrap"
           }
         ]
       }
@@ -130,11 +126,20 @@ One env var roots the runtime filesystem layout:
 
 ### Project-name override
 
-Memory is bucketed by project name, derived from the cwd's leaf
-directory name (`Path.cwd().name`). For situations where the leaf name
-isn't right — multiple worktrees of the same logical project, or a
-deeply-nested cwd — drop a `.better-memory` file at the project root
-with a single line containing the desired project name:
+Memory is bucketed by project name, resolved in this order:
+
+1. **`.better-memory` override file** — if a `.better-memory` file
+   exists in the cwd, its first non-empty stripped line is used
+   verbatim. Use this only for the rare case where the git-derived
+   name isn't right.
+2. **Git common dir** — `git rev-parse --git-common-dir` resolves to
+   the main repo's `.git` directory even from inside a worktree, so
+   all worktrees of the same repo share one project bucket
+   automatically. The project name is the parent directory's name.
+3. **`general`** — fallback when the cwd isn't inside a git tree (or
+   git is unavailable).
+
+If you need an override (renamed repo, multi-repo monolith, etc.):
 
 ```bash
 echo "my-project" > .better-memory
@@ -149,7 +154,7 @@ despite the shared name.
 
 ## MCP tools
 
-The server registers 18 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
+The server registers 19 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
 
 **Episodic memory** — observations the AI writes during a session.
 
@@ -196,6 +201,7 @@ The server registers 18 tools, grouped below. Full schemas are in [`website/mcp-
 
 | Tool | Purpose |
 |---|---|
+| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. |
 | `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` | Apply spec §9 retention rules; archive or hard-delete. |
 | `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 

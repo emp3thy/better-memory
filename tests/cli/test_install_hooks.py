@@ -82,17 +82,16 @@ class TestMergeClaudeJson:
 
 
 class TestHookSpec:
-    """Sanity checks on the hook registry — pin the four expected entries."""
+    """Sanity checks on the hook registry — pin the three expected entries."""
 
-    def test_registry_has_four_entries(self) -> None:
-        assert len(_OUR_HOOKS) == 4
+    def test_registry_has_three_entries(self) -> None:
+        assert len(_OUR_HOOKS) == 3
 
-    def test_session_start_pair_is_session_start_event_no_matcher(self) -> None:
-        for spec in _OUR_HOOKS:
-            if spec.module.endswith(("session_start", "session_retrieve")):
-                assert spec.event == "SessionStart"
-                assert spec.matcher is None
-                assert spec.is_async is False
+    def test_session_bootstrap_is_session_start_event_no_matcher(self) -> None:
+        sb = next(s for s in _OUR_HOOKS if s.module.endswith("session_bootstrap"))
+        assert sb.event == "SessionStart"
+        assert sb.matcher is None
+        assert sb.is_async is False
 
     def test_observer_is_post_tool_use_with_matcher(self) -> None:
         observer = next(s for s in _OUR_HOOKS if s.module.endswith("observer"))
@@ -111,14 +110,13 @@ from better_memory.cli.install_hooks import merge_settings_json
 
 
 class TestMergeSettingsJson:
-    def test_empty_hooks_adds_all_four(self) -> None:
+    def test_empty_hooks_adds_all_three(self) -> None:
         out = merge_settings_json({}, venv_pyw="/venv/bin/pythonw")
         ss = out["hooks"]["SessionStart"]
-        assert len(ss) == 1  # one shared matcher-group
+        assert len(ss) == 1
         ss_hooks = ss[0]["hooks"]
         cmds = [h["command"] for h in ss_hooks]
-        assert any("better_memory.hooks.session_start" in c for c in cmds)
-        assert any("better_memory.hooks.session_retrieve" in c for c in cmds)
+        assert any("better_memory.hooks.session_bootstrap" in c for c in cmds)
 
         ptu = out["hooks"]["PostToolUse"]
         assert len(ptu) == 1
@@ -251,14 +249,13 @@ class TestMergeSettingsJson:
         # and is dropped. ADD pass adds a fresh canonical group.
         assert len(out["hooks"]["PostToolUse"]) == 1
 
-    def test_session_start_pair_shares_matcher_group(self) -> None:
+    def test_session_start_group_contains_session_bootstrap(self) -> None:
         out = merge_settings_json({}, venv_pyw="/p/pyw")
         ss = out["hooks"]["SessionStart"]
         assert len(ss) == 1
-        assert len(ss[0]["hooks"]) == 2
+        assert len(ss[0]["hooks"]) == 1
         modules = [h["command"] for h in ss[0]["hooks"]]
-        assert any("session_start" in m and "session_retrieve" not in m for m in modules)
-        assert any("session_retrieve" in m for m in modules)
+        assert any("session_bootstrap" in m for m in modules)
 
     def test_user_session_start_hook_preserved(self) -> None:
         existing = {
@@ -274,13 +271,13 @@ class TestMergeSettingsJson:
         }
         out = merge_settings_json(existing, venv_pyw="/p/pyw")
         ss = out["hooks"]["SessionStart"]
-        # User's group preserved, our pair appended in its own group.
+        # User's group preserved, our bootstrap appended in its own group.
         assert any(
             g["hooks"][0]["command"] == "echo user-on-start"
             for g in ss
         )
         assert any(
-            any("better_memory.hooks.session_start" in h["command"] for h in g["hooks"])
+            any("better_memory.hooks.session_bootstrap" in h["command"] for h in g["hooks"])
             for g in ss
         )
 
@@ -288,6 +285,51 @@ class TestMergeSettingsJson:
         first = merge_settings_json({}, venv_pyw="/p/pyw")
         second = merge_settings_json(first, venv_pyw="/p/pyw")
         assert first == second
+
+
+def test_merge_settings_strips_legacy_session_start_and_session_retrieve():
+    """Re-running install_hooks after upgrade scrubs the two old hook entries."""
+    from better_memory.cli.install_hooks import merge_settings_json
+
+    legacy_pyw = "C:/old/pythonw.exe"
+    existing = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {"type": "command",
+                         "command": f'"{legacy_pyw}" -m better_memory.hooks.session_start'},
+                        {"type": "command",
+                         "command": f'"{legacy_pyw}" -m better_memory.hooks.session_retrieve'},
+                    ],
+                },
+            ],
+        },
+    }
+    new_pyw = "C:/new/pythonw.exe"
+
+    result = merge_settings_json(existing, venv_pyw=new_pyw)
+
+    session_start_groups = result["hooks"]["SessionStart"]
+    flattened = [
+        h["command"]
+        for g in session_start_groups
+        for h in g["hooks"]
+    ]
+    assert all("session_start" not in c or "session_bootstrap" in c for c in flattened)
+    assert all("session_retrieve" not in c for c in flattened)
+    assert any("session_bootstrap" in c for c in flattened)
+
+
+def test_merge_settings_writes_single_session_bootstrap_entry_on_empty():
+    from better_memory.cli.install_hooks import merge_settings_json
+
+    result = merge_settings_json({}, venv_pyw="/tmp/pythonw")
+
+    groups = result["hooks"]["SessionStart"]
+    assert len(groups) == 1
+    assert len(groups[0]["hooks"]) == 1
+    assert "session_bootstrap" in groups[0]["hooks"][0]["command"]
 
 
 from pathlib import Path

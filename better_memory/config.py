@@ -17,7 +17,9 @@ vars because they're orthogonal to path layout.
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 _DEFAULT_HOME = "~/.better-memory"
@@ -31,22 +33,85 @@ def resolve_home() -> Path:
     return Path(raw).expanduser()
 
 
+@lru_cache(maxsize=128)
+def _resolve_git_project(cwd_str: str) -> str | None:
+    """Resolve the git repo's main directory name for ``cwd_str``.
+
+    Runs ``git rev-parse --git-common-dir`` and returns the parent directory's
+    ``.name`` (which handles worktrees: ``--git-common-dir`` resolves to the
+    main repo's ``.git``). Returns ``None`` when ``cwd_str`` is not inside a
+    git tree, when git is unavailable, or when output is unusable.
+
+    Memoized by absolute path string so the ~30 ms subprocess hit only
+    happens once per process per directory. Callers must pass the resolved
+    absolute path so equivalent paths share a cache slot.
+
+    On Windows, ``creationflags=CREATE_NO_WINDOW`` suppresses the console
+    window flash that would otherwise occur for each invocation when Claude
+    Code runs as a GUI process.
+
+    Catches ``OSError`` (covers ``FileNotFoundError`` for missing git, plus
+    ``PermissionError`` for Windows ACL edge cases) alongside
+    ``subprocess.SubprocessError`` (timeouts, etc.).
+    """
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd_str, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            **kwargs,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    common_dir_str = result.stdout.strip()
+    if not common_dir_str:
+        return None
+
+    common_dir = Path(common_dir_str)
+    if not common_dir.is_absolute():
+        common_dir = (Path(cwd_str) / common_dir).resolve()
+
+    repo_root = common_dir.parent
+    return repo_root.name or None
+
+
 def project_name(cwd: Path | None = None) -> str:
     """Return the canonical project name for ``cwd`` (defaults to ``Path.cwd()``).
 
-    A ``<cwd>/.better-memory`` file overrides the default ``cwd.name``: the
-    first non-empty stripped line is used. Used uniformly by knowledge
-    search, observation writes/reads, episode scoping, the UI panel filter,
-    and hook payloads — every subsystem that buckets state by project must
-    call this helper, never construct the name inline.
+    Resolution order:
+    1. ``<cwd>/.better-memory`` override file: first non-empty stripped line.
+       The ``.better-memory`` override is checked only at ``cwd``, not at
+       ancestors — the override is a deliberate per-directory signal.
+    2. ``git rev-parse --git-common-dir`` (handles worktrees: returns the main
+       repo's .git directory). Project name = parent dir's ``.name``.
+    3. ``"general"`` if no git tree is found or git is unavailable.
+
+    Used uniformly by knowledge search, observation writes/reads, episode
+    scoping, the UI panel filter, and hook payloads — every subsystem that
+    buckets state by project must call this helper, never construct the
+    name inline.
+
+    The override-file branch is intentionally **not** memoized so editing
+    ``.better-memory`` mid-session takes effect immediately. The git
+    resolution is memoized by absolute path via :func:`_resolve_git_project`.
     """
     cwd = cwd if cwd is not None else Path.cwd()
+
     override = cwd / ".better-memory"
     if override.is_file():
         text = override.read_text(encoding="utf-8").strip()
         if text:
             return text.splitlines()[0].strip()
-    return cwd.name
+
+    return _resolve_git_project(str(cwd.resolve())) or "general"
 
 
 def _resolve_str(env_var: str, default: str) -> str:

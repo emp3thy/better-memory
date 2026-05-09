@@ -14,7 +14,13 @@ One environment variable roots the runtime filesystem layout. Everything else ha
 
 ## Project-name override
 
-Memory is bucketed by project name, derived from the cwd's leaf directory name (`Path.cwd().name`). For situations where the leaf name isn't right — multiple worktrees of the same logical project, or a deeply-nested cwd — drop a `.better-memory` file at the project root with a single line containing the desired project name:
+Memory is bucketed by project name, resolved in this order:
+
+1. **`.better-memory` override file** — if a `.better-memory` file exists in the cwd, its first non-empty stripped line is used verbatim. Reserved for the rare case where the git-derived name isn't right.
+2. **Git common dir** — `git rev-parse --git-common-dir` resolves to the main repo's `.git` directory even from inside a worktree, so all worktrees of the same repo share one project bucket automatically. The project name is the parent directory's name.
+3. **`general`** — fallback when the cwd isn't inside a git tree (or git is unavailable).
+
+If you need an override (renamed repo, multi-repo monolith, etc.) drop a `.better-memory` file at the project root with a single line containing the desired project name:
 
 ```bash
 echo "my-project" > .better-memory
@@ -46,10 +52,9 @@ The two SQLite files are never shared between processes — the MCP server owns 
 
 ## Hooks
 
-Four Claude Code hooks ship with better-memory and read or write the filesystem layout above. They are installed automatically by `./scripts/setup.sh` (which calls `python -m better_memory.cli.install_hooks` to merge them idempotently into `~/.claude/settings.json`). The list below is reference material:
+Three Claude Code hooks ship with better-memory and read or write the filesystem layout above. They are installed automatically by `./scripts/setup.sh` (which calls `python -m better_memory.cli.install_hooks` to merge them idempotently into `~/.claude/settings.json`). The list below is reference material:
 
-- **`better_memory.hooks.session_start`** (SessionStart) — writes a marker JSON to `spool/` so the MCP server can lazy-open a background episode for the session.
-- **`better_memory.hooks.session_retrieve`** (SessionStart) — opens `memory.db` and injects the project's distilled reflections (`do` / `dont` / `neutral`, capped at 10 per bucket) as `additionalContext` for Claude's first turn. Failure-isolated: if injection breaks, a fallback directive is injected instead and the failure is recorded in the `hook_errors` table.
+- **`better_memory.hooks.session_bootstrap`** (SessionStart) — opens or reuses a background episode for the session and injects the project's curated context (project-scoped and general-scope semantic memories plus all distilled reflections — `do` / `dont` / `neutral` buckets) as `additionalContext` for Claude's first turn. Runs in-process against `memory.db`; failure-isolated: if bootstrap breaks, a fallback directive is injected and the failure is recorded in the `hook_errors` table.
 - **`better_memory.hooks.observer`** (PostToolUse) — captures tool-call snapshots into `spool/` for later observation creation.
 - **`better_memory.hooks.session_close`** (Stop) — writes a session-close marker into `spool/`.
 

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from better_memory.config import get_config
+from better_memory.config import get_config, project_name
+
+
+def _git_init(path: Path) -> None:
+    subprocess.run(["git", "init", "--quiet"], cwd=str(path), check=True)
 
 
 def test_defaults_resolve_under_home(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,23 +112,34 @@ def test_config_auto_prune_true_when_env_set(monkeypatch) -> None:
     assert cfg.auto_prune is True
 
 
-def test_project_name_defaults_to_cwd_name(
+def test_project_name_defaults_to_cwd(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """With no override file, project_name returns cwd's leaf name."""
+    """With no override and no git tree, project_name falls back to 'general'.
+
+    Also exercises the no-arg form (defaults to ``Path.cwd()``).
+    """
     cwd = tmp_path / "my-service"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
     from better_memory.config import project_name
-    assert project_name() == "my-service"
+    assert project_name() == "general"
 
 
-def test_project_name_explicit_cwd(tmp_path: Path) -> None:
-    """When cwd is passed explicitly, it is used over Path.cwd()."""
-    cwd = tmp_path / "explicit"
-    cwd.mkdir()
+def test_project_name_explicit_cwd_used_over_path_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When cwd is passed explicitly, it is used over ``Path.cwd()``."""
+    process_cwd = tmp_path / "process-cwd"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    _git_init(explicit)
+
     from better_memory.config import project_name
-    assert project_name(cwd) == "explicit"
+    assert project_name(explicit) == "explicit"
 
 
 def test_project_name_override_file_wins(tmp_path: Path) -> None:
@@ -136,21 +152,21 @@ def test_project_name_override_file_wins(tmp_path: Path) -> None:
 
 
 def test_project_name_empty_override_falls_back(tmp_path: Path) -> None:
-    """An empty override file falls back to cwd.name."""
+    """An empty override file falls back through to git/general resolution."""
     cwd = tmp_path / "leaf"
     cwd.mkdir()
     (cwd / ".better-memory").write_text("", encoding="utf-8")
     from better_memory.config import project_name
-    assert project_name(cwd) == "leaf"
+    assert project_name(cwd) == "general"
 
 
 def test_project_name_whitespace_only_override_falls_back(tmp_path: Path) -> None:
-    """A whitespace-only override file falls back to cwd.name."""
+    """A whitespace-only override file falls back through to git/general resolution."""
     cwd = tmp_path / "leaf"
     cwd.mkdir()
     (cwd / ".better-memory").write_text("   \n  \n", encoding="utf-8")
     from better_memory.config import project_name
-    assert project_name(cwd) == "leaf"
+    assert project_name(cwd) == "general"
 
 
 def test_project_name_multi_line_override_takes_first_non_empty(
@@ -164,3 +180,107 @@ def test_project_name_multi_line_override_takes_first_non_empty(
     )
     from better_memory.config import project_name
     assert project_name(cwd) == "first-line"
+
+
+def test_project_name_in_git_repo_root_returns_repo_dir_name(tmp_path: Path) -> None:
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git_init(repo)
+
+    assert project_name(repo) == "myrepo"
+
+
+def test_project_name_in_subdirectory_walks_to_repo_root(tmp_path: Path) -> None:
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git_init(repo)
+    sub = repo / "src" / "deep"
+    sub.mkdir(parents=True)
+
+    assert project_name(sub) == "myrepo"
+
+
+def test_project_name_outside_git_returns_general(tmp_path: Path) -> None:
+    nongit = tmp_path / "loose"
+    nongit.mkdir()
+
+    assert project_name(nongit) == "general"
+
+
+def test_project_name_in_worktree_returns_main_repo_name(tmp_path: Path) -> None:
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git_init(repo)
+    # Need at least one commit for `git worktree add` to succeed.
+    (repo / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-m", "init", "--quiet"],
+        cwd=str(repo), check=True,
+    )
+    worktree = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree), "-b", "feat", "--quiet"],
+        cwd=str(repo), check=True,
+    )
+
+    assert project_name(worktree) == "myrepo"
+
+
+def test_project_name_override_file_beats_git(tmp_path: Path) -> None:
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / ".better-memory").write_text("override-name\n")
+
+    assert project_name(repo) == "override-name"
+
+
+def test_project_name_handles_subprocess_filenotfound(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If git is not installed, project_name falls back to 'general'.
+
+    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
+    ``FileNotFoundError``) so a missing git binary cannot break the hook.
+    """
+    import better_memory.config as bm_config
+
+    def raise_filenotfound(*args, **kwargs):
+        raise FileNotFoundError("git not on PATH")
+
+    # Clear lru_cache so the monkeypatched subprocess.run is exercised.
+    bm_config._resolve_git_project.cache_clear()
+    monkeypatch.setattr(bm_config.subprocess, "run", raise_filenotfound)
+
+    try:
+        result = bm_config.project_name(tmp_path)
+        assert result == "general"
+    finally:
+        # Cache hygiene: drop the entry seeded by the patched subprocess
+        # so later tests don't observe a stale `None` for this path.
+        bm_config._resolve_git_project.cache_clear()
+
+
+def test_project_name_handles_subprocess_permissionerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If subprocess.run raises PermissionError (Windows ACL), fall back to 'general'.
+
+    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
+    ``PermissionError``) so a Windows ACL edge case cannot break the hook.
+    """
+    import better_memory.config as bm_config
+
+    def raise_permission(*args, **kwargs):
+        raise PermissionError("access denied")
+
+    bm_config._resolve_git_project.cache_clear()
+    monkeypatch.setattr(bm_config.subprocess, "run", raise_permission)
+
+    try:
+        result = bm_config.project_name(tmp_path)
+        assert result == "general"
+    finally:
+        bm_config._resolve_git_project.cache_clear()

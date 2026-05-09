@@ -4,8 +4,8 @@ better-memory ships three hooks that wire into Claude Code's hook framework:
 
 | Hook | Purpose | Module |
 |---|---|---|
+| `SessionStart` | Open/reuse a background episode and inject project + general semantic memories and reflections as `additionalContext` | `better_memory.hooks.session_bootstrap` |
 | `PostToolUse` | Capture every tool invocation as a spool event | `better_memory.hooks.observer` |
-| `SessionStart` | Open a background episode for this session | `better_memory.hooks.session_start` |
 | `Stop` | Mark session end for consolidation boundary detection | `better_memory.hooks.session_close` |
 
 ## Registering the hooks
@@ -22,18 +22,19 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.session_start"
+            "command": "uv run python -m better_memory.hooks.session_bootstrap"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "Write|Edit|Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.observer"
+            "command": "uv run python -m better_memory.hooks.observer",
+            "async": true
           }
         ]
       }
@@ -43,7 +44,8 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.session_close"
+            "command": "uv run python -m better_memory.hooks.session_close",
+            "async": true
           }
         ]
       }
@@ -55,31 +57,47 @@ project-scoped):
 Adjust the `command` to match your environment — for example:
 
 - If better-memory is installed as a system-wide package, drop the
-  `uv run` prefix and use `python -m better_memory.hooks.session_start`.
+  `uv run` prefix and use `python -m better_memory.hooks.session_bootstrap`.
 - If your environment uses a different Python launcher (e.g. `py` on
   Windows with multiple Python versions), adjust accordingly.
 
 ## How sessions flow
 
 1. **Claude Code starts a session.** It sets `CLAUDE_SESSION_ID` in the
-   environment and fires the `SessionStart` hook.
-2. **Session-start hook runs.** It writes a `session_start` marker to
-   `$BETTER_MEMORY_HOME/spool` (defaulting to `~/.better-memory/spool`).
-   The hook never touches the database — it stays fast and cannot fail.
+   environment and fires the `SessionStart` hook with a JSON payload on
+   stdin (`source`, `session_id`, `cwd`).
+2. **Session-bootstrap hook runs in-process.** It opens `memory.db`
+   directly (no MCP RPC on the hook critical path), calls
+   `SessionBootstrapService.bootstrap`, which:
+   - resolves the project name from `cwd` via the git-aware
+     `project_name(cwd)` helper (uses `git rev-parse --git-common-dir` so
+     worktrees share scope with their main repo);
+   - opens a fresh background episode for this session, or reuses an
+     existing open background episode if `source=resume`;
+   - retrieves all project-scoped + general-scope semantic memories and
+     all distilled reflections (`do` / `dont` / `neutral` buckets) — no
+     per-bucket cap;
+   - renders a markdown block with a `## better-memory: session
+     bootstrap` header summarising project / source / episode action,
+     followed by the memories and reflections.
+   The hook prints a `hookSpecificOutput` JSON envelope with the rendered
+   markdown as `additionalContext`. Claude Code injects this into the
+   first turn's context. If anything fails, a fallback directive is
+   emitted instructing Claude to call
+   `mcp__better-memory__memory_session_bootstrap` manually, and the error
+   is logged to the `hook_errors` table.
 3. **Claude Code launches the better-memory MCP server.** The server reads
    `CLAUDE_SESSION_ID` for its own `session_id`, matching the hook's.
-4. **First `memory.retrieve` call drains the spool.** `SpoolService` sees
-   the `session_start` marker, inserts the `hook_events` row, and calls
-   `EpisodeService.open_background` — creating the background episode that
-   subsequent `memory.observe` calls bind to.
-5. **Per-turn observations write to the background episode** via
-   auto-binding in `ObservationService.create`.
-6. **Session ends.** The `Stop` hook writes a `session_end` marker. On the
-   next drain, an unhardened (background) episode for that session is
-   auto-closed as `outcome=no_outcome`, `close_reason=session_end_reconciled`.
-   A hardened (goal-declared) episode stays open so the next session's
-   reconciliation prompt can resolve it with a real outcome.
-7. **Next session starts.** Claude calls `memory.reconcile_episodes()`,
+4. **Per-turn observations write to the background episode** via
+   auto-binding in `ObservationService.create`. The episode opened by the
+   bootstrap hook is the binding target.
+5. **Session ends.** The `Stop` hook writes a `session_end` marker to the
+   spool. On the next MCP retrieve drain, an unhardened (background)
+   episode for that session is auto-closed as `outcome=no_outcome`,
+   `close_reason=session_end_reconciled`. A hardened (goal-declared)
+   episode stays open so the next session's reconciliation prompt can
+   resolve it with a real outcome.
+6. **Next session starts.** Claude calls `memory.reconcile_episodes()`,
    sees the prior unclosed episode, and prompts the user in chat per the
    guidance in the CLAUDE.md snippet.
 
@@ -98,10 +116,10 @@ because session ids change every process.
 
 ## Post-commit hook (opt-in episode close)
 
-Unlike the session_start / observer / Stop hooks above (which are Claude
-Code hooks registered in `settings.json`), the post-commit hook is a
-**git-native hook** — a shell script at `.git/hooks/post-commit` in each
-repository where you want episode close-on-commit behaviour.
+Unlike the session_bootstrap / observer / Stop hooks above (which are
+Claude Code hooks registered in `settings.json`), the post-commit hook
+is a **git-native hook** — a shell script at `.git/hooks/post-commit`
+in each repository where you want episode close-on-commit behaviour.
 
 ### Why it's opt-in-per-commit
 
@@ -174,25 +192,43 @@ the CLAUDE snippet for the LLM-side guidance.
 
 ## Verifying the hooks work
 
-After registering, start a Claude Code session and run:
+After registering, start a Claude Code session. The
+`session_bootstrap` hook runs in-process and opens (or reuses) a
+background episode directly in `memory.db`. Confirm via:
+
+```bash
+sqlite3 ~/.better-memory/memory.db \
+  "SELECT id, project, status, started_at FROM episodes \
+   WHERE status='open' ORDER BY started_at DESC LIMIT 5;"
+```
+
+You should see an open background episode for the current project.
+You should also see the bootstrap markdown block (header
+`## better-memory: session bootstrap`, followed by `Project: <name>  •
+Source: <startup|resume|...>  •  Episode: <opened|reused> id=<short>`)
+appear in Claude's first-turn context.
+
+Make a tool call (any Write/Edit/Bash) so the observer fires, then
+verify the spool received a snapshot:
 
 ```bash
 ls ~/.better-memory/spool/
 ```
 
-You should see a `*_session_start_*.json` file appear within ~1 second
-of the session starting. Make a tool call (any tool), wait, and run:
-
-```bash
-ls ~/.better-memory/spool/
-```
-
-The `session_start` marker should be gone (drained into `hook_events`).
-Query the DB to confirm:
+You should see one or more snapshot JSON files. After the next
+`memory.retrieve` call (or session end + drain), they migrate into the
+`hook_events` and `observations` tables:
 
 ```bash
 sqlite3 ~/.better-memory/memory.db \
   "SELECT event_type, session_id FROM hook_events ORDER BY id DESC LIMIT 5;"
 ```
 
-You should see the `session_start` event with your `CLAUDE_SESSION_ID`.
+If bootstrap fails for any reason, the hook injects a fallback
+directive instead and records the failure:
+
+```bash
+sqlite3 ~/.better-memory/memory.db \
+  "SELECT hook_name, exc_type, occurred_at FROM hook_errors \
+   ORDER BY occurred_at DESC LIMIT 5;"
+```

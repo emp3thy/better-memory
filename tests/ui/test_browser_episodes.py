@@ -14,15 +14,11 @@ from pathlib import Path
 
 from playwright.sync_api import Page, expect
 
+from better_memory.config import project_name
 from better_memory.db.connection import connect
 from better_memory.services.episode import EpisodeService
 
 pytest_plugins = ["tests.ui.conftest_browser"]
-
-
-def _project_name() -> str:
-    """Match the subprocess's project resolution (Path.cwd().name)."""
-    return Path.cwd().name
 
 
 def _seed_episode_via_service(
@@ -45,11 +41,11 @@ def _seed_episode_via_service(
         clock = lambda: datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC)
         svc = EpisodeService(conn, clock=clock)
         ep_id = svc.open_background(
-            session_id="e2e-test", project=_project_name()
+            session_id="e2e-test", project=project_name()
         )
         svc.start_foreground(
             session_id="e2e-test",
-            project=_project_name(),
+            project=project_name(),
             goal=goal,
             tech=tech,
         )

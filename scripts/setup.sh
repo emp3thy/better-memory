@@ -3,7 +3,8 @@
 # Windows). Detects prerequisites (Python, uv, Ollama), installs what's
 # missing, creates the runtime filesystem layout under ~/.better-memory,
 # then auto-installs the MCP server registration into ~/.claude.json and
-# the four hooks into ~/.claude/settings.json by shelling out to
+# the three hooks (session_bootstrap, observer, session_close) into
+# ~/.claude/settings.json by shelling out to
 # `python -m better_memory.cli.install_hooks`.
 #
 # The installer is idempotent and smart-merges — re-running yields the same

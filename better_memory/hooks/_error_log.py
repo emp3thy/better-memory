@@ -28,7 +28,7 @@ def record_hook_error(*, hook_name: str, exc: BaseException) -> None:
     # except below would catch it and we'd lose the entire row write —
     # the diagnostic that's supposed to expose hook failures itself
     # silently fails on exactly the kind of weird production state where
-    # we most want it to work. Mirror the pattern in session_start.py:50-53.
+    # we most want it to work.
     try:
         cwd = os.getcwd()
     except OSError:
