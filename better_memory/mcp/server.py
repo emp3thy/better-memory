@@ -507,6 +507,38 @@ def _tool_definitions() -> list[Tool]:
             },
         ),
         Tool(
+            name="memory.session_bootstrap",
+            description=(
+                "Open or reuse a session episode and inject all project + "
+                "general semantic memories and reflections as "
+                "additionalContext markdown. Mirrors what the SessionStart "
+                "hook does; callable manually for recovery, testing, or "
+                "post-/clear re-injection."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "enum": ["startup", "resume", "clear", "compact"],
+                        "description": (
+                            "SessionStart payload source. Unknown values "
+                            "coerce to 'startup' inside the service."
+                        ),
+                    },
+                    "session_id": {"type": "string"},
+                    "cwd": {
+                        "type": "string",
+                        "description": (
+                            "Optional working directory. Defaults to "
+                            "server's process cwd."
+                        ),
+                    },
+                },
+            },
+        ),
+        Tool(
             name="memory.run_retention",
             description=(
                 "Apply spec §9 retention rules — flip eligible "
@@ -1023,6 +1055,41 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 }
                 for e in rows
             ]
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.session_bootstrap":
+            import os
+            import uuid
+
+            from better_memory.services.session_bootstrap import (
+                SessionBootstrapService,
+            )
+
+            cwd_arg = args.get("cwd") or os.getcwd()
+            session_id_arg = (
+                args.get("session_id")
+                or os.environ.get("CLAUDE_SESSION_ID")
+                or uuid.uuid4().hex
+            )
+            svc = SessionBootstrapService(memory_conn)
+            result = svc.bootstrap(
+                source=args.get("source"),
+                session_id=session_id_arg,
+                cwd=Path(cwd_arg),
+            )
+            payload = {
+                "additionalContext": result.additional_context,
+                "project": result.project,
+                "source": result.source,
+                "episode": {
+                    "id": result.episode_id,
+                    "action": result.episode_action,
+                },
+                "counts": {
+                    "semantic": result.semantic_count,
+                    "reflections": result.reflections_counts,
+                },
+            }
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.synthesize_next_get_context":
