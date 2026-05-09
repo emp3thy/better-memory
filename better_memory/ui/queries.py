@@ -310,6 +310,7 @@ class ReflectionFull:
     use_cases: str
     hints: str
     evidence_count: int
+    scope: str
     created_at: str
     updated_at: str
 
@@ -356,7 +357,7 @@ def reflection_detail(
     """
     r_row = conn.execute(
         "SELECT id, title, project, tech, phase, polarity, "
-        "confidence, status, use_cases, hints, evidence_count, "
+        "confidence, status, use_cases, hints, evidence_count, scope, "
         "created_at, updated_at "
         "FROM reflections WHERE id = ?",
         (reflection_id,),
@@ -413,6 +414,7 @@ def reflection_detail(
             use_cases=r_row["use_cases"],
             hints=r_row["hints"],
             evidence_count=r_row["evidence_count"],
+            scope=r_row["scope"],
             created_at=r_row["created_at"],
             updated_at=r_row["updated_at"],
         ),
