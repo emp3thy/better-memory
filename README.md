@@ -31,7 +31,7 @@ The script:
 3. Checks for Ollama; offers to install via `brew` / `apt` / `winget` if missing.
 4. Pulls `nomic-embed-text`.
 5. Creates `~/.better-memory/{spool,knowledge-base/...}`.
-6. Auto-installs the MCP server registration into `~/.claude.json` and the four hooks into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
+6. Auto-installs the MCP server registration into `~/.claude.json` and the three hooks (`session_bootstrap`, `observer`, `session_close`) into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
 
 If you'd rather inspect or hand-edit the config, see [Manual setup](#manual-setup) below.
 
@@ -66,7 +66,7 @@ Then add to `~/.claude.json` (user-scope MCP — create the file if it doesn't e
 
 And add hooks to `~/.claude/settings.json`:
 
-Two SessionStart hooks ship: `session_start` writes a spool marker so the MCP server can lazy-open a background episode for the session, and `session_retrieve` queries `memory.db` and injects the project's reflections (`do` / `dont` / `neutral` buckets) as `additionalContext` so Claude has prior memory available without needing to call `memory_retrieve` first. Both should be registered — Claude Code concatenates `additionalContext` across hooks.
+A single SessionStart hook ships: `session_bootstrap` opens (or reuses) a background episode for the session and injects the project's curated context — both project-scoped and general-scope semantic memories plus all distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext` so Claude has prior memory available without needing to call any retrieval tool first. The hook does its work in-process against `memory.db`; if it fails for any reason, a fallback directive is injected instructing Claude to call `mcp__better-memory__memory_session_bootstrap` manually.
 
 ```json
 {
@@ -76,11 +76,7 @@ Two SessionStart hooks ship: `session_start` writes a spool marker so the MCP se
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_start"
-          },
-          {
-            "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_retrieve"
+            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_bootstrap"
           }
         ]
       }
