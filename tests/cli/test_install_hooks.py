@@ -286,6 +286,31 @@ class TestMergeSettingsJson:
         second = merge_settings_json(first, venv_pyw="/p/pyw")
         assert first == second
 
+    def test_session_bootstrap_uses_venv_py_async_hooks_use_venv_pyw(self) -> None:
+        """Foreground bootstrap needs python.exe (stdout reaches Claude
+        Code); the two async hooks keep pythonw.exe so they don't flash
+        a console window on every tool call. setup.sh passes the same
+        path on non-Windows; the split only matters on Windows."""
+        out = merge_settings_json(
+            {}, venv_py="/venv/python.exe", venv_pyw="/venv/pythonw.exe",
+        )
+        ss_cmd = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "python.exe" in ss_cmd and "pythonw.exe" not in ss_cmd
+        assert "session_bootstrap" in ss_cmd
+
+        ptu_cmd = out["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert "pythonw.exe" in ptu_cmd
+
+        stop_cmd = out["hooks"]["Stop"][0]["hooks"][0]["command"]
+        assert "pythonw.exe" in stop_cmd
+
+    def test_default_venv_py_falls_back_to_venv_pyw(self) -> None:
+        """Back-compat: callers that only pass venv_pyw get the old
+        behavior (every hook uses the same interpreter)."""
+        out = merge_settings_json({}, venv_pyw="/legacy/path/pyw")
+        ss_cmd = out["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "/legacy/path/pyw" in ss_cmd
+
 
 def test_merge_settings_strips_legacy_session_start_and_session_retrieve():
     """Re-running install_hooks after upgrade scrubs the two old hook entries."""
@@ -532,3 +557,42 @@ class TestCLIIntegration:
         assert "MCP server" in result.stdout
         assert "hooks" in result.stdout
         assert "Restart Claude Code" in result.stdout
+
+
+def test_main_passes_venv_py_separately_to_settings_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main() must forward --venv-py to merge_settings_json so the SessionStart
+    hook gets python.exe (not pythonw.exe) on Windows. Regression test for
+    the bug where main() only passed venv_pyw and silently relied on the
+    back-compat fallback."""
+    from better_memory.cli import install_hooks
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".claude").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))  # Path.home() on Windows
+
+    bm_home = tmp_path / "bm-home"
+    (bm_home / "install-backups").mkdir(parents=True)
+
+    install_hooks.main([
+        "--venv-py", "C:/venv/python.exe",
+        "--venv-pyw", "C:/venv/pythonw.exe",
+        "--home", str(bm_home),
+    ])
+
+    settings = _json.loads(
+        (fake_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    ss_cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert "python.exe" in ss_cmd and "pythonw.exe" not in ss_cmd, (
+        f"SessionStart command must use python.exe, got: {ss_cmd!r}"
+    )
+
+    # Sanity: async PostToolUse + Stop hooks should still use pythonw.exe.
+    ptu_cmd = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert "pythonw.exe" in ptu_cmd
+
+    stop_cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert "pythonw.exe" in stop_cmd

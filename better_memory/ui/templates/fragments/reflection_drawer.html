@@ -18,6 +18,7 @@
     <dt>Confidence</dt>
     <dd>{{ '%.2f' | format(detail.reflection.confidence) }}</dd>
     <dt>Status</dt><dd>{{ detail.reflection.status }}</dd>
+    <dt>Scope</dt><dd>{{ detail.reflection.scope }}</dd>
     <dt>Evidence</dt><dd>{{ detail.reflection.evidence_count }} observation{{ 's' if detail.reflection.evidence_count != 1 else '' }}</dd>
     <dt>Updated</dt><dd>{{ detail.reflection.updated_at }}</dd>
   </dl>
@@ -64,6 +65,15 @@
               hx-swap="innerHTML">
         Edit
       </button>
+      {% if detail.reflection.scope == 'project' %}
+        <button type="button"
+                class="action-promote"
+                hx-post="{{ url_for('reflection_promote', id=detail.reflection.id) }}"
+                hx-target="#reflection-drawer"
+                hx-swap="innerHTML">
+          Promote to general
+        </button>
+      {% endif %}
     </div>
   {% endif %}
 

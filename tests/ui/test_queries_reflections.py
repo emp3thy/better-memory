@@ -44,16 +44,17 @@ def _seed(
     created_at: str = "2026-04-25T10:00:00+00:00",
     updated_at: str = "2026-04-25T10:00:00+00:00",
     evidence_count: int = 0,
+    scope: str = "project",
 ) -> None:
     conn.execute(
         "INSERT INTO reflections "
         "(id, title, project, tech, phase, polarity, use_cases, hints, "
-        "confidence, status, evidence_count, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "confidence, status, evidence_count, created_at, updated_at, scope) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             rid, title or f"title-{rid}", project, tech, phase, polarity,
             use_cases, hints, confidence, status, evidence_count,
-            created_at, updated_at,
+            created_at, updated_at, scope,
         ),
     )
     conn.commit()
@@ -271,3 +272,15 @@ class TestReflectionDetail:
         detail = reflection_detail(conn, reflection_id="r-1")
         assert detail is not None, "reflection_detail returns for ordered-sources seed"
         assert [s.observation_id for s in detail.sources] == ["obs-new", "obs-old"]
+
+    def test_returns_default_project_scope_when_unspecified(self, conn):
+        _seed(conn, rid="r-1")  # default scope='project'
+        detail = reflection_detail(conn, reflection_id="r-1")
+        assert detail is not None
+        assert detail.reflection.scope == "project"
+
+    def test_returns_general_scope_when_seeded_general(self, conn):
+        _seed(conn, rid="r-1", scope="general")
+        detail = reflection_detail(conn, reflection_id="r-1")
+        assert detail is not None
+        assert detail.reflection.scope == "general"

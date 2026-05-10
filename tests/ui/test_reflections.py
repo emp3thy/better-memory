@@ -24,18 +24,19 @@ def _seed_reflection(
     hints: str = "h",
     title: str | None = None,
     evidence_count: int = 0,
+    scope: str = "project",
 ) -> None:
     conn = connect(db_path)
     try:
         conn.execute(
             "INSERT INTO reflections "
             "(id, title, project, tech, phase, polarity, use_cases, hints, "
-            "confidence, status, evidence_count, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "confidence, status, evidence_count, scope, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
             "'2026-04-26T10:00:00+00:00', '2026-04-26T10:00:00+00:00')",
             (
                 rid, title or f"title-{rid}", project, tech, phase, polarity,
-                use_cases, hints, confidence, status, evidence_count,
+                use_cases, hints, confidence, status, evidence_count, scope,
             ),
         )
         conn.commit()
@@ -372,3 +373,111 @@ class TestReflectionEdit:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 409
+
+
+class TestReflectionPromote:
+    def test_promotes_project_pending(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="pending_review", scope="project")
+
+        response = client.post(
+            "/reflections/r-1/promote",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("HX-Trigger") == "reflection-changed"
+
+        conn = connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT scope FROM reflections WHERE id = ?", ("r-1",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["scope"] == "general"
+
+    def test_404_for_unknown(self, client: FlaskClient):
+        response = client.post(
+            "/reflections/does-not-exist/promote",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 404
+
+    def test_409_for_retired(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="retired", scope="project")
+
+        response = client.post(
+            "/reflections/r-1/promote",
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 409
+        body = response.get_data(as_text=True)
+        assert "card-error" in body
+
+
+class TestReflectionDrawerScope:
+    def test_drawer_shows_scope_meta_and_promote_button_for_active_project(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", status="pending_review", scope="project",
+        )
+        response = client.get("/reflections/r-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        # Scope meta row visible.
+        assert "Scope" in body
+        assert ">project<" in body
+        # Promote button rendered.
+        assert "Promote to general" in body
+        assert "action-promote" in body
+        assert "/reflections/r-1/promote" in body
+
+    def test_drawer_hides_promote_button_when_already_general(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", status="pending_review", scope="general",
+        )
+        response = client.get("/reflections/r-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        # Scope meta row still visible (now general).
+        assert "Scope" in body
+        assert ">general<" in body
+        # No promote button.
+        assert "Promote to general" not in body
+        assert "action-promote" not in body
+
+    def test_drawer_hides_promote_button_when_retired(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", status="retired", scope="project",
+        )
+        response = client.get("/reflections/r-1/drawer")
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        # Scope meta row still visible.
+        assert "Scope" in body
+        # No promote button (existing actions block already hidden on retired).
+        assert "Promote to general" not in body
+        assert "action-promote" not in body
