@@ -259,7 +259,9 @@ def main(argv: list[str] | None = None) -> None:
         (
             "hooks",
             Path.home() / ".claude" / "settings.json",
-            lambda d: merge_settings_json(d, venv_pyw=args.venv_pyw),
+            lambda d: merge_settings_json(
+                d, venv_pyw=args.venv_pyw, venv_py=args.venv_py,
+            ),
         ),
     ]
 

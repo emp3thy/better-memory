@@ -1180,7 +1180,7 @@ class ReflectionService:
     """UI-facing writes for reflections.
 
     Sibling of ``ReflectionSynthesisService``: this class does NOT
-    synthesise — it handles the three lifecycle actions the user
+    synthesise — it handles the four lifecycle actions the user
     drives from the Reflections tab drawer:
 
     - ``confirm``: pending_review → confirmed (idempotent on confirmed).
@@ -1188,8 +1188,11 @@ class ReflectionService:
     - ``update_text``: edit use_cases / hints in place; blocked on
       retired and superseded so we don't surprise the synthesis
       pipeline by mutating retired text.
+    - ``promote_to_general``: project → general scope; idempotent on
+      already-general; blocked on retired and superseded so promoted-but-
+      invisible state can't slip into the cross-project pile.
 
-    All three bump ``updated_at`` only when the row actually changes
+    All four bump ``updated_at`` only when the row actually changes
     (no-op cases leave the timestamp untouched so reinforcement /
     audit trails stay honest).
     """

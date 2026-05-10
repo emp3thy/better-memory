@@ -1,4 +1,4 @@
-"""Tests for ReflectionService (UI write actions: confirm / retire / update_text)."""
+"""Tests for ReflectionService (UI write actions: confirm / retire / update_text / promote_to_general)."""
 
 from __future__ import annotations
 
