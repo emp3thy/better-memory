@@ -184,3 +184,29 @@ class TestApplySessionRatingsTool:
                 "memory.apply_session_ratings",
                 {"ratings": [{"kind": "reflection", "id": "r1", "class": "cited"}]},
             ))
+
+
+class TestMemoryCreditTool:
+    def test_credit_one(self, memory_db, monkeypatch):
+        from better_memory.mcp import server as srv_mod
+        conn, _ = memory_db
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.credit",
+            {"kind": "reflection", "id": "r1", "class": "cited"},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload == {"applied": "cited", "skipped": None}
+
+    def test_no_session_returns_skipped(self, memory_db, monkeypatch):
+        from better_memory.mcp import server as srv_mod
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.credit",
+            {"kind": "reflection", "id": "r1", "class": "cited"},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload == {"applied": None, "skipped": "no_session"}

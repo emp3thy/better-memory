@@ -638,6 +638,26 @@ def _tool_definitions() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="memory.credit",
+            description=(
+                "Per-tool-use credit. When you actively use a memory "
+                "retrieved during this session (quote it, follow its "
+                "guidance, or it misled you), call this immediately. "
+                "Resolved server-side from CLAUDE_SESSION_ID. "
+                "class must be 'cited', 'shaped', or 'misled' — NOT 'ignored'."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["kind", "id", "class"],
+                "properties": {
+                    "kind": {"enum": ["reflection", "semantic"]},
+                    "id": {"type": "string"},
+                    "class": {"enum": ["cited", "shaped", "misled"]},
+                },
+            },
+        ),
     ]
 
 
@@ -1233,6 +1253,19 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 session_id=sid,
                 ratings=args["ratings"],
             )
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.credit":
+            sid = os.environ.get("CLAUDE_SESSION_ID")
+            if not sid:
+                payload = {"applied": None, "skipped": "no_session"}
+            else:
+                payload = memory_rating.credit_one(
+                    session_id=sid,
+                    kind=args["kind"],
+                    id=args["id"],
+                    classification=args["class"],
+                )
             return [TextContent(type="text", text=json.dumps(payload))]
 
         raise ValueError(f"Unknown tool: {name}")
