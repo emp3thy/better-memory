@@ -46,6 +46,13 @@ class TestExposureTable:
         ).fetchone()
         assert idx is not None
 
+    def test_memory_index_exists(self, conn):
+        idx = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_sme_memory'"
+        ).fetchone()
+        assert idx is not None
+
 
 class TestReflectionsNewColumns:
     def test_useful_count_column_exists(self, conn):
@@ -82,6 +89,20 @@ class TestSemanticMemoriesNewColumns:
         }
         assert {"useful_count", "last_useful_at",
                 "times_misled", "last_misled_at"} <= cols
+
+    def test_useful_count_defaults_to_zero(self, conn):
+        # insert a semantic memory and verify defaults
+        conn.execute(
+            """INSERT INTO semantic_memories
+               (id, content, project, scope, created_at, updated_at)
+               VALUES ('s1', 'fact', 'p', 'project',
+                       '2026-01-01', '2026-01-01')"""
+        )
+        row = conn.execute(
+            "SELECT useful_count, times_misled FROM semantic_memories WHERE id='s1'"
+        ).fetchone()
+        assert row["useful_count"] == 0
+        assert row["times_misled"] == 0
 
 
 class TestRatingDiagnosticsTable:
