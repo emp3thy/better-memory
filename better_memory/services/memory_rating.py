@@ -58,7 +58,7 @@ class MemoryRatingService:
         kind: str,
         id: str,
         classification: str,
-    ) -> dict[str, object]:
+    ) -> dict[str, str | None]:
         """Apply one rating for (session_id, kind, id).
 
         Validation (ValueError before any DB write):
@@ -122,7 +122,7 @@ class MemoryRatingService:
         memory_id: str,
         classification: str,
         now: str,
-    ) -> dict[str, object]:
+    ) -> dict[str, str | None]:
         """Inside-savepoint per-row apply. Returns the same dict shape as
         credit_one. Shared by credit_one and apply_session_ratings (Task 3).
         """
