@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, TypedDict
 
 
 def _default_clock() -> datetime:
@@ -27,6 +27,14 @@ CreditClassification = Literal["cited", "shaped", "misled"]
 SkipReason = Literal[
     "not_exposed", "already_rated", "memory_missing", "memory_retired"
 ]
+
+
+class ApplyOutcome(TypedDict):
+    """Return shape for credit_one and _apply_one. Exactly one of
+    `applied` and `skipped` is non-None (mutual exclusivity is a
+    runtime invariant, not expressed in the type)."""
+    applied: str | None
+    skipped: str | None
 
 
 _VALID_KINDS: set[str] = {"reflection", "semantic"}
@@ -58,7 +66,7 @@ class MemoryRatingService:
         kind: str,
         id: str,
         classification: str,
-    ) -> dict[str, str | None]:
+    ) -> ApplyOutcome:
         """Apply one rating for (session_id, kind, id).
 
         Validation (ValueError before any DB write):
@@ -122,7 +130,7 @@ class MemoryRatingService:
         memory_id: str,
         classification: str,
         now: str,
-    ) -> dict[str, str | None]:
+    ) -> ApplyOutcome:
         """Inside-savepoint per-row apply. Returns the same dict shape as
         credit_one. Shared by credit_one and apply_session_ratings (Task 3).
         """
@@ -262,10 +270,19 @@ class MemoryRatingService:
                     classification=r["class"],
                     now=now,
                 )
-                if outcome["applied"] is not None:
-                    applied[outcome["applied"]] += 1
+                applied_class = outcome["applied"]
+                skipped_reason = outcome["skipped"]
+                if applied_class is not None:
+                    applied[applied_class] += 1
+                elif skipped_reason is not None:
+                    skipped[skipped_reason] += 1
                 else:
-                    skipped[outcome["skipped"]] += 1
+                    # Defensive: _apply_one's contract guarantees exactly one
+                    # of applied / skipped is non-None. Reaching here means
+                    # the contract was violated — fail loudly.
+                    raise AssertionError(
+                        f"_apply_one returned both None: {outcome!r}"
+                    )
         except BaseException:
             self._conn.execute("ROLLBACK TO SAVEPOINT memory_rating_apply")
             self._conn.execute("RELEASE SAVEPOINT memory_rating_apply")
