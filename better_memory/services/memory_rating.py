@@ -30,6 +30,8 @@ SkipReason = Literal[
 
 
 _VALID_KINDS: set[str] = {"reflection", "semantic"}
+# Used by apply_session_ratings (Task 3). credit_one accepts only the
+# subset _CREDIT_CLASSES below.
 _VALID_CLASSES: set[str] = {"cited", "shaped", "ignored", "misled"}
 _CREDIT_CLASSES: set[str] = {"cited", "shaped", "misled"}
 
@@ -124,15 +126,18 @@ class MemoryRatingService:
         """Inside-savepoint per-row apply. Returns the same dict shape as
         credit_one. Shared by credit_one and apply_session_ratings (Task 3).
         """
-        # 1. Find the unrated exposure row.
-        row = self._conn.execute(
+        # 1. Find exposure rows. A single memory may have multiple rows
+        # in one session (bootstrap + mid-session retrieve = two rows,
+        # by design — see spec §4.1 and §5.3). Rate the memory once
+        # and stamp ALL its unrated exposure rows (step 4 below).
+        all_rows = self._conn.execute(
             "SELECT rated_at FROM session_memory_exposure "
             "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?",
             (session_id, kind, memory_id),
-        ).fetchone()
-        if row is None:
+        ).fetchall()
+        if not all_rows:
             return {"applied": None, "skipped": "not_exposed"}
-        if row["rated_at"] is not None:
+        if all(r["rated_at"] is not None for r in all_rows):
             return {"applied": None, "skipped": "already_rated"}
 
         # 2. Check the memory still exists.

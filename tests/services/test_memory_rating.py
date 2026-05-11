@@ -1,10 +1,8 @@
 """Tests for MemoryRatingService.credit_one."""
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -179,6 +177,91 @@ class TestCreditOneSkips:
         )
         assert result == {"applied": None, "skipped": "memory_retired"}
 
+    def test_skip_memory_superseded(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        conn.execute(
+            "UPDATE reflections SET status='superseded' WHERE id='r1'"
+        )
+        conn.commit()
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.credit_one(
+            session_id="S1", kind="reflection", id="r1", classification="cited",
+        )
+        assert result == {"applied": None, "skipped": "memory_retired"}
+
+    def test_kind_semantic_with_reflection_id_returns_memory_missing(
+        self, conn, fixed_clock,
+    ):
+        """If caller passes kind='semantic' but the id only exists in
+        reflections, the service looks in semantic_memories, finds
+        nothing, and correctly returns memory_missing."""
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")  # exists in reflections only
+        _seed_exposure(conn, "S1", "semantic", "r1")  # exposed with wrong kind
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.credit_one(
+            session_id="S1", kind="semantic", id="r1", classification="cited",
+        )
+        assert result == {"applied": None, "skipped": "memory_missing"}
+
+    def test_two_exposure_rows_one_rated_one_unrated_succeeds(
+        self, conn, fixed_clock,
+    ):
+        """If a memory has TWO exposure rows (bootstrap + retrieve, both
+        valid per spec §5.3), and one is already rated while the other
+        is unrated, credit_one must rate against the unrated row — not
+        falsely return already_rated.
+
+        This guards against a SQLite fetchone()-order regression.
+        """
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        # Two exposure rows with distinct exposed_at — mimics bootstrap
+        # then mid-session retrieve.
+        _seed_exposure(conn, "S1", "reflection", "r1",
+                       exposed_at="2026-05-11T10:00:00+00:00")
+        _seed_exposure(conn, "S1", "reflection", "r1",
+                       exposed_at="2026-05-11T11:00:00+00:00")
+        # Mark ONLY the earlier row as rated.
+        conn.execute(
+            "UPDATE session_memory_exposure SET rated_at='2026-05-11T10:30:00+00:00', "
+            "classification='cited' WHERE session_id='S1' AND memory_id='r1' "
+            "AND exposed_at='2026-05-11T10:00:00+00:00'"
+        )
+        conn.commit()
+
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.credit_one(
+            session_id="S1", kind="reflection", id="r1", classification="shaped",
+        )
+        assert result == {"applied": "shaped", "skipped": None}
+
+    def test_all_exposure_rows_rated_returns_already_rated(
+        self, conn, fixed_clock,
+    ):
+        """If a memory has multiple exposure rows and ALL are rated,
+        credit_one returns already_rated."""
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1",
+                       exposed_at="2026-05-11T10:00:00+00:00")
+        _seed_exposure(conn, "S1", "reflection", "r1",
+                       exposed_at="2026-05-11T11:00:00+00:00")
+        # Mark BOTH as rated.
+        conn.execute(
+            "UPDATE session_memory_exposure SET rated_at='x', classification='cited' "
+            "WHERE session_id='S1' AND memory_id='r1'"
+        )
+        conn.commit()
+
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.credit_one(
+            session_id="S1", kind="reflection", id="r1", classification="cited",
+        )
+        assert result == {"applied": None, "skipped": "already_rated"}
+
 
 class TestCreditOneValidation:
     def test_ignored_class_rejected(self, conn, fixed_clock):
@@ -192,7 +275,7 @@ class TestCreditOneValidation:
     def test_unknown_class_rejected(self, conn, fixed_clock):
         from better_memory.services.memory_rating import MemoryRatingService
         svc = MemoryRatingService(conn, clock=fixed_clock)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="bogus"):
             svc.credit_one(
                 session_id="S1", kind="reflection", id="r1", classification="bogus",
             )
@@ -200,7 +283,7 @@ class TestCreditOneValidation:
     def test_unknown_kind_rejected(self, conn, fixed_clock):
         from better_memory.services.memory_rating import MemoryRatingService
         svc = MemoryRatingService(conn, clock=fixed_clock)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="observation"):
             svc.credit_one(
                 session_id="S1", kind="observation", id="o1", classification="cited",
             )
