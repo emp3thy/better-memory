@@ -179,9 +179,8 @@ class TestApplySessionRatingsTool:
     ):
         from better_memory.mcp import server as srv_mod
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
-        result = run_async(srv_mod._dispatch_for_tests(
-            "memory.apply_session_ratings",
-            {"ratings": [{"kind": "reflection", "id": "r1", "class": "cited"}]},
-        ))
-        # MCP framework catches exceptions and returns error text
-        assert "session" in result[0].text.lower()
+        with pytest.raises(ValueError, match="session"):
+            run_async(srv_mod._dispatch_for_tests(
+                "memory.apply_session_ratings",
+                {"ratings": [{"kind": "reflection", "id": "r1", "class": "cited"}]},
+            ))

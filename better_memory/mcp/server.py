@@ -1267,14 +1267,14 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
 
 
 async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
-    """Test-only entry point: invoke one tool against a fresh server instance.
+    """Test-only entry point that runs one tool invocation against a fresh
+    server instance. NOT used by production code.
 
-    Uses the MCP SDK's registered CallToolRequest handler directly —
-    no stdio transport needed. NOT used by production code.
-
-    Pattern discovered from the MCP SDK internals:
-        server.request_handlers[CallToolRequest]  →  async (req) → ServerResult
-        result.root.content  →  list[TextContent]
+    The MCP SDK catches exceptions inside handlers and surfaces them as
+    CallToolResult(isError=True). To make tests ergonomic, this helper
+    re-raises any error as ValueError so callers can use
+    `pytest.raises(ValueError, match="...")` instead of inspecting
+    result text manually.
     """
     from mcp.types import CallToolRequest, CallToolRequestParams
 
@@ -1292,6 +1292,13 @@ async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
         assert isinstance(result.root, CallToolResult), (
             f"Expected CallToolResult, got {type(result.root).__name__}"
         )
+        if getattr(result.root, "isError", False):
+            # Re-raise as ValueError; preserve the framework's error text.
+            text = ""
+            if result.root.content:
+                first = result.root.content[0]
+                text = getattr(first, "text", "") or ""
+            raise ValueError(text)
         # Tests inspect .text on TextContent entries — runtime is correct;
         # cast through Any to satisfy Pyright's list invariance (the SDK
         # types .content as list[ContentBlock]; our tools only emit
