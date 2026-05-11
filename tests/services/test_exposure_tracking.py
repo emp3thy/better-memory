@@ -30,8 +30,8 @@ def _seed_reflection(conn, rid, project="p"):
     conn.execute(
         """INSERT INTO reflections
            (id, title, project, phase, polarity, use_cases, hints,
-            confidence, status, created_at, updated_at)
-           VALUES (?, 't', ?, 'general', 'do', 'uc', '[]', 0.5, 'confirmed',
+            confidence, created_at, updated_at)
+           VALUES (?, 't', ?, 'general', 'do', 'uc', '[]', 0.5,
                    '2026-01-01', '2026-01-01')""",
         (rid, project),
     )
@@ -133,7 +133,7 @@ class TestReflectionRetrieveExposureWrite:
         _seed_reflection(conn, "r2")
         monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
         svc = ReflectionSynthesisService(conn, clock=fixed_clock)
-        result = svc.retrieve_reflections(project="p")
+        svc.retrieve_reflections(project="p")
 
         rows = conn.execute(
             "SELECT memory_kind, memory_id, source "
@@ -167,7 +167,7 @@ class TestReflectionRetrieveExposureWrite:
         # No reflections seeded.
         monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
         svc = ReflectionSynthesisService(conn, clock=fixed_clock)
-        result = svc.retrieve_reflections(project="p")
+        svc.retrieve_reflections(project="p")
 
         rows = conn.execute(
             "SELECT * FROM session_memory_exposure"
