@@ -56,6 +56,16 @@ def _seed_reflection(c, rid):
     c.commit()
 
 
+def _seed_semantic(c, sid, content="some semantic content"):
+    c.execute(
+        """INSERT INTO semantic_memories
+           (id, content, project, scope, created_at, updated_at)
+           VALUES (?, ?, 'p', 'project', '2026-01-01', '2026-01-01')""",
+        (sid, content),
+    )
+    c.commit()
+
+
 class TestListSessionExposuresRegistered:
     def test_tool_is_in_definitions(self):
         from better_memory.mcp.server import _tool_definitions
@@ -75,7 +85,13 @@ class TestListSessionExposuresRegistered:
 
 class TestListSessionExposures:
     def test_returns_unrated_for_current_session(self, memory_db, monkeypatch):
-        """The tool reads CLAUDE_SESSION_ID from env and returns unrated rows."""
+        """The tool reads CLAUDE_SESSION_ID from env and returns unrated rows.
+
+        Note: _dispatch_for_tests opens its own DB connection (via create_server)
+        separate from the fixture's conn. Both target the same on-disk file via
+        BETTER_MEMORY_HOME. Commits in the fixture are required for the dispatch
+        connection to see the seeded data.
+        """
         from better_memory.mcp import server as srv_mod
 
         conn, _ = memory_db
@@ -91,6 +107,28 @@ class TestListSessionExposures:
         assert len(payload["exposures"]) == 1
         assert payload["exposures"][0]["id"] == "r1"
         assert payload["exposures"][0]["kind"] == "reflection"
+        assert "title" in payload["exposures"][0]
+        assert "content" not in payload["exposures"][0]
+
+    def test_returns_content_key_for_semantic_exposure(self, memory_db, monkeypatch):
+        """Semantic exposures use the 'content' key, not 'title'."""
+        from better_memory.mcp import server as srv_mod
+
+        conn, _ = memory_db
+        _seed_semantic(conn, "s1", content="prefer short filenames")
+        _seed_exposure(conn, "S2", "semantic", "s1")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S2")
+
+        result = run_async(
+            srv_mod._dispatch_for_tests("memory.list_session_exposures", {})
+        )
+        payload = json.loads(result[0].text)
+        assert len(payload["exposures"]) == 1
+        exp = payload["exposures"][0]
+        assert exp["kind"] == "semantic"
+        assert exp["id"] == "s1"
+        assert exp["content"] == "prefer short filenames"
+        assert "title" not in exp
 
     def test_empty_when_no_unrated(self, memory_db, monkeypatch):
         from better_memory.mcp import server as srv_mod
