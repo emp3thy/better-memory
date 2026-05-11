@@ -22,6 +22,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+# --------------------------------------------------------------- skill registry
+
+_SKILLS_TO_INSTALL: tuple[str, ...] = ("rate-session-memories",)
+
 # --------------------------------------------------------------- hook registry
 
 
@@ -173,6 +177,51 @@ def merge_settings_json(
     return config
 
 
+# ----------------------------------------------------------- skill symlinks
+
+
+def _resolve_user_skills_dir() -> Path:
+    """Return ~/.claude/skills/, creating it if missing."""
+    target = Path.home() / ".claude" / "skills"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def install_skill_symlinks() -> None:
+    """Symlink each in-repo skill into ~/.claude/skills/.
+
+    Idempotent: if the link already points to the right target, nothing
+    happens. If a different file or symlink exists at the target path,
+    remove it and recreate. Symlinks have no meaningful content to back up.
+    """
+    repo_skills_dir = Path(__file__).resolve().parents[2] / ".claude" / "skills"
+    user_skills_dir = _resolve_user_skills_dir()
+
+    for skill_name in _SKILLS_TO_INSTALL:
+        source = repo_skills_dir / skill_name
+        if not source.is_dir():
+            continue
+        link = user_skills_dir / skill_name
+        if link.is_symlink():
+            if link.resolve() == source.resolve():
+                continue  # Already correct — nothing to do.
+            link.unlink()
+        elif link.exists():
+            if link.is_file():
+                link.unlink()
+            elif link.is_dir():
+                shutil.rmtree(link)
+        try:
+            link.symlink_to(source, target_is_directory=True)
+        except OSError as exc:
+            print(
+                f"  WARN skill symlink skipped ({skill_name}): {exc}\n"
+                "  Enable Windows Developer Mode or run as administrator"
+                " to install skill symlinks.",
+                file=sys.stderr,
+            )
+
+
 # ----------------------------------------------------------- I/O helpers
 
 
@@ -265,6 +314,7 @@ def main(argv: list[str] | None = None) -> None:
         ),
     ]
 
+    install_skill_symlinks()
     print("[install_hooks] Installing better-memory MCP server + hooks...")
     # Pass 1 (VALIDATE): load + parse ALL targets before any writes. If any
     # is malformed, _load_or_empty exits 1 here, and no target file has been
