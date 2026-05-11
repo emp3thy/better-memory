@@ -2225,7 +2225,66 @@ git commit -m "feat(rating): rate-session-memories skill + install symlink"
 - Modify: `better_memory/hooks/session_close.py`
 - Create: `tests/hooks/test_session_close_rating_directive.py`
 
-**Confidence note (~90%):** the Stop hook decision-block JSON shape is verified against the Claude Code hook docs (spec §6.2), but this is the first time we use it in this codebase. If the test passes and the integration smoke (Task 16) confirms an LLM turn fires, confidence rises to ~98%.
+**Confidence note (~98% after mitigations applied below):** the Stop hook JSON shape was re-verified during plan-writing against https://code.claude.com/docs/en/hooks.md (Stop Hook section, updated 2026-05-10). The exact documented envelope is:
+
+```json
+{
+  "decision": "block",
+  "reason": "<short, user-visible explanation>",
+  "hookSpecificOutput": {
+    "hookEventName": "Stop",
+    "additionalContext": "<directive text, max 10,000 chars>"
+  }
+}
+```
+
+Key facts:
+- `decision` is top-level (NOT nested in `hookSpecificOutput`).
+- `reason` is top-level, recommended for UX.
+- `hookEventName: "Stop"` belongs inside `hookSpecificOutput`.
+- `additionalContext` max is 10,000 characters. Our 8 KB cap is conservative.
+- The block fires from `decision` alone; `additionalContext` enriches Claude's next turn but doesn't gate the block.
+- This works on the **Stop** event only — not SubagentStop.
+
+The final ~2% uncertainty is whether the production mechanism actually produces an LLM turn end-to-end, which can only be confirmed by a real Claude session. Step 7 below covers that smoke test.
+
+- [ ] **Step 0: Eyeball the JSON shape via a throwaway spike**
+
+Create `better_memory/hooks/_rating_directive_smoke.py` (delete after Task 12 lands):
+
+```python
+"""Spike: emit a sample Stop-hook rating directive to stdout.
+
+Run: `python -m better_memory.hooks._rating_directive_smoke`
+
+Eyeball the output against the documented schema at
+https://code.claude.com/docs/en/hooks.md (Stop Hook section). This file
+exists ONLY for that visual check — delete it before merging Task 12.
+"""
+from __future__ import annotations
+
+import json
+
+sample = {
+    "decision": "block",
+    "reason": "RATE_MEMORIES — 2 pending ratings for this session",
+    "hookSpecificOutput": {
+        "hookEventName": "Stop",
+        "additionalContext": (
+            "RATE_MEMORIES — sample directive\n\n"
+            "Reflections (2):\n"
+            "- r-aaa: Sample title 1\n"
+            "- r-bbb: Sample title 2\n\n"
+            "Semantic memories (0):\n  (none)\n\n"
+            "For each id, classify as one of:\n"
+            "  cited / shaped / ignored / misled (default: ignored)\n"
+        ),
+    },
+}
+print(json.dumps(sample, indent=2))
+```
+
+Run it and confirm the output structure matches the documented schema (decision top-level, reason top-level, hookEventName + additionalContext inside hookSpecificOutput).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2293,13 +2352,18 @@ class TestRatingDirectiveEmission:
         }
         result = _run_hook(env)
         assert result.returncode == 0
-        # stdout should contain a single JSON object with decision: block.
+        # stdout should contain a single JSON object with the documented shape.
         payload = json.loads(result.stdout)
         assert payload["decision"] == "block"
-        assert "additionalContext" in payload["hookSpecificOutput"]
-        assert "RATE_MEMORIES" in payload["hookSpecificOutput"]["additionalContext"]
-        assert "r1" in payload["hookSpecificOutput"]["additionalContext"]
-        assert "My Title" in payload["hookSpecificOutput"]["additionalContext"]
+        assert isinstance(payload.get("reason"), str) and payload["reason"]
+        hso = payload["hookSpecificOutput"]
+        assert hso["hookEventName"] == "Stop"
+        assert "additionalContext" in hso
+        assert "RATE_MEMORIES" in hso["additionalContext"]
+        assert "r1" in hso["additionalContext"]
+        assert "My Title" in hso["additionalContext"]
+        # Documented cap: 10,000 chars; we use a conservative 8 KB internal cap.
+        assert len(hso["additionalContext"]) <= 10_000
 
     def test_empty_unrated_writes_marker_no_directive(
         self, tmp_path, tmp_memory_db,
@@ -2415,7 +2479,12 @@ def _emit_rating_directive_if_unrated(session_id: str) -> None:
 
         payload = {
             "decision": "block",
+            "reason": (
+                f"RATE_MEMORIES — {len(rows)} pending rating(s) for "
+                f"this session"
+            ),
             "hookSpecificOutput": {
+                "hookEventName": "Stop",
                 "additionalContext": directive,
             },
         }
@@ -2451,12 +2520,43 @@ Expected: PASS (3 tests)
 Run: `python -m pytest tests/hooks/ -v -k session_close`
 Expected: PASS (all existing session_close tests)
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Delete the throwaway spike file**
+
+```bash
+rm better_memory/hooks/_rating_directive_smoke.py
+```
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add better_memory/hooks/session_close.py tests/hooks/test_session_close_rating_directive.py
 git commit -m "feat(rating): session_close emits Stop-block rating directive"
 ```
+
+- [ ] **Step 8: Manual end-to-end smoke test in a real Claude session**
+
+This is the ONLY way to confirm the mechanism actually produces an LLM turn in production (pytest can't drive Claude Code). Run after the commit lands.
+
+**Setup:**
+1. Open a fresh Claude Code session in this repo (`claude` in the terminal).
+2. Confirm `CLAUDE_SESSION_ID` is set in the environment of the spawned MCP server (check via `/diagnostics` or a quick MCP tool call).
+3. Trigger a memory retrieve mid-session so at least one exposure row exists with `rated_at IS NULL`. Quickest: ask Claude something like *"retrieve memories about X"* — it will call `memory_retrieve` and exposures will be recorded.
+
+**Execute the test:**
+4. End the session (`/exit`, or close the terminal — whichever fires the Stop hook).
+5. Watch the terminal: Claude should take ONE additional turn before actually stopping. That turn should invoke the `rate-session-memories` skill and call `memory.apply_session_ratings`.
+
+**Verify:**
+6. In a new terminal, open the memory DB: `sqlite3 ~/.better-memory/memory.db`.
+7. Run: `SELECT session_id, memory_id, rated_at, classification FROM session_memory_exposure ORDER BY exposed_at DESC LIMIT 10;`
+8. Expected: rows from the test session have `rated_at` populated (not NULL) and a non-null `classification`.
+
+**If the smoke test fails:**
+- Claude didn't take a rating turn → either `decision: "block"` didn't propagate (re-read docs, check JSON shape against schema in the Confidence Note) or the rating skill wasn't installed (re-run `bm install-hooks`).
+- Claude tried but the MCP call errored → check the diagnostics counter for `session_id_missing` and the Recent Errors panel.
+- Open a GitHub issue with the captured terminal output and the SQL results.
+
+Note: this manual step is not blocking for the rest of the plan (Tasks 13-18 don't depend on it). If smoke fails, file the issue and continue; the data model and tool surface still work via manual `/rate-memories` invocation, and the auto-trigger can be patched after.
 
 ---
 
