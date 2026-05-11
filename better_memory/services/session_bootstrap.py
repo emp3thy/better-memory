@@ -17,7 +17,9 @@ existing SAVEPOINT envelope.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -50,19 +52,22 @@ def _render_header(*, project: str, source: str, action: str, episode_id: str) -
     )
 
 
-def _render_semantic(items) -> str:
+def _render_semantic(items) -> tuple[str, list[str]]:
     if not items:
-        return ""
+        return "", []
     lines = [f"### Semantic memories ({len(items)} entries)"]
+    ids: list[str] = []
     for m in items:
         lines.append(f"- [{m.id[:8]}] {_truncate(m.content)}")
-    return "\n".join(lines)
+        ids.append(m.id)
+    return "\n".join(lines), ids
 
 
-def _render_reflection_bucket(name: str, items) -> str:
+def _render_reflection_bucket(name: str, items) -> tuple[str, list[str]]:
     if not items:
-        return ""
+        return "", []
     blocks: list[str] = []
+    ids: list[str] = []
     for item in items:
         lines = [
             f"**{item['title']}**",
@@ -72,7 +77,8 @@ def _render_reflection_bucket(name: str, items) -> str:
             lines.append(f"- {_truncate(hint)}")
         lines.append(f"_id: {item['id']}_")
         blocks.append("\n".join(lines))
-    return f"### Reflections — {name}\n" + "\n\n".join(blocks)
+        ids.append(item["id"])
+    return f"### Reflections — {name}\n" + "\n\n".join(blocks), ids
 
 
 @dataclass(frozen=True)
@@ -89,19 +95,61 @@ class BootstrapResult:
 
 
 class SessionBootstrapService:
-    def __init__(self, conn) -> None:
+    def __init__(
+        self,
+        conn,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._conn = conn
+        self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self._episodes = EpisodeService(conn)
+
+    def _record_exposure(
+        self,
+        *,
+        session_id: str,
+        reflection_ids: list[str],
+        semantic_ids: list[str],
+    ) -> None:
+        """Write one row per injected memory into session_memory_exposure.
+
+        Called only after rendering succeeded, so we don't credit memories
+        the LLM never actually saw. Best-effort: skips entirely if
+        session_id is empty (e.g., manual invocation without env).
+        """
+        if not session_id:
+            return
+        now = self._clock().isoformat()
+        rows = (
+            [(session_id, "reflection", rid, now, "bootstrap")
+             for rid in reflection_ids] +
+            [(session_id, "semantic", sid, now, "bootstrap")
+             for sid in semantic_ids]
+        )
+        if not rows:
+            return
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO session_memory_exposure "
+            "(session_id, memory_kind, memory_id, exposed_at, source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
 
     def bootstrap(
         self,
         *,
-        source: str | None,
+        source: str | None = None,
         session_id: str,
-        cwd: Path,
+        cwd: Path | None = None,
+        project: str | None = None,
     ) -> BootstrapResult:
         coerced_source = source if source in _VALID_SOURCES else "startup"
-        project = project_name(cwd)
+        if project is None:
+            if cwd is None:
+                raise ValueError("Either 'project' or 'cwd' must be provided.")
+            project = project_name(cwd)
 
         existing = self._episodes.active_episode(session_id)
         if existing is None:
@@ -143,22 +191,28 @@ class SessionBootstrapService:
                 episode_id=episode_id,
             ),
         ]
-        sem_section = _render_semantic(semantic)
+        sem_section, semantic_ids = _render_semantic(semantic)
         if sem_section:
             sections.append(sem_section)
-        do_section = _render_reflection_bucket("do (prior wins)", buckets["do"])
+        do_section, do_ids = _render_reflection_bucket("do (prior wins)", buckets["do"])
         if do_section:
             sections.append(do_section)
-        dont_section = _render_reflection_bucket("dont (approaches to avoid)", buckets["dont"])
+        dont_section, dont_ids = _render_reflection_bucket("dont (approaches to avoid)", buckets["dont"])
         if dont_section:
             sections.append(dont_section)
-        neutral_section = _render_reflection_bucket("neutral (context)", buckets["neutral"])
+        neutral_section, neutral_ids = _render_reflection_bucket("neutral (context)", buckets["neutral"])
         if neutral_section:
             sections.append(neutral_section)
         sections.append("---")
         sections.append(_FOOTER)
 
         rendered = "\n\n".join(sections)
+
+        self._record_exposure(
+            session_id=session_id,
+            reflection_ids=do_ids + dont_ids + neutral_ids,
+            semantic_ids=semantic_ids,
+        )
 
         return BootstrapResult(
             additional_context=rendered,
