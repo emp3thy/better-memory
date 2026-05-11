@@ -186,3 +186,96 @@ class MemoryRatingService:
         )
 
         return {"applied": classification, "skipped": None}
+
+    # ----------------------------------------------------- apply_session_ratings
+    def apply_session_ratings(
+        self,
+        *,
+        session_id: str,
+        ratings: list[dict[str, str]],
+    ) -> dict[str, object]:
+        """Atomic batch update at session end.
+
+        Validates the entire batch BEFORE entering the SAVEPOINT:
+        - session_id must be non-empty.
+        - ratings must be non-empty.
+        - each entry must have kind in {'reflection', 'semantic'},
+          class in {'cited', 'shaped', 'ignored', 'misled'},
+          and a string id.
+        - no duplicate (kind, id) pairs in one batch.
+
+        Inside the SAVEPOINT, each entry runs through _apply_one. Skip
+        outcomes are counted; apply outcomes are counted. On any
+        unhandled exception, the whole batch rolls back.
+
+        Returns:
+            {
+                "session_id": str,
+                "applied":  {"cited": int, "shaped": int, "ignored": int, "misled": int},
+                "skipped":  {"not_exposed": int, "already_rated": int,
+                             "memory_missing": int, "memory_retired": int},
+            }
+        """
+        if not session_id:
+            raise ValueError("session_id must be non-empty")
+        if not ratings:
+            raise ValueError("ratings must be non-empty")
+
+        seen: set[tuple[str, str]] = set()
+        for i, r in enumerate(ratings):
+            kind = r.get("kind")
+            rid = r.get("id")
+            cls = r.get("class")
+            if kind not in _VALID_KINDS:
+                raise ValueError(
+                    f"ratings[{i}].kind: invalid {kind!r}; "
+                    f"expected one of {_VALID_KINDS}"
+                )
+            if cls not in _VALID_CLASSES:
+                raise ValueError(
+                    f"ratings[{i}].class: invalid {cls!r}; "
+                    f"expected one of {_VALID_CLASSES}"
+                )
+            if not isinstance(rid, str) or not rid:
+                raise ValueError(f"ratings[{i}].id: must be non-empty string")
+            key = (kind, rid)
+            if key in seen:
+                raise ValueError(
+                    f"ratings[{i}]: duplicate (kind, id) = {key!r}"
+                )
+            seen.add(key)
+
+        now = self._clock().isoformat()
+        applied = {"cited": 0, "shaped": 0, "ignored": 0, "misled": 0}
+        skipped = {
+            "not_exposed": 0, "already_rated": 0,
+            "memory_missing": 0, "memory_retired": 0,
+        }
+
+        self._conn.execute("SAVEPOINT memory_rating_apply")
+        try:
+            for r in ratings:
+                outcome = self._apply_one(
+                    session_id=session_id,
+                    kind=r["kind"],
+                    memory_id=r["id"],
+                    classification=r["class"],
+                    now=now,
+                )
+                if outcome["applied"] is not None:
+                    applied[outcome["applied"]] += 1
+                else:
+                    skipped[outcome["skipped"]] += 1
+        except BaseException:
+            self._conn.execute("ROLLBACK TO SAVEPOINT memory_rating_apply")
+            self._conn.execute("RELEASE SAVEPOINT memory_rating_apply")
+            raise
+        else:
+            self._conn.execute("RELEASE SAVEPOINT memory_rating_apply")
+        self._conn.commit()
+
+        return {
+            "session_id": session_id,
+            "applied": applied,
+            "skipped": skipped,
+        }

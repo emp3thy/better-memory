@@ -287,3 +287,206 @@ class TestCreditOneValidation:
             svc.credit_one(
                 session_id="S1", kind="observation", id="o1", classification="cited",
             )
+
+
+class TestApplySessionRatings:
+    def test_each_class_produces_right_updates(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_reflection(conn, "r2")
+        _seed_semantic(conn, "s1")
+        _seed_semantic(conn, "s2")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        _seed_exposure(conn, "S1", "reflection", "r2")
+        _seed_exposure(conn, "S1", "semantic",   "s1")
+        _seed_exposure(conn, "S1", "semantic",   "s2")
+
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.apply_session_ratings(
+            session_id="S1",
+            ratings=[
+                {"kind": "reflection", "id": "r1", "class": "cited"},
+                {"kind": "reflection", "id": "r2", "class": "ignored"},
+                {"kind": "semantic",   "id": "s1", "class": "shaped"},
+                {"kind": "semantic",   "id": "s2", "class": "misled"},
+            ],
+        )
+        assert result["session_id"] == "S1"
+        assert result["applied"] == {
+            "cited": 1, "shaped": 1, "ignored": 1, "misled": 1,
+        }
+        assert all(v == 0 for v in result["skipped"].values())
+
+        # Verify the actual columns.
+        r1 = conn.execute(
+            "SELECT useful_count, times_misled FROM reflections WHERE id='r1'"
+        ).fetchone()
+        assert r1["useful_count"] == 1
+        r2 = conn.execute(
+            "SELECT useful_count, times_misled FROM reflections WHERE id='r2'"
+        ).fetchone()
+        assert r2["useful_count"] == 0  # ignored is a no-op on memory
+        s1 = conn.execute(
+            "SELECT useful_count FROM semantic_memories WHERE id='s1'"
+        ).fetchone()
+        assert s1["useful_count"] == 1
+        s2 = conn.execute(
+            "SELECT times_misled FROM semantic_memories WHERE id='s2'"
+        ).fetchone()
+        assert s2["times_misled"] == 1
+
+    def test_ignored_still_stamps_exposure_row(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        svc.apply_session_ratings(
+            session_id="S1",
+            ratings=[{"kind": "reflection", "id": "r1", "class": "ignored"}],
+        )
+        row = conn.execute(
+            "SELECT rated_at, classification FROM session_memory_exposure "
+            "WHERE session_id='S1'"
+        ).fetchone()
+        assert row["rated_at"] is not None
+        assert row["classification"] == "ignored"
+
+    def test_all_four_skip_counts_exercised(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        # r1: exists + not exposed
+        _seed_reflection(conn, "r1")
+        # r2: exists + exposed + already rated
+        _seed_reflection(conn, "r2")
+        _seed_exposure(conn, "S1", "reflection", "r2")
+        conn.execute(
+            "UPDATE session_memory_exposure SET rated_at='x' "
+            "WHERE memory_id='r2'"
+        )
+        conn.commit()
+        # r3: missing + exposed
+        _seed_exposure(conn, "S1", "reflection", "r3")
+        # r4: exists + retired + exposed
+        _seed_reflection(conn, "r4")
+        conn.execute(
+            "UPDATE reflections SET status='retired' WHERE id='r4'"
+        )
+        conn.commit()
+        _seed_exposure(conn, "S1", "reflection", "r4")
+
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.apply_session_ratings(
+            session_id="S1",
+            ratings=[
+                {"kind": "reflection", "id": "r1", "class": "cited"},
+                {"kind": "reflection", "id": "r2", "class": "cited"},
+                {"kind": "reflection", "id": "r3", "class": "cited"},
+                {"kind": "reflection", "id": "r4", "class": "cited"},
+            ],
+        )
+        assert result["applied"] == {
+            "cited": 0, "shaped": 0, "ignored": 0, "misled": 0,
+        }
+        assert result["skipped"] == {
+            "not_exposed": 1, "already_rated": 1,
+            "memory_missing": 1, "memory_retired": 1,
+        }
+
+    def test_empty_ratings_rejected(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="ratings"):
+            svc.apply_session_ratings(session_id="S1", ratings=[])
+
+    def test_empty_session_id_rejected(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="session_id"):
+            svc.apply_session_ratings(
+                session_id="",
+                ratings=[{"kind": "reflection", "id": "r1", "class": "cited"}],
+            )
+
+    def test_duplicate_kind_id_in_batch_rejected(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="duplicate"):
+            svc.apply_session_ratings(
+                session_id="S1",
+                ratings=[
+                    {"kind": "reflection", "id": "r1", "class": "cited"},
+                    {"kind": "reflection", "id": "r1", "class": "ignored"},
+                ],
+            )
+
+    def test_invalid_class_rejected(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError):
+            svc.apply_session_ratings(
+                session_id="S1",
+                ratings=[{"kind": "reflection", "id": "r1", "class": "bogus"}],
+            )
+
+    def test_savepoint_rollback_on_unexpected_error(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        """If something inside the loop raises, no partial state should land."""
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_reflection(conn, "r2")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        _seed_exposure(conn, "S1", "reflection", "r2")
+
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        # Patch _apply_one so r1 succeeds, r2 raises.
+        original = svc._apply_one
+        calls = {"n": 0}
+
+        def patched(**kw):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("boom")
+            return original(**kw)
+
+        monkeypatch.setattr(svc, "_apply_one", patched)
+        with pytest.raises(RuntimeError, match="boom"):
+            svc.apply_session_ratings(
+                session_id="S1",
+                ratings=[
+                    {"kind": "reflection", "id": "r1", "class": "cited"},
+                    {"kind": "reflection", "id": "r2", "class": "cited"},
+                ],
+            )
+
+        # r1's bump should have been rolled back.
+        row = conn.execute(
+            "SELECT useful_count FROM reflections WHERE id='r1'"
+        ).fetchone()
+        assert row["useful_count"] == 0
+
+    def test_credit_then_sweep_skips_already_rated(self, conn, fixed_clock):
+        """Credit one mid-session, then sweep — credited row is skipped."""
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_reflection(conn, "r2")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        _seed_exposure(conn, "S1", "reflection", "r2")
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        svc.credit_one(
+            session_id="S1", kind="reflection", id="r1", classification="cited",
+        )
+        # Sweep both ids; r1 should land in skipped.already_rated.
+        result = svc.apply_session_ratings(
+            session_id="S1",
+            ratings=[
+                {"kind": "reflection", "id": "r1", "class": "ignored"},
+                {"kind": "reflection", "id": "r2", "class": "ignored"},
+            ],
+        )
+        assert result["applied"]["ignored"] == 1
+        assert result["skipped"]["already_rated"] == 1
+        # r1 still has useful_count == 1 from the credit (not bumped to 2).
+        row = conn.execute(
+            "SELECT useful_count FROM reflections WHERE id='r1'"
+        ).fetchone()
+        assert row["useful_count"] == 1
