@@ -1113,6 +1113,7 @@ class ReflectionSynthesisService:
         phase: str | None = None,
         polarity: str | None = None,
         limit_per_bucket: int | None = 20,
+        track_exposure: bool = True,
     ) -> dict[str, list[dict]]:
         """Return reflections bucketed by polarity, ordered by confidence DESC.
 
@@ -1125,6 +1126,11 @@ class ReflectionSynthesisService:
           Pass ``None`` to disable the cap (returns every matching row per
           bucket); used by SessionBootstrapService which injects all
           reflections at session start.
+        - ``track_exposure``: when ``True`` (default), writes a
+          source='retrieve' row per returned memory into
+          ``session_memory_exposure`` if ``CLAUDE_SESSION_ID`` is set.
+          Set to ``False`` when calling from contexts that manage their own
+          exposure tracking (e.g., SessionBootstrapService.bootstrap).
 
         Excludes retired and superseded reflections. Includes pending_review
         + confirmed.
@@ -1177,8 +1183,10 @@ class ReflectionSynthesisService:
 
         # Best-effort exposure tracking. Skip silently when env is missing
         # (e.g., test or non-Claude context) — see spec §5.2.1.
+        # track_exposure=False is used by SessionBootstrapService.bootstrap,
+        # which manages its own exposure write via _record_exposure.
         sid = os.environ.get("CLAUDE_SESSION_ID")
-        if sid:
+        if track_exposure and sid:
             all_ids = [
                 r["id"] for bucket in buckets.values() for r in bucket
             ]

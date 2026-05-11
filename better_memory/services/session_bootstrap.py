@@ -167,14 +167,21 @@ class SessionBootstrapService:
         # tagged project='general' with scope='project'. The default union
         # (project = ? OR scope = 'general') would otherwise pull them.
         # See spec §6.
+        # track_exposure=False: bootstrap manages its own source='bootstrap'
+        # exposure write via _record_exposure; the inline retrieve path must
+        # not write a duplicate source='retrieve' row for the same memory.
         if project == "general":
-            semantic = semantic_svc.list_for_project(project=project, scope_filter="general")
+            semantic = semantic_svc.list_for_project(
+                project=project, scope_filter="general", track_exposure=False,
+            )
         else:
-            semantic = semantic_svc.list_for_project(project=project, scope_filter=None)
+            semantic = semantic_svc.list_for_project(
+                project=project, scope_filter=None, track_exposure=False,
+            )
 
         reflection_svc = ReflectionSynthesisService(self._conn)
         buckets = reflection_svc.retrieve_reflections(
-            project=project, limit_per_bucket=None,
+            project=project, limit_per_bucket=None, track_exposure=False,
         )
 
         semantic_count = len(semantic)

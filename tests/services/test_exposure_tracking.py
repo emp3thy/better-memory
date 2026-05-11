@@ -122,6 +122,32 @@ class TestBootstrapExposureWrite:
         ).fetchone()
         assert rows["n"] == 0
 
+    def test_bootstrap_writes_one_row_per_memory_not_two(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        """Regression: bootstrap calls retrieve_reflections + list_for_project
+        internally. They must NOT write their own exposure rows on top of
+        bootstrap's _record_exposure write."""
+        from better_memory.services.session_bootstrap import SessionBootstrapService
+
+        _seed_reflection(conn, "r1")
+        _seed_semantic(conn, "s1")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+        svc = SessionBootstrapService(conn, clock=fixed_clock)
+        svc.bootstrap(project="p", session_id="S1")
+
+        rows = conn.execute(
+            "SELECT memory_id, source FROM session_memory_exposure "
+            "WHERE session_id='S1'"
+        ).fetchall()
+        # Each memory should appear exactly once, all with source='bootstrap'.
+        memory_id_count: dict[str, int] = {}
+        for r in rows:
+            memory_id_count[r["memory_id"]] = memory_id_count.get(r["memory_id"], 0) + 1
+        assert memory_id_count["r1"] == 1
+        assert memory_id_count["s1"] == 1
+        assert all(r["source"] == "bootstrap" for r in rows)
+
 
 class TestReflectionRetrieveExposureWrite:
     def test_retrieve_writes_exposure_rows(
@@ -174,6 +200,21 @@ class TestReflectionRetrieveExposureWrite:
         ).fetchall()
         assert rows == []
 
+    def test_track_exposure_false_skips_write(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.reflection import ReflectionSynthesisService
+
+        _seed_reflection(conn, "r1")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        svc.retrieve_reflections(project="p", track_exposure=False)
+
+        rows = conn.execute(
+            "SELECT * FROM session_memory_exposure"
+        ).fetchall()
+        assert rows == []
+
 
 class TestSemanticListExposureWrite:
     def test_list_for_project_writes_exposure_rows(
@@ -203,6 +244,36 @@ class TestSemanticListExposureWrite:
 
         _seed_semantic(conn, "s1")
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.list_for_project(project="p")
+
+        rows = conn.execute(
+            "SELECT * FROM session_memory_exposure"
+        ).fetchall()
+        assert rows == []
+
+    def test_track_exposure_false_skips_write(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+
+        _seed_semantic(conn, "s1")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.list_for_project(project="p", track_exposure=False)
+
+        rows = conn.execute(
+            "SELECT * FROM session_memory_exposure"
+        ).fetchall()
+        assert rows == []
+
+    def test_list_for_project_skips_exposure_for_empty_result(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+
+        # No semantic memories seeded.
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
         svc = SemanticMemoryService(conn, clock=fixed_clock)
         svc.list_for_project(project="p")
 

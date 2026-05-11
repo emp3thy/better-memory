@@ -190,6 +190,7 @@ class SemanticMemoryService:
         project: str,
         scope_filter: str | None = None,
         search: str | None = None,
+        track_exposure: bool = True,
     ) -> list[SemanticMemory]:
         """Project rows + general-scope rows from any project, newest first.
 
@@ -202,6 +203,11 @@ class SemanticMemoryService:
             search: optional case-insensitive substring match on
                 ``content``. ``%`` and ``_`` in the input are escaped so
                 they match literally rather than as LIKE wildcards.
+            track_exposure: when ``True`` (default), writes a
+                source='retrieve' row per returned memory into
+                ``session_memory_exposure`` if ``CLAUDE_SESSION_ID`` is set.
+                Set to ``False`` when calling from contexts that manage their
+                own exposure tracking (e.g., SessionBootstrapService.bootstrap).
         """
         where_clauses: list[str] = []
         params: list[object] = []
@@ -240,8 +246,10 @@ class SemanticMemoryService:
             for r in rows
         ]
         # Best-effort exposure tracking — see spec §5.2.1.
+        # track_exposure=False is used by SessionBootstrapService.bootstrap,
+        # which manages its own exposure write via _record_exposure.
         sid = os.environ.get("CLAUDE_SESSION_ID")
-        if sid and results:
+        if track_exposure and sid and results:
             now = self._clock().isoformat()
             self._conn.executemany(
                 "INSERT OR IGNORE INTO session_memory_exposure "
