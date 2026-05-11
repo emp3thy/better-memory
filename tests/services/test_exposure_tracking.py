@@ -173,3 +173,40 @@ class TestReflectionRetrieveExposureWrite:
             "SELECT * FROM session_memory_exposure"
         ).fetchall()
         assert rows == []
+
+
+class TestSemanticListExposureWrite:
+    def test_list_for_project_writes_exposure_rows(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+
+        _seed_semantic(conn, "s1")
+        _seed_semantic(conn, "s2")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.list_for_project(project="p")
+
+        rows = conn.execute(
+            "SELECT memory_kind, memory_id, source FROM session_memory_exposure "
+            "WHERE session_id='S1'"
+        ).fetchall()
+        ids = {(r["memory_kind"], r["memory_id"]) for r in rows}
+        assert ("semantic", "s1") in ids
+        assert ("semantic", "s2") in ids
+        assert all(r["source"] == "retrieve" for r in rows)
+
+    def test_list_for_project_skips_exposure_when_no_env(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.semantic import SemanticMemoryService
+
+        _seed_semantic(conn, "s1")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        svc = SemanticMemoryService(conn, clock=fixed_clock)
+        svc.list_for_project(project="p")
+
+        rows = conn.execute(
+            "SELECT * FROM session_memory_exposure"
+        ).fetchall()
+        assert rows == []

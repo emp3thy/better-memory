@@ -9,6 +9,7 @@ See docs/superpowers/specs/2026-05-04-semantic-memories-design.md.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -230,7 +231,7 @@ class SemanticMemoryService:
             "ORDER BY created_at DESC"
         )
         rows = self._conn.execute(sql, params).fetchall()
-        return [
+        results = [
             SemanticMemory(
                 id=r["id"], content=r["content"], project=r["project"],
                 scope=r["scope"],
@@ -238,3 +239,15 @@ class SemanticMemoryService:
             )
             for r in rows
         ]
+        # Best-effort exposure tracking — see spec §5.2.1.
+        sid = os.environ.get("CLAUDE_SESSION_ID")
+        if sid and results:
+            now = self._clock().isoformat()
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO session_memory_exposure "
+                "(session_id, memory_kind, memory_id, exposed_at, source) "
+                "VALUES (?, 'semantic', ?, ?, 'retrieve')",
+                [(sid, m.id, now) for m in results],
+            )
+            self._conn.commit()
+        return results
