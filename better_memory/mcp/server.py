@@ -1246,7 +1246,14 @@ async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
             params=CallToolRequestParams(name=name, arguments=arguments),
         )
         result = await handler(req)
-        return result.root.content
+        # The SDK's ServerResult is a discriminated union; we know this
+        # handler is wired to CallTool and returns CallToolResult.
+        from mcp.types import CallToolResult
+        from typing import cast
+        assert isinstance(result.root, CallToolResult), (
+            f"Expected CallToolResult, got {type(result.root).__name__}"
+        )
+        return cast("list[TextContent]", result.root.content)
     finally:
         await cleanup()
 
