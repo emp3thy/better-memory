@@ -29,7 +29,8 @@ def test_semantic_memories_table_exists(conn) -> None:
 
 def test_semantic_memories_has_expected_columns(conn) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(semantic_memories)").fetchall()}
-    assert cols == {"id", "content", "project", "scope", "created_at", "updated_at"}
+    assert cols == {"id", "content", "project", "scope", "created_at", "updated_at",
+                    "useful_count", "last_useful_at", "times_misled", "last_misled_at"}
 
 
 def test_scope_default_is_project(conn) -> None:
