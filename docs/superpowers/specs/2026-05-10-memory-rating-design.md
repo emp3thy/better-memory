@@ -147,19 +147,41 @@ Append the same insert to:
 - `ReflectionSynthesisService.retrieve_reflections` — for each returned reflection ID, kind=`'reflection'`, source=`'retrieve'`.
 - `SemanticMemoryService.list_for_project` — kind=`'semantic'`, source=`'retrieve'`.
 
-Both methods gain an optional `session_id: str | None = None` parameter. When `None`, the exposure insert is skipped (no synthetic IDs). The MCP tools (`memory_retrieve` and the semantic list tool) gain the same optional parameter and pass it through.
+Both methods gain a private `_record_exposure(conn, session_id, ...)` helper that the public methods call. `session_id` is resolved server-side from `os.environ["CLAUDE_SESSION_ID"]` — see §5.2.1.
 
 `memory_retrieve_observations` is NOT instrumented (observations out of scope).
 
-### 5.2.1 How `session_id` reaches retrieval calls
+### 5.2.1 How `session_id` reaches retrieval calls — verified
 
-The MCP server is a long-lived process serving potentially multiple Claude sessions, so process-level env is not sufficient. `session_id` flows in via the MCP tool arguments:
+Verified by reading the codebase. `CLAUDE_SESSION_ID` is set in the MCP server's environment for the entire session, so the tool handler can resolve it directly without LLM plumbing.
 
-- `session_bootstrap` runs in the SessionStart hook subprocess and already reads `CLAUDE_SESSION_ID` from env. It passes that into `_record_exposure` directly.
-- `memory_retrieve` / semantic list MCP tools accept an optional `session_id` argument. Claude (the LLM) is responsible for passing the current `CLAUDE_SESSION_ID` value when invoking these tools. The skill docs (`memory-retrieve.md`) gain a one-liner reminder: "pass `session_id` when retrieving so the call contributes to the rating signal."
-- If the LLM omits `session_id`, retrieval still works — only exposure tracking is skipped for that call. Graceful degradation.
+**Why env is sufficient:**
+- The MCP server uses **stdio transport** (`better_memory/mcp/server.py:1181` — `async with stdio_server()`).
+- Stdio MCP servers are spawned per-Claude-session by Claude Code as child processes with the parent's env.
+- Once the server starts, `CLAUDE_SESSION_ID` stays put for the lifetime of the session — across every compact, every tool call, every sub-agent dispatch — until the session actually ends and the MCP server dies with it.
+- The codebase already uses this pattern in 5+ places (`server.py:1079`, `observation.py:141`, `session_bootstrap.py:64`, `session_close.py:51,89`, `post_commit.py:149`).
 
-This is a known cost: relying on the LLM to plumb `session_id` is fragile. **Open question for implementation:** verify whether Claude Code's MCP transport exposes a server-side hook for the current session (e.g., per-request metadata) that the tool can read without an explicit parameter. If yes, prefer that. If not, accept the optional parameter approach.
+**Resolution rule inside the exposure-writing helpers:**
+
+```python
+sid = os.environ.get("CLAUDE_SESSION_ID")
+if not sid:
+    # exposure tracking is best-effort; skip rather than fabricate
+    return retrieved_memories
+_record_exposure(conn, sid, ...)
+return retrieved_memories
+```
+
+**Why "skip" rather than `or uuid4().hex` fallback:** the existing call sites use `or uuid4()` because every observation write *must* have some session_id. Our case is different — a synthetic per-call UUID would create one-call sessions that never group together, and the Stop hook's query (which uses the real session_id) would never find them. Skipping the exposure write is strictly better than fabricating a session_id.
+
+**Diagnostics counter:** add a small counter to the `/diagnostics` panel — *"retrieve calls where CLAUDE_SESSION_ID was missing"*. In normal Claude-Code-driven flows this is always 0; a non-zero value flags a future Anthropic env-var change before we lose months of signal.
+
+**When env may be absent:**
+- MCP server invoked manually (debug, tests, another MCP client).
+- Future Claude Code change renames or removes the var.
+- Sandboxed / containerised Claude that strips certain env vars.
+
+All three degrade silently. Confidence: ~95%.
 
 ### 5.3 Edge cases
 
@@ -271,9 +293,10 @@ description: Use when a session is about to end or compact, and the LLM sees a
 You are about to classify the memories exposed in THIS session.
 
 STEP 1 — Refresh the list.
-Call `memory_list_session_exposures(session_id=<current>)` and read
-the returned list. This is the ONLY valid set of ids to rate.
-(The list in the directive may have been truncated.)
+Call `memory_list_session_exposures()` (no arguments — the server
+resolves the current session from env). Read the returned list. This
+is the ONLY valid set of ids to rate. (The list in the directive may
+have been truncated.)
 
 STEP 2 — Classify each id.
 For each (memory_kind, memory_id), assign exactly ONE class:
@@ -294,7 +317,6 @@ STEP 3 — Submit ALL ratings in ONE call.
 Build a single JSON object:
 
   {
-    "session_id": "<current>",
     "ratings": [
       {"kind": "reflection", "id": "r-abc...", "class": "cited"},
       {"kind": "semantic",   "id": "s-def...", "class": "ignored"},
@@ -302,8 +324,9 @@ Build a single JSON object:
     ]
   }
 
-Call `memory_apply_session_ratings` with this JSON. ONE call, all
-ratings. Partial batches will be rejected by the server.
+Call `memory_apply_session_ratings` with this JSON (server resolves
+the session from env). ONE call, all ratings. Partial batches will
+be rejected by the server.
 
 STEP 4 — Verify.
 The tool returns counts: {cited, shaped, ignored, misled, skipped}.
@@ -335,11 +358,11 @@ Three new tools, all registered in `better_memory/mcp/server.py`.
 
 ### 8.1 `memory_list_session_exposures`
 
-Read-only. Returns the unrated exposure rows for a session, joined with title/content.
+Read-only. Returns the unrated exposure rows for the **current** session (resolved server-side from `CLAUDE_SESSION_ID`), joined with title/content.
 
 ```python
 # input
-{"session_id": "<string, required>"}
+{}    # no parameters — session_id resolved server-side
 
 # output
 {
@@ -354,16 +377,15 @@ Read-only. Returns the unrated exposure rows for a session, joined with title/co
 }
 ```
 
-No side effects.
+If `CLAUDE_SESSION_ID` is missing from env → returns `{"session_id": null, "exposures": []}` and bumps the diagnostics counter. No side effects.
 
 ### 8.2 `memory_apply_session_ratings`
 
-Atomic batch update. Single SAVEPOINT.
+Atomic batch update for the **current** session (resolved server-side from `CLAUDE_SESSION_ID`). Single SAVEPOINT.
 
 ```python
 # input
 {
-  "session_id": "<string, required>",
   "ratings": [
     {
       "kind": "reflection" | "semantic",
@@ -387,26 +409,30 @@ Atomic batch update. Single SAVEPOINT.
 }
 ```
 
+If `CLAUDE_SESSION_ID` is missing from env → returns `ValueError("no active session")`. Apply is meaningless without a session.
+
 ### 8.3 `memory_credit`
 
-Per-tool-use credit. One memory, one classification, no batching. Called opportunistically by the LLM right after it uses a memory.
+Per-tool-use credit for the **current** session (resolved server-side from `CLAUDE_SESSION_ID`). One memory, one classification, no batching. Called opportunistically by the LLM right after it uses a memory.
 
 ```python
 # input
 {
-  "session_id": "<string, required>",
-  "kind":       "reflection" | "semantic",
-  "id":         "<string, required>",
-  "class":      "cited" | "shaped" | "misled"     # NOT "ignored"
+  "kind":  "reflection" | "semantic",
+  "id":    "<string, required>",
+  "class": "cited" | "shaped" | "misled"     # NOT "ignored"
 }
 
 # output
 {
   "applied": "cited" | "shaped" | "misled" | null,    # null when skipped
   "skipped": "not_exposed" | "already_rated"
-           | "memory_missing" | "memory_retired" | null
+           | "memory_missing" | "memory_retired"
+           | "no_session" | null
 }
 ```
+
+If `CLAUDE_SESSION_ID` is missing from env → returns `skipped: "no_session"` (silent, non-error — the LLM keeps working; we bump the diagnostics counter).
 
 **Semantics:**
 - Validates class ≠ `ignored` (the LLM should not call this with "ignored" — that's the session-end default).
@@ -501,7 +527,7 @@ Minimal additions to existing pages; no new pages except a diagnostics panel.
 | `fragments/reflection_filter_form.html` | Add a "useful only" checkbox that filters `useful_count > 0`. |
 | `fragments/reflection_drawer.html` | Below the existing confidence + evidence_count line, show `useful: N (last: <relative time>)` and (when M>0) `misled: M (last: <relative time>)`. |
 | `fragments/semantic_row.html` + `semantic_drawer.html` | Same pattern, scaled to the simpler semantic shape. |
-| Diagnostics tab | New panel "Recent ratings" — last 20 rows from `session_memory_exposure WHERE rated_at IS NOT NULL`, joined with title/content, ordered `rated_at DESC`. |
+| Diagnostics tab | New panel "Recent ratings" — last 20 rows from `session_memory_exposure WHERE rated_at IS NOT NULL`, joined with title/content, ordered `rated_at DESC`. Add a small counter row: *"retrieve/credit calls where `CLAUDE_SESSION_ID` was missing"* — sparkline of last 7 days. Always 0 in normal Claude-Code flows; non-zero flags an env-var regression. |
 
 ### 10.1 Not building
 
@@ -527,7 +553,11 @@ Server raises `ValueError` with a specific message. Skill instructs the LLM to r
 
 Not an error. Surfaces as `skipped.not_exposed += 1` in the response. Skill prompt: "don't retry skipped IDs."
 
-### 11.5 Memory deleted between exposure and rating
+### 11.5 `CLAUDE_SESSION_ID` missing at MCP-tool time
+
+Best-effort skip. `memory_list_session_exposures` returns empty, `memory_credit` returns `skipped: "no_session"`, `memory_apply_session_ratings` raises `ValueError` (apply is meaningless without a session). All three bump the diagnostics counter. No crash, no corruption.
+
+### 11.6 Memory deleted between exposure and rating
 
 `apply_session_ratings` skips it (`skipped.memory_missing` or `skipped.memory_retired`). The exposure row stays in the table as a historical fact but remains `rated_at IS NULL`. Harmless.
 
@@ -580,10 +610,9 @@ Verifications completed during spec-writing:
 - **Hook output mechanism for Stop.** Verified. `{"decision":"block", "hookSpecificOutput":{"additionalContext":...}}` reliably forces Claude to continue with the directive in context. Source: https://code.claude.com/docs/en/hooks.md. Confidence: ~95%.
 - **`semantic_memories.status` column.** Verified by reading `better_memory/db/migrations/0008_semantic_memories.sql`. No status column; the §8.5 / apply-tool skip rule for retired memories only applies to reflections. Confidence: 100%.
 - **PreCompact viability for v1.** Verified NOT viable: `decision: "block"` on PreCompact prevents compaction but does not force an LLM turn. Dropped for v1 (see §6.4); revisit if a future Claude Code event enables a force-turn path.
+- **`session_id` resolution at MCP-tool time.** Verified by reading the codebase. MCP server uses stdio transport (per-Claude-session lifetime), `CLAUDE_SESSION_ID` env var is set by Claude Code for the server's whole life, and the codebase already trusts this pattern in 5+ existing call sites. No LLM plumbing required. See §5.2.1 for the resolution rule and the diagnostics counter. Confidence: ~95%.
 
-One residual item for the implementation plan:
-
-1. **How `session_id` reaches mid-session retrieval calls.** Confidence: ~80% that "optional arg passed by the LLM" works in practice. Verify whether Claude Code's MCP transport already exposes per-request session metadata that the tool can read without an explicit parameter. If yes, prefer that (zero LLM plumbing). If not, accept the optional-parameter approach (graceful degradation when omitted).
+No residual verification items for the implementation plan.
 
 ## 14. Out-of-scope / Follow-ups
 
