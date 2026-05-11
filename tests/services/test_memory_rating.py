@@ -427,6 +427,15 @@ class TestApplySessionRatings:
                 ratings=[{"kind": "reflection", "id": "r1", "class": "bogus"}],
             )
 
+    def test_invalid_kind_rejected(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="kind"):
+            svc.apply_session_ratings(
+                session_id="S1",
+                ratings=[{"kind": "observation", "id": "o1", "class": "cited"}],
+            )
+
     def test_savepoint_rollback_on_unexpected_error(
         self, conn, fixed_clock, monkeypatch,
     ):
