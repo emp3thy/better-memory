@@ -372,7 +372,7 @@ class ReflectionSynthesisService:
                   FROM reflections
                  WHERE (project = ? OR scope = 'general')
                    AND status IN ('pending_review', 'confirmed')
-                 ORDER BY confidence DESC, updated_at DESC
+                 ORDER BY useful_count DESC, confidence DESC, updated_at DESC
                 """,
                 (episode.project,),
             ).fetchall()
@@ -385,7 +385,7 @@ class ReflectionSynthesisService:
                  WHERE (project = ? OR scope = 'general')
                    AND status IN ('pending_review', 'confirmed')
                    AND (tech = ? OR tech IS NULL)
-                 ORDER BY confidence DESC, updated_at DESC
+                 ORDER BY useful_count DESC, confidence DESC, updated_at DESC
                 """,
                 (episode.project, tech),
             ).fetchall()
@@ -1155,10 +1155,10 @@ class ReflectionSynthesisService:
         rows = self._conn.execute(
             f"""
             SELECT id, title, phase, polarity, use_cases, hints,
-                   confidence, tech, evidence_count
+                   confidence, tech, evidence_count, useful_count
             FROM reflections
             WHERE {where}
-            ORDER BY confidence DESC, updated_at DESC
+            ORDER BY useful_count DESC, confidence DESC, updated_at DESC
             """,
             params,
         ).fetchall()
@@ -1179,6 +1179,7 @@ class ReflectionSynthesisService:
                 "confidence": r["confidence"],
                 "tech": r["tech"],
                 "evidence_count": r["evidence_count"],
+                "useful_count": r["useful_count"],
             })
 
         # Best-effort exposure tracking. Skip silently when env is missing

@@ -234,7 +234,7 @@ class SemanticMemoryService:
             "SELECT id, content, project, scope, created_at, updated_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
-            "ORDER BY created_at DESC"
+            "ORDER BY useful_count DESC, created_at DESC"
         )
         rows = self._conn.execute(sql, params).fetchall()
         results = [
