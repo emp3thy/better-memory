@@ -150,3 +150,38 @@ class TestListSessionExposures:
         payload = json.loads(result[0].text)
         assert payload["session_id"] is None
         assert payload["exposures"] == []
+
+
+class TestApplySessionRatingsTool:
+    def test_applies_batch(self, memory_db, monkeypatch):
+        from better_memory.mcp import server as srv_mod
+        conn, _ = memory_db
+        _seed_reflection(conn, "r1")
+        _seed_reflection(conn, "r2")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        _seed_exposure(conn, "S1", "reflection", "r2")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.apply_session_ratings",
+            {"ratings": [
+                {"kind": "reflection", "id": "r1", "class": "cited"},
+                {"kind": "reflection", "id": "r2", "class": "ignored"},
+            ]},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["applied"]["cited"] == 1
+        assert payload["applied"]["ignored"] == 1
+        assert payload["session_id"] == "S1"
+
+    def test_raises_value_error_when_env_missing(
+        self, memory_db, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.apply_session_ratings",
+            {"ratings": [{"kind": "reflection", "id": "r1", "class": "cited"}]},
+        ))
+        # MCP framework catches exceptions and returns error text
+        assert "session" in result[0].text.lower()

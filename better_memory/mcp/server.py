@@ -608,6 +608,36 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="memory.apply_session_ratings",
+            description=(
+                "Atomic batch rating for the current Claude session "
+                "(resolved server-side from CLAUDE_SESSION_ID). Called "
+                "at session end by the rate-session-memories skill."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ratings"],
+                "properties": {
+                    "ratings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["kind", "id", "class"],
+                            "properties": {
+                                "kind": {"enum": ["reflection", "semantic"]},
+                                "id": {"type": "string"},
+                                "class": {
+                                    "enum": ["cited", "shaped", "ignored", "misled"]
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -1193,6 +1223,16 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                         for r in rows
                     ],
                 }
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.apply_session_ratings":
+            sid = os.environ.get("CLAUDE_SESSION_ID")
+            if not sid:
+                raise ValueError("No active session: CLAUDE_SESSION_ID not set")
+            payload = memory_rating.apply_session_ratings(
+                session_id=sid,
+                ratings=args["ratings"],
+            )
             return [TextContent(type="text", text=json.dumps(payload))]
 
         raise ValueError(f"Unknown tool: {name}")
