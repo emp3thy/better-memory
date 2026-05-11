@@ -25,6 +25,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -1173,6 +1174,23 @@ class ReflectionSynthesisService:
                 "tech": r["tech"],
                 "evidence_count": r["evidence_count"],
             })
+
+        # Best-effort exposure tracking. Skip silently when env is missing
+        # (e.g., test or non-Claude context) — see spec §5.2.1.
+        sid = os.environ.get("CLAUDE_SESSION_ID")
+        if sid:
+            all_ids = [
+                r["id"] for bucket in buckets.values() for r in bucket
+            ]
+            if all_ids:
+                now = self._clock().isoformat()
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO session_memory_exposure "
+                    "(session_id, memory_kind, memory_id, exposed_at, source) "
+                    "VALUES (?, 'reflection', ?, ?, 'retrieve')",
+                    [(sid, rid, now) for rid in all_ids],
+                )
+                self._conn.commit()
         return buckets
 
 

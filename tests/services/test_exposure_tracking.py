@@ -30,8 +30,8 @@ def _seed_reflection(conn, rid, project="p"):
     conn.execute(
         """INSERT INTO reflections
            (id, title, project, phase, polarity, use_cases, hints,
-            confidence, created_at, updated_at)
-           VALUES (?, 't', ?, 'general', 'do', 'uc', '[]', 0.5,
+            confidence, status, created_at, updated_at)
+           VALUES (?, 't', ?, 'general', 'do', 'uc', '[]', 0.5, 'confirmed',
                    '2026-01-01', '2026-01-01')""",
         (rid, project),
     )
@@ -121,3 +121,55 @@ class TestBootstrapExposureWrite:
             "SELECT COUNT(*) AS n FROM session_memory_exposure"
         ).fetchone()
         assert rows["n"] == 0
+
+
+class TestReflectionRetrieveExposureWrite:
+    def test_retrieve_writes_exposure_rows(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.reflection import ReflectionSynthesisService
+
+        _seed_reflection(conn, "r1")
+        _seed_reflection(conn, "r2")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p")
+
+        rows = conn.execute(
+            "SELECT memory_kind, memory_id, source "
+            "FROM session_memory_exposure WHERE session_id='S1'"
+        ).fetchall()
+        ids = {(r["memory_kind"], r["memory_id"]) for r in rows}
+        assert ("reflection", "r1") in ids
+        assert ("reflection", "r2") in ids
+        assert all(r["source"] == "retrieve" for r in rows)
+
+    def test_retrieve_skips_exposure_when_no_env(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.reflection import ReflectionSynthesisService
+
+        _seed_reflection(conn, "r1")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        svc.retrieve_reflections(project="p")
+
+        rows = conn.execute(
+            "SELECT * FROM session_memory_exposure"
+        ).fetchall()
+        assert rows == []
+
+    def test_retrieve_skips_exposure_for_empty_result(
+        self, conn, fixed_clock, monkeypatch,
+    ):
+        from better_memory.services.reflection import ReflectionSynthesisService
+
+        # No reflections seeded.
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        result = svc.retrieve_reflections(project="p")
+
+        rows = conn.execute(
+            "SELECT * FROM session_memory_exposure"
+        ).fetchall()
+        assert rows == []
