@@ -64,3 +64,37 @@ class TestReflectionRanking:
         result = svc.retrieve_reflections(project="p")
         ids = [r["id"] for r in result["do"]]
         assert ids[0] == "r-newer"
+
+
+def _seed_semantic(conn, sid, *, useful_count=0, created_at="2026-01-01"):
+    conn.execute(
+        """INSERT INTO semantic_memories
+           (id, content, project, scope, created_at, updated_at, useful_count)
+           VALUES (?, 'fact', 'p', 'project', ?, ?, ?)""",
+        (sid, created_at, created_at, useful_count),
+    )
+    conn.commit()
+
+
+class TestSemanticRanking:
+    def test_useful_count_beats_created_at(self, conn):
+        """High useful_count surfaces first even when older."""
+        from better_memory.services.semantic import SemanticMemoryService
+        _seed_semantic(conn, "s-older-but-useful",
+                       useful_count=5, created_at="2026-01-01")
+        _seed_semantic(conn, "s-newer-unused",
+                       useful_count=0, created_at="2026-05-01")
+        svc = SemanticMemoryService(conn)
+        results = svc.list_for_project(project="p", track_exposure=False)
+        ids = [m.id for m in results]
+        assert ids[0] == "s-older-but-useful"
+        assert ids[1] == "s-newer-unused"
+
+    def test_created_at_tiebreaks_when_useful_count_equal(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        _seed_semantic(conn, "s-older", useful_count=0, created_at="2026-01-01")
+        _seed_semantic(conn, "s-newer", useful_count=0, created_at="2026-05-01")
+        svc = SemanticMemoryService(conn)
+        results = svc.list_for_project(project="p", track_exposure=False)
+        ids = [m.id for m in results]
+        assert ids[0] == "s-newer"

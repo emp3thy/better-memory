@@ -192,7 +192,8 @@ class SemanticMemoryService:
         search: str | None = None,
         track_exposure: bool = True,
     ) -> list[SemanticMemory]:
-        """Project rows + general-scope rows from any project, newest first.
+        """Project rows + general-scope rows from any project, ordered by
+        useful_count DESC then created_at DESC (newest first as tiebreaker).
 
         Args:
             project: project key for project-scope filtering.
