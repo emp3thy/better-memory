@@ -1,10 +1,8 @@
 """Tests for exposure tracking on bootstrap + mid-session retrieve paths."""
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -52,7 +50,7 @@ def _seed_semantic(conn, sid, project="p"):
 
 class TestBootstrapExposureWrite:
     def test_bootstrap_writes_exposure_rows_for_injected_memories(
-        self, conn, fixed_clock, monkeypatch,
+        self, conn, fixed_clock,
     ):
         """When bootstrap injects reflections + semantic memories, an
         exposure row is recorded for each."""
@@ -61,7 +59,6 @@ class TestBootstrapExposureWrite:
         _seed_reflection(conn, "r1")
         _seed_reflection(conn, "r2")
         _seed_semantic(conn, "s1")
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
 
         svc = SessionBootstrapService(conn, clock=fixed_clock)
         svc.bootstrap(project="p", session_id="S1")
@@ -107,3 +104,20 @@ class TestBootstrapExposureWrite:
             "WHERE session_id='S1'"
         ).fetchone()
         assert row["exposed_at"] == "2026-05-11T12:00:00+00:00"
+
+    def test_bootstrap_writes_no_rows_when_no_memories_to_inject(
+        self, conn, fixed_clock,
+    ):
+        """When a project has no reflections and no semantic memories,
+        bootstrap must NOT write any exposure rows (the early-return
+        `if not rows` guard in _record_exposure)."""
+        from better_memory.services.session_bootstrap import SessionBootstrapService
+
+        # Seed nothing.
+        svc = SessionBootstrapService(conn, clock=fixed_clock)
+        svc.bootstrap(project="p", session_id="S1")
+
+        rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM session_memory_exposure"
+        ).fetchone()
+        assert rows["n"] == 0

@@ -11,9 +11,10 @@ Invoked on every Claude Code SessionStart event by the
 - Retrieval of project + general semantic memories and reflections.
 - Markdown rendering for ``additionalContext`` injection.
 
-Connection ownership: caller owns the sqlite3 connection. The service does
-not commit on its own — episode opens commit through ``EpisodeService``'s
-existing SAVEPOINT envelope.
+Connection ownership: caller owns the sqlite3 connection. Episode opens
+commit through ``EpisodeService``'s existing SAVEPOINT envelope. ``_record_exposure``
+issues its own commit for the exposure write — callers must not wrap ``bootstrap()``
+in an outer transaction they intend to roll back.
 """
 from __future__ import annotations
 
