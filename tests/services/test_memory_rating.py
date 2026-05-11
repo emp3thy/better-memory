@@ -1,4 +1,4 @@
-"""Tests for MemoryRatingService.credit_one."""
+"""Tests for MemoryRatingService (credit_one and apply_session_ratings)."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -434,6 +434,15 @@ class TestApplySessionRatings:
             svc.apply_session_ratings(
                 session_id="S1",
                 ratings=[{"kind": "observation", "id": "o1", "class": "cited"}],
+            )
+
+    def test_missing_kind_field_rejected(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        with pytest.raises(ValueError, match="missing required field"):
+            svc.apply_session_ratings(
+                session_id="S1",
+                ratings=[{"id": "r1", "class": "cited"}],  # no "kind"
             )
 
     def test_savepoint_rollback_on_unexpected_error(

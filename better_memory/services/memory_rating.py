@@ -231,9 +231,15 @@ class MemoryRatingService:
 
         seen: set[tuple[str, str]] = set()
         for i, r in enumerate(ratings):
-            kind = r.get("kind")
-            rid = r.get("id")
-            cls = r.get("class")
+            if "kind" not in r:
+                raise ValueError(f"ratings[{i}].kind: missing required field")
+            if "class" not in r:
+                raise ValueError(f"ratings[{i}].class: missing required field")
+            if "id" not in r:
+                raise ValueError(f"ratings[{i}].id: missing required field")
+            kind = r["kind"]
+            rid = r["id"]
+            cls = r["class"]
             if kind not in _VALID_KINDS:
                 raise ValueError(
                     f"ratings[{i}].kind: invalid {kind!r}; "
