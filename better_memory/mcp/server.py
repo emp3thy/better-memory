@@ -44,7 +44,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -1249,11 +1249,14 @@ async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
         # The SDK's ServerResult is a discriminated union; we know this
         # handler is wired to CallTool and returns CallToolResult.
         from mcp.types import CallToolResult
-        from typing import cast
         assert isinstance(result.root, CallToolResult), (
             f"Expected CallToolResult, got {type(result.root).__name__}"
         )
-        return cast("list[TextContent]", result.root.content)
+        # Tests inspect .text on TextContent entries — runtime is correct;
+        # cast through Any to satisfy Pyright's list invariance (the SDK
+        # types .content as list[ContentBlock]; our tools only emit
+        # TextContent so the cast is sound).
+        return cast(list[TextContent], result.root.content)
     finally:
         await cleanup()
 
