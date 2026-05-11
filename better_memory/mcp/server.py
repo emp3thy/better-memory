@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -67,6 +68,7 @@ from better_memory.services.reflection import (
     ReflectionSynthesisService,
     SynthesisStep,
 )
+from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.retention import RetentionService
 from better_memory.services.retention_scheduler import RetentionScheduler
 from better_memory.services.spool import SpoolService
@@ -591,6 +593,21 @@ def _tool_definitions() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="memory.list_session_exposures",
+            description=(
+                "Return the unrated session_memory_exposure rows for the "
+                "current Claude session (resolved server-side from "
+                "CLAUDE_SESSION_ID env). Read-only; no side effects. "
+                "Used by the rate-session-memories skill as the "
+                "authoritative anti-hallucination list."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -765,6 +782,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     # longer holds a chat client.
     reflections = ReflectionSynthesisService(memory_conn)
     retention = RetentionService(conn=memory_conn)
+    memory_rating = MemoryRatingService(memory_conn)
 
     knowledge = KnowledgeService(
         knowledge_conn,
@@ -1066,7 +1084,6 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.session_bootstrap":
-            import os
             import uuid
 
             from better_memory.services.session_bootstrap import (
@@ -1143,6 +1160,41 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 )
             ]
 
+        if name == "memory.list_session_exposures":
+            sid = os.environ.get("CLAUDE_SESSION_ID")
+            if not sid:
+                payload = {"session_id": None, "exposures": []}
+            else:
+                rows = memory_conn.execute(
+                    """
+                    SELECT e.memory_kind, e.memory_id, e.exposed_at, e.source,
+                           COALESCE(r.title, s.content) AS display
+                      FROM session_memory_exposure e
+                      LEFT JOIN reflections        r ON e.memory_kind='reflection'
+                                                    AND e.memory_id = r.id
+                      LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
+                                                    AND e.memory_id = s.id
+                     WHERE e.session_id = ? AND e.rated_at IS NULL
+                     ORDER BY e.exposed_at ASC
+                    """,
+                    (sid,),
+                ).fetchall()
+                payload = {
+                    "session_id": sid,
+                    "exposures": [
+                        {
+                            "kind": r["memory_kind"],
+                            "id": r["memory_id"],
+                            **({"title": r["display"]} if r["memory_kind"] == "reflection"
+                               else {"content": r["display"]}),
+                            "exposed_at": r["exposed_at"],
+                            "source": r["source"],
+                        }
+                        for r in rows
+                    ],
+                }
+            return [TextContent(type="text", text=json.dumps(payload))]
+
         raise ValueError(f"Unknown tool: {name}")
 
     cleaned = False
@@ -1172,6 +1224,31 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             pass
 
     return server, cleanup
+
+
+async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
+    """Test-only entry point: invoke one tool against a fresh server instance.
+
+    Uses the MCP SDK's registered CallToolRequest handler directly —
+    no stdio transport needed. NOT used by production code.
+
+    Pattern discovered from the MCP SDK internals:
+        server.request_handlers[CallToolRequest]  →  async (req) → ServerResult
+        result.root.content  →  list[TextContent]
+    """
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    server, cleanup = create_server()
+    try:
+        handler = server.request_handlers[CallToolRequest]
+        req = CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(name=name, arguments=arguments),
+        )
+        result = await handler(req)
+        return result.root.content
+    finally:
+        await cleanup()
 
 
 async def run() -> None:
