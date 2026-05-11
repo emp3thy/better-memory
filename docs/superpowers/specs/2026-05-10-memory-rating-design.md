@@ -17,7 +17,9 @@ The LLM that just consumed the memories is uniquely positioned to rate them. Thi
 - Have the LLM self-classify each exposed memory as `cited`, `shaped`, `ignored`, or `misled`.
 - Record `useful_count` (cited or shaped) and `times_misled` per memory.
 - Use `useful_count` as the primary ranking key in retrieval and bootstrap injection.
-- Run automatically on `PreCompact` and `SessionEnd` events.
+- Two complementary rating paths:
+  - **Opportunistic per-tool-use crediting**: when the LLM actively uses a retrieved memory, it credits the specific memory at that moment via `memory_credit`. Captures the freshest "cited" / "shaped" signal.
+  - **Session-end sweep**: at session end, the LLM classifies all remaining unrated exposures (defaulting to `ignored`, flagging any `misled` with hindsight). Catches everything that wasn't opportunistically credited.
 
 **Non-goals**
 - Rating observations. Observations already have `used_count` / `reinforcement_score`. Adding a parallel mechanic there is out of scope.
@@ -28,38 +30,41 @@ The LLM that just consumed the memories is uniquely positioned to rate them. Thi
 ## 3. Architecture Overview
 
 ```
-SESSION START                  DURING SESSION                  SESSION END / PRE-COMPACT
-───────────                    ──────────────                  ─────────────────────────
-session_bootstrap              memory_retrieve(...)            PreCompact / session_close
-   │  injects N+M memories        │  returns K memories            │  reads exposure table
-   ▼                              ▼                                ▼
-session_memory_exposure       session_memory_exposure        additionalContext envelope
-(source='bootstrap')          (source='retrieve')             "Rate these N memories:
-                                                                [reflection r-abc...] ...
-                                                                Run skill rate-session-memories"
-                                                                       │
-                                                                       ▼
-                                                           LLM invokes skill, emits ONE JSON:
-                                                                       │
-                                                                       ▼
-                                                          memory_apply_session_ratings
-                                                            ── one SAVEPOINT ──
-                                                             cited/shaped → useful_count++
-                                                             misled       → times_misled++
-                                                             ignored      → no-op
+SESSION START          DURING SESSION                            SESSION END
+───────────            ──────────────                            ───────────
+session_bootstrap      memory_retrieve(...)                      session_close (Stop hook)
+   │  injects N+M         │  returns K memories                     │  reads unrated exposures
+   │  memories            │                                         │
+   ▼                      ▼                                         ▼
+session_memory_       session_memory_                          {"decision": "block",
+exposure              exposure                                  "hookSpecificOutput":
+(source='bootstrap')  (source='retrieve')                         {"additionalContext":
+                                                                    "RATE_MEMORIES..."}}
+                              │                                       │
+                              │  WHEN LLM USES A MEMORY:               │ forces LLM to continue
+                              ▼                                       ▼
+                      memory_credit(id, class)                LLM invokes
+                      ── per-use, one row ──                  rate-session-memories skill
+                       cited / shaped /                              │
+                       (rarely) misled                               ▼
+                                                              memory_apply_session_ratings
+                                                                ── one SAVEPOINT ──
+                                                                 remaining unrated → ignored
+                                                                 (LLM flags any misled)
 ```
 
-**Four new components, one extended hook:**
+**Five new components, one extended hook:**
 
 | Component | Type | Purpose |
 |---|---|---|
 | `session_memory_exposure` table + writes | Schema + service edits | Track which memory IDs were exposed in each session |
-| `memory_apply_session_ratings` | New MCP tool + `MemoryRatingService` | Atomic batch update of `useful_count` / `times_misled` |
+| `memory_credit` | New MCP tool | Single-rating per-use credit, called mid-session by the LLM |
+| `memory_apply_session_ratings` | New MCP tool + `MemoryRatingService` | Atomic batch update at session end |
 | `memory_list_session_exposures` | New MCP tool | Read-only authoritative list of unrated exposures |
-| `rate-session-memories` skill | New symlinked skill | Drives the LLM through self-classification |
-| `pre_compact` hook (new) + extension to `session_close` | Hook code | Inject the rating directive when those events fire |
+| `rate-session-memories` skill | New symlinked skill | Drives the LLM through end-of-session sweep |
+| Extended `session_close` (Stop hook) | Hook code | Inject the rating directive with `decision: "block"` |
 
-**Key invariant:** `session_id` is the join key between exposure and rating. A session may produce multiple rating passes (PreCompact can fire several times in a long session); `rated_at IS NULL` on the exposure row gates whether a memory is re-rated. Once rated, never re-rated within the same session.
+**Key invariant:** `session_id` is the join key between exposure and rating. The `rated_at IS NULL` filter on the exposure row gates whether a memory is re-rated. A memory may be rated once via `memory_credit` mid-session OR once via the end-of-session sweep; never both, never twice.
 
 ## 4. Data Model
 
@@ -168,41 +173,42 @@ This is a known cost: relying on the LLM to plumb `session_id` is fragile. **Ope
 
 `INSERT OR IGNORE` is used defensively so any future code path that produces a duplicate insertion does not crash a hot path.
 
-## 6. Hook Directives
+## 6. End-of-Session Hook Directive
 
-Both hooks inject `additionalContext` into the LLM's view. Neither hook calls the LLM; they only place a directive in front of it.
+One hook fires the end-of-session sweep: the existing `session_close` (Stop hook), extended to emit a force-continue directive that the LLM acts on.
 
-### 6.1 `pre_compact` (new)
+### 6.1 Extended `session_close`
 
-New file: `better_memory/hooks/pre_compact.py`. Follows the existing hook contract: never raises, exits 0, swallows errors to `hook_errors`.
+The existing hook writes a `session_end` spool marker. We extend it to first emit the rating directive on stdout, then write the marker. The marker behavior is preserved.
 
 Behavior:
 1. Read `CLAUDE_SESSION_ID` from env.
 2. Open SQLite read-only.
-3. Query `session_memory_exposure WHERE session_id = ? AND rated_at IS NULL`, joined with reflection title / semantic content for each row.
-4. If empty: emit empty output (no-op).
-5. Otherwise: emit the rating directive (template in §6.3). Truncate per-row payload to ~80 chars; cap the full payload at 8 KB. If the unrated set exceeds the cap, list only the first N items and the skill's `STEP 1` re-fetches the full list via `memory_list_session_exposures`.
+3. Query `session_memory_exposure WHERE session_id = ? AND rated_at IS NULL`, joined with reflection title / semantic content.
+4. If the unrated set is empty: skip the directive emission (write the marker as today and exit).
+5. Otherwise: emit the directive in the form below. Truncate per-row payload to ~80 chars; cap full payload at 8 KB. If the unrated set exceeds the cap, list the first N items only; the skill's STEP 1 re-fetches the full list via `memory_list_session_exposures`.
 
-### 6.2 Extended `session_close`
+### 6.2 Hook output JSON — verified
 
-The existing hook writes a `session_end` spool marker. We extend it to also emit the rating directive (same query, same template, same cap). The marker write is preserved as-is.
+Verified against Claude Code hooks docs (https://code.claude.com/docs/en/hooks.md): emitting `{"decision": "block", ...}` on the Stop hook prevents the stop and forces Claude to continue, with `hookSpecificOutput.additionalContext` injected into the next model request.
 
-### 6.2.1 Hook output mechanism — confidence: medium, verify during plan
+```json
+{
+  "decision": "block",
+  "hookSpecificOutput": {
+    "additionalContext": "RATE_MEMORIES — <directive body, see §6.3>"
+  }
+}
+```
 
-For the rating directive to produce an actual LLM turn (not just be discarded), the hook output has to use a mechanism that Claude Code recognises as "force Claude to continue." This is **unverified** as of spec-writing and is the single most important thing the implementation plan must confirm before coding:
-
-| Hook | Likely mechanism | Verification needed |
-|---|---|---|
-| `PreCompact` | Emit `{"hookSpecificOutput": {"additionalContext": "<directive>"}}` on stdout. The directive is prepended to the compaction input, so the LLM sees it before context is summarised. | Confirm `additionalContext` is in fact prepended (and not discarded), and that the LLM has a turn to act on it before compact actually runs. If compact runs immediately without an LLM turn, this approach fails and we either (a) drop PreCompact, or (b) use `decision: "block"` to cancel compact, force a turn, then rely on the next compact attempt. |
-| `Stop` (session end) | Emit `{"decision": "block", "reason": "<directive>"}` to force Claude to continue with the directive as the next instruction. Plain `additionalContext` on Stop is typically informational, not turn-generating. | Confirm `decision: "block"` semantics on the current Claude Code version, and confirm the rating skill's MCP calls complete before Claude actually stops the second time. |
-
-If either mechanism turns out not to do what we expect, fall back to **manual-only** invocation (a `/rate-memories` slash command running the same skill against the same MCP tools). The data model, MCP tools, and skill itself are unchanged; only the auto-trigger is dropped. Implementation plan should treat the hook auto-trigger as a separate sub-phase that ships only after the manual path is proven, so we don't block the rest of the system on this unverified piece.
+Confidence on this mechanism: ~95%. Single residual risk is whether the rating skill's MCP calls all complete before Claude actually stops on the next attempt; mitigated because the skill emits one batched MCP call (`memory_apply_session_ratings`), so latency is bounded to one round-trip.
 
 ### 6.3 Rating directive template
 
 ```
-RATE_MEMORIES — before {context-window-compaction|session ends}, classify
-the memories that were exposed in this session.
+RATE_MEMORIES — before this session ends, classify the memories that
+were exposed during this session and that you did NOT already credit
+via memory_credit.
 
 Reflections (N):
 - r-abc123: <truncated title, 80 chars>
@@ -216,23 +222,24 @@ Semantic memories (M):
 For each id, classify as one of:
   cited   — quoted or directly referenced in your reply
   shaped  — guided a decision but not cited verbatim
-  ignored — read but did not affect this session
+  ignored — read but did not affect this session  (default)
   misled  — caused a wrong direction or wasted effort
 
-Invoke the skill `rate-session-memories`. It will collect your
-classifications and submit them as one batch via
+Most exposures default to `ignored` — only flag the few that actually
+shaped the session or misled you. Invoke the skill `rate-session-memories`.
+It will collect your classifications and submit them as one batch via
 memory_apply_session_ratings.
 ```
 
-### 6.4 Why both hooks
+### 6.4 Why one hook, not two
 
-- `PreCompact` fires while conversation context is intact — highest-quality classification signal — but does not fire on short sessions.
-- `SessionEnd` fires unconditionally but may run after compaction has already evicted the classifying context.
-- Belt + braces. The `rated_at IS NULL` filter prevents double-rating within a session.
+The original draft also used `PreCompact`. Verification showed that PreCompact's `decision: "block"` only prevents compaction — it does not reliably force an LLM turn. Without a force-turn path, the directive would sit in context unused. Dropped for v1.
+
+A future Claude Code event between PreCompact and the compaction running could revive that path; the data model and tools already support it.
 
 ### 6.5 Hook safety
 
-`pre_compact.py` follows the hooks-never-raise rule. Any DB error → log to `hook_errors`, emit empty `additionalContext`, exit 0.
+`session_close` follows the existing hooks-never-raise rule. Any DB error during the directive query → log to `hook_errors`, skip the directive emission, write the marker, exit 0. The marker write is independent of the rating logic and must always succeed (downstream services depend on it).
 
 ## 7. `rate-session-memories` Skill
 
@@ -308,9 +315,23 @@ duplicated. That's fine — don't retry. The session is now marked rated.
 
 The synthesize skill prompt has the same hardening because the LLM left to its own devices invents plausible-looking IDs. `memory_list_session_exposures` returns ground truth; the skill anchors classification on it before submission.
 
+### 7.5 Opportunistic crediting via `memory_credit`
+
+The end-of-session sweep is the safety net, but the highest-quality signal comes from crediting a memory **at the moment it is used**. Two existing skills are extended with a one-liner reminder:
+
+- `memory-retrieve.md` (the skill that wraps `memory_retrieve`): after retrieval, add: *"When you actively use one of these memories (quoting it, applying its hint to a decision, following its do/dont guidance), call `memory_credit(id, class)` immediately. Class is `cited` if quoted, `shaped` if it guided the decision."*
+- `CLAUDE.snippet.md` (the better-memory skill index): add one bullet under the "Record" section: *"Opportunistic crediting: call `memory_credit(id, class)` when a retrieved memory is actively used. The session-end sweep will catch anything you don't credit, defaulting to `ignored`."*
+
+Constraints to keep the LLM honest:
+- `memory_credit` only accepts IDs that exist in `session_memory_exposure` for the current session (otherwise it returns `not_exposed` and writes nothing — see §8.4).
+- The credit can be `cited`, `shaped`, or `misled`. `ignored` is **not** a valid input class for `memory_credit` — ignored is the session-end default, not a deliberate per-use call.
+- Idempotent: once a memory is credited mid-session, the session-end sweep skips it (via `rated_at IS NOT NULL`).
+
+There is no PostToolUse hook reminding the LLM to credit. A hook that fires after every tool call would be too chatty (most tool calls don't use a memory). Crediting is LLM-initiative; the sweep is the safety net.
+
 ## 8. MCP Tools
 
-Two new tools, both registered in `better_memory/mcp/server.py`.
+Three new tools, all registered in `better_memory/mcp/server.py`.
 
 ### 8.1 `memory_list_session_exposures`
 
@@ -366,7 +387,37 @@ Atomic batch update. Single SAVEPOINT.
 }
 ```
 
-### 8.3 Service: `MemoryRatingService.apply_session_ratings`
+### 8.3 `memory_credit`
+
+Per-tool-use credit. One memory, one classification, no batching. Called opportunistically by the LLM right after it uses a memory.
+
+```python
+# input
+{
+  "session_id": "<string, required>",
+  "kind":       "reflection" | "semantic",
+  "id":         "<string, required>",
+  "class":      "cited" | "shaped" | "misled"     # NOT "ignored"
+}
+
+# output
+{
+  "applied": "cited" | "shaped" | "misled" | null,    # null when skipped
+  "skipped": "not_exposed" | "already_rated"
+           | "memory_missing" | "memory_retired" | null
+}
+```
+
+**Semantics:**
+- Validates class ≠ `ignored` (the LLM should not call this with "ignored" — that's the session-end default).
+- Validates `(session_id, kind, id)` exists in `session_memory_exposure` with `rated_at IS NULL`.
+- If valid: bumps `useful_count` (for `cited`/`shaped`) or `times_misled` (for `misled`) on the target row, stamps `last_useful_at` or `last_misled_at`, and sets `rated_at = now, classification = class` on the matching exposure row.
+- If the exposure is already rated, returns `skipped: "already_rated"` without writing — idempotent on retries.
+- Wrapped in its own small SAVEPOINT (single-row, but still atomic so the exposure flip and the memory column bump can never disagree).
+
+Backed by `MemoryRatingService.credit_one`, sibling of `apply_session_ratings`. Both methods share the same row-skip / update logic; `apply_session_ratings` is essentially `credit_one` called in a loop inside one SAVEPOINT.
+
+### 8.4 Service: `MemoryRatingService`
 
 New file: `better_memory/services/memory_rating.py`. Connection-owning service, same pattern as `ReflectionService` and `ObservationService` — writes within its own SAVEPOINT + commit envelope.
 
@@ -404,7 +455,7 @@ UPDATE session_memory_exposure
 
 On any unhandled exception inside the SAVEPOINT: `ROLLBACK TO SAVEPOINT memory_rating_apply`, then re-raise. No partial commit.
 
-### 8.4 Deliberately NOT in the apply tool
+### 8.5 Deliberately NOT in the apply tool
 
 - No `audit_log` write. The exposure table itself carries the audit (`rated_at`, `classification`).
 - No cascade from reflection misled to its source observations. The signal is about reflection-level usefulness, not the underlying evidence.
@@ -466,7 +517,7 @@ Exposure inserts ride on the existing service transactions. If the insert fails,
 
 ### 11.2 Hook failure
 
-`pre_compact` and `session_close` both honour the hooks-never-raise rule. Exceptions → `hook_errors` row, empty `additionalContext`, exit 0. Symptom: that session goes unrated. The query `WHERE session_id = ? AND rated_at IS NULL` is session-scoped, so an unrated past session stays unrated — by design.
+`session_close` honours the hooks-never-raise rule. Exceptions → `hook_errors` row, skip directive emission, write the marker, exit 0. Symptom: that session goes unrated. The query `WHERE session_id = ? AND rated_at IS NULL` is session-scoped, so an unrated past session stays unrated — by design. Any memories that were credited mid-session via `memory_credit` are unaffected; the failure only loses the end-of-session sweep for the rest.
 
 ### 11.3 Malformed apply input
 
@@ -493,18 +544,23 @@ Not an error. Surfaces as `skipped.not_exposed += 1` in the response. Skill prom
   - Validation rejects empty / malformed inputs.
   - Duplicate `(kind, id)` in one batch rejected.
   - Exception inside SAVEPOINT rolls back cleanly.
+- `MemoryRatingService.credit_one`:
+  - Each valid class (cited/shaped/misled) produces the right column updates.
+  - `class="ignored"` rejected (ValueError).
+  - All four skip cases exercised (idempotent on `already_rated`).
+  - Credit-then-sweep round-trip: credited memory is skipped by the subsequent sweep.
 - New ORDER BY: `useful_count` precedence verified with mixed-rated-and-unrated data.
 
 ### 12.2 Hook tests
 
-- `pre_compact.py` and extended `session_close.py`:
-  - Empty unrated set → empty `additionalContext`.
-  - Non-empty unrated set → directive contains correct IDs, truncation respected, 8 KB cap honoured.
-  - DB error → `hook_errors` row written, exit 0.
+- Extended `session_close.py`:
+  - Empty unrated set → directive emission skipped; marker still written.
+  - Non-empty unrated set → directive contains correct IDs, truncation respected, 8 KB cap honoured, JSON shape is `{"decision":"block", "hookSpecificOutput":{"additionalContext":...}}`.
+  - DB error → `hook_errors` row written, directive skipped, marker still written, exit 0.
 
 ### 12.3 Integration
 
-- Round-trip: bootstrap exposes → mid-session retrieve exposes more → hook directive emits → apply_session_ratings updates → re-running PreCompact within the same session produces empty directive.
+- Round-trip: bootstrap exposes → mid-session retrieve exposes more → mid-session `memory_credit` rates a few → Stop hook directive emits for the rest → `apply_session_ratings` updates the unrated → re-running the sweep query within the same session returns an empty unrated set.
 
 ### 12.4 Skill smoke
 
@@ -514,16 +570,20 @@ The skill itself is a prompt; not unit-testable directly. A small fixture sessio
 
 - One migration file: `0009_memory_rating.sql`.
 - Backfill: none required. Existing reflections / semantic memories start at `useful_count = 0`; the new ORDER BY tiebreakers keep their existing order until ratings accumulate.
-- Hook installation: `bm install-hooks` is extended to register `pre_compact.py` and symlink the new skill. Idempotent.
+- Hook installation: `bm install-hooks` is extended to symlink the new `rate-session-memories` skill. The Stop hook entry (`session_close.py`) is already registered today; no new hook file. Idempotent.
 - No feature flag. The system fails open: if any layer is missing, retrieval works as before.
 
 ## 13.1 Confidence and verification
 
-This spec has a few areas where the implementation plan must do specific verification BEFORE coding to avoid building on wrong assumptions. They are all in §6.2.1 and §5.2.1, but to consolidate for the plan:
+Verifications completed during spec-writing:
 
-1. **Hook output mechanism for triggering an LLM turn.** Confidence: ~60%. Verify via Claude Code hook docs and a one-line spike that confirms the chosen mechanism actually produces an LLM turn. If it doesn't, ship manual-trigger only and treat hook auto-trigger as a follow-up.
-2. **How `session_id` reaches mid-session retrieval calls.** Confidence: ~80% that "optional arg passed by LLM" works; verify whether MCP transport already exposes per-call session metadata that would let us skip the LLM-plumbing step.
-3. **`semantic_memories.status` column.** Confidence: ~70%. The spec assumes semantic memories DO NOT have a `retired`/`superseded` status; only reflections do. Verify against the migration `0008_semantic_memories.sql`. If semantic memories also have a status, extend the §8.3 "memory_retired" skip rule.
+- **Hook output mechanism for Stop.** Verified. `{"decision":"block", "hookSpecificOutput":{"additionalContext":...}}` reliably forces Claude to continue with the directive in context. Source: https://code.claude.com/docs/en/hooks.md. Confidence: ~95%.
+- **`semantic_memories.status` column.** Verified by reading `better_memory/db/migrations/0008_semantic_memories.sql`. No status column; the §8.5 / apply-tool skip rule for retired memories only applies to reflections. Confidence: 100%.
+- **PreCompact viability for v1.** Verified NOT viable: `decision: "block"` on PreCompact prevents compaction but does not force an LLM turn. Dropped for v1 (see §6.4); revisit if a future Claude Code event enables a force-turn path.
+
+One residual item for the implementation plan:
+
+1. **How `session_id` reaches mid-session retrieval calls.** Confidence: ~80% that "optional arg passed by the LLM" works in practice. Verify whether Claude Code's MCP transport already exposes per-request session metadata that the tool can read without an explicit parameter. If yes, prefer that (zero LLM plumbing). If not, accept the optional-parameter approach (graceful degradation when omitted).
 
 ## 14. Out-of-scope / Follow-ups
 
