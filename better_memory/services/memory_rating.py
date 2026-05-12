@@ -37,6 +37,26 @@ class ApplyOutcome(TypedDict):
     skipped: str | None
 
 
+class AppliedCounts(TypedDict):
+    cited: int
+    shaped: int
+    ignored: int
+    misled: int
+
+
+class SkippedCounts(TypedDict):
+    not_exposed: int
+    already_rated: int
+    memory_missing: int
+    memory_retired: int
+
+
+class ApplySessionRatingsResult(TypedDict):
+    session_id: str
+    applied: AppliedCounts
+    skipped: SkippedCounts
+
+
 _VALID_KINDS: set[str] = {"reflection", "semantic"}
 # Used by apply_session_ratings (Task 3). credit_one accepts only the
 # subset _CREDIT_CLASSES below.
@@ -201,7 +221,7 @@ class MemoryRatingService:
         *,
         session_id: str,
         ratings: list[dict[str, str]],
-    ) -> dict[str, object]:
+    ) -> ApplySessionRatingsResult:
         """Atomic batch update at session end.
 
         Validates the entire batch BEFORE entering the SAVEPOINT:
@@ -260,8 +280,10 @@ class MemoryRatingService:
             seen.add(key)
 
         now = self._clock().isoformat()
-        applied = {"cited": 0, "shaped": 0, "ignored": 0, "misled": 0}
-        skipped = {
+        applied: AppliedCounts = {
+            "cited": 0, "shaped": 0, "ignored": 0, "misled": 0,
+        }
+        skipped: SkippedCounts = {
             "not_exposed": 0, "already_rated": 0,
             "memory_missing": 0, "memory_retired": 0,
         }
