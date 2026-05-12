@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from better_memory.config import get_config
+
 # Mirror the observer cap: reject any stdin payload above 1 MiB without
 # raising. Hooks must never fail.
 _MAX_STDIN_BYTES = 1_048_576
@@ -50,6 +52,92 @@ def _synthesise_marker() -> dict[str, str]:
         "cwd": os.environ.get("PWD") or os.getcwd(),
         "session_id": os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex,
     }
+
+
+def _emit_rating_directive_if_unrated(session_id: str) -> None:
+    """Best-effort: if the current session has any unrated exposures,
+    emit a decision:block directive on stdout asking the LLM to rate
+    them via the rate-session-memories skill.
+
+    Never raises. On any failure, swallows the exception and returns.
+    The caller proceeds to write the session_end marker regardless.
+    """
+    try:
+        from better_memory.db.connection import connect
+        cfg = get_config()
+        if not cfg.memory_db.exists():
+            return
+        conn = connect(cfg.memory_db)
+        try:
+            rows = conn.execute(
+                """
+                SELECT e.memory_kind, e.memory_id, e.exposed_at,
+                       COALESCE(r.title, s.content) AS display
+                  FROM session_memory_exposure e
+                  LEFT JOIN reflections        r ON e.memory_kind='reflection'
+                                                AND e.memory_id = r.id
+                  LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
+                                                AND e.memory_id = s.id
+                 WHERE e.session_id = ? AND e.rated_at IS NULL
+                 ORDER BY e.exposed_at ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return
+
+        TRUNC = 80
+        CAP_BYTES = 8 * 1024
+        refl_lines = []
+        sem_lines = []
+        for r in rows:
+            display = (r["display"] or "")[:TRUNC]
+            if r["memory_kind"] == "reflection":
+                refl_lines.append(f"- {r['memory_id']}: {display}")
+            else:
+                sem_lines.append(f"- {r['memory_id']}: {display}")
+
+        directive = (
+            "RATE_MEMORIES — before this session ends, classify the "
+            "memories that were exposed during this session and that you "
+            "did NOT already credit via memory.credit.\n\n"
+            f"Reflections ({len(refl_lines)}):\n"
+            + ("\n".join(refl_lines) if refl_lines else "  (none)")
+            + f"\n\nSemantic memories ({len(sem_lines)}):\n"
+            + ("\n".join(sem_lines) if sem_lines else "  (none)")
+            + "\n\nFor each id, classify as one of:\n"
+            "  cited / shaped / ignored / misled (default: ignored)\n\n"
+            "Most exposures default to `ignored` — only flag the few "
+            "that actually shaped the session or misled you. Invoke "
+            "the skill `rate-session-memories`."
+        )
+        if len(directive.encode("utf-8")) > CAP_BYTES:
+            directive = directive[: CAP_BYTES - 200] + (
+                "\n\n(list truncated; call memory.list_session_exposures "
+                "for the full set)"
+            )
+
+        payload = {
+            "decision": "block",
+            "reason": (
+                f"RATE_MEMORIES — {len(rows)} pending rating(s) for "
+                f"this session"
+            ),
+            "hookSpecificOutput": {
+                "hookEventName": "Stop",
+                "additionalContext": directive,
+            },
+        }
+        sys.stdout.write(json.dumps(payload))
+        sys.stdout.flush()
+    except BaseException as _exc:
+        try:
+            from better_memory.hooks._error_log import record_hook_error
+            record_hook_error(hook_name="session_close_rating", exc=_exc)
+        except BaseException:
+            pass
 
 
 def main() -> None:
@@ -90,6 +178,14 @@ def main() -> None:
             )
         if "cwd" not in data or not data["cwd"]:
             data["cwd"] = os.environ.get("PWD") or os.getcwd()
+
+        session_id_str = (
+            os.environ.get("CLAUDE_SESSION_ID")
+            or data.get("session_id")
+            or ""
+        )
+        if session_id_str:
+            _emit_rating_directive_if_unrated(str(session_id_str))
 
         spool_dir = _default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)

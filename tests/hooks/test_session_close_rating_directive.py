@@ -1,0 +1,99 @@
+"""Tests for the rating directive emission in session_close.py."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from better_memory.db.connection import connect
+from better_memory.db.schema import apply_migrations
+
+
+def _run_hook(env: dict[str, str], stdin_data: str = "") -> subprocess.CompletedProcess:
+    """Run session_close.py as a subprocess (mirrors how the hook is invoked)."""
+    return subprocess.run(
+        [sys.executable, "-m", "better_memory.hooks.session_close"],
+        input=stdin_data,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
+        timeout=10,
+    )
+
+
+def _seed_unrated_exposure(db_path: Path, sid: str = "S1"):
+    c = connect(db_path)
+    apply_migrations(c)
+    c.execute(
+        """INSERT INTO reflections
+           (id, title, project, phase, polarity, use_cases, hints,
+            confidence, created_at, updated_at)
+           VALUES ('r1', 'My Title', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                   '2026-01-01', '2026-01-01')"""
+    )
+    c.execute(
+        """INSERT INTO session_memory_exposure
+           (session_id, memory_kind, memory_id, exposed_at, source)
+           VALUES (?, 'reflection', 'r1', '2026-05-11T11:00:00+00:00',
+                   'bootstrap')""",
+        (sid,),
+    )
+    c.commit()
+    c.close()
+
+
+class TestRatingDirectiveEmission:
+    def test_non_empty_unrated_emits_decision_block(
+        self, tmp_path, tmp_memory_db,
+    ):
+        _seed_unrated_exposure(tmp_memory_db, "S1")
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        # stdout should contain a single JSON object with the documented shape.
+        payload = json.loads(result.stdout)
+        assert payload["decision"] == "block"
+        assert isinstance(payload.get("reason"), str) and payload["reason"]
+        hso = payload["hookSpecificOutput"]
+        assert hso["hookEventName"] == "Stop"
+        assert "additionalContext" in hso
+        assert "RATE_MEMORIES" in hso["additionalContext"]
+        assert "r1" in hso["additionalContext"]
+        assert "My Title" in hso["additionalContext"]
+        assert len(hso["additionalContext"]) <= 10_000
+
+    def test_empty_unrated_writes_marker_no_directive(
+        self, tmp_path, tmp_memory_db,
+    ):
+        # Migrate but no unrated rows.
+        c = connect(tmp_memory_db)
+        apply_migrations(c)
+        c.close()
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_path),  # spool lives under here
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        # stdout should be empty (no directive) but the marker file is written.
+        assert result.stdout.strip() == ""
+        markers = list(spool.glob("*_session_end_*.json"))
+        assert len(markers) == 1
+
+    def test_db_error_falls_back_to_marker(self, tmp_path):
+        """If the DB doesn't exist, the hook still exits 0 and writes a marker."""
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_path / "nonexistent"),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
