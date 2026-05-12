@@ -613,7 +613,9 @@ def _tool_definitions() -> list[Tool]:
             description=(
                 "Atomic batch rating for the current Claude session "
                 "(resolved server-side from CLAUDE_SESSION_ID). Called "
-                "at session end by the rate-session-memories skill."
+                "at session end by the rate-session-memories skill. "
+                "Raises if CLAUDE_SESSION_ID is unset — call only inside "
+                "an active Claude session."
             ),
             inputSchema={
                 "type": "object",
@@ -622,6 +624,7 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {
                     "ratings": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,

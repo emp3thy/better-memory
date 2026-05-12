@@ -44,7 +44,7 @@ Call `memory.apply_session_ratings` with this exact shape (no `session_id`
 }
 ```
 
-ONE call. All ratings. Partial batches will be rejected.
+ONE call. All ratings. Malformed batches (empty, unknown kind/class, duplicate ids) will be rejected; individual id mismatches return in `skipped`.
 
 ## STEP 4 — Verify
 
