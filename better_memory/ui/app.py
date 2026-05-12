@@ -237,6 +237,7 @@ def create_app(
                 "polarity": "",
                 "status": "",
                 "min_confidence": "",
+                "useful_only": False,
             },
         )
 
@@ -261,6 +262,8 @@ def create_app(
         except ValueError:
             min_confidence = 0.0
 
+        useful_only = args.get("useful_only") == "1"
+
         rows = queries.reflection_list_for_ui(
             conn,
             project=project,
@@ -269,6 +272,7 @@ def create_app(
             polarity=polarity,
             status=status,
             min_confidence=min_confidence,
+            useful_only=useful_only,
         )
         return render_template(
             "fragments/panel_reflections.html", rows=rows

@@ -284,3 +284,43 @@ class TestReflectionDetail:
         detail = reflection_detail(conn, reflection_id="r-1")
         assert detail is not None
         assert detail.reflection.scope == "general"
+
+
+class TestUsefulCountInReadModel:
+    def test_reflection_list_includes_useful_count(self, conn):
+        from better_memory.ui.queries import reflection_list_for_ui
+        # Seed a reflection with useful_count = 3.
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at, useful_count, times_misled)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01', 3, 1)"""
+        )
+        conn.commit()
+        rows = reflection_list_for_ui(conn, project="p")
+        assert any(r.useful_count == 3 and r.times_misled == 1 for r in rows)
+
+    def test_useful_only_filter(self, conn):
+        from better_memory.ui.queries import reflection_list_for_ui
+        # Seed: one with useful_count > 0, one with useful_count == 0.
+        for rid, useful in [("r-useful", 2), ("r-unused", 0)]:
+            conn.execute(
+                """INSERT INTO reflections
+                   (id, title, project, phase, polarity, use_cases, hints,
+                    confidence, created_at, updated_at, useful_count, times_misled)
+                   VALUES (?, ?, 'p', 'general', 'do', 'uc', '[]', 0.5,
+                           '2026-01-01', '2026-01-01', ?, 0)""",
+                (rid, rid, useful),
+            )
+        conn.commit()
+        rows = reflection_list_for_ui(conn, project="p", useful_only=True)
+        ids = [r.id for r in rows]
+        assert "r-useful" in ids
+        assert "r-unused" not in ids
+
+        # Default (no filter): both rows.
+        rows_all = reflection_list_for_ui(conn, project="p")
+        ids_all = [r.id for r in rows_all]
+        assert "r-useful" in ids_all
+        assert "r-unused" in ids_all
