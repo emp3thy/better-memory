@@ -209,6 +209,8 @@ class ReflectionListRow:
     use_cases: str
     evidence_count: int
     updated_at: str
+    useful_count: int = 0
+    times_misled: int = 0
 
 
 # Default status filter — matches retrieve_reflections (active set only).
@@ -225,6 +227,7 @@ def reflection_list_for_ui(
     status: str | None = None,
     min_confidence: float = 0.0,
     limit: int = 100,
+    useful_only: bool = False,
 ) -> list[ReflectionListRow]:
     """Return reflections matching the six filter fields from spec §8.
 
@@ -235,6 +238,8 @@ def reflection_list_for_ui(
     - When ``status`` is given, exact match on that single value
       (lets the user surface ``retired`` or ``superseded`` reflections
       explicitly).
+
+    ``useful_only``: when True, restricts to rows where ``useful_count > 0``.
 
     Order: ``confidence DESC, updated_at DESC, rowid DESC``.
     Cap: ``limit`` rows (default 100). ``min_confidence`` is a
@@ -266,11 +271,14 @@ def reflection_list_for_ui(
     if min_confidence > 0.0:
         clauses.append("confidence >= ?")
         params.append(min_confidence)
+    if useful_only:
+        clauses.append("useful_count > 0")
 
     where = " AND ".join(clauses)
     sql = (
         "SELECT id, title, project, tech, phase, polarity, "
-        "confidence, status, use_cases, evidence_count, updated_at "
+        "confidence, status, use_cases, evidence_count, updated_at, "
+        "useful_count, times_misled "
         f"FROM reflections WHERE {where} "
         "ORDER BY confidence DESC, updated_at DESC, rowid DESC "
         "LIMIT ?"
@@ -290,6 +298,8 @@ def reflection_list_for_ui(
             use_cases=r["use_cases"],
             evidence_count=r["evidence_count"],
             updated_at=r["updated_at"],
+            useful_count=r["useful_count"],
+            times_misled=r["times_misled"],
         )
         for r in rows
     ]
@@ -313,6 +323,10 @@ class ReflectionFull:
     scope: str
     created_at: str
     updated_at: str
+    useful_count: int = 0
+    last_useful_at: str | None = None
+    times_misled: int = 0
+    last_misled_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +353,22 @@ class ReflectionDetail:
     reflection: ReflectionFull
     sources: list[ReflectionSourceObservation]
 
+    @property
+    def useful_count(self) -> int:
+        return self.reflection.useful_count
+
+    @property
+    def last_useful_at(self) -> str | None:
+        return self.reflection.last_useful_at
+
+    @property
+    def times_misled(self) -> int:
+        return self.reflection.times_misled
+
+    @property
+    def last_misled_at(self) -> str | None:
+        return self.reflection.last_misled_at
+
 
 def reflection_detail(
     conn: sqlite3.Connection, *, reflection_id: str
@@ -358,7 +388,8 @@ def reflection_detail(
     r_row = conn.execute(
         "SELECT id, title, project, tech, phase, polarity, "
         "confidence, status, use_cases, hints, evidence_count, scope, "
-        "created_at, updated_at "
+        "created_at, updated_at, "
+        "useful_count, last_useful_at, times_misled, last_misled_at "
         "FROM reflections WHERE id = ?",
         (reflection_id,),
     ).fetchone()
@@ -417,6 +448,10 @@ def reflection_detail(
             scope=r_row["scope"],
             created_at=r_row["created_at"],
             updated_at=r_row["updated_at"],
+            useful_count=r_row["useful_count"] or 0,
+            last_useful_at=r_row["last_useful_at"],
+            times_misled=r_row["times_misled"] or 0,
+            last_misled_at=r_row["last_misled_at"],
         ),
         sources=sources,
     )

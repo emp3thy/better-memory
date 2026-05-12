@@ -108,3 +108,16 @@ incidents = memory.retrieve_observations(
 If `dont` includes "tried injecting auth middleware through FastAPI
 Depends at module scope, broke test isolation" — do not repeat that.
 Find another way or ask.
+
+## Crediting memories you actually use
+
+When you actively use one of the retrieved memories — quote a hint,
+follow its do/dont guidance, or it caused a wrong direction — call
+`memory.credit(kind, id, class)` **immediately**. Class is `cited`
+if quoted, `shaped` if it guided a decision, `misled` if it led you
+astray.
+
+This is the fresh-context signal. Memories you don't credit will
+default to `ignored` at session end (caught by the
+`rate-session-memories` skill). Credit-as-you-go survives compaction;
+the session-end sweep can't recover what your context has forgotten.

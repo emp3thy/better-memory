@@ -39,6 +39,8 @@ search; without, ordered newest-first.
 - `memory.retrieve(project?, tech?, phase?, polarity?, limit_per_bucket?)` — reflections, bucketed by polarity
 - `memory.retrieve_observations(project?, episode_id?, component?, theme?, outcome?, query?, limit?)` — raw observations
 - `memory.record_use(id, outcome?)`
+- `memory.credit(kind, id, class)` — **opportunistic per-tool-use rating.** When you actively use a memory retrieved this session (quote it, follow its guidance, or it misled you), call this immediately. Class is `cited`/`shaped`/`misled` (NOT `ignored`). The session-end sweep catches anything you don't credit, defaulting to `ignored`. Credit-as-you-go survives compaction.
+- `memory.list_session_exposures()` / `memory.apply_session_ratings(ratings)` — end-of-session sweep tooling used by the `rate-session-memories` skill.
 - `memory.start_episode(goal, tech?)` — declares a goal; returns `{episode_id, reflections}`
 - `memory.close_episode(outcome, summary?, close_reason?)` — closes the active episode
 - `memory.reconcile_episodes()` — list unclosed episodes from prior sessions

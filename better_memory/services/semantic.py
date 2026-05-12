@@ -9,6 +9,7 @@ See docs/superpowers/specs/2026-05-04-semantic-memories-design.md.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,6 +32,10 @@ class SemanticMemory:
     scope: str            # 'project' | 'general'
     created_at: str
     updated_at: str
+    useful_count: int = 0
+    last_useful_at: str | None = None
+    times_misled: int = 0
+    last_misled_at: str | None = None
 
 
 _VALID_SCOPES = ("project", "general")
@@ -189,8 +194,10 @@ class SemanticMemoryService:
         project: str,
         scope_filter: str | None = None,
         search: str | None = None,
+        track_exposure: bool = True,
     ) -> list[SemanticMemory]:
-        """Project rows + general-scope rows from any project, newest first.
+        """Project rows + general-scope rows from any project, ordered by
+        useful_count DESC then created_at DESC (newest first as tiebreaker).
 
         Args:
             project: project key for project-scope filtering.
@@ -201,6 +208,11 @@ class SemanticMemoryService:
             search: optional case-insensitive substring match on
                 ``content``. ``%`` and ``_`` in the input are escaped so
                 they match literally rather than as LIKE wildcards.
+            track_exposure: when ``True`` (default), writes a
+                source='retrieve' row per returned memory into
+                ``session_memory_exposure`` if ``CLAUDE_SESSION_ID`` is set.
+                Set to ``False`` when calling from contexts that manage their
+                own exposure tracking (e.g., SessionBootstrapService.bootstrap).
         """
         where_clauses: list[str] = []
         params: list[object] = []
@@ -224,17 +236,50 @@ class SemanticMemoryService:
             params.append(f"%{escaped}%")
 
         sql = (
-            "SELECT id, content, project, scope, created_at, updated_at "
+            "SELECT id, content, project, scope, created_at, updated_at, "
+            "useful_count, last_useful_at, times_misled, last_misled_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
-            "ORDER BY created_at DESC"
+            "ORDER BY useful_count DESC, created_at DESC"
         )
         rows = self._conn.execute(sql, params).fetchall()
-        return [
+        results = [
             SemanticMemory(
                 id=r["id"], content=r["content"], project=r["project"],
                 scope=r["scope"],
                 created_at=r["created_at"], updated_at=r["updated_at"],
+                useful_count=r["useful_count"] or 0,
+                last_useful_at=r["last_useful_at"],
+                times_misled=r["times_misled"] or 0,
+                last_misled_at=r["last_misled_at"],
             )
             for r in rows
         ]
+        # Best-effort exposure tracking — see spec §5.2.1.
+        # track_exposure=False is used by SessionBootstrapService.bootstrap,
+        # which manages its own exposure write via _record_exposure.
+        sid = os.environ.get("CLAUDE_SESSION_ID")
+        if track_exposure:
+            if not sid:
+                # Best-effort: bump diagnostics counter. Swallow any error so
+                # the missing-env path stays silent.
+                try:
+                    self._conn.execute(
+                        "UPDATE rating_diagnostics "
+                        "SET value = value + 1, updated_at = ? "
+                        "WHERE metric = 'session_id_missing'",
+                        (self._clock().isoformat(),),
+                    )
+                    self._conn.commit()
+                except BaseException:
+                    pass
+            elif results:
+                now = self._clock().isoformat()
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO session_memory_exposure "
+                    "(session_id, memory_kind, memory_id, exposed_at, source) "
+                    "VALUES (?, 'semantic', ?, ?, 'retrieve')",
+                    [(sid, m.id, now) for m in results],
+                )
+                self._conn.commit()
+        return results

@@ -514,3 +514,58 @@ class TestCreateFromObservation:
             "SELECT status FROM observations WHERE id = 'o1'"
         ).fetchone()
         assert row["status"] == "active"
+
+
+class TestUsefulMisledFields:
+    """list_for_project and the drawer detail dict expose the 4 rating counters."""
+
+    def test_list_includes_useful_count_and_times_misled(self, conn):
+        """Rows returned by list_for_project carry useful_count + times_misled."""
+        from better_memory.services.semantic import SemanticMemoryService
+        conn.execute(
+            "INSERT INTO semantic_memories "
+            "(id, content, project, scope, created_at, updated_at, "
+            "useful_count, last_useful_at, times_misled, last_misled_at) "
+            "VALUES ('m1', 'test rule', 'p1', 'project', "
+            "'2026-05-04T12:00:00+00:00', '2026-05-04T12:00:00+00:00', "
+            "3, '2026-05-10T10:00:00+00:00', 1, '2026-05-09T08:00:00+00:00')",
+        )
+        conn.commit()
+        svc = SemanticMemoryService(conn)
+        rows = svc.list_for_project(project="p1", track_exposure=False)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.useful_count == 3
+        assert row.times_misled == 1
+
+    def test_list_last_at_fields_returned(self, conn):
+        """last_useful_at and last_misled_at are returned from list_for_project."""
+        from better_memory.services.semantic import SemanticMemoryService
+        conn.execute(
+            "INSERT INTO semantic_memories "
+            "(id, content, project, scope, created_at, updated_at, "
+            "useful_count, last_useful_at, times_misled, last_misled_at) "
+            "VALUES ('m2', 'another rule', 'p1', 'project', "
+            "'2026-05-04T12:00:00+00:00', '2026-05-04T12:00:00+00:00', "
+            "2, '2026-05-11T09:00:00+00:00', 0, NULL)",
+        )
+        conn.commit()
+        svc = SemanticMemoryService(conn)
+        rows = svc.list_for_project(project="p1", track_exposure=False)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.last_useful_at == "2026-05-11T09:00:00+00:00"
+        assert row.last_misled_at is None
+
+    def test_defaults_to_zero_counts(self, conn):
+        """Rows created without explicit counters default to 0 / None."""
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn)
+        svc.create(content="new rule", project="p1")
+        rows = svc.list_for_project(project="p1", track_exposure=False)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.useful_count == 0
+        assert row.times_misled == 0
+        assert row.last_useful_at is None
+        assert row.last_misled_at is None

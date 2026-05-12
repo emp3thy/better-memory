@@ -38,12 +38,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -67,6 +68,7 @@ from better_memory.services.reflection import (
     ReflectionSynthesisService,
     SynthesisStep,
 )
+from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.retention import RetentionService
 from better_memory.services.retention_scheduler import RetentionScheduler
 from better_memory.services.spool import SpoolService
@@ -591,6 +593,74 @@ def _tool_definitions() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="memory.list_session_exposures",
+            description=(
+                "Return the unrated session_memory_exposure rows for the "
+                "current Claude session (resolved server-side from "
+                "CLAUDE_SESSION_ID env). Read-only; no side effects. "
+                "Used by the rate-session-memories skill as the "
+                "authoritative anti-hallucination list."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="memory.apply_session_ratings",
+            description=(
+                "Atomic batch rating for the current Claude session "
+                "(resolved server-side from CLAUDE_SESSION_ID). Called "
+                "at session end by the rate-session-memories skill. "
+                "Raises if CLAUDE_SESSION_ID is unset — call only inside "
+                "an active Claude session."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ratings"],
+                "properties": {
+                    "ratings": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["kind", "id", "class"],
+                            "properties": {
+                                "kind": {"enum": ["reflection", "semantic"]},
+                                "id": {"type": "string"},
+                                "class": {
+                                    "enum": ["cited", "shaped", "ignored", "misled"]
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="memory.credit",
+            description=(
+                "Per-tool-use credit. When you actively use a memory "
+                "retrieved during this session (quote it, follow its "
+                "guidance, or it misled you), call this immediately. "
+                "Resolved server-side from CLAUDE_SESSION_ID. "
+                "class must be 'cited', 'shaped', or 'misled' — NOT 'ignored'."
+            ),
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["kind", "id", "class"],
+                "properties": {
+                    "kind": {"enum": ["reflection", "semantic"]},
+                    "id": {"type": "string"},
+                    "class": {"enum": ["cited", "shaped", "misled"]},
+                },
+            },
+        ),
     ]
 
 
@@ -765,6 +835,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     # longer holds a chat client.
     reflections = ReflectionSynthesisService(memory_conn)
     retention = RetentionService(conn=memory_conn)
+    memory_rating = MemoryRatingService(memory_conn)
 
     knowledge = KnowledgeService(
         knowledge_conn,
@@ -1066,7 +1137,6 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.session_bootstrap":
-            import os
             import uuid
 
             from better_memory.services.session_bootstrap import (
@@ -1143,6 +1213,73 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 )
             ]
 
+        if name == "memory.list_session_exposures":
+            sid = os.environ.get("CLAUDE_SESSION_ID")
+            if not sid:
+                payload = {"session_id": None, "exposures": []}
+            else:
+                # Dedupe by (memory_kind, memory_id) — a memory can have two
+                # exposure rows (bootstrap + retrieve) in one session. The
+                # rating apply path stamps ALL unrated rows per (kind, id)
+                # in one UPDATE, so the LLM must see one entry per unique
+                # memory; otherwise apply_session_ratings rejects the batch
+                # for duplicate (kind, id) pairs.
+                rows = memory_conn.execute(
+                    """
+                    SELECT e.memory_kind, e.memory_id,
+                           MIN(e.exposed_at) AS exposed_at,
+                           MIN(e.source) AS source,
+                           COALESCE(r.title, s.content) AS display
+                      FROM session_memory_exposure e
+                      LEFT JOIN reflections        r ON e.memory_kind='reflection'
+                                                    AND e.memory_id = r.id
+                      LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
+                                                    AND e.memory_id = s.id
+                     WHERE e.session_id = ? AND e.rated_at IS NULL
+                     GROUP BY e.memory_kind, e.memory_id
+                     ORDER BY exposed_at ASC
+                    """,
+                    (sid,),
+                ).fetchall()
+                payload = {
+                    "session_id": sid,
+                    "exposures": [
+                        {
+                            "kind": r["memory_kind"],
+                            "id": r["memory_id"],
+                            **({"title": r["display"]} if r["memory_kind"] == "reflection"
+                               else {"content": r["display"]}),
+                            "exposed_at": r["exposed_at"],
+                            "source": r["source"],
+                        }
+                        for r in rows
+                    ],
+                }
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.apply_session_ratings":
+            sid = os.environ.get("CLAUDE_SESSION_ID")
+            if not sid:
+                raise ValueError("No active session: CLAUDE_SESSION_ID not set")
+            payload = memory_rating.apply_session_ratings(
+                session_id=sid,
+                ratings=args["ratings"],
+            )
+            return [TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "memory.credit":
+            sid = os.environ.get("CLAUDE_SESSION_ID")
+            if not sid:
+                payload = {"applied": None, "skipped": "no_session"}
+            else:
+                payload = memory_rating.credit_one(
+                    session_id=sid,
+                    kind=args["kind"],
+                    id=args["id"],
+                    classification=args["class"],
+                )
+            return [TextContent(type="text", text=json.dumps(payload))]
+
         raise ValueError(f"Unknown tool: {name}")
 
     cleaned = False
@@ -1172,6 +1309,48 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             pass
 
     return server, cleanup
+
+
+async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
+    """Test-only entry point that runs one tool invocation against a fresh
+    server instance. NOT used by production code.
+
+    The MCP SDK catches exceptions inside handlers and surfaces them as
+    CallToolResult(isError=True). To make tests ergonomic, this helper
+    re-raises any error as ValueError so callers can use
+    `pytest.raises(ValueError, match="...")` instead of inspecting
+    result text manually.
+    """
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    server, cleanup = create_server()
+    try:
+        handler = server.request_handlers[CallToolRequest]
+        req = CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(name=name, arguments=arguments),
+        )
+        result = await handler(req)
+        # The SDK's ServerResult is a discriminated union; we know this
+        # handler is wired to CallTool and returns CallToolResult.
+        from mcp.types import CallToolResult
+        assert isinstance(result.root, CallToolResult), (
+            f"Expected CallToolResult, got {type(result.root).__name__}"
+        )
+        if getattr(result.root, "isError", False):
+            # Re-raise as ValueError; preserve the framework's error text.
+            text = ""
+            if result.root.content:
+                first = result.root.content[0]
+                text = getattr(first, "text", "") or ""
+            raise ValueError(text)
+        # Tests inspect .text on TextContent entries — runtime is correct;
+        # cast through Any to satisfy Pyright's list invariance (the SDK
+        # types .content as list[ContentBlock]; our tools only emit
+        # TextContent so the cast is sound).
+        return cast(list[TextContent], result.root.content)
+    finally:
+        await cleanup()
 
 
 async def run() -> None:

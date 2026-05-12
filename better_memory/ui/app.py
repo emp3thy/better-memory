@@ -237,6 +237,7 @@ def create_app(
                 "polarity": "",
                 "status": "",
                 "min_confidence": "",
+                "useful_only": False,
             },
         )
 
@@ -261,6 +262,8 @@ def create_app(
         except ValueError:
             min_confidence = 0.0
 
+        useful_only = args.get("useful_only") == "1"
+
         rows = queries.reflection_list_for_ui(
             conn,
             project=project,
@@ -269,6 +272,7 @@ def create_app(
             polarity=polarity,
             status=status,
             min_confidence=min_confidence,
+            useful_only=useful_only,
         )
         return render_template(
             "fragments/panel_reflections.html", rows=rows
@@ -456,7 +460,8 @@ def create_app(
     def semantic_drawer(id: str):
         conn = app.extensions["db_connection"]
         row = conn.execute(
-            "SELECT id, content, project, scope, created_at, updated_at "
+            "SELECT id, content, project, scope, created_at, updated_at, "
+            "useful_count, last_useful_at, times_misled, last_misled_at "
             "FROM semantic_memories WHERE id = ?",
             (id,),
         ).fetchone()
@@ -466,6 +471,10 @@ def create_app(
             "id": row["id"], "content": row["content"],
             "project": row["project"], "scope": row["scope"],
             "created_at": row["created_at"], "updated_at": row["updated_at"],
+            "useful_count": row["useful_count"] or 0,
+            "last_useful_at": row["last_useful_at"],
+            "times_misled": row["times_misled"] or 0,
+            "last_misled_at": row["last_misled_at"],
         }
         return render_template(
             "fragments/semantic_drawer.html", memory=memory,
@@ -557,8 +566,30 @@ def create_app(
 
     @app.get("/diagnostics")
     def diagnostics() -> str:
+        conn = app.extensions["db_connection"]
+        recent_ratings = conn.execute(
+            """
+            SELECT e.rated_at, e.memory_kind, e.memory_id, e.classification,
+                   COALESCE(r.title, s.content) AS display
+              FROM session_memory_exposure e
+              LEFT JOIN reflections        r ON e.memory_kind='reflection'
+                                            AND e.memory_id = r.id
+              LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
+                                            AND e.memory_id = s.id
+             WHERE e.rated_at IS NOT NULL
+             ORDER BY e.rated_at DESC
+             LIMIT 20
+            """
+        ).fetchall()
+        diag_rows = conn.execute(
+            "SELECT metric, value FROM rating_diagnostics"
+        ).fetchall()
+        rating_diagnostics = {r["metric"]: r["value"] for r in diag_rows}
         return render_template(
-            "diagnostics.html", active_tab="diagnostics"
+            "diagnostics.html",
+            active_tab="diagnostics",
+            recent_ratings=recent_ratings,
+            rating_diagnostics=rating_diagnostics,
         )
 
     @app.get("/diagnostics/panel/hook-errors")

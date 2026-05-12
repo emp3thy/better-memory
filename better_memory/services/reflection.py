@@ -25,6 +25,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -371,7 +372,7 @@ class ReflectionSynthesisService:
                   FROM reflections
                  WHERE (project = ? OR scope = 'general')
                    AND status IN ('pending_review', 'confirmed')
-                 ORDER BY confidence DESC, updated_at DESC
+                 ORDER BY useful_count DESC, confidence DESC, updated_at DESC
                 """,
                 (episode.project,),
             ).fetchall()
@@ -384,7 +385,7 @@ class ReflectionSynthesisService:
                  WHERE (project = ? OR scope = 'general')
                    AND status IN ('pending_review', 'confirmed')
                    AND (tech = ? OR tech IS NULL)
-                 ORDER BY confidence DESC, updated_at DESC
+                 ORDER BY useful_count DESC, confidence DESC, updated_at DESC
                 """,
                 (episode.project, tech),
             ).fetchall()
@@ -1112,6 +1113,7 @@ class ReflectionSynthesisService:
         phase: str | None = None,
         polarity: str | None = None,
         limit_per_bucket: int | None = 20,
+        track_exposure: bool = True,
     ) -> dict[str, list[dict]]:
         """Return reflections bucketed by polarity, ordered by confidence DESC.
 
@@ -1124,6 +1126,11 @@ class ReflectionSynthesisService:
           Pass ``None`` to disable the cap (returns every matching row per
           bucket); used by SessionBootstrapService which injects all
           reflections at session start.
+        - ``track_exposure``: when ``True`` (default), writes a
+          source='retrieve' row per returned memory into
+          ``session_memory_exposure`` if ``CLAUDE_SESSION_ID`` is set.
+          Set to ``False`` when calling from contexts that manage their own
+          exposure tracking (e.g., SessionBootstrapService.bootstrap).
 
         Excludes retired and superseded reflections. Includes pending_review
         + confirmed.
@@ -1148,10 +1155,10 @@ class ReflectionSynthesisService:
         rows = self._conn.execute(
             f"""
             SELECT id, title, phase, polarity, use_cases, hints,
-                   confidence, tech, evidence_count
+                   confidence, tech, evidence_count, useful_count
             FROM reflections
             WHERE {where}
-            ORDER BY confidence DESC, updated_at DESC
+            ORDER BY useful_count DESC, confidence DESC, updated_at DESC
             """,
             params,
         ).fetchall()
@@ -1172,7 +1179,41 @@ class ReflectionSynthesisService:
                 "confidence": r["confidence"],
                 "tech": r["tech"],
                 "evidence_count": r["evidence_count"],
+                "useful_count": r["useful_count"],
             })
+
+        # Best-effort exposure tracking. Skip silently when env is missing
+        # (e.g., test or non-Claude context) — see spec §5.2.1.
+        # track_exposure=False is used by SessionBootstrapService.bootstrap,
+        # which manages its own exposure write via _record_exposure.
+        sid = os.environ.get("CLAUDE_SESSION_ID")
+        if track_exposure:
+            if not sid:
+                # Best-effort: bump diagnostics counter. Swallow any error so
+                # the missing-env path stays silent.
+                try:
+                    self._conn.execute(
+                        "UPDATE rating_diagnostics "
+                        "SET value = value + 1, updated_at = ? "
+                        "WHERE metric = 'session_id_missing'",
+                        (self._clock().isoformat(),),
+                    )
+                    self._conn.commit()
+                except BaseException:
+                    pass
+            else:
+                all_ids = [
+                    r["id"] for bucket in buckets.values() for r in bucket
+                ]
+                if all_ids:
+                    now = self._clock().isoformat()
+                    self._conn.executemany(
+                        "INSERT OR IGNORE INTO session_memory_exposure "
+                        "(session_id, memory_kind, memory_id, exposed_at, source) "
+                        "VALUES (?, 'reflection', ?, ?, 'retrieve')",
+                        [(sid, rid, now) for rid in all_ids],
+                    )
+                    self._conn.commit()
         return buckets
 
 

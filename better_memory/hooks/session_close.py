@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from better_memory.config import get_config
+
 # Mirror the observer cap: reject any stdin payload above 1 MiB without
 # raising. Hooks must never fail.
 _MAX_STDIN_BYTES = 1_048_576
@@ -50,6 +52,108 @@ def _synthesise_marker() -> dict[str, str]:
         "cwd": os.environ.get("PWD") or os.getcwd(),
         "session_id": os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex,
     }
+
+
+def _emit_rating_directive_if_unrated(session_id: str) -> bool:
+    """Best-effort: if the current session has any unrated exposures,
+    emit a decision:block directive on stdout asking the LLM to rate
+    them via the rate-session-memories skill.
+
+    Returns True if a block directive was emitted (caller must SKIP the
+    spool-marker write — Claude Code will fire Stop again after the
+    rating turn, and the marker should land only on that final fire so
+    downstream spool consumers don't see two session_end events or run
+    synthesis before ratings land). Returns False otherwise.
+
+    Never raises. On any failure, swallows the exception and returns False.
+    """
+    try:
+        from better_memory.db.connection import connect
+        cfg = get_config()
+        if not cfg.memory_db.exists():
+            return False
+        conn = connect(cfg.memory_db)
+        try:
+            # Dedupe by (memory_kind, memory_id) — a memory can have two
+            # exposure rows (bootstrap + retrieve) in one session. The
+            # MIN(exposed_at) keeps deterministic ordering; the rating
+            # apply path stamps ALL unrated rows per (kind, id) in one
+            # UPDATE, so one rating per unique memory is the correct
+            # contract to surface to the LLM.
+            rows = conn.execute(
+                """
+                SELECT e.memory_kind, e.memory_id,
+                       MIN(e.exposed_at) AS exposed_at,
+                       COALESCE(r.title, s.content) AS display
+                  FROM session_memory_exposure e
+                  LEFT JOIN reflections        r ON e.memory_kind='reflection'
+                                                AND e.memory_id = r.id
+                  LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
+                                                AND e.memory_id = s.id
+                 WHERE e.session_id = ? AND e.rated_at IS NULL
+                 GROUP BY e.memory_kind, e.memory_id
+                 ORDER BY exposed_at ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return False
+
+        TRUNC = 80
+        CAP_BYTES = 8 * 1024
+        refl_lines = []
+        sem_lines = []
+        for r in rows:
+            display = (r["display"] or "")[:TRUNC]
+            if r["memory_kind"] == "reflection":
+                refl_lines.append(f"- {r['memory_id']}: {display}")
+            else:
+                sem_lines.append(f"- {r['memory_id']}: {display}")
+
+        directive = (
+            "RATE_MEMORIES — before this session ends, classify the "
+            "memories that were exposed during this session and that you "
+            "did NOT already credit via memory.credit.\n\n"
+            f"Reflections ({len(refl_lines)}):\n"
+            + ("\n".join(refl_lines) if refl_lines else "  (none)")
+            + f"\n\nSemantic memories ({len(sem_lines)}):\n"
+            + ("\n".join(sem_lines) if sem_lines else "  (none)")
+            + "\n\nFor each id, classify as one of:\n"
+            "  cited / shaped / ignored / misled (default: ignored)\n\n"
+            "Most exposures default to `ignored` — only flag the few "
+            "that actually shaped the session or misled you. Invoke "
+            "the skill `rate-session-memories`."
+        )
+        encoded = directive.encode("utf-8")
+        if len(encoded) > CAP_BYTES:
+            directive = encoded[: CAP_BYTES - 200].decode("utf-8", errors="ignore") + (
+                "\n\n(list truncated; call memory.list_session_exposures "
+                "for the full set)"
+            )
+
+        payload = {
+            "decision": "block",
+            "reason": (
+                f"RATE_MEMORIES — {len(rows)} pending rating(s) for "
+                f"this session"
+            ),
+            "hookSpecificOutput": {
+                "hookEventName": "Stop",
+                "additionalContext": directive,
+            },
+        }
+        sys.stdout.write(json.dumps(payload))
+        sys.stdout.flush()
+        return True
+    except BaseException as _exc:
+        try:
+            from better_memory.hooks._error_log import record_hook_error
+            record_hook_error(hook_name="session_close_rating", exc=_exc)
+        except BaseException:
+            pass
+        return False
 
 
 def main() -> None:
@@ -90,6 +194,20 @@ def main() -> None:
             )
         if "cwd" not in data or not data["cwd"]:
             data["cwd"] = os.environ.get("PWD") or os.getcwd()
+
+        session_id_str = (
+            os.environ.get("CLAUDE_SESSION_ID")
+            or data.get("session_id")
+            or ""
+        )
+        if session_id_str and _emit_rating_directive_if_unrated(
+            str(session_id_str)
+        ):
+            # Block was emitted — Claude Code re-fires Stop after the
+            # rating turn. Skip the spool-marker write so the consumer
+            # sees session_end exactly once (on the final fire) and
+            # downstream synthesis runs AFTER ratings land.
+            sys.exit(0)
 
         spool_dir = _default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)
