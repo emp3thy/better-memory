@@ -342,6 +342,7 @@ class TestUsefulMisledInDetail:
         )
         conn.commit()
         detail = reflection_detail(conn, reflection_id="r1")
+        assert detail is not None
         assert detail.useful_count == 5
         assert detail.last_useful_at == "2026-05-11T10:00:00+00:00"
         assert detail.times_misled == 2
@@ -359,6 +360,7 @@ class TestUsefulMisledInDetail:
         )
         conn.commit()
         detail = reflection_detail(conn, reflection_id="r1")
+        assert detail is not None
         assert detail.useful_count == 0
         assert detail.last_useful_at is None
         assert detail.times_misled == 0
