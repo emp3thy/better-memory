@@ -24,7 +24,10 @@ from typing import Callable
 
 # --------------------------------------------------------------- skill registry
 
-_SKILLS_TO_INSTALL: tuple[str, ...] = ("rate-session-memories",)
+_SKILLS_TO_INSTALL: tuple[str, ...] = (
+    "better-memory-synthesize",
+    "rate-session-memories",
+)
 
 # --------------------------------------------------------------- hook registry
 
@@ -190,9 +193,16 @@ def _resolve_user_skills_dir() -> Path:
 def install_skill_symlinks() -> None:
     """Symlink each in-repo skill into ~/.claude/skills/.
 
-    Idempotent: if the link already points to the right target, nothing
-    happens. If a different file or symlink exists at the target path,
-    remove it and recreate. Symlinks have no meaningful content to back up.
+    Idempotent: if a link already points to the right target, nothing
+    happens. If a different symlink, file, or directory exists at the
+    target path, it is REMOVED without backup before recreating the
+    symlink. Symlinks have no content to preserve, and a stale or
+    user-replaced skill directory at the same name is treated as
+    obsolete.
+
+    Silently skips with a stderr warning on OSError (Windows symlink
+    privilege not available — user must enable Developer Mode or run
+    elevated). The skill can still be invoked from the in-repo path.
     """
     repo_skills_dir = Path(__file__).resolve().parents[2] / ".claude" / "skills"
     user_skills_dir = _resolve_user_skills_dir()
