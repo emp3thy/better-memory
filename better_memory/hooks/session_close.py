@@ -54,24 +54,36 @@ def _synthesise_marker() -> dict[str, str]:
     }
 
 
-def _emit_rating_directive_if_unrated(session_id: str) -> None:
+def _emit_rating_directive_if_unrated(session_id: str) -> bool:
     """Best-effort: if the current session has any unrated exposures,
     emit a decision:block directive on stdout asking the LLM to rate
     them via the rate-session-memories skill.
 
-    Never raises. On any failure, swallows the exception and returns.
-    The caller proceeds to write the session_end marker regardless.
+    Returns True if a block directive was emitted (caller must SKIP the
+    spool-marker write — Claude Code will fire Stop again after the
+    rating turn, and the marker should land only on that final fire so
+    downstream spool consumers don't see two session_end events or run
+    synthesis before ratings land). Returns False otherwise.
+
+    Never raises. On any failure, swallows the exception and returns False.
     """
     try:
         from better_memory.db.connection import connect
         cfg = get_config()
         if not cfg.memory_db.exists():
-            return
+            return False
         conn = connect(cfg.memory_db)
         try:
+            # Dedupe by (memory_kind, memory_id) — a memory can have two
+            # exposure rows (bootstrap + retrieve) in one session. The
+            # MIN(exposed_at) keeps deterministic ordering; the rating
+            # apply path stamps ALL unrated rows per (kind, id) in one
+            # UPDATE, so one rating per unique memory is the correct
+            # contract to surface to the LLM.
             rows = conn.execute(
                 """
-                SELECT e.memory_kind, e.memory_id, e.exposed_at,
+                SELECT e.memory_kind, e.memory_id,
+                       MIN(e.exposed_at) AS exposed_at,
                        COALESCE(r.title, s.content) AS display
                   FROM session_memory_exposure e
                   LEFT JOIN reflections        r ON e.memory_kind='reflection'
@@ -79,14 +91,15 @@ def _emit_rating_directive_if_unrated(session_id: str) -> None:
                   LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
                                                 AND e.memory_id = s.id
                  WHERE e.session_id = ? AND e.rated_at IS NULL
-                 ORDER BY e.exposed_at ASC
+                 GROUP BY e.memory_kind, e.memory_id
+                 ORDER BY exposed_at ASC
                 """,
                 (session_id,),
             ).fetchall()
         finally:
             conn.close()
         if not rows:
-            return
+            return False
 
         TRUNC = 80
         CAP_BYTES = 8 * 1024
@@ -133,12 +146,14 @@ def _emit_rating_directive_if_unrated(session_id: str) -> None:
         }
         sys.stdout.write(json.dumps(payload))
         sys.stdout.flush()
+        return True
     except BaseException as _exc:
         try:
             from better_memory.hooks._error_log import record_hook_error
             record_hook_error(hook_name="session_close_rating", exc=_exc)
         except BaseException:
             pass
+        return False
 
 
 def main() -> None:
@@ -185,8 +200,14 @@ def main() -> None:
             or data.get("session_id")
             or ""
         )
-        if session_id_str:
-            _emit_rating_directive_if_unrated(str(session_id_str))
+        if session_id_str and _emit_rating_directive_if_unrated(
+            str(session_id_str)
+        ):
+            # Block was emitted — Claude Code re-fires Stop after the
+            # rating turn. Skip the spool-marker write so the consumer
+            # sees session_end exactly once (on the final fire) and
+            # downstream synthesis runs AFTER ratings land.
+            sys.exit(0)
 
         spool_dir = _default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)

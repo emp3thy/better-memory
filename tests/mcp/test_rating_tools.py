@@ -151,6 +151,36 @@ class TestListSessionExposures:
         assert payload["session_id"] is None
         assert payload["exposures"] == []
 
+    def test_dedupes_multi_row_exposure(self, memory_db, monkeypatch):
+        """A memory with TWO unrated exposure rows (bootstrap + retrieve)
+        must appear ONCE in the response — apply_session_ratings rejects
+        duplicate (kind, id) pairs, so the list tool must match that
+        contract."""
+        from better_memory.mcp import server as srv_mod
+
+        conn, _ = memory_db
+        _seed_reflection(conn, "r-dup")
+        # Two distinct exposed_at timestamps for the same (session, kind, id).
+        for ts, src in [
+            ("2026-05-11T10:00:00+00:00", "bootstrap"),
+            ("2026-05-11T11:00:00+00:00", "retrieve"),
+        ]:
+            conn.execute(
+                """INSERT INTO session_memory_exposure
+                   (session_id, memory_kind, memory_id, exposed_at, source)
+                   VALUES ('SDUP', 'reflection', 'r-dup', ?, ?)""",
+                (ts, src),
+            )
+        conn.commit()
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "SDUP")
+
+        result = run_async(
+            srv_mod._dispatch_for_tests("memory.list_session_exposures", {})
+        )
+        payload = json.loads(result[0].text)
+        assert len(payload["exposures"]) == 1
+        assert payload["exposures"][0]["id"] == "r-dup"
+
 
 class TestApplySessionRatingsTool:
     def test_applies_batch(self, memory_db, monkeypatch):
