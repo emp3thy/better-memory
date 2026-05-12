@@ -1187,19 +1187,33 @@ class ReflectionSynthesisService:
         # track_exposure=False is used by SessionBootstrapService.bootstrap,
         # which manages its own exposure write via _record_exposure.
         sid = os.environ.get("CLAUDE_SESSION_ID")
-        if track_exposure and sid:
-            all_ids = [
-                r["id"] for bucket in buckets.values() for r in bucket
-            ]
-            if all_ids:
-                now = self._clock().isoformat()
-                self._conn.executemany(
-                    "INSERT OR IGNORE INTO session_memory_exposure "
-                    "(session_id, memory_kind, memory_id, exposed_at, source) "
-                    "VALUES (?, 'reflection', ?, ?, 'retrieve')",
-                    [(sid, rid, now) for rid in all_ids],
-                )
-                self._conn.commit()
+        if track_exposure:
+            if not sid:
+                # Best-effort: bump diagnostics counter. Swallow any error so
+                # the missing-env path stays silent.
+                try:
+                    self._conn.execute(
+                        "UPDATE rating_diagnostics "
+                        "SET value = value + 1, updated_at = ? "
+                        "WHERE metric = 'session_id_missing'",
+                        (self._clock().isoformat(),),
+                    )
+                    self._conn.commit()
+                except BaseException:
+                    pass
+            else:
+                all_ids = [
+                    r["id"] for bucket in buckets.values() for r in bucket
+                ]
+                if all_ids:
+                    now = self._clock().isoformat()
+                    self._conn.executemany(
+                        "INSERT OR IGNORE INTO session_memory_exposure "
+                        "(session_id, memory_kind, memory_id, exposed_at, source) "
+                        "VALUES (?, 'reflection', ?, ?, 'retrieve')",
+                        [(sid, rid, now) for rid in all_ids],
+                    )
+                    self._conn.commit()
         return buckets
 
 

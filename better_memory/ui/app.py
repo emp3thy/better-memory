@@ -566,8 +566,30 @@ def create_app(
 
     @app.get("/diagnostics")
     def diagnostics() -> str:
+        conn = app.extensions["db_connection"]
+        recent_ratings = conn.execute(
+            """
+            SELECT e.rated_at, e.memory_kind, e.memory_id, e.classification,
+                   COALESCE(r.title, s.content) AS display
+              FROM session_memory_exposure e
+              LEFT JOIN reflections        r ON e.memory_kind='reflection'
+                                            AND e.memory_id = r.id
+              LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
+                                            AND e.memory_id = s.id
+             WHERE e.rated_at IS NOT NULL
+             ORDER BY e.rated_at DESC
+             LIMIT 20
+            """
+        ).fetchall()
+        diag_rows = conn.execute(
+            "SELECT metric, value FROM rating_diagnostics"
+        ).fetchall()
+        rating_diagnostics = {r["metric"]: r["value"] for r in diag_rows}
         return render_template(
-            "diagnostics.html", active_tab="diagnostics"
+            "diagnostics.html",
+            active_tab="diagnostics",
+            recent_ratings=recent_ratings,
+            rating_diagnostics=rating_diagnostics,
         )
 
     @app.get("/diagnostics/panel/hook-errors")

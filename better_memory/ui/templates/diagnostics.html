@@ -17,5 +17,33 @@
   </div>
 
   <div id="hook-error-drawer"></div>
+
+  <section class="diagnostics-panel">
+    <h2>Recent ratings</h2>
+    <p class="small">Last 20 rated session_memory_exposure rows.</p>
+    <table class="table">
+      <thead><tr><th>rated_at</th><th>kind</th><th>id</th><th>class</th><th>display</th></tr></thead>
+      <tbody>
+      {% for r in recent_ratings %}
+        <tr>
+          <td>{{ r.rated_at }}</td>
+          <td>{{ r.memory_kind }}</td>
+          <td>{{ r.memory_id }}</td>
+          <td><span class="badge">{{ r.classification }}</span></td>
+          <td>{{ r.display | truncate(60) if r.display else '' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="diagnostics-panel">
+    <h3>Rating diagnostics</h3>
+    <dl>
+      <dt>session_id_missing</dt>
+      <dd>{{ rating_diagnostics.get('session_id_missing', 0) }}
+        (calls where CLAUDE_SESSION_ID was unset)</dd>
+    </dl>
+  </section>
 </section>
 {% endblock %}
