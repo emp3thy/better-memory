@@ -113,8 +113,9 @@ def _emit_rating_directive_if_unrated(session_id: str) -> None:
             "that actually shaped the session or misled you. Invoke "
             "the skill `rate-session-memories`."
         )
-        if len(directive.encode("utf-8")) > CAP_BYTES:
-            directive = directive[: CAP_BYTES - 200] + (
+        encoded = directive.encode("utf-8")
+        if len(encoded) > CAP_BYTES:
+            directive = encoded[: CAP_BYTES - 200].decode("utf-8", errors="ignore") + (
                 "\n\n(list truncated; call memory.list_session_exposures "
                 "for the full set)"
             )

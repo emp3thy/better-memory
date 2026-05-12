@@ -72,28 +72,33 @@ class TestRatingDirectiveEmission:
     def test_empty_unrated_writes_marker_no_directive(
         self, tmp_path, tmp_memory_db,
     ):
-        # Migrate but no unrated rows.
+        # Migrate but no unrated rows. The DB exists; the table is empty.
         c = connect(tmp_memory_db)
         apply_migrations(c)
         c.close()
-        spool = tmp_path / "spool"
-        spool.mkdir()
+        home = tmp_memory_db.parent
+        spool = home / "spool"
+        spool.mkdir(exist_ok=True)
         env = {
-            "BETTER_MEMORY_HOME": str(tmp_path),  # spool lives under here
+            "BETTER_MEMORY_HOME": str(home),
             "CLAUDE_SESSION_ID": "S1",
         }
         result = _run_hook(env)
         assert result.returncode == 0
-        # stdout should be empty (no directive) but the marker file is written.
+        # stdout should be empty (no directive) — the table exists but has no rows.
         assert result.stdout.strip() == ""
         markers = list(spool.glob("*_session_end_*.json"))
         assert len(markers) == 1
 
     def test_db_error_falls_back_to_marker(self, tmp_path):
         """If the DB doesn't exist, the hook still exits 0 and writes a marker."""
+        home = tmp_path / "nonexistent"
         env = {
-            "BETTER_MEMORY_HOME": str(tmp_path / "nonexistent"),
+            "BETTER_MEMORY_HOME": str(home),
             "CLAUDE_SESSION_ID": "S1",
         }
         result = _run_hook(env)
         assert result.returncode == 0
+        # Marker should still be written even though DB is absent.
+        markers = list((home / "spool").glob("*_session_end_*.json"))
+        assert len(markers) == 1
