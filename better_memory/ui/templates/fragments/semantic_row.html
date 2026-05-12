@@ -4,6 +4,11 @@
   <div class="row-meta">
     <span class="scope-badge scope-{{ row.scope }}">{{ row.scope }}</span>
     <span class="updated-at">{{ row.updated_at }}</span>
+    {% if row.useful_count > 0 %}
+    <span class="badge bg-success" title="Times this memory was useful">
+      ★ useful: {{ row.useful_count }}
+    </span>
+    {% endif %}
   </div>
   <div class="row-actions">
     <button type="button"

@@ -32,6 +32,10 @@ class SemanticMemory:
     scope: str            # 'project' | 'general'
     created_at: str
     updated_at: str
+    useful_count: int = 0
+    last_useful_at: str | None = None
+    times_misled: int = 0
+    last_misled_at: str | None = None
 
 
 _VALID_SCOPES = ("project", "general")
@@ -232,7 +236,8 @@ class SemanticMemoryService:
             params.append(f"%{escaped}%")
 
         sql = (
-            "SELECT id, content, project, scope, created_at, updated_at "
+            "SELECT id, content, project, scope, created_at, updated_at, "
+            "useful_count, last_useful_at, times_misled, last_misled_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
             "ORDER BY useful_count DESC, created_at DESC"
@@ -243,6 +248,10 @@ class SemanticMemoryService:
                 id=r["id"], content=r["content"], project=r["project"],
                 scope=r["scope"],
                 created_at=r["created_at"], updated_at=r["updated_at"],
+                useful_count=r["useful_count"] or 0,
+                last_useful_at=r["last_useful_at"],
+                times_misled=r["times_misled"] or 0,
+                last_misled_at=r["last_misled_at"],
             )
             for r in rows
         ]
