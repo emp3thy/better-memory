@@ -323,6 +323,10 @@ class ReflectionFull:
     scope: str
     created_at: str
     updated_at: str
+    useful_count: int = 0
+    last_useful_at: str | None = None
+    times_misled: int = 0
+    last_misled_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -349,6 +353,22 @@ class ReflectionDetail:
     reflection: ReflectionFull
     sources: list[ReflectionSourceObservation]
 
+    @property
+    def useful_count(self) -> int:
+        return self.reflection.useful_count
+
+    @property
+    def last_useful_at(self) -> str | None:
+        return self.reflection.last_useful_at
+
+    @property
+    def times_misled(self) -> int:
+        return self.reflection.times_misled
+
+    @property
+    def last_misled_at(self) -> str | None:
+        return self.reflection.last_misled_at
+
 
 def reflection_detail(
     conn: sqlite3.Connection, *, reflection_id: str
@@ -368,7 +388,8 @@ def reflection_detail(
     r_row = conn.execute(
         "SELECT id, title, project, tech, phase, polarity, "
         "confidence, status, use_cases, hints, evidence_count, scope, "
-        "created_at, updated_at "
+        "created_at, updated_at, "
+        "useful_count, last_useful_at, times_misled, last_misled_at "
         "FROM reflections WHERE id = ?",
         (reflection_id,),
     ).fetchone()
@@ -427,6 +448,10 @@ def reflection_detail(
             scope=r_row["scope"],
             created_at=r_row["created_at"],
             updated_at=r_row["updated_at"],
+            useful_count=r_row["useful_count"] or 0,
+            last_useful_at=r_row["last_useful_at"],
+            times_misled=r_row["times_misled"] or 0,
+            last_misled_at=r_row["last_misled_at"],
         ),
         sources=sources,
     )

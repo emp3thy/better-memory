@@ -21,6 +21,12 @@
     <dt>Scope</dt><dd>{{ detail.reflection.scope }}</dd>
     <dt>Evidence</dt><dd>{{ detail.reflection.evidence_count }} observation{{ 's' if detail.reflection.evidence_count != 1 else '' }}</dd>
     <dt>Updated</dt><dd>{{ detail.reflection.updated_at }}</dd>
+    <dt>Useful</dt>
+    <dd>{{ detail.reflection.useful_count }}{% if detail.reflection.last_useful_at %} (last: {{ detail.reflection.last_useful_at }}){% endif %}</dd>
+    {% if detail.reflection.times_misled > 0 %}
+      <dt>Misled</dt>
+      <dd class="text-danger">{{ detail.reflection.times_misled }}{% if detail.reflection.last_misled_at %} (last: {{ detail.reflection.last_misled_at }}){% endif %}</dd>
+    {% endif %}
   </dl>
 
   <section class="drawer-section">

@@ -324,3 +324,42 @@ class TestUsefulCountInReadModel:
         ids_all = [r.id for r in rows_all]
         assert "r-useful" in ids_all
         assert "r-unused" in ids_all
+
+
+class TestUsefulMisledInDetail:
+    def test_reflection_detail_includes_useful_and_misled_fields(self, conn):
+        from better_memory.ui.queries import reflection_detail
+
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at,
+                useful_count, last_useful_at, times_misled, last_misled_at)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01',
+                       5, '2026-05-11T10:00:00+00:00',
+                       2, '2026-05-11T11:00:00+00:00')"""
+        )
+        conn.commit()
+        detail = reflection_detail(conn, reflection_id="r1")
+        assert detail.useful_count == 5
+        assert detail.last_useful_at == "2026-05-11T10:00:00+00:00"
+        assert detail.times_misled == 2
+        assert detail.last_misled_at == "2026-05-11T11:00:00+00:00"
+
+    def test_reflection_detail_defaults_to_zero_counts(self, conn):
+        from better_memory.ui.queries import reflection_detail
+
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01')"""
+        )
+        conn.commit()
+        detail = reflection_detail(conn, reflection_id="r1")
+        assert detail.useful_count == 0
+        assert detail.last_useful_at is None
+        assert detail.times_misled == 0
+        assert detail.last_misled_at is None
