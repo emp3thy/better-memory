@@ -132,13 +132,19 @@ class ObservationService:
         self._scope_resolver: Callable[[], str | None] = (
             scope_resolver if scope_resolver is not None else (lambda: None)
         )
-        # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var > uuid4().
-        # The env var makes hook-written events (which read CLAUDE_SESSION_ID)
-        # and MCP-written observations share the same session id.
+        # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var >
+        # CLAUDE_CODE_SESSION_ID env var > uuid4(). The env vars make
+        # hook-written events and MCP-written observations share the same
+        # session id (Claude Code exports CLAUDE_CODE_SESSION_ID; the older
+        # CLAUDE_SESSION_ID is kept as the primary name for back-compat).
         self.session_id: str = (
             session_id
             if session_id is not None
-            else (os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex)
+            else (
+                os.environ.get("CLAUDE_SESSION_ID")
+                or os.environ.get("CLAUDE_CODE_SESSION_ID")
+                or uuid4().hex
+            )
         )
         # ``None`` defers to the resolved config value so tests can inject
         # ``False`` without having to monkeypatch the environment.

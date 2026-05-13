@@ -24,12 +24,32 @@ Design choices:
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+import time
+from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
 from better_memory.config import get_config
+
+# Diagnostic logging for embed calls. Off by default; enable with
+# BETTER_MEMORY_EMBED_LOG=1 to localize hang-on-first-call freezes that the
+# MCP server has hit intermittently on Windows. Each ``_post_embed`` call
+# writes a paired ``[bm-embed start ...]`` / ``[bm-embed done ...]`` line to
+# stderr with a short call-id, attempt counter, and elapsed ms. A ``start``
+# line with no matching ``done`` localises the hang to ``httpx.AsyncClient
+# .post()``.
+_EMBED_LOG = os.environ.get("BETTER_MEMORY_EMBED_LOG", "").strip() not in ("", "0", "false", "False")
+
+
+def _embed_log(msg: str) -> None:
+    if _EMBED_LOG:
+        sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
 
 
 class EmbeddingError(RuntimeError):
@@ -142,23 +162,47 @@ class OllamaEmbedder:
         """Issue ``POST /api/embed`` with retries, return the ``embeddings`` list."""
         body: dict[str, Any] = {"model": self._model, "input": payload_input}
 
+        call_id = uuid4().hex[:8]
+        n = 1 if isinstance(payload_input, str) else len(payload_input)
+        _embed_log(
+            f"[bm-embed start cid={call_id} model={self._model} host={self._host} "
+            f"n={n} ts={datetime.now(UTC).isoformat()}]"
+        )
+        t_call = time.monotonic()
+
+        def _done(status: str) -> None:
+            attempt_ms = int((time.monotonic() - t_attempt) * 1000)
+            total_ms = int((time.monotonic() - t_call) * 1000)
+            _embed_log(
+                f"[bm-embed done cid={call_id} status={status} "
+                f"attempt_ms={attempt_ms} total_ms={total_ms}]"
+            )
+
         last_exc: Exception | None = None
         for attempt in range(self._max_retries):
+            t_attempt = time.monotonic()
+            _embed_log(
+                f"[bm-embed attempt cid={call_id} n_attempt={attempt + 1}/"
+                f"{self._max_retries}]"
+            )
             try:
                 response = await self._client.post("/api/embed", json=body)
             except httpx.TransportError as exc:
                 last_exc = exc
                 if attempt + 1 >= self._max_retries:
+                    _done("transport_error_final")
                     raise EmbeddingError(
                         f"Failed to reach Ollama at {self._host} after "
                         f"{self._max_retries} attempts: {exc}"
                     ) from exc
+                _done("transport_error_retry")
                 await asyncio.sleep(self._backoff_base * (2**attempt))
                 continue
             except httpx.HTTPError as exc:
                 # Any other httpx error (e.g. InvalidURL, UnsupportedProtocol,
                 # a non-transport RequestError subclass) is surfaced as an
                 # EmbeddingError so callers never see raw httpx exceptions.
+                _done("http_error")
                 raise EmbeddingError(
                     f"Unexpected httpx error talking to Ollama: {exc}"
                 ) from exc
@@ -170,14 +214,17 @@ class OllamaEmbedder:
                     response=response,
                 )
                 if attempt + 1 >= self._max_retries:
+                    _done(f"http_{response.status_code}_final")
                     raise EmbeddingError(
                         f"Ollama returned {response.status_code} after "
                         f"{self._max_retries} attempts: {response.text}"
                     ) from last_exc
+                _done(f"http_{response.status_code}_retry")
                 await asyncio.sleep(self._backoff_base * (2**attempt))
                 continue
 
             if 400 <= response.status_code < 500:
+                _done(f"http_{response.status_code}")
                 raise EmbeddingError(
                     f"Ollama returned {response.status_code}: {response.text}"
                 )
@@ -186,15 +233,18 @@ class OllamaEmbedder:
             try:
                 data = response.json()
             except ValueError as exc:
+                _done("non_json")
                 raise EmbeddingError(
                     f"Ollama returned non-JSON body: {response.text!r}"
                 ) from exc
 
             embeddings = data.get("embeddings")
             if not isinstance(embeddings, list):
+                _done("missing_embeddings")
                 raise EmbeddingError(
                     f"Ollama response missing 'embeddings' list: {data!r}"
                 )
+            _done("ok")
             return embeddings  # type: ignore[no-any-return]
 
         # Should be unreachable — the loop always either returns or raises.
