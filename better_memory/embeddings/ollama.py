@@ -24,8 +24,6 @@ Design choices:
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
 import time
 from datetime import UTC, datetime
 from types import TracebackType
@@ -39,17 +37,11 @@ from better_memory.config import get_config
 # Diagnostic logging for embed calls. Off by default; enable with
 # BETTER_MEMORY_EMBED_LOG=1 to localize hang-on-first-call freezes that the
 # MCP server has hit intermittently on Windows. Each ``_post_embed`` call
-# writes a paired ``[bm-embed start ...]`` / ``[bm-embed done ...]`` line to
-# stderr with a short call-id, attempt counter, and elapsed ms. A ``start``
-# line with no matching ``done`` localises the hang to ``httpx.AsyncClient
-# .post()``.
-_EMBED_LOG = os.environ.get("BETTER_MEMORY_EMBED_LOG", "").strip() not in ("", "0", "false", "False")
-
-
-def _embed_log(msg: str) -> None:
-    if _EMBED_LOG:
-        sys.stderr.write(msg + "\n")
-        sys.stderr.flush()
+# writes a paired ``[bm-embed start ...]`` / ``[bm-embed done ...]`` line via
+# the shared diagnostic logger (stderr + ``{home}/logs/diag.log``) with a
+# short call-id, attempt counter, and elapsed ms. A ``start`` line with no
+# matching ``done`` localises the hang to ``httpx.AsyncClient.post()``.
+from better_memory._diag import log as _embed_log
 
 
 class EmbeddingError(RuntimeError):

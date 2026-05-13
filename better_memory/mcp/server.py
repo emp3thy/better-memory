@@ -88,7 +88,12 @@ _OLLAMA_PROBE_TIMEOUT_SEC = 2.0
 logger = logging.getLogger(__name__)
 
 
-def _run_best_effort(operation: str, fn: Callable[[], Any]) -> None:
+def _run_best_effort(
+    operation: str,
+    fn: Callable[[], Any],
+    *,
+    diag_cid: str | None = None,
+) -> None:
     """Run ``fn`` swallowing any ``Exception`` but logging it via the module logger.
 
     Used by best-effort hooks inside ``memory.retrieve`` (spool drain,
@@ -96,11 +101,28 @@ def _run_best_effort(operation: str, fn: Callable[[], Any]) -> None:
     must still produce a discoverable diagnostic. The previous behaviour
     silently dropped the exception, so a broken background path could
     fail invisibly for weeks.
+
+    When ``diag_cid`` is provided and ``BETTER_MEMORY_EMBED_LOG=1`` is on,
+    emits a ``[bm-retrieve step=<operation> cid=... ms=N status=ok|error]``
+    line through the shared diagnostic logger so callers can localize
+    which step is slow.
     """
+    from better_memory import _diag
+
+    t0 = time.monotonic()
+    status = "ok"
     try:
         fn()
     except Exception:  # noqa: BLE001 — best-effort wrapper
+        status = "error"
         logger.exception("best-effort %s failed", operation)
+    finally:
+        if diag_cid is not None and _diag.enabled():
+            ms = int((time.monotonic() - t0) * 1000)
+            _diag.log(
+                f"[bm-retrieve step={operation} cid={diag_cid} "
+                f"ms={ms} status={status}]"
+            )
 
 
 # --------------------------------------------------------- synthesize audit log
@@ -1027,10 +1049,19 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps({"ok": True}))]
 
         if name == "memory.retrieve":
+            from better_memory import _diag
+
+            diag_cid: str | None = None
+            t_retrieve = 0.0
+            if _diag.enabled():
+                diag_cid = uuid.uuid4().hex[:8]
+                t_retrieve = time.monotonic()
+                _diag.log(f"[bm-retrieve start cid={diag_cid}]")
+
             # 1. Drain spool — must happen before any retrieval so fresh
             #    hook events (session_start, commit_close) are processed.
             #    SpoolService.drain is idempotent.
-            _run_best_effort("spool.drain", spool.drain)
+            _run_best_effort("spool.drain", spool.drain, diag_cid=diag_cid)
 
             # 2. Maybe run retention. Guard ensures at most once per 24h
             #    regardless of how often retrieve is called. Best-effort:
@@ -1041,10 +1072,13 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                     memory_conn, auto_prune=cfg.auto_prune
                 ).maybe_run(triggered_by="retrieve")
 
-            _run_best_effort("retention scheduler", _retention_step)
+            _run_best_effort(
+                "retention scheduler", _retention_step, diag_cid=diag_cid
+            )
 
             project = args.get("project") or project_name()
             limit_per_bucket = args.get("limit_per_bucket", 20)
+            t_reflections = time.monotonic() if diag_cid else 0.0
             buckets = reflections.retrieve_reflections(
                 project=project,
                 tech=args.get("tech"),
@@ -1052,6 +1086,16 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
                 polarity=args.get("polarity"),
                 limit_per_bucket=limit_per_bucket,
             )
+            if diag_cid is not None:
+                refl_ms = int((time.monotonic() - t_reflections) * 1000)
+                total_ms = int((time.monotonic() - t_retrieve) * 1000)
+                _diag.log(
+                    f"[bm-retrieve step=reflections cid={diag_cid} "
+                    f"ms={refl_ms} status=ok]"
+                )
+                _diag.log(
+                    f"[bm-retrieve done cid={diag_cid} total_ms={total_ms}]"
+                )
             return [TextContent(type="text", text=json.dumps(buckets))]
 
         if name == "memory.retrieve_observations":
@@ -1236,8 +1280,6 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.session_bootstrap":
-            import uuid
-
             from better_memory.services.session_bootstrap import (
                 SessionBootstrapService,
             )
