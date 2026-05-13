@@ -105,6 +105,41 @@ def test_hook_handles_oversized_stdin(home_with_schema, git_cwd):
     assert "Source: startup" in text
 
 
+def test_hook_writes_session_marker_for_mcp_fallback(home_with_schema, git_cwd):
+    """SessionStart receives session_id in stdin payload and must write a
+    marker file the MCP server can read (Claude Code doesn't propagate
+    CLAUDE_SESSION_ID into spawned stdio MCP envs)."""
+    from better_memory.runtime.session_marker import (
+        encode_project_dir,
+        read_session_id,
+    )
+
+    payload = json.dumps({
+        "source": "startup",
+        "session_id": "marker-test-sid",
+        "cwd": str(git_cwd),
+    })
+
+    proc = _run_hook(home_with_schema, stdin=payload, cwd=git_cwd)
+    assert proc.returncode == 0
+
+    # Marker is keyed by the encoded cwd (which the hook passes as
+    # project_dir), regardless of the MCP server's runtime CLAUDE_PROJECT_DIR.
+    marker = (
+        home_with_schema
+        / "runtime"
+        / "sessions"
+        / encode_project_dir(str(git_cwd))
+    )
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8").strip() == "marker-test-sid"
+    # Read helper round-trips with the same project_dir key.
+    assert (
+        read_session_id(home_with_schema, project_dir=str(git_cwd))
+        == "marker-test-sid"
+    )
+
+
 def test_hook_session_id_resolves_from_env_var(home_with_schema, git_cwd):
     # Ensure env var leg of the session_id resolution chain is exercised.
     env_overrides = {"CLAUDE_SESSION_ID": "env-fixed-id"}
