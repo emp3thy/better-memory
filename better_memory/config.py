@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 
 _DEFAULT_HOME = "~/.better-memory"
@@ -33,18 +32,11 @@ def resolve_home() -> Path:
     return Path(raw).expanduser()
 
 
-@lru_cache(maxsize=128)
-def _resolve_git_project(cwd_str: str) -> str | None:
-    """Resolve the git repo's main directory name for ``cwd_str``.
+_git_project_success_cache: dict[str, str] = {}
 
-    Runs ``git rev-parse --git-common-dir`` and returns the parent directory's
-    ``.name`` (which handles worktrees: ``--git-common-dir`` resolves to the
-    main repo's ``.git``). Returns ``None`` when ``cwd_str`` is not inside a
-    git tree, when git is unavailable, or when output is unusable.
 
-    Memoized by absolute path string so the ~30 ms subprocess hit only
-    happens once per process per directory. Callers must pass the resolved
-    absolute path so equivalent paths share a cache slot.
+def _git_common_dir_lookup(cwd_str: str) -> str | None:
+    """Uncached worker: run git rev-parse and parse the result.
 
     On Windows, ``creationflags=CREATE_NO_WINDOW`` suppresses the console
     window flash that would otherwise occur for each invocation when Claude
@@ -81,6 +73,34 @@ def _resolve_git_project(cwd_str: str) -> str | None:
 
     repo_root = common_dir.parent
     return repo_root.name or None
+
+
+def _resolve_git_project(cwd_str: str) -> str | None:
+    """Resolve the git repo's main directory name for ``cwd_str``.
+
+    Runs ``git rev-parse --git-common-dir`` and returns the parent directory's
+    ``.name`` (which handles worktrees: ``--git-common-dir`` resolves to the
+    main repo's ``.git``). Returns ``None`` when ``cwd_str`` is not inside a
+    git tree, when git is unavailable, or when output is unusable.
+
+    Successful resolutions are cached for the lifetime of the process by
+    absolute path string, so the ~30 ms subprocess hit only happens once
+    per directory. Failures are deliberately NOT cached: an lru_cache that
+    stamps ``None`` on a transient subprocess hiccup (5 s timeout tripping
+    during cold start, a fork race during stdio MCP spawn, etc.) would
+    poison the process for its entire lifetime, silently collapsing project
+    resolution to ``"general"`` with no recovery short of a restart. We
+    learned this the hard way; see ``docs/debug/2026-05-13-synthesize-freeze.md``.
+    Callers must pass the resolved absolute path so equivalent paths share
+    a cache slot.
+    """
+    cached = _git_project_success_cache.get(cwd_str)
+    if cached is not None:
+        return cached
+    result = _git_common_dir_lookup(cwd_str)
+    if result is not None:
+        _git_project_success_cache[cwd_str] = result
+    return result
 
 
 def project_name(cwd: Path | None = None) -> str:

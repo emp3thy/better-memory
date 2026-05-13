@@ -250,17 +250,52 @@ def test_project_name_handles_subprocess_filenotfound(
     def raise_filenotfound(*args, **kwargs):
         raise FileNotFoundError("git not on PATH")
 
-    # Clear lru_cache so the monkeypatched subprocess.run is exercised.
-    bm_config._resolve_git_project.cache_clear()
+    # Clear the success cache so a previously-stored entry can't mask the
+    # subprocess error. (Failures are no longer cached — see the docstring
+    # on _resolve_git_project — but a prior success would short-circuit.)
+    bm_config._git_project_success_cache.pop(str(tmp_path.resolve()), None)
     monkeypatch.setattr(bm_config.subprocess, "run", raise_filenotfound)
 
-    try:
-        result = bm_config.project_name(tmp_path)
-        assert result == "general"
-    finally:
-        # Cache hygiene: drop the entry seeded by the patched subprocess
-        # so later tests don't observe a stale `None` for this path.
-        bm_config._resolve_git_project.cache_clear()
+    result = bm_config.project_name(tmp_path)
+    assert result == "general"
+
+
+def test_project_name_does_not_cache_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A transient subprocess failure must NOT be cached.
+
+    Regression for the bug debugged 2026-05-13: a single failed
+    ``_resolve_git_project`` (e.g. ``subprocess.run`` timing out during the
+    MCP server's cold start) used to get memoized by ``@lru_cache`` and
+    silently collapsed every subsequent ``project_name(cwd)`` call to
+    ``"general"`` for the lifetime of the process. The cache must only
+    store successes; failures must retry on next call.
+    """
+    import better_memory.config as bm_config
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git_init(repo)
+
+    # Force the success cache to be empty for this path.
+    bm_config._git_project_success_cache.pop(str(repo.resolve()), None)
+
+    # First call: subprocess fails — result must be 'general' AND no entry
+    # should be left in the cache.
+    real_run = bm_config.subprocess.run
+
+    def fail_first(*args, **kwargs):
+        raise OSError("transient failure")
+
+    monkeypatch.setattr(bm_config.subprocess, "run", fail_first)
+    assert bm_config.project_name(repo) == "general"
+    assert str(repo.resolve()) not in bm_config._git_project_success_cache
+
+    # Second call: subprocess works again — must NOT return the cached
+    # 'general'; must re-run the subprocess and resolve to 'myrepo'.
+    monkeypatch.setattr(bm_config.subprocess, "run", real_run)
+    assert bm_config.project_name(repo) == "myrepo"
 
 
 def test_project_name_handles_subprocess_permissionerror(
@@ -276,11 +311,8 @@ def test_project_name_handles_subprocess_permissionerror(
     def raise_permission(*args, **kwargs):
         raise PermissionError("access denied")
 
-    bm_config._resolve_git_project.cache_clear()
+    bm_config._git_project_success_cache.pop(str(tmp_path.resolve()), None)
     monkeypatch.setattr(bm_config.subprocess, "run", raise_permission)
 
-    try:
-        result = bm_config.project_name(tmp_path)
-        assert result == "general"
-    finally:
-        bm_config._resolve_git_project.cache_clear()
+    result = bm_config.project_name(tmp_path)
+    assert result == "general"
