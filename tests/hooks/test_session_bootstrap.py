@@ -15,8 +15,16 @@ from better_memory.db.schema import apply_migrations
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "better_memory" / "db" / "migrations"
 
 
-def _run_hook(home_dir: Path, *, stdin: str = "", cwd: Path | None = None):
+def _run_hook(
+    home_dir: Path,
+    *,
+    stdin: str = "",
+    cwd: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+):
     env = {**os.environ, "BETTER_MEMORY_HOME": str(home_dir)}
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, "-m", "better_memory.hooks.session_bootstrap"],
         input=stdin,
@@ -137,6 +145,65 @@ def test_hook_writes_session_marker_for_mcp_fallback(home_with_schema, git_cwd):
     assert (
         read_session_id(home_with_schema, project_dir=str(git_cwd))
         == "marker-test-sid"
+    )
+
+
+def test_hook_writes_marker_keyed_by_claude_project_dir_when_set(
+    home_with_schema, git_cwd, tmp_path,
+):
+    """Symmetry with MCP read path: when CLAUDE_PROJECT_DIR is set in the
+    hook env, the marker MUST be keyed by that env value (not the payload's
+    cwd) — otherwise the MCP server, which resolves the read path through
+    CLAUDE_PROJECT_DIR, will look at a different key and miss the bridge.
+
+    Regression for Claude BugBot finding on PR #53 (commit 8904fbf).
+    """
+    from better_memory.runtime.session_marker import (
+        encode_project_dir,
+        read_session_id,
+    )
+
+    # Hook payload's cwd is one path; CLAUDE_PROJECT_DIR is intentionally a
+    # DIFFERENT path. The fix keys the marker by the env var.
+    project_dir_env = str(tmp_path / "as-resolved-by-claude-code")
+    payload = json.dumps({
+        "source": "startup",
+        "session_id": "env-keyed-sid",
+        "cwd": str(git_cwd),
+    })
+
+    proc = _run_hook(
+        home_with_schema,
+        stdin=payload,
+        cwd=git_cwd,
+        extra_env={"CLAUDE_PROJECT_DIR": project_dir_env},
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # Marker is keyed by CLAUDE_PROJECT_DIR, not payload cwd.
+    env_marker = (
+        home_with_schema
+        / "runtime"
+        / "sessions"
+        / encode_project_dir(project_dir_env)
+    )
+    cwd_marker = (
+        home_with_schema
+        / "runtime"
+        / "sessions"
+        / encode_project_dir(str(git_cwd))
+    )
+    assert env_marker.is_file(), (
+        f"marker not at env-keyed path: {env_marker}"
+    )
+    assert not cwd_marker.is_file(), (
+        f"marker incorrectly keyed by payload cwd: {cwd_marker}"
+    )
+    # MCP-side read: pass project_dir explicitly with the env value (the
+    # MCP server's _resolve_project_dir(None) would do this internally).
+    assert (
+        read_session_id(home_with_schema, project_dir=project_dir_env)
+        == "env-keyed-sid"
     )
 
 

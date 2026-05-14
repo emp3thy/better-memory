@@ -80,7 +80,15 @@ def main() -> None:
         rendered = result.additional_context
         # Bridge session_id to the MCP server: it doesn't see CLAUDE_SESSION_ID
         # in its spawn env. See better_memory/runtime/session_marker.py.
-        write_session_id(cfg.home, session_id, project_dir=cwd_str)
+        # Resolution MUST match read_session_id's _resolve_project_dir order:
+        # CLAUDE_PROJECT_DIR env first, then a non-empty fallback. The hook has
+        # the payload's cwd as a stronger fallback than os.getcwd() because the
+        # MCP server's cwd may not equal the project root.
+        write_session_id(
+            cfg.home,
+            session_id,
+            project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
+        )
     except BaseException as exc:  # noqa: BLE001
         try:
             record_hook_error(hook_name="session_bootstrap", exc=exc)
