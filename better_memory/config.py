@@ -17,9 +17,10 @@ vars because they're orthogonal to path layout.
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from better_memory import _diag
 
 _DEFAULT_HOME = "~/.better-memory"
 _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
@@ -32,75 +33,97 @@ def resolve_home() -> Path:
     return Path(raw).expanduser()
 
 
-_git_project_success_cache: dict[str, str] = {}
+# Maps absolute cwd string → resolved project name (or None when no git tree
+# is reachable). Both successes and ``None`` are cached for the process
+# lifetime: the walk is deterministic given filesystem state, so caching the
+# negative result is safe. The previous design avoided caching ``None``
+# because the subprocess fallback could hang/hiccup transiently — that
+# fallback is gone (see ``_walk_for_git_root``), so the rationale no longer
+# applies.
+_git_project_cache: dict[str, str | None] = {}
 
 
-def _git_common_dir_lookup(cwd_str: str) -> str | None:
-    """Uncached worker: run git rev-parse and parse the result.
+def _walk_for_git_root(cwd_str: str) -> str | None:
+    """Walk up from ``cwd_str`` looking for ``.git``. Pure stdlib, no subprocess.
 
-    On Windows, ``creationflags=CREATE_NO_WINDOW`` suppresses the console
-    window flash that would otherwise occur for each invocation when Claude
-    Code runs as a GUI process.
+    Replaces the old ``git rev-parse --git-common-dir`` subprocess (which
+    hung for ~65 s on Windows when ``subprocess.run``'s post-timeout cleanup
+    blocked on a child that refused to reap quickly under AV/EDR scanning).
+    Handles the two ``.git`` shapes git itself recognises:
 
-    Catches ``OSError`` (covers ``FileNotFoundError`` for missing git, plus
-    ``PermissionError`` for Windows ACL edge cases) alongside
-    ``subprocess.SubprocessError`` (timeouts, etc.).
+    * Directory — standard repo. Returns the parent directory's ``.name``.
+    * File — worktree (or submodule) marker, contents ``gitdir: <path>``
+      pointing at ``<main_repo>/.git/worktrees/<name>``. The main repo
+      root sits three parents above ``gitdir``; its ``.name`` is returned
+      to match the worktree-aware semantics that originally motivated
+      shelling out to ``git rev-parse --git-common-dir``.
+
+    Returns ``None`` if no ``.git`` entry is found in any ancestor.
     """
-    kwargs: dict = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    try:
-        result = subprocess.run(
-            ["git", "-C", cwd_str, "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            **kwargs,
-        )
-    except (OSError, subprocess.SubprocessError):
+    fn = "_walk_for_git_root"
+    with _diag.trace(fn, cwd_str=cwd_str):
+        cwd = Path(cwd_str)
+        for candidate in (cwd, *cwd.parents):
+            git_path = candidate / ".git"
+            if not git_path.exists():
+                continue
+            kind = "dir" if git_path.is_dir() else "file"
+            _diag.step(fn, "git_found", path=str(git_path), kind=kind)
+            if git_path.is_dir():
+                return candidate.name or None
+            try:
+                text = git_path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                _diag.step(fn, "read_failed", exc=repr(exc))
+                return None
+            prefix = "gitdir:"
+            if not text.startswith(prefix):
+                _diag.step(fn, "unexpected_git_file_format")
+                return None
+            gitdir = Path(text[len(prefix):].strip())
+            if not gitdir.is_absolute():
+                gitdir = (candidate / gitdir).resolve()
+            try:
+                main_repo = gitdir.parents[2]
+            except IndexError:
+                _diag.step(fn, "gitdir_too_shallow", gitdir=str(gitdir))
+                return None
+            return main_repo.name or None
         return None
-
-    if result.returncode != 0:
-        return None
-
-    common_dir_str = result.stdout.strip()
-    if not common_dir_str:
-        return None
-
-    common_dir = Path(common_dir_str)
-    if not common_dir.is_absolute():
-        common_dir = (Path(cwd_str) / common_dir).resolve()
-
-    repo_root = common_dir.parent
-    return repo_root.name or None
 
 
 def _resolve_git_project(cwd_str: str) -> str | None:
     """Resolve the git repo's main directory name for ``cwd_str``.
 
-    Runs ``git rev-parse --git-common-dir`` and returns the parent directory's
-    ``.name`` (which handles worktrees: ``--git-common-dir`` resolves to the
-    main repo's ``.git``). Returns ``None`` when ``cwd_str`` is not inside a
-    git tree, when git is unavailable, or when output is unusable.
+    Walks up the directory tree looking for a ``.git`` entry (directory for
+    standard repos, file containing ``gitdir: <path>`` for worktrees) and
+    returns the corresponding repo root's ``.name``. Returns ``None`` when
+    ``cwd_str`` is not inside any git tree.
 
-    Successful resolutions are cached for the lifetime of the process by
-    absolute path string, so the ~30 ms subprocess hit only happens once
-    per directory. Failures are deliberately NOT cached: an lru_cache that
-    stamps ``None`` on a transient subprocess hiccup (5 s timeout tripping
-    during cold start, a fork race during stdio MCP spawn, etc.) would
-    poison the process for its entire lifetime, silently collapsing project
-    resolution to ``"general"`` with no recovery short of a restart. We
-    learned this the hard way; see ``docs/debug/2026-05-13-synthesize-freeze.md``.
+    Both successful resolutions AND ``None`` are cached for the lifetime of
+    the process by absolute path string. Caching ``None`` is safe because
+    the walk is deterministic given filesystem state. The earlier subprocess
+    implementation deliberately did NOT cache failures because a transient
+    ``subprocess.run`` hiccup (5 s timeout tripping during cold start, fork
+    race during stdio MCP spawn) could poison the process for its entire
+    lifetime, silently collapsing project resolution to ``"general"`` with
+    no recovery short of a restart. The walk has no such transient failure
+    mode — see ``docs/debug/2026-05-13-synthesize-freeze.md``.
+
     Callers must pass the resolved absolute path so equivalent paths share
     a cache slot.
     """
-    cached = _git_project_success_cache.get(cwd_str)
-    if cached is not None:
-        return cached
-    result = _git_common_dir_lookup(cwd_str)
-    if result is not None:
-        _git_project_success_cache[cwd_str] = result
-    return result
+    fn = "_resolve_git_project"
+    with _diag.trace(fn, cwd_str=cwd_str):
+        if cwd_str in _git_project_cache:
+            cached = _git_project_cache[cwd_str]
+            _diag.step(fn, "cache_hit", value=cached)
+            return cached
+        _diag.step(fn, "cache_miss_walking")
+        result = _walk_for_git_root(cwd_str)
+        _diag.step(fn, "walk_returned", value=result)
+        _git_project_cache[cwd_str] = result
+        return result
 
 
 def project_name(cwd: Path | None = None) -> str:
@@ -123,15 +146,28 @@ def project_name(cwd: Path | None = None) -> str:
     ``.better-memory`` mid-session takes effect immediately. The git
     resolution is memoized by absolute path via :func:`_resolve_git_project`.
     """
-    cwd = cwd if cwd is not None else Path.cwd()
+    fn = "project_name"
+    with _diag.trace(fn):
+        _diag.step(fn, "resolve_cwd")
+        cwd = cwd if cwd is not None else Path.cwd()
+        _diag.step(fn, "cwd_resolved", cwd=str(cwd))
 
-    override = cwd / ".better-memory"
-    if override.is_file():
-        text = override.read_text(encoding="utf-8").strip()
-        if text:
-            return text.splitlines()[0].strip()
+        override = cwd / ".better-memory"
+        _diag.step(fn, "check_override_file", path=str(override))
+        if override.is_file():
+            _diag.step(fn, "override_found_reading")
+            text = override.read_text(encoding="utf-8").strip()
+            if text:
+                first = text.splitlines()[0].strip()
+                _diag.step(fn, "override_returned", value=first)
+                return first
 
-    return _resolve_git_project(str(cwd.resolve())) or "general"
+        _diag.step(fn, "calling_resolve_git_project")
+        cwd_resolved = str(cwd.resolve())
+        _diag.step(fn, "cwd_resolve_done", value=cwd_resolved)
+        result = _resolve_git_project(cwd_resolved) or "general"
+        _diag.step(fn, "returning", value=result)
+        return result
 
 
 def _resolve_str(env_var: str, default: str) -> str:

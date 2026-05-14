@@ -32,6 +32,7 @@ from uuid import uuid4
 
 import httpx
 
+from better_memory import _diag
 from better_memory.config import get_config
 
 # Diagnostic logging for embed calls. Off by default; enable with
@@ -107,31 +108,33 @@ class OllamaEmbedder:
     # ------------------------------------------------------------------ public
     async def embed(self, text: str) -> list[float]:
         """Return a single embedding vector for ``text``."""
-        embeddings = await self._post_embed(text)
-        if len(embeddings) != 1:
-            raise EmbeddingError(
-                f"Expected 1 embedding for single input, got {len(embeddings)}"
-            )
-        vec = embeddings[0]
-        self._check_dim(vec)
-        return vec
+        with _diag.trace("OllamaEmbedder.embed", text_len=len(text)):
+            embeddings = await self._post_embed(text)
+            if len(embeddings) != 1:
+                raise EmbeddingError(
+                    f"Expected 1 embedding for single input, got {len(embeddings)}"
+                )
+            vec = embeddings[0]
+            self._check_dim(vec)
+            return vec
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Return one embedding vector per input string.
 
         An empty ``texts`` list returns ``[]`` without issuing an HTTP request.
         """
-        if not texts:
-            return []
+        with _diag.trace("OllamaEmbedder.embed_batch", n=len(texts)):
+            if not texts:
+                return []
 
-        embeddings = await self._post_embed(texts)
-        if len(embeddings) != len(texts):
-            raise EmbeddingError(
-                f"Expected {len(texts)} embeddings, got {len(embeddings)}"
-            )
-        for vec in embeddings:
-            self._check_dim(vec)
-        return embeddings
+            embeddings = await self._post_embed(texts)
+            if len(embeddings) != len(texts):
+                raise EmbeddingError(
+                    f"Expected {len(texts)} embeddings, got {len(embeddings)}"
+                )
+            for vec in embeddings:
+                self._check_dim(vec)
+            return embeddings
 
     async def aclose(self) -> None:
         """Close the underlying client if this instance created it."""
@@ -177,8 +180,27 @@ class OllamaEmbedder:
                 f"[bm-embed attempt cid={call_id} n_attempt={attempt + 1}/"
                 f"{self._max_retries}]"
             )
+            # Log right before AND right after the httpx.post call so we can
+            # tell whether a hang sits inside the network round-trip or
+            # somewhere on either side (event-loop handoff, retry sleep, etc).
+            # Also capture the current asyncio loop id so we can spot the
+            # "client bound to a different loop than the caller" deadlock
+            # documented in reflection 7a4fdb8e.
+            try:
+                loop_id = id(asyncio.get_running_loop())
+            except RuntimeError:
+                loop_id = -1
+            _embed_log(
+                f"[bm-embed pre-post cid={call_id} loop_id={loop_id} "
+                f"client_loop_id={id(getattr(self._client, '_state', None))}]"
+            )
             try:
                 response = await self._client.post("/api/embed", json=body)
+                _embed_log(
+                    f"[bm-embed post-returned cid={call_id} "
+                    f"status={response.status_code} "
+                    f"elapsed_ms={int((time.monotonic() - t_attempt) * 1000)}]"
+                )
             except httpx.TransportError as exc:
                 last_exc = exc
                 if attempt + 1 >= self._max_retries:
@@ -198,6 +220,21 @@ class OllamaEmbedder:
                 raise EmbeddingError(
                     f"Unexpected httpx error talking to Ollama: {exc}"
                 ) from exc
+            except BaseException as exc:
+                # Diagnostic last-resort: name the exception type that escapes
+                # the post call but isn't covered by the handlers above (e.g.
+                # asyncio.CancelledError, RuntimeError from wrong-loop bind).
+                # Logs the type AND the wallclock timestamp so we can measure
+                # any gap between the raise and the final embed exit log.
+                _embed_log(
+                    f"[bm-embed escaped cid={call_id} "
+                    f"type={type(exc).__name__} "
+                    f"msg={exc!r} "
+                    f"elapsed_ms={int((time.monotonic() - t_attempt) * 1000)} "
+                    f"ts={datetime.now(UTC).isoformat()}]"
+                )
+                _done(f"escaped_{type(exc).__name__}")
+                raise
 
             if 500 <= response.status_code < 600:
                 last_exc = httpx.HTTPStatusError(

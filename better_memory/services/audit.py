@@ -28,6 +28,8 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from better_memory import _diag
+
 
 def log(
     conn: sqlite3.Connection,
@@ -50,23 +52,26 @@ def log(
     id is a fresh ``uuid4().hex``. ``action`` is free-form and set by the
     calling service — there is no central registry of valid actions.
     """
-    conn.execute(
-        """
-        INSERT INTO audit_log (
-            id, entity_type, entity_id, action,
-            from_status, to_status, triggered_by, actor, detail, session_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            uuid4().hex,
-            entity_type,
-            entity_id,
-            action,
-            from_status,
-            to_status,
-            triggered_by,
-            actor,
-            json.dumps(detail) if detail is not None else None,
-            session_id,
-        ),
-    )
+    with _diag.trace(
+        "audit.log", entity_type=entity_type, entity_id=entity_id, action=action
+    ):
+        conn.execute(
+            """
+            INSERT INTO audit_log (
+                id, entity_type, entity_id, action,
+                from_status, to_status, triggered_by, actor, detail, session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid4().hex,
+                entity_type,
+                entity_id,
+                action,
+                from_status,
+                to_status,
+                triggered_by,
+                actor,
+                json.dumps(detail) if detail is not None else None,
+                session_id,
+            ),
+        )

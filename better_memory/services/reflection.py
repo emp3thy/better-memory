@@ -32,6 +32,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from better_memory import _diag
+
+
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -1135,89 +1138,107 @@ class ReflectionSynthesisService:
         Excludes retired and superseded reflections. Includes pending_review
         + confirmed.
         """
-        tech = self._normalize_tech(tech)
-        clauses = [
-            "(project = ? OR scope = 'general')",
-            "status IN ('pending_review', 'confirmed')",
-        ]
-        params: list[object] = [project]
-        if tech is not None:
-            clauses.append("(tech = ? OR tech IS NULL)")
-            params.append(tech)
-        if phase is not None:
-            clauses.append("phase = ?")
-            params.append(phase)
-        if polarity is not None:
-            clauses.append("polarity = ?")
-            params.append(polarity)
+        fn = "ReflectionSynthesisService.retrieve_reflections"
+        with _diag.trace(
+            fn, project=project, tech=tech, phase=phase, polarity=polarity,
+            limit_per_bucket=limit_per_bucket,
+        ):
+            tech = self._normalize_tech(tech)
+            clauses = [
+                "(project = ? OR scope = 'general')",
+                "status IN ('pending_review', 'confirmed')",
+            ]
+            params: list[object] = [project]
+            if tech is not None:
+                clauses.append("(tech = ? OR tech IS NULL)")
+                params.append(tech)
+            if phase is not None:
+                clauses.append("phase = ?")
+                params.append(phase)
+            if polarity is not None:
+                clauses.append("polarity = ?")
+                params.append(polarity)
 
-        where = " AND ".join(clauses)
-        rows = self._conn.execute(
-            f"""
-            SELECT id, title, phase, polarity, use_cases, hints,
-                   confidence, tech, evidence_count, useful_count
-            FROM reflections
-            WHERE {where}
-            ORDER BY useful_count DESC, confidence DESC, updated_at DESC
-            """,
-            params,
-        ).fetchall()
+            where = " AND ".join(clauses)
+            _diag.step(fn, "executing_select")
+            rows = self._conn.execute(
+                f"""
+                SELECT id, title, phase, polarity, use_cases, hints,
+                       confidence, tech, evidence_count, useful_count
+                FROM reflections
+                WHERE {where}
+                ORDER BY useful_count DESC, confidence DESC, updated_at DESC
+                """,
+                params,
+            ).fetchall()
+            _diag.step(fn, "select_done", n_rows=len(rows))
 
-        # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
-        cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize
-        buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
-        for r in rows:
-            bucket = buckets[r["polarity"]]
-            if len(bucket) >= cap:
-                continue
-            bucket.append({
-                "id": r["id"],
-                "title": r["title"],
-                "phase": r["phase"],
-                "use_cases": r["use_cases"],
-                "hints": json.loads(r["hints"]),
-                "confidence": r["confidence"],
-                "tech": r["tech"],
-                "evidence_count": r["evidence_count"],
-                "useful_count": r["useful_count"],
-            })
+            # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
+            cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize
+            buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
+            for r in rows:
+                bucket = buckets[r["polarity"]]
+                if len(bucket) >= cap:
+                    continue
+                bucket.append({
+                    "id": r["id"],
+                    "title": r["title"],
+                    "phase": r["phase"],
+                    "use_cases": r["use_cases"],
+                    "hints": json.loads(r["hints"]),
+                    "confidence": r["confidence"],
+                    "tech": r["tech"],
+                    "evidence_count": r["evidence_count"],
+                    "useful_count": r["useful_count"],
+                })
+            _diag.step(
+                fn, "bucketed",
+                do=len(buckets["do"]), dont=len(buckets["dont"]),
+                neutral=len(buckets["neutral"]),
+            )
 
-        # Best-effort exposure tracking. Skip silently when env is missing
-        # (e.g., test or non-Claude context) — see spec §5.2.1.
-        # track_exposure=False is used by SessionBootstrapService.bootstrap,
-        # which manages its own exposure write via _record_exposure.
-        sid = (
-            os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-        )
-        if track_exposure:
-            if not sid:
-                # Best-effort: bump diagnostics counter. Swallow any error so
-                # the missing-env path stays silent.
-                try:
-                    self._conn.execute(
-                        "UPDATE rating_diagnostics "
-                        "SET value = value + 1, updated_at = ? "
-                        "WHERE metric = 'session_id_missing'",
-                        (self._clock().isoformat(),),
-                    )
-                    self._conn.commit()
-                except BaseException:
-                    pass
-            else:
-                all_ids = [
-                    r["id"] for bucket in buckets.values() for r in bucket
-                ]
-                if all_ids:
-                    now = self._clock().isoformat()
-                    self._conn.executemany(
-                        "INSERT OR IGNORE INTO session_memory_exposure "
-                        "(session_id, memory_kind, memory_id, exposed_at, source) "
-                        "VALUES (?, 'reflection', ?, ?, 'retrieve')",
-                        [(sid, rid, now) for rid in all_ids],
-                    )
-                    self._conn.commit()
-        return buckets
+            # Best-effort exposure tracking. Skip silently when env is missing
+            # (e.g., test or non-Claude context) — see spec §5.2.1.
+            # track_exposure=False is used by SessionBootstrapService.bootstrap,
+            # which manages its own exposure write via _record_exposure.
+            sid = (
+                os.environ.get("CLAUDE_SESSION_ID")
+                or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            )
+            if track_exposure:
+                _diag.step(fn, "exposure_track_begin", sid=bool(sid))
+                if not sid:
+                    # Best-effort: bump diagnostics counter. Swallow any error so
+                    # the missing-env path stays silent.
+                    try:
+                        self._conn.execute(
+                            "UPDATE rating_diagnostics "
+                            "SET value = value + 1, updated_at = ? "
+                            "WHERE metric = 'session_id_missing'",
+                            (self._clock().isoformat(),),
+                        )
+                        self._conn.commit()
+                    except BaseException:
+                        pass
+                else:
+                    all_ids = [
+                        r["id"] for bucket in buckets.values() for r in bucket
+                    ]
+                    if all_ids:
+                        now = self._clock().isoformat()
+                        _diag.step(
+                            fn, "exposure_insert", n_ids=len(all_ids)
+                        )
+                        self._conn.executemany(
+                            "INSERT OR IGNORE INTO session_memory_exposure "
+                            "(session_id, memory_kind, memory_id, exposed_at, source) "
+                            "VALUES (?, 'reflection', ?, ?, 'retrieve')",
+                            [(sid, rid, now) for rid in all_ids],
+                        )
+                        _diag.step(fn, "exposure_commit")
+                        self._conn.commit()
+                _diag.step(fn, "exposure_track_done")
+            return buckets
 
 
 class ReflectionService:

@@ -54,6 +54,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from better_memory import _diag
 from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
@@ -107,8 +108,6 @@ def _run_best_effort(
     line through the shared diagnostic logger so callers can localize
     which step is slow.
     """
-    from better_memory import _diag
-
     t0 = time.monotonic()
     status = "ok"
     try:
@@ -987,21 +986,29 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
         args = arguments or {}
 
         if name == "memory.observe":
-            obs_id = await observations.create(
-                content=args["content"],
-                component=args.get("component"),
-                theme=args.get("theme"),
-                trigger_type=args.get("trigger_type"),
-                outcome=args.get("outcome", "neutral"),
-                tech=args.get("tech"),
-                # `or "project"` (not `, "project"` default) defends against
-                # MCP clients sending {"scope": null} — dict.get returns the
-                # default only when the key is absent, not when its value is
-                # None. Without this, scope=None propagates to ObservationService
-                # .create() which raises ValueError.
+            with _diag.trace(
+                "mcp.memory.observe",
+                content_len=len(args.get("content") or ""),
                 scope=args.get("scope") or "project",
-            )
-            return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
+                component=args.get("component"),
+            ):
+                _diag.step("mcp.memory.observe", "calling_observations_create")
+                obs_id = await observations.create(
+                    content=args["content"],
+                    component=args.get("component"),
+                    theme=args.get("theme"),
+                    trigger_type=args.get("trigger_type"),
+                    outcome=args.get("outcome", "neutral"),
+                    tech=args.get("tech"),
+                    # `or "project"` (not `, "project"` default) defends against
+                    # MCP clients sending {"scope": null} — dict.get returns the
+                    # default only when the key is absent, not when its value is
+                    # None. Without this, scope=None propagates to ObservationService
+                    # .create() which raises ValueError.
+                    scope=args.get("scope") or "project",
+                )
+                _diag.step("mcp.memory.observe", "create_returned", obs_id=obs_id)
+                return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
         if name == "memory.semantic_observe":
             from better_memory.services.semantic import SemanticMemoryService
@@ -1049,54 +1056,75 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps({"ok": True}))]
 
         if name == "memory.retrieve":
-            from better_memory import _diag
-
-            diag_cid: str | None = None
-            t_retrieve = 0.0
-            if _diag.enabled():
-                diag_cid = uuid.uuid4().hex[:8]
-                t_retrieve = time.monotonic()
-                _diag.log(f"[bm-retrieve start cid={diag_cid}]")
-
-            # 1. Drain spool — must happen before any retrieval so fresh
-            #    hook events (session_start, commit_close) are processed.
-            #    SpoolService.drain is idempotent.
-            _run_best_effort("spool.drain", spool.drain, diag_cid=diag_cid)
-
-            # 2. Maybe run retention. Guard ensures at most once per 24h
-            #    regardless of how often retrieve is called. Best-effort:
-            #    a retention failure must NEVER block memory.retrieve.
-            def _retention_step() -> None:
-                cfg = get_config()
-                RetentionScheduler(
-                    memory_conn, auto_prune=cfg.auto_prune
-                ).maybe_run(triggered_by="retrieve")
-
-            _run_best_effort(
-                "retention scheduler", _retention_step, diag_cid=diag_cid
-            )
-
-            project = args.get("project") or project_name()
-            limit_per_bucket = args.get("limit_per_bucket", 20)
-            t_reflections = time.monotonic() if diag_cid else 0.0
-            buckets = reflections.retrieve_reflections(
-                project=project,
+            with _diag.trace(
+                "mcp.memory.retrieve",
+                project=args.get("project") or "<auto>",
                 tech=args.get("tech"),
                 phase=args.get("phase"),
                 polarity=args.get("polarity"),
-                limit_per_bucket=limit_per_bucket,
-            )
-            if diag_cid is not None:
-                refl_ms = int((time.monotonic() - t_reflections) * 1000)
-                total_ms = int((time.monotonic() - t_retrieve) * 1000)
-                _diag.log(
-                    f"[bm-retrieve step=reflections cid={diag_cid} "
-                    f"ms={refl_ms} status=ok]"
+            ):
+                diag_cid: str | None = None
+                t_retrieve = 0.0
+                if _diag.enabled():
+                    diag_cid = uuid.uuid4().hex[:8]
+                    t_retrieve = time.monotonic()
+                    _diag.log(f"[bm-retrieve start cid={diag_cid}]")
+
+                # 1. Drain spool — must happen before any retrieval so fresh
+                #    hook events (session_start, commit_close) are processed.
+                #    SpoolService.drain is idempotent.
+                _diag.step("mcp.memory.retrieve", "before_spool_drain")
+                _run_best_effort("spool.drain", spool.drain, diag_cid=diag_cid)
+                _diag.step("mcp.memory.retrieve", "after_spool_drain")
+
+                # 2. Maybe run retention. Guard ensures at most once per 24h
+                #    regardless of how often retrieve is called. Best-effort:
+                #    a retention failure must NEVER block memory.retrieve.
+                def _retention_step() -> None:
+                    cfg = get_config()
+                    RetentionScheduler(
+                        memory_conn, auto_prune=cfg.auto_prune
+                    ).maybe_run(triggered_by="retrieve")
+
+                _diag.step("mcp.memory.retrieve", "before_retention_scheduler")
+                _run_best_effort(
+                    "retention scheduler", _retention_step, diag_cid=diag_cid
                 )
-                _diag.log(
-                    f"[bm-retrieve done cid={diag_cid} total_ms={total_ms}]"
+                _diag.step("mcp.memory.retrieve", "after_retention_scheduler")
+
+                project = args.get("project") or project_name()
+                limit_per_bucket = args.get("limit_per_bucket", 20)
+                t_reflections = time.monotonic() if diag_cid else 0.0
+                _diag.step(
+                    "mcp.memory.retrieve",
+                    "before_retrieve_reflections",
+                    project=project,
                 )
-            return [TextContent(type="text", text=json.dumps(buckets))]
+                buckets = reflections.retrieve_reflections(
+                    project=project,
+                    tech=args.get("tech"),
+                    phase=args.get("phase"),
+                    polarity=args.get("polarity"),
+                    limit_per_bucket=limit_per_bucket,
+                )
+                _diag.step(
+                    "mcp.memory.retrieve",
+                    "after_retrieve_reflections",
+                    do=len(buckets.get("do", [])),
+                    dont=len(buckets.get("dont", [])),
+                    neutral=len(buckets.get("neutral", [])),
+                )
+                if diag_cid is not None:
+                    refl_ms = int((time.monotonic() - t_reflections) * 1000)
+                    total_ms = int((time.monotonic() - t_retrieve) * 1000)
+                    _diag.log(
+                        f"[bm-retrieve step=reflections cid={diag_cid} "
+                        f"ms={refl_ms} status=ok]"
+                    )
+                    _diag.log(
+                        f"[bm-retrieve done cid={diag_cid} total_ms={total_ms}]"
+                    )
+                return [TextContent(type="text", text=json.dumps(buckets))]
 
         if name == "memory.retrieve_observations":
             project = args.get("project") or project_name()

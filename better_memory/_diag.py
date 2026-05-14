@@ -14,9 +14,13 @@ diagnostic prints across the package.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import threading
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 _ENABLED = os.environ.get("BETTER_MEMORY_EMBED_LOG", "").strip() not in (
@@ -72,3 +76,61 @@ def log(msg: str) -> None:
                 _FILE_HANDLE.flush()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — best-effort diagnostic
         pass
+
+
+def _fmt_fields(fields: dict[str, object]) -> str:
+    """Render kv pairs as `` k=v k2=v2``; empty mapping -> empty string."""
+    if not fields:
+        return ""
+    return " " + " ".join(f"{k}={v}" for k, v in fields.items())
+
+
+def step(fn: str, msg: str, **fields: object) -> None:
+    """Emit an intermediate ``[bm-trace step ...]`` line.
+
+    Use inside a method already wrapped in :func:`trace` to mark a
+    sub-step (e.g. "about to call self._embedder.embed", "SAVEPOINT
+    open", "commit"). Cheap when diagnostics are off.
+    """
+    if not _ENABLED:
+        return
+    log(
+        f"[bm-trace step  fn={fn} msg={msg}{_fmt_fields(fields)} "
+        f"ts={datetime.now(UTC).isoformat()}]"
+    )
+
+
+@contextlib.contextmanager
+def trace(fn: str, **fields: object) -> Iterator[None]:
+    """Context manager that emits paired enter/exit trace lines.
+
+    Wraps a method/function call to localize where execution sits. The
+    enter line is emitted BEFORE the body runs so a hang inside the
+    body leaves an enter without an exit — pointing directly at the
+    stuck call. Cheap when diagnostics are off (single boolean check).
+    """
+    if not _ENABLED:
+        yield
+        return
+    extra = _fmt_fields(fields)
+    log(f"[bm-trace enter fn={fn}{extra} ts={datetime.now(UTC).isoformat()}]")
+    t0 = time.monotonic()
+    status = "ok"
+    try:
+        yield
+    except BaseException:
+        status = "error"
+        # Wallclock + monotonic NOW (before finally runs the log call) so we
+        # can pinpoint where time evaporates during exception unwind.
+        log(
+            f"[bm-trace except fn={fn}{extra} "
+            f"ms={int((time.monotonic() - t0) * 1000)} "
+            f"ts={datetime.now(UTC).isoformat()}]"
+        )
+        raise
+    finally:
+        ms = int((time.monotonic() - t0) * 1000)
+        log(
+            f"[bm-trace exit  fn={fn}{extra} ms={ms} status={status} "
+            f"ts={datetime.now(UTC).isoformat()}]"
+        )

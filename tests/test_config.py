@@ -237,82 +237,24 @@ def test_project_name_override_file_beats_git(tmp_path: Path) -> None:
     assert project_name(repo) == "override-name"
 
 
-def test_project_name_handles_subprocess_filenotfound(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """If git is not installed, project_name falls back to 'general'.
+def test_project_name_caches_negative_lookup(tmp_path: Path) -> None:
+    """A 'no git tree' result is cached so repeat lookups don't re-walk.
 
-    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
-    ``FileNotFoundError``) so a missing git binary cannot break the hook.
+    Replaces the older ``test_project_name_does_not_cache_subprocess_failure``
+    test. The subprocess fallback (and its transient-hiccup failure mode) is
+    gone — ``_walk_for_git_root`` is deterministic given filesystem state,
+    so caching ``None`` is safe. The bug debugged 2026-05-13 (subprocess
+    timeout cleanup hanging for ~65 s on Windows) is fixed at the root by
+    eliminating the subprocess entirely; the cache poisoning rationale no
+    longer applies.
     """
     import better_memory.config as bm_config
 
-    def raise_filenotfound(*args, **kwargs):
-        raise FileNotFoundError("git not on PATH")
+    nongit = tmp_path / "loose"
+    nongit.mkdir()
+    resolved = str(nongit.resolve())
+    bm_config._git_project_cache.pop(resolved, None)
 
-    # Clear the success cache so a previously-stored entry can't mask the
-    # subprocess error. (Failures are no longer cached — see the docstring
-    # on _resolve_git_project — but a prior success would short-circuit.)
-    bm_config._git_project_success_cache.pop(str(tmp_path.resolve()), None)
-    monkeypatch.setattr(bm_config.subprocess, "run", raise_filenotfound)
-
-    result = bm_config.project_name(tmp_path)
-    assert result == "general"
-
-
-def test_project_name_does_not_cache_subprocess_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A transient subprocess failure must NOT be cached.
-
-    Regression for the bug debugged 2026-05-13: a single failed
-    ``_resolve_git_project`` (e.g. ``subprocess.run`` timing out during the
-    MCP server's cold start) used to get memoized by ``@lru_cache`` and
-    silently collapsed every subsequent ``project_name(cwd)`` call to
-    ``"general"`` for the lifetime of the process. The cache must only
-    store successes; failures must retry on next call.
-    """
-    import better_memory.config as bm_config
-
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    _git_init(repo)
-
-    # Force the success cache to be empty for this path.
-    bm_config._git_project_success_cache.pop(str(repo.resolve()), None)
-
-    # First call: subprocess fails — result must be 'general' AND no entry
-    # should be left in the cache.
-    real_run = bm_config.subprocess.run
-
-    def fail_first(*args, **kwargs):
-        raise OSError("transient failure")
-
-    monkeypatch.setattr(bm_config.subprocess, "run", fail_first)
-    assert bm_config.project_name(repo) == "general"
-    assert str(repo.resolve()) not in bm_config._git_project_success_cache
-
-    # Second call: subprocess works again — must NOT return the cached
-    # 'general'; must re-run the subprocess and resolve to 'myrepo'.
-    monkeypatch.setattr(bm_config.subprocess, "run", real_run)
-    assert bm_config.project_name(repo) == "myrepo"
-
-
-def test_project_name_handles_subprocess_permissionerror(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """If subprocess.run raises PermissionError (Windows ACL), fall back to 'general'.
-
-    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
-    ``PermissionError``) so a Windows ACL edge case cannot break the hook.
-    """
-    import better_memory.config as bm_config
-
-    def raise_permission(*args, **kwargs):
-        raise PermissionError("access denied")
-
-    bm_config._git_project_success_cache.pop(str(tmp_path.resolve()), None)
-    monkeypatch.setattr(bm_config.subprocess, "run", raise_permission)
-
-    result = bm_config.project_name(tmp_path)
-    assert result == "general"
+    assert bm_config.project_name(nongit) == "general"
+    assert resolved in bm_config._git_project_cache
+    assert bm_config._git_project_cache[resolved] is None
