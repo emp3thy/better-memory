@@ -62,7 +62,14 @@ def write_session_id(
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".sid-", dir=str(path.parent))
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # os.fdopen takes ownership of fd only after it returns
+            # successfully; if it raises, fd is still ours to close.
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                os.close(fd)
+                raise
+            with f:
                 f.write(session_id)
             os.replace(tmp, path)
         except BaseException:

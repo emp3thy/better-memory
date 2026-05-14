@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from better_memory.runtime.session_marker import (
     encode_project_dir,
     marker_path,
@@ -68,6 +70,39 @@ class TestWriteRobustness:
         sessions_dir = (tmp_path / "runtime" / "sessions")
         leftover = [p for p in sessions_dir.iterdir() if p.name.startswith(".sid-")]
         assert leftover == []
+
+    def test_closes_fd_when_fdopen_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        # Regression for fd leak: os.fdopen takes ownership of fd only on
+        # successful return. If it raises, the caller must close fd.
+        closed: list[int] = []
+        real_close = os.close
+
+        def tracking_close(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        def raising_fdopen(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise ValueError("simulated fdopen failure")
+
+        monkeypatch.setattr(os, "close", tracking_close)
+        monkeypatch.setattr(os, "fdopen", raising_fdopen)
+
+        # write_session_id only suppresses OSError, so ValueError propagates.
+        with pytest.raises(ValueError):
+            write_session_id(tmp_path, "x", project_dir="/p")
+
+        # The fd from mkstemp must have been closed exactly once.
+        assert len(closed) == 1
+        # And tmp file must have been unlinked.
+        sessions_dir = (tmp_path / "runtime" / "sessions")
+        if sessions_dir.exists():
+            leftover = [
+                p for p in sessions_dir.iterdir() if p.name.startswith(".sid-")
+            ]
+            assert leftover == []
 
 
 class TestProjectDirResolution:
