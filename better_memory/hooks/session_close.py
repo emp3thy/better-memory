@@ -50,7 +50,11 @@ def _synthesise_marker() -> dict[str, str]:
         "event_type": "session_end",
         "timestamp": datetime.now(UTC).isoformat(),
         "cwd": os.environ.get("PWD") or os.getcwd(),
-        "session_id": os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex,
+        "session_id": (
+            os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or uuid4().hex
+        ),
     }
 
 
@@ -190,13 +194,16 @@ def main() -> None:
             data["timestamp"] = datetime.now(UTC).isoformat()
         if "session_id" not in data or not data["session_id"]:
             data["session_id"] = (
-                os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex
+                os.environ.get("CLAUDE_SESSION_ID")
+                or os.environ.get("CLAUDE_CODE_SESSION_ID")
+                or uuid4().hex
             )
         if "cwd" not in data or not data["cwd"]:
             data["cwd"] = os.environ.get("PWD") or os.getcwd()
 
         session_id_str = (
             os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID")
             or data.get("session_id")
             or ""
         )

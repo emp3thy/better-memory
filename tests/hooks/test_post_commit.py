@@ -59,9 +59,11 @@ def _run_post_commit(
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "BETTER_MEMORY_HOME": str(spool_home)}
-    # Deliberately clear CLAUDE_SESSION_ID before re-applying extra_env
-    # so tests don't pick up a leaked value from the parent process.
+    # Deliberately clear both CLAUDE_SESSION_ID and CLAUDE_CODE_SESSION_ID
+    # before re-applying extra_env so tests don't pick up a leaked value
+    # from the parent process. Claude Code sets the latter in shell envs.
     env.pop("CLAUDE_SESSION_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
     if extra_env:
         env.update(extra_env)
     return subprocess.run(

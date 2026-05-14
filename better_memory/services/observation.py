@@ -62,6 +62,7 @@ from uuid import uuid4
 
 import sqlite_vec
 
+from better_memory import _diag
 from better_memory.config import get_config, project_name
 from better_memory.search.hybrid import (
     SearchFilters,
@@ -132,13 +133,19 @@ class ObservationService:
         self._scope_resolver: Callable[[], str | None] = (
             scope_resolver if scope_resolver is not None else (lambda: None)
         )
-        # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var > uuid4().
-        # The env var makes hook-written events (which read CLAUDE_SESSION_ID)
-        # and MCP-written observations share the same session id.
+        # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var >
+        # CLAUDE_CODE_SESSION_ID env var > uuid4(). The env vars make
+        # hook-written events and MCP-written observations share the same
+        # session id (Claude Code exports CLAUDE_CODE_SESSION_ID; the older
+        # CLAUDE_SESSION_ID is kept as the primary name for back-compat).
         self.session_id: str = (
             session_id
             if session_id is not None
-            else (os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex)
+            else (
+                os.environ.get("CLAUDE_SESSION_ID")
+                or os.environ.get("CLAUDE_CODE_SESSION_ID")
+                or uuid4().hex
+            )
         )
         # ``None`` defers to the resolved config value so tests can inject
         # ``False`` without having to monkeypatch the environment.
@@ -164,97 +171,117 @@ class ObservationService:
         scope: str = "project",
     ) -> str:
         """Insert a new observation, embedding and audit row; return its id."""
-        if scope not in ("project", "general"):
-            raise ValueError(
-                f"scope must be 'project' or 'general', got {scope!r}"
-            )
-        obs_id = uuid4().hex
+        fn = "ObservationService.create"
+        with _diag.trace(fn, scope=scope, content_len=len(content)):
+            if scope not in ("project", "general"):
+                raise ValueError(
+                    f"scope must be 'project' or 'general', got {scope!r}"
+                )
+            obs_id = uuid4().hex
+            _diag.step(fn, "obs_id_minted", obs_id=obs_id)
 
-        resolved_project = project if project is not None else self._project_resolver()
-        resolved_scope = scope_path if scope_path is not None else self._scope_resolver()
-        tech_normalised = tech.lower() if tech else None
+            _diag.step(fn, "resolving_project")
+            resolved_project = project if project is not None else self._project_resolver()
+            _diag.step(fn, "resolving_scope_path", project=resolved_project)
+            resolved_scope = scope_path if scope_path is not None else self._scope_resolver()
+            tech_normalised = tech.lower() if tech else None
 
-        # Resolve episode_id. ObservationService requires an EpisodeService
-        # now that episode_id is NOT NULL on observations (Phase 1 schema).
-        if self._episodes is None:
-            raise RuntimeError(
-                "ObservationService.create requires an EpisodeService "
-                "(episodes=...). Wire one at construction time."
-            )
-        active = self._episodes.active_episode(self.session_id)
-        if active is None:
-            episode_id = self._episodes.open_background(
-                session_id=self.session_id,
-                project=resolved_project,
-            )
-        else:
-            episode_id = active.id
+            # Resolve episode_id. ObservationService requires an EpisodeService
+            # now that episode_id is NOT NULL on observations (Phase 1 schema).
+            if self._episodes is None:
+                raise RuntimeError(
+                    "ObservationService.create requires an EpisodeService "
+                    "(episodes=...). Wire one at construction time."
+                )
+            _diag.step(fn, "lookup_active_episode", session_id=self.session_id)
+            active = self._episodes.active_episode(self.session_id)
+            if active is None:
+                _diag.step(fn, "no_active_episode_opening_background")
+                episode_id = self._episodes.open_background(
+                    session_id=self.session_id,
+                    project=resolved_project,
+                )
+                _diag.step(fn, "background_episode_opened", episode_id=episode_id)
+            else:
+                episode_id = active.id
+                _diag.step(fn, "reusing_active_episode", episode_id=episode_id)
 
-        # Compute the embedding BEFORE opening the observation SAVEPOINT so a
-        # slow / broken Ollama server does not hold an open SAVEPOINT. Note
-        # that the episode lookup / background-open above has already
-        # committed if a new background was created — see module docstring.
-        vector = await self._embedder.embed(content)
-        vec_blob = sqlite_vec.serialize_float32(vector)
+            # Compute the embedding BEFORE opening the observation SAVEPOINT so a
+            # slow / broken Ollama server does not hold an open SAVEPOINT. Note
+            # that the episode lookup / background-open above has already
+            # committed if a new background was created — see module docstring.
+            _diag.step(fn, "about_to_embed", model=getattr(self._embedder, "_model", "?"))
+            vector = await self._embedder.embed(content)
+            _diag.step(fn, "embed_returned", dim=len(vector))
+            vec_blob = sqlite_vec.serialize_float32(vector)
+            _diag.step(fn, "vec_serialized", bytes=len(vec_blob))
 
-        now = self._clock().isoformat()
+            now = self._clock().isoformat()
 
-        conn = self._conn
-        conn.execute("SAVEPOINT observation_create")
-        try:
-            conn.execute(
-                """
-                INSERT INTO observations (
-                    id, content, project, component, theme, session_id,
-                    trigger_type, outcome, reinforcement_score, scope_path,
-                    created_at, status_changed_at, episode_id, tech, scope
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    obs_id,
-                    content,
-                    resolved_project,
-                    component,
-                    theme,
-                    self.session_id,
-                    trigger_type,
-                    outcome,
-                    resolved_scope,
-                    now,
-                    now,
-                    episode_id,
-                    tech_normalised,
-                    scope,
-                ),
-            )
+            conn = self._conn
+            _diag.step(fn, "savepoint_open")
+            conn.execute("SAVEPOINT observation_create")
+            try:
+                _diag.step(fn, "insert_observation_row")
+                conn.execute(
+                    """
+                    INSERT INTO observations (
+                        id, content, project, component, theme, session_id,
+                        trigger_type, outcome, reinforcement_score, scope_path,
+                        created_at, status_changed_at, episode_id, tech, scope
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        obs_id,
+                        content,
+                        resolved_project,
+                        component,
+                        theme,
+                        self.session_id,
+                        trigger_type,
+                        outcome,
+                        resolved_scope,
+                        now,
+                        now,
+                        episode_id,
+                        tech_normalised,
+                        scope,
+                    ),
+                )
 
-            conn.execute(
-                "INSERT INTO observation_embeddings (observation_id, embedding) "
-                "VALUES (?, ?)",
-                (obs_id, vec_blob),
-            )
+                _diag.step(fn, "insert_embedding_row")
+                conn.execute(
+                    "INSERT INTO observation_embeddings (observation_id, embedding) "
+                    "VALUES (?, ?)",
+                    (obs_id, vec_blob),
+                )
 
-            self._write_audit(
-                entity_id=obs_id,
-                action="created",
-                detail={
-                    "outcome": outcome,
-                    "scope_path": resolved_scope,
-                    "component": component,
-                    "episode_id": episode_id,
-                    "tech": tech_normalised,
-                },
-            )
-        except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT observation_create")
-            conn.execute("RELEASE SAVEPOINT observation_create")
-            raise
-        else:
-            conn.execute("RELEASE SAVEPOINT observation_create")
+                _diag.step(fn, "write_audit_row")
+                self._write_audit(
+                    entity_id=obs_id,
+                    action="created",
+                    detail={
+                        "outcome": outcome,
+                        "scope_path": resolved_scope,
+                        "component": component,
+                        "episode_id": episode_id,
+                        "tech": tech_normalised,
+                    },
+                )
+            except Exception:
+                _diag.step(fn, "savepoint_rollback")
+                conn.execute("ROLLBACK TO SAVEPOINT observation_create")
+                conn.execute("RELEASE SAVEPOINT observation_create")
+                raise
+            else:
+                _diag.step(fn, "savepoint_release")
+                conn.execute("RELEASE SAVEPOINT observation_create")
 
-        # Service owns the connection — see class docstring for the contract.
-        conn.commit()
-        return obs_id
+            # Service owns the connection — see class docstring for the contract.
+            _diag.step(fn, "commit")
+            conn.commit()
+            _diag.step(fn, "commit_done", obs_id=obs_id)
+            return obs_id
 
     async def retrieve(
         self,

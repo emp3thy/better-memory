@@ -42,6 +42,26 @@ def run_async[T](coro: Coroutine[object, object, T]) -> T:
             _asyncio_events._set_running_loop(leaked)
 
 
+@pytest.fixture(autouse=True)
+def _strip_leaked_claude_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip Claude Code env vars that the dev shell leaks into pytest.
+
+    Claude Code sets ``CLAUDE_CODE_SESSION_ID`` (and ``CLAUDE_PROJECT_DIR``)
+    in the env of shell tool subprocesses, but NOT in the env of spawned
+    stdio MCP servers. Several tests exercise "what happens when no session
+    env var is set" by calling ``monkeypatch.delenv("CLAUDE_SESSION_ID")``,
+    not realising production code also reads ``CLAUDE_CODE_SESSION_ID`` —
+    so those tests pass in CI but fail when run from a Claude Code shell.
+
+    This autouse fixture clears the leaking variables at the start of every
+    test. Tests that need the env var must ``monkeypatch.setenv`` it
+    explicitly. (No effect when running outside Claude Code: the vars
+    weren't set in the first place.)
+    """
+    for var in ("CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR"):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.fixture
 def tmp_memory_db(tmp_path: Path) -> Iterator[Path]:
     """Yield a path to a fresh (non-existent) SQLite database file.

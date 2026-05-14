@@ -9,6 +9,7 @@ server.request_handlers[CallToolRequest] without stdio transport.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,104 @@ def _seed_semantic(c, sid, content="some semantic content"):
         (sid, content),
     )
     c.commit()
+
+
+class TestMarkerFileFallback:
+    """When env vars are missing, the rating tools fall back to the marker
+    file written by the SessionStart hook (Claude Code does not propagate
+    CLAUDE_SESSION_ID into MCP server env — see runtime/session_marker.py)."""
+
+    def test_list_exposures_reads_marker_when_env_absent(
+        self, memory_db, tmp_path, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+        from better_memory.runtime.session_marker import write_session_id
+
+        conn, _ = memory_db
+        # tmp_path is BETTER_MEMORY_HOME / "bm" — but memory_db's home is
+        # the parent dir of memory.db. Read it back from env.
+        home = Path(os.environ["BETTER_MEMORY_HOME"])
+        _seed_reflection(conn, "rmark")
+        _seed_exposure(conn, "SMARK", "reflection", "rmark")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        write_session_id(home, "SMARK", project_dir=str(tmp_path))
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.list_session_exposures", {},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["session_id"] == "SMARK"
+        assert len(payload["exposures"]) == 1
+
+    def test_env_wins_over_marker(
+        self, memory_db, tmp_path, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+        from better_memory.runtime.session_marker import write_session_id
+
+        conn, _ = memory_db
+        home = Path(os.environ["BETTER_MEMORY_HOME"])
+        _seed_reflection(conn, "renv")
+        _seed_exposure(conn, "SENV", "reflection", "renv")
+        # Marker says SMARK; env says SENV — env wins.
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "SENV")
+        write_session_id(home, "SMARK", project_dir=str(tmp_path))
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.list_session_exposures", {},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["session_id"] == "SENV"
+
+    def test_apply_ratings_uses_marker_when_env_absent(
+        self, memory_db, tmp_path, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+        from better_memory.runtime.session_marker import write_session_id
+
+        conn, _ = memory_db
+        home = Path(os.environ["BETTER_MEMORY_HOME"])
+        _seed_reflection(conn, "rap")
+        _seed_exposure(conn, "SAP", "reflection", "rap")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        write_session_id(home, "SAP", project_dir=str(tmp_path))
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.apply_session_ratings",
+            {"ratings": [
+                {"kind": "reflection", "id": "rap", "class": "cited"},
+            ]},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["session_id"] == "SAP"
+        assert payload["applied"]["cited"] == 1
+
+    def test_credit_uses_marker_when_env_absent(
+        self, memory_db, tmp_path, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+        from better_memory.runtime.session_marker import write_session_id
+
+        conn, _ = memory_db
+        home = Path(os.environ["BETTER_MEMORY_HOME"])
+        _seed_reflection(conn, "rcr")
+        _seed_exposure(conn, "SCR", "reflection", "rcr")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        write_session_id(home, "SCR", project_dir=str(tmp_path))
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.credit",
+            {"kind": "reflection", "id": "rcr", "class": "cited"},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload == {"applied": "cited", "skipped": None}
 
 
 class TestListSessionExposuresRegistered:
@@ -142,6 +241,8 @@ class TestListSessionExposures:
 
     def test_returns_null_session_when_env_missing(self, memory_db, monkeypatch):
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         from better_memory.mcp import server as srv_mod
 
         result = run_async(
@@ -209,6 +310,8 @@ class TestApplySessionRatingsTool:
     ):
         from better_memory.mcp import server as srv_mod
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         with pytest.raises(ValueError, match="session"):
             run_async(srv_mod._dispatch_for_tests(
                 "memory.apply_session_ratings",
@@ -234,6 +337,8 @@ class TestMemoryCreditTool:
     def test_no_session_returns_skipped(self, memory_db, monkeypatch):
         from better_memory.mcp import server as srv_mod
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         result = run_async(srv_mod._dispatch_for_tests(
             "memory.credit",
             {"kind": "reflection", "id": "r1", "class": "cited"},

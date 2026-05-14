@@ -20,8 +20,10 @@ The unit is one episode at a time (1-5 observations, ~1-2 KB of context). You de
 
 ## The two-tool workflow
 
-1. **`memory.synthesize_next_get_context`** — fetch the next pending episode's full context. Returns `{episode_id: null, queue: {...}}` when the queue is empty (this is the loop terminator).
-2. **`memory.synthesize_next_apply`** — submit your decision JSON for one episode. Atomically applies actions, marks the episode synthesized, and returns the resulting `{counts, queue}` snapshot.
+The MCP server registers these tools as `memory.synthesize_next_get_context` / `memory.synthesize_next_apply`, but Claude Code's harness exposes them under its `mcp__<server>__<tool>` namespace (dots become underscores). **Always invoke them by their harness names:**
+
+1. **`mcp__better-memory__memory_synthesize_next_get_context`** — fetch the next pending episode's full context. Returns `{episode_id: null, queue: {...}}` when the queue is empty (this is the loop terminator).
+2. **`mcp__better-memory__memory_synthesize_next_apply`** — submit your decision JSON for one episode. Atomically applies actions, marks the episode synthesized, and returns the resulting `{counts, queue}` snapshot.
 
 Loop until `episode_id` is `null`.
 
@@ -120,11 +122,11 @@ Observations you don't address (neither in `new`, `augment`, nor `ignore`) are a
 
 ## Decision rubric
 
-**Step 0 — scan the existing `reflections` array for merge candidates BEFORE looking at this episode's observations.**
+**Fast path — empty observations.** If the episode's `observations` array is empty, the decision is `{"new":[], "augment":[], "merge":[], "ignore":[]}`. Submit it immediately, with no further analysis — no merge scan, no rubric, no reasoning. The episode opened, work happened off-record, and it closed without producing observable evidence; there is nothing to distill. Skip directly to the apply call.
 
-The `get_context` response gives you a tech-filtered slice of all active reflections. Skim titles + use_cases for clusters that should be one reflection (see "Merge criteria" above). Each call is your only opportunity to merge the pairs that appear together — `merge` cannot operate cross-episode.
+**Step 0 — quick scan for merge candidates.**
 
-Don't force merges every call. Most calls will produce zero merge entries. But the skim is non-optional.
+The `get_context` response gives you a tech-filtered slice of all active reflections. Skim titles + use_cases briefly. If two reflections obviously name the same lesson (see "Merge criteria" above), emit a `merge` entry. Otherwise move on — most calls produce zero merges, and that's expected. Don't deliberate; trust your first read. `merge` cannot operate cross-episode, but missing a merge is cheap — they'll be obvious again next time the same pair shows up.
 
 **Step 1 — for each observation in the episode, ask:**
 
@@ -140,7 +142,7 @@ Don't force merges every call. Most calls will produce zero merge entries. But t
 
 ## Worked example
 
-`memory.synthesize_next_get_context` returns:
+`mcp__better-memory__memory_synthesize_next_get_context` returns:
 
 ```json
 {
@@ -169,7 +171,7 @@ Don't force merges every call. Most calls will produce zero merge entries. But t
 Submit:
 
 ```
-memory.synthesize_next_apply(
+mcp__better-memory__memory_synthesize_next_apply(
   episode_id="ep-42",
   decision={
     "new": [],
@@ -197,17 +199,17 @@ Result:
 }
 ```
 
-Then loop: call `synthesize_next_get_context` again for the next episode.
+Then loop: call `mcp__better-memory__memory_synthesize_next_get_context` again for the next episode.
 
 ## Drain pattern
 
 ```
 loop:
-  result = memory.synthesize_next_get_context()
+  result = mcp__better-memory__memory_synthesize_next_get_context()
   if result.episode_id is null:
     report "queue empty" and stop
   decision = decide_for_episode(result)
-  apply_result = memory.synthesize_next_apply(
+  apply_result = mcp__better-memory__memory_synthesize_next_apply(
     episode_id=result.episode_id,
     decision=decision,
   )
@@ -225,8 +227,8 @@ loop:
 - **Cross-episode merging**: `merge` only operates on existing reflections shown in the same response's `reflections` array. Don't try to merge against ids you remember from earlier in the loop — they may be retired.
 - **Augmenting retired reflections**: the apply layer drops them silently. The reflections array won't include `retired` / `superseded` reflections so this should not occur, but if you ever cache ids across iterations, a previously-merged source may now be `superseded`.
 - **Over-confident new entries**: a single observation rarely warrants `confidence > 0.7`.
-- **Sycophantic ignore**: don't dump everything into `ignore` to clear the queue. The point is to extract real lessons. If you genuinely cannot find a lesson, ignore is correct — but think first.
-- **Skipping the merge scan**: the `reflections` array isn't just for cross-checking your `new` entries — it's the only place you can act on accumulated similarity drift. Skim it every call.
+- **Sycophantic ignore**: don't dump everything into `ignore` to clear the queue. The point is to extract real lessons. If you genuinely cannot find a lesson, ignore is correct — but think first. (Empty-observation episodes are the exception — there's nothing to ignore, so submit the all-empty decision immediately per the fast path.)
+- **Over-deliberation on the merge scan**: skim, don't analyze. If a merge candidate isn't visible on a first read, there isn't one. Don't spend time inventing one.
 - **Over-merging**: don't collapse three distinct gotchas into one bloated reflection because they share a tech tag. Different mechanism + different fix = keep separate. See "Anti-patterns" under merge criteria.
 
 ## Reporting

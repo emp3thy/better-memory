@@ -146,7 +146,11 @@ def main() -> None:
             sys.exit(0)
 
         now_iso = datetime.now(UTC).isoformat()
-        session_id = os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex
+        session_id = (
+            os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or uuid4().hex
+        )
         cwd = _resolve_cwd()
 
         data: dict[str, object] = {

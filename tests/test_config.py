@@ -237,50 +237,24 @@ def test_project_name_override_file_beats_git(tmp_path: Path) -> None:
     assert project_name(repo) == "override-name"
 
 
-def test_project_name_handles_subprocess_filenotfound(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """If git is not installed, project_name falls back to 'general'.
+def test_project_name_caches_negative_lookup(tmp_path: Path) -> None:
+    """A 'no git tree' result is cached so repeat lookups don't re-walk.
 
-    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
-    ``FileNotFoundError``) so a missing git binary cannot break the hook.
+    Replaces the older ``test_project_name_does_not_cache_subprocess_failure``
+    test. The subprocess fallback (and its transient-hiccup failure mode) is
+    gone — ``_walk_for_git_root`` is deterministic given filesystem state,
+    so caching ``None`` is safe. The bug debugged 2026-05-13 (subprocess
+    timeout cleanup hanging for ~65 s on Windows) is fixed at the root by
+    eliminating the subprocess entirely; the cache poisoning rationale no
+    longer applies.
     """
     import better_memory.config as bm_config
 
-    def raise_filenotfound(*args, **kwargs):
-        raise FileNotFoundError("git not on PATH")
+    nongit = tmp_path / "loose"
+    nongit.mkdir()
+    resolved = str(nongit.resolve())
+    bm_config._git_project_cache.pop(resolved, None)
 
-    # Clear lru_cache so the monkeypatched subprocess.run is exercised.
-    bm_config._resolve_git_project.cache_clear()
-    monkeypatch.setattr(bm_config.subprocess, "run", raise_filenotfound)
-
-    try:
-        result = bm_config.project_name(tmp_path)
-        assert result == "general"
-    finally:
-        # Cache hygiene: drop the entry seeded by the patched subprocess
-        # so later tests don't observe a stale `None` for this path.
-        bm_config._resolve_git_project.cache_clear()
-
-
-def test_project_name_handles_subprocess_permissionerror(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """If subprocess.run raises PermissionError (Windows ACL), fall back to 'general'.
-
-    Spec §10: ``_resolve_git_project`` catches ``OSError`` (including
-    ``PermissionError``) so a Windows ACL edge case cannot break the hook.
-    """
-    import better_memory.config as bm_config
-
-    def raise_permission(*args, **kwargs):
-        raise PermissionError("access denied")
-
-    bm_config._resolve_git_project.cache_clear()
-    monkeypatch.setattr(bm_config.subprocess, "run", raise_permission)
-
-    try:
-        result = bm_config.project_name(tmp_path)
-        assert result == "general"
-    finally:
-        bm_config._resolve_git_project.cache_clear()
+    assert bm_config.project_name(nongit) == "general"
+    assert resolved in bm_config._git_project_cache
+    assert bm_config._git_project_cache[resolved] is None

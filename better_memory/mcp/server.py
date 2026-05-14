@@ -36,13 +36,17 @@ inside a handler are caught by the MCP framework and re-surfaced as a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Coroutine
+import uuid
+from collections.abc import Callable, Coroutine, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -50,10 +54,12 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from better_memory import _diag
 from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.runtime.session_marker import read_session_id
 from better_memory.services import ui_launcher
 from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
@@ -83,7 +89,12 @@ _OLLAMA_PROBE_TIMEOUT_SEC = 2.0
 logger = logging.getLogger(__name__)
 
 
-def _run_best_effort(operation: str, fn: Callable[[], Any]) -> None:
+def _run_best_effort(
+    operation: str,
+    fn: Callable[[], Any],
+    *,
+    diag_cid: str | None = None,
+) -> None:
     """Run ``fn`` swallowing any ``Exception`` but logging it via the module logger.
 
     Used by best-effort hooks inside ``memory.retrieve`` (spool drain,
@@ -91,11 +102,120 @@ def _run_best_effort(operation: str, fn: Callable[[], Any]) -> None:
     must still produce a discoverable diagnostic. The previous behaviour
     silently dropped the exception, so a broken background path could
     fail invisibly for weeks.
+
+    When ``diag_cid`` is provided and ``BETTER_MEMORY_EMBED_LOG=1`` is on,
+    emits a ``[bm-retrieve step=<operation> cid=... ms=N status=ok|error]``
+    line through the shared diagnostic logger so callers can localize
+    which step is slow.
     """
+    t0 = time.monotonic()
+    status = "ok"
     try:
         fn()
     except Exception:  # noqa: BLE001 — best-effort wrapper
+        status = "error"
         logger.exception("best-effort %s failed", operation)
+    finally:
+        if diag_cid is not None and _diag.enabled():
+            ms = int((time.monotonic() - t0) * 1000)
+            _diag.log(
+                f"[bm-retrieve step={operation} cid={diag_cid} "
+                f"ms={ms} status={status}]"
+            )
+
+
+# --------------------------------------------------------- synthesize audit log
+#
+# The synthesize drain loop is driven by the IDE LLM across many
+# round-trips (one per pending episode). When that loop appears to
+# freeze, server-side timing is the only evidence we have — the LLM
+# side is opaque. Each call writes two JSONL rows to
+# ``{config.home}/logs/synthesize.jsonl``:
+#
+#   {"phase": "start",    "call_id": "...", "tool": "...", ...}
+#   {"phase": "complete", "call_id": "...", "tool": "...",
+#    "latency_ms": N, "result_kind": "...", ...}
+#
+# Paired by call_id. A start row with no matching complete row points
+# to the call that hung. Best-effort: any IO error is swallowed so the
+# audit log can never block or fail the synthesize tool itself.
+
+
+def _resolve_session_id(home: Path) -> str | None:
+    """Resolve the current Claude Code session id.
+
+    Order: ``CLAUDE_SESSION_ID`` env, ``CLAUDE_CODE_SESSION_ID`` env, then
+    the marker file written by the SessionStart hook (see
+    :mod:`better_memory.runtime.session_marker`). Claude Code does not
+    propagate the session id into the spawned stdio MCP server's env, so
+    the marker file is the fallback for every rating call.
+    """
+    return (
+        os.environ.get("CLAUDE_SESSION_ID")
+        or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or read_session_id(home)
+    )
+
+
+def _append_synth_audit(home: Path, payload: dict[str, Any]) -> None:
+    """Append one JSONL row to ``{home}/logs/synthesize.jsonl``."""
+    try:
+        log_dir = home / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "synthesize.jsonl"
+        line = json.dumps(payload, separators=(",", ":"))
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:  # noqa: BLE001 — best-effort audit
+        logger.exception("synth audit write failed")
+
+
+@contextlib.contextmanager
+def _audit_synth_call(
+    home: Path,
+    *,
+    tool: str,
+    project: str,
+    episode_id: str | None,
+) -> Iterator[dict[str, Any]]:
+    """Bracket a synthesize tool call with start + complete audit rows.
+
+    Yields a mutable ``state`` dict the caller fills in (``result_kind``,
+    ``error``, ``counts``, ``obs_count``, ``refl_count``, and may
+    overwrite ``episode_id`` once known). The complete row is written
+    on both normal exit and exception. Exceptions still propagate.
+    """
+    call_id = uuid.uuid4().hex[:12]
+    t0 = time.perf_counter()
+    _append_synth_audit(home, {
+        "phase": "start",
+        "call_id": call_id,
+        "tool": tool,
+        "ts": datetime.now(UTC).isoformat(),
+        "project": project,
+        "episode_id": episode_id,
+    })
+    state: dict[str, Any] = {
+        "phase": "complete",
+        "call_id": call_id,
+        "tool": tool,
+        "project": project,
+        "episode_id": episode_id,
+        "result_kind": None,
+    }
+    try:
+        yield state
+    except BaseException as exc:
+        if state.get("result_kind") is None:
+            state["result_kind"] = "exception"
+        state.setdefault("error", f"{type(exc).__name__}: {exc}")
+        state["ts"] = datetime.now(UTC).isoformat()
+        state["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+        _append_synth_audit(home, state)
+        raise
+    state["ts"] = datetime.now(UTC).isoformat()
+    state["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+    _append_synth_audit(home, state)
 
 
 def _probe_ollama(host: str) -> None:
@@ -866,21 +986,29 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
         args = arguments or {}
 
         if name == "memory.observe":
-            obs_id = await observations.create(
-                content=args["content"],
-                component=args.get("component"),
-                theme=args.get("theme"),
-                trigger_type=args.get("trigger_type"),
-                outcome=args.get("outcome", "neutral"),
-                tech=args.get("tech"),
-                # `or "project"` (not `, "project"` default) defends against
-                # MCP clients sending {"scope": null} — dict.get returns the
-                # default only when the key is absent, not when its value is
-                # None. Without this, scope=None propagates to ObservationService
-                # .create() which raises ValueError.
+            with _diag.trace(
+                "mcp.memory.observe",
+                content_len=len(args.get("content") or ""),
                 scope=args.get("scope") or "project",
-            )
-            return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
+                component=args.get("component"),
+            ):
+                _diag.step("mcp.memory.observe", "calling_observations_create")
+                obs_id = await observations.create(
+                    content=args["content"],
+                    component=args.get("component"),
+                    theme=args.get("theme"),
+                    trigger_type=args.get("trigger_type"),
+                    outcome=args.get("outcome", "neutral"),
+                    tech=args.get("tech"),
+                    # `or "project"` (not `, "project"` default) defends against
+                    # MCP clients sending {"scope": null} — dict.get returns the
+                    # default only when the key is absent, not when its value is
+                    # None. Without this, scope=None propagates to ObservationService
+                    # .create() which raises ValueError.
+                    scope=args.get("scope") or "project",
+                )
+                _diag.step("mcp.memory.observe", "create_returned", obs_id=obs_id)
+                return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
 
         if name == "memory.semantic_observe":
             from better_memory.services.semantic import SemanticMemoryService
@@ -928,32 +1056,75 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps({"ok": True}))]
 
         if name == "memory.retrieve":
-            # 1. Drain spool — must happen before any retrieval so fresh
-            #    hook events (session_start, commit_close) are processed.
-            #    SpoolService.drain is idempotent.
-            _run_best_effort("spool.drain", spool.drain)
-
-            # 2. Maybe run retention. Guard ensures at most once per 24h
-            #    regardless of how often retrieve is called. Best-effort:
-            #    a retention failure must NEVER block memory.retrieve.
-            def _retention_step() -> None:
-                cfg = get_config()
-                RetentionScheduler(
-                    memory_conn, auto_prune=cfg.auto_prune
-                ).maybe_run(triggered_by="retrieve")
-
-            _run_best_effort("retention scheduler", _retention_step)
-
-            project = args.get("project") or project_name()
-            limit_per_bucket = args.get("limit_per_bucket", 20)
-            buckets = reflections.retrieve_reflections(
-                project=project,
+            with _diag.trace(
+                "mcp.memory.retrieve",
+                project=args.get("project") or "<auto>",
                 tech=args.get("tech"),
                 phase=args.get("phase"),
                 polarity=args.get("polarity"),
-                limit_per_bucket=limit_per_bucket,
-            )
-            return [TextContent(type="text", text=json.dumps(buckets))]
+            ):
+                diag_cid: str | None = None
+                t_retrieve = 0.0
+                if _diag.enabled():
+                    diag_cid = uuid.uuid4().hex[:8]
+                    t_retrieve = time.monotonic()
+                    _diag.log(f"[bm-retrieve start cid={diag_cid}]")
+
+                # 1. Drain spool — must happen before any retrieval so fresh
+                #    hook events (session_start, commit_close) are processed.
+                #    SpoolService.drain is idempotent.
+                _diag.step("mcp.memory.retrieve", "before_spool_drain")
+                _run_best_effort("spool.drain", spool.drain, diag_cid=diag_cid)
+                _diag.step("mcp.memory.retrieve", "after_spool_drain")
+
+                # 2. Maybe run retention. Guard ensures at most once per 24h
+                #    regardless of how often retrieve is called. Best-effort:
+                #    a retention failure must NEVER block memory.retrieve.
+                def _retention_step() -> None:
+                    cfg = get_config()
+                    RetentionScheduler(
+                        memory_conn, auto_prune=cfg.auto_prune
+                    ).maybe_run(triggered_by="retrieve")
+
+                _diag.step("mcp.memory.retrieve", "before_retention_scheduler")
+                _run_best_effort(
+                    "retention scheduler", _retention_step, diag_cid=diag_cid
+                )
+                _diag.step("mcp.memory.retrieve", "after_retention_scheduler")
+
+                project = args.get("project") or project_name()
+                limit_per_bucket = args.get("limit_per_bucket", 20)
+                t_reflections = time.monotonic() if diag_cid else 0.0
+                _diag.step(
+                    "mcp.memory.retrieve",
+                    "before_retrieve_reflections",
+                    project=project,
+                )
+                buckets = reflections.retrieve_reflections(
+                    project=project,
+                    tech=args.get("tech"),
+                    phase=args.get("phase"),
+                    polarity=args.get("polarity"),
+                    limit_per_bucket=limit_per_bucket,
+                )
+                _diag.step(
+                    "mcp.memory.retrieve",
+                    "after_retrieve_reflections",
+                    do=len(buckets.get("do", [])),
+                    dont=len(buckets.get("dont", [])),
+                    neutral=len(buckets.get("neutral", [])),
+                )
+                if diag_cid is not None:
+                    refl_ms = int((time.monotonic() - t_reflections) * 1000)
+                    total_ms = int((time.monotonic() - t_retrieve) * 1000)
+                    _diag.log(
+                        f"[bm-retrieve step=reflections cid={diag_cid} "
+                        f"ms={refl_ms} status=ok]"
+                    )
+                    _diag.log(
+                        f"[bm-retrieve done cid={diag_cid} total_ms={total_ms}]"
+                    )
+                return [TextContent(type="text", text=json.dumps(buckets))]
 
         if name == "memory.retrieve_observations":
             project = args.get("project") or project_name()
@@ -1137,8 +1308,6 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.session_bootstrap":
-            import uuid
-
             from better_memory.services.session_bootstrap import (
                 SessionBootstrapService,
             )
@@ -1147,6 +1316,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             session_id_arg = (
                 args.get("session_id")
                 or os.environ.get("CLAUDE_SESSION_ID")
+                or os.environ.get("CLAUDE_CODE_SESSION_ID")
                 or uuid.uuid4().hex
             )
             svc = SessionBootstrapService(memory_conn)
@@ -1172,9 +1342,22 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
 
         if name == "memory.synthesize_next_get_context":
             project = args.get("project") or project_name()
-            ctx = reflections.get_next_pending_context(project=project)
-            queue = reflections._read_queue_counts(project=project)
-            payload = _serialize_synth_get_context(ctx, queue)
+            with _audit_synth_call(
+                config.home,
+                tool="get_context",
+                project=project,
+                episode_id=None,
+            ) as audit:
+                ctx = reflections.get_next_pending_context(project=project)
+                queue = reflections._read_queue_counts(project=project)
+                payload = _serialize_synth_get_context(ctx, queue)
+                if ctx is None:
+                    audit["result_kind"] = "empty"
+                else:
+                    audit["result_kind"] = "episode"
+                    audit["episode_id"] = ctx.episode.id
+                    audit["obs_count"] = len(ctx.observations)
+                    audit["refl_count"] = len(ctx.reflections)
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.synthesize_next_apply":
@@ -1184,28 +1367,46 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             project = args.get("project") or project_name()
             episode_id = args["episode_id"]
             decision = args["decision"]
-            try:
-                # ``decision`` is already a parsed dict (the MCP framework
-                # decoded it before dispatch). Use the dict-shape parser
-                # directly to skip a redundant json.dumps → json.loads
-                # round-trip.
-                response = reflections.parse_response_dict(decision)
-            except SynthesisResponseError as exc:
-                payload = _serialize_synth_apply_validation_error(str(exc))
-                return [TextContent(type="text", text=json.dumps(payload))]
-            try:
-                step = reflections.apply_decision(
-                    episode_id=episode_id,
-                    response=response,
-                    project=project,
-                )
-            except ValueError as exc:
-                # Episode-state preconditions: not found / wrong project /
-                # already synthesized. Surface as structured error so the
-                # IDE-LLM can refetch context instead of retrying the same
-                # stale id.
-                payload = _serialize_synth_apply_state_error(str(exc))
-                return [TextContent(type="text", text=json.dumps(payload))]
+            with _audit_synth_call(
+                config.home,
+                tool="apply",
+                project=project,
+                episode_id=episode_id,
+            ) as audit:
+                try:
+                    # ``decision`` is already a parsed dict (the MCP
+                    # framework decoded it before dispatch). Use the
+                    # dict-shape parser directly to skip a redundant
+                    # json.dumps → json.loads round-trip.
+                    response = reflections.parse_response_dict(decision)
+                except SynthesisResponseError as exc:
+                    audit["result_kind"] = "validation_error"
+                    audit["error"] = str(exc)
+                    payload = _serialize_synth_apply_validation_error(
+                        str(exc)
+                    )
+                    return [
+                        TextContent(type="text", text=json.dumps(payload))
+                    ]
+                try:
+                    step = reflections.apply_decision(
+                        episode_id=episode_id,
+                        response=response,
+                        project=project,
+                    )
+                except ValueError as exc:
+                    # Episode-state preconditions: not found / wrong
+                    # project / already synthesized. Surface as
+                    # structured error so the IDE-LLM can refetch
+                    # context instead of retrying the same stale id.
+                    audit["result_kind"] = "state_error"
+                    audit["error"] = str(exc)
+                    payload = _serialize_synth_apply_state_error(str(exc))
+                    return [
+                        TextContent(type="text", text=json.dumps(payload))
+                    ]
+                audit["result_kind"] = "applied"
+                audit["counts"] = step.counts
             return [
                 TextContent(
                     type="text",
@@ -1214,7 +1415,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             ]
 
         if name == "memory.list_session_exposures":
-            sid = os.environ.get("CLAUDE_SESSION_ID")
+            sid = _resolve_session_id(config.home)
             if not sid:
                 payload = {"session_id": None, "exposures": []}
             else:
@@ -1258,9 +1459,13 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.apply_session_ratings":
-            sid = os.environ.get("CLAUDE_SESSION_ID")
+            sid = _resolve_session_id(config.home)
             if not sid:
-                raise ValueError("No active session: CLAUDE_SESSION_ID not set")
+                raise ValueError(
+                    "No active session: CLAUDE_SESSION_ID / "
+                    "CLAUDE_CODE_SESSION_ID not set and no session marker "
+                    "found (SessionStart hook may not have run)"
+                )
             payload = memory_rating.apply_session_ratings(
                 session_id=sid,
                 ratings=args["ratings"],
@@ -1268,7 +1473,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.credit":
-            sid = os.environ.get("CLAUDE_SESSION_ID")
+            sid = _resolve_session_id(config.home)
             if not sid:
                 payload = {"applied": None, "skipped": "no_session"}
             else:

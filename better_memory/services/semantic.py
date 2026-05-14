@@ -258,7 +258,10 @@ class SemanticMemoryService:
         # Best-effort exposure tracking — see spec §5.2.1.
         # track_exposure=False is used by SessionBootstrapService.bootstrap,
         # which manages its own exposure write via _record_exposure.
-        sid = os.environ.get("CLAUDE_SESSION_ID")
+        sid = (
+            os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        )
         if track_exposure:
             if not sid:
                 # Best-effort: bump diagnostics counter. Swallow any error so

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from better_memory import _diag
 from better_memory.config import get_config
 from better_memory.services.episode import EpisodeService
 
@@ -100,71 +101,68 @@ class SpoolService:
         3. Unlink each committed file. Unlink failures (e.g. Windows file
            locks) quarantine the source so it isn't re-inserted next drain.
         """
-        spool = self._spool_dir
-        spool.mkdir(parents=True, exist_ok=True)
-        quarantine = spool / ".quarantine"
-        quarantine.mkdir(parents=True, exist_ok=True)
+        fn = "SpoolService.drain"
+        with _diag.trace(fn, spool_dir=str(self._spool_dir)):
+            spool = self._spool_dir
+            spool.mkdir(parents=True, exist_ok=True)
+            quarantine = spool / ".quarantine"
+            quarantine.mkdir(parents=True, exist_ok=True)
 
-        # ``glob("*.json")`` is non-recursive — the ``.quarantine`` subdir is
-        # skipped naturally. Sort so the oldest timestamp-prefixed filename is
-        # processed first and inserts land in chronological order.
-        files = sorted(spool.glob("*.json"))
+            files = sorted(spool.glob("*.json"))
+            _diag.step(fn, "scanned_spool", n_files=len(files))
 
-        quarantined = 0
-        # Files whose rows were queued on the connection. Cleanup happens
-        # AFTER commit() returns successfully.
-        inserted: list[Path] = []
+            quarantined = 0
+            inserted: list[Path] = []
 
-        # ---- Pass 1: parse + insert (no file unlinks yet) -----------------
-        inserted_payloads: list[dict[str, object]] = []
-        for path in files:
-            try:
-                payload = self._insert_one(path)
-            except Exception:
-                # Any failure — JSON parse error, missing field, DB error —
-                # quarantines the file so the rest of the batch can drain.
-                self._quarantine(path, quarantine)
-                quarantined += 1
-            else:
-                inserted.append(path)
-                inserted_payloads.append(payload)
+            # ---- Pass 1: parse + insert (no file unlinks yet) -------------
+            inserted_payloads: list[dict[str, object]] = []
+            _diag.step(fn, "pass1_begin")
+            for path in files:
+                try:
+                    payload = self._insert_one(path)
+                except Exception:
+                    self._quarantine(path, quarantine)
+                    quarantined += 1
+                else:
+                    inserted.append(path)
+                    inserted_payloads.append(payload)
+            _diag.step(
+                fn,
+                "pass1_done",
+                inserted=len(inserted),
+                quarantined=quarantined,
+            )
 
-        # ---- Pass 2: commit once per batch --------------------------------
-        # If commit raises, ``inserted`` files stay on disk; the exception
-        # propagates so the caller knows the drain did not complete. A
-        # subsequent drain will re-read those files and retry.
-        self._conn.commit()
+            # ---- Pass 2: commit once per batch ----------------------------
+            _diag.step(fn, "pass2_commit_begin")
+            self._conn.commit()
+            _diag.step(fn, "pass2_commit_done")
 
-        # ---- Pass 2.5: Phase 3/4 side-effects on committed payloads -------
-        # Runs AFTER the batch commit so the hook_events rows are durable
-        # before any episode-lifecycle side-effect fires. Each side-effect
-        # is guarded individually so one bad payload cannot block the rest
-        # of the batch from being unlinked.
-        if self._episodes is not None:
-            for payload in inserted_payloads:
-                event_type = payload.get("event_type")
-                if event_type == "commit_close":
-                    self._maybe_close_episode_for_commit(payload)
-                elif event_type == "session_end":
-                    self._maybe_close_episode_for_session_end(payload)
+            # ---- Pass 2.5: Phase 3/4 side-effects on committed payloads ---
+            if self._episodes is not None:
+                _diag.step(fn, "pass2.5_side_effects_begin")
+                for payload in inserted_payloads:
+                    event_type = payload.get("event_type")
+                    if event_type == "commit_close":
+                        _diag.step(fn, "side_effect_commit_close")
+                        self._maybe_close_episode_for_commit(payload)
+                    elif event_type == "session_end":
+                        _diag.step(fn, "side_effect_session_end")
+                        self._maybe_close_episode_for_session_end(payload)
+                _diag.step(fn, "pass2.5_side_effects_done")
 
-        # ---- Pass 3: unlink committed files -------------------------------
-        # Only reached if commit() succeeded. Every file in ``inserted`` now
-        # has a durable row, so losing the file is safe; failing to unlink
-        # is a bookkeeping problem (quarantine to prevent re-insertion on
-        # the next drain).
-        drained = 0
-        for path in inserted:
-            try:
-                path.unlink()
-            except OSError:
-                # File couldn't be deleted (e.g. locked on Windows). The row
-                # is already committed, so a re-drain would double-insert.
-                # Quarantine the source instead to prevent duplication.
-                self._quarantine(path, quarantine)
-            drained += 1
+            # ---- Pass 3: unlink committed files ---------------------------
+            _diag.step(fn, "pass3_unlink_begin", n=len(inserted))
+            drained = 0
+            for path in inserted:
+                try:
+                    path.unlink()
+                except OSError:
+                    self._quarantine(path, quarantine)
+                drained += 1
+            _diag.step(fn, "pass3_unlink_done", drained=drained)
 
-        return DrainReport(drained=drained, quarantined=quarantined)
+            return DrainReport(drained=drained, quarantined=quarantined)
 
     # ----------------------------------------------------------------- helpers
     def _insert_one(self, path: Path) -> dict[str, object]:

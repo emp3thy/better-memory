@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from better_memory import _diag
+
 
 def _default_clock() -> datetime:
     return datetime.now(UTC)
@@ -80,28 +82,37 @@ class EpisodeService:
         Returns the new episode id. Also inserts the matching
         ``episode_sessions`` row with ``left_at = NULL``.
         """
-        episode_id = uuid4().hex
-        now = self._clock().isoformat()
-        conn = self._conn
-        conn.execute("SAVEPOINT episode_open_background")
-        try:
-            conn.execute(
-                "INSERT INTO episodes (id, project, started_at) "
-                "VALUES (?, ?, ?)",
-                (episode_id, project, now),
-            )
-            conn.execute(
-                "INSERT INTO episode_sessions "
-                "(episode_id, session_id, joined_at) VALUES (?, ?, ?)",
-                (episode_id, session_id, now),
-            )
-        except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT episode_open_background")
+        fn = "EpisodeService.open_background"
+        with _diag.trace(fn, session_id=session_id, project=project):
+            episode_id = uuid4().hex
+            now = self._clock().isoformat()
+            conn = self._conn
+            _diag.step(fn, "savepoint_open")
+            conn.execute("SAVEPOINT episode_open_background")
+            try:
+                _diag.step(fn, "insert_episode_row", episode_id=episode_id)
+                conn.execute(
+                    "INSERT INTO episodes (id, project, started_at) "
+                    "VALUES (?, ?, ?)",
+                    (episode_id, project, now),
+                )
+                _diag.step(fn, "insert_episode_sessions_row")
+                conn.execute(
+                    "INSERT INTO episode_sessions "
+                    "(episode_id, session_id, joined_at) VALUES (?, ?, ?)",
+                    (episode_id, session_id, now),
+                )
+            except Exception:
+                _diag.step(fn, "savepoint_rollback")
+                conn.execute("ROLLBACK TO SAVEPOINT episode_open_background")
+                conn.execute("RELEASE SAVEPOINT episode_open_background")
+                raise
+            _diag.step(fn, "savepoint_release")
             conn.execute("RELEASE SAVEPOINT episode_open_background")
-            raise
-        conn.execute("RELEASE SAVEPOINT episode_open_background")
-        conn.commit()
-        return episode_id
+            _diag.step(fn, "commit")
+            conn.commit()
+            _diag.step(fn, "commit_done")
+            return episode_id
 
     def active_episode(self, session_id: str) -> Episode | None:
         """Return the open episode bound to ``session_id``, or None.
@@ -110,8 +121,12 @@ class EpisodeService:
         ``episode_sessions`` row with ``left_at IS NULL``. One-active-per-
         session is an invariant the lifecycle methods maintain.
         """
-        row = self._active_episode_row(session_id)
-        return row_to_episode(row) if row is not None else None
+        fn = "EpisodeService.active_episode"
+        with _diag.trace(fn, session_id=session_id):
+            _diag.step(fn, "query_active_episode_row")
+            row = self._active_episode_row(session_id)
+            _diag.step(fn, "row_fetched", found=row is not None)
+            return row_to_episode(row) if row is not None else None
 
     def start_foreground(
         self,

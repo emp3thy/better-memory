@@ -18,6 +18,7 @@ from uuid import uuid4
 from better_memory.config import get_config
 from better_memory.db.connection import connect
 from better_memory.hooks._error_log import record_hook_error
+from better_memory.runtime.session_marker import write_session_id
 from better_memory.services.session_bootstrap import SessionBootstrapService
 
 _MAX_STDIN_BYTES = 1_048_576
@@ -61,7 +62,11 @@ def main() -> None:
     session_id = (
         str(payload.get("session_id"))
         if payload.get("session_id")
-        else os.environ.get("CLAUDE_SESSION_ID") or uuid4().hex
+        else (
+            os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or uuid4().hex
+        )
     )
     cwd_str = str(payload.get("cwd")) if payload.get("cwd") else os.getcwd()
 
@@ -73,6 +78,17 @@ def main() -> None:
                 source=source, session_id=session_id, cwd=Path(cwd_str),
             )
         rendered = result.additional_context
+        # Bridge session_id to the MCP server: it doesn't see CLAUDE_SESSION_ID
+        # in its spawn env. See better_memory/runtime/session_marker.py.
+        # Resolution MUST match read_session_id's _resolve_project_dir order:
+        # CLAUDE_PROJECT_DIR env first, then a non-empty fallback. The hook has
+        # the payload's cwd as a stronger fallback than os.getcwd() because the
+        # MCP server's cwd may not equal the project root.
+        write_session_id(
+            cfg.home,
+            session_id,
+            project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
+        )
     except BaseException as exc:  # noqa: BLE001
         try:
             record_hook_error(hook_name="session_bootstrap", exc=exc)
