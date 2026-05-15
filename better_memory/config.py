@@ -195,6 +195,7 @@ class Config:
     embed_model: str
     audit_log_retrieved: bool
     auto_prune: bool
+    diag_logging: bool
 
 
 def get_config() -> Config:
@@ -213,4 +214,5 @@ def get_config() -> Config:
         embed_model=_resolve_str("EMBED_MODEL", _DEFAULT_EMBED_MODEL),
         audit_log_retrieved=_resolve_bool("AUDIT_LOG_RETRIEVED", default=True),
         auto_prune=_resolve_bool("BETTER_MEMORY_AUTO_PRUNE", default=False),
+        diag_logging=_resolve_bool("BETTER_MEMORY_DIAG_LOGGING", default=False),
     )
