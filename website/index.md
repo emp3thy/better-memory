@@ -186,9 +186,10 @@ cd better-memory
         <tr><td><a href="mcp-tools/#knowledgesearch">knowledge.search</a></td><td>BM25 search against the knowledge base.</td></tr>
         <tr><td><a href="mcp-tools/#memoryrun_retention">memory.run_retention</a></td><td>Apply spec §9 retention rules; archive or hard-delete.</td></tr>
         <tr><td><a href="mcp-tools/#memorystart_ui">memory.start_ui</a></td><td>Spawn or reuse the management UI; returns {url, reused}.</td></tr>
+        <tr><td><a href="mcp-tools/#memorycredit">memory.credit</a></td><td>Per-tool-use credit on a retrieved memory — closes the reinforcement loop.</td></tr>
       </tbody>
     </table>
-    <p style="margin-top:18px"><a href="mcp-tools/">complete tool reference (19 tools) →</a></p>
+    <p style="margin-top:18px"><a href="mcp-tools/">complete tool reference (22 tools) →</a></p>
   </div>
 </section>
 

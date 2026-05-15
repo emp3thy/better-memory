@@ -91,13 +91,23 @@ Adjust the `command` to match your environment — for example:
 4. **Per-turn observations write to the background episode** via
    auto-binding in `ObservationService.create`. The episode opened by the
    bootstrap hook is the binding target.
-5. **Session ends.** The `Stop` hook writes a `session_end` marker to the
-   spool. On the next MCP retrieve drain, an unhardened (background)
-   episode for that session is auto-closed as `outcome=no_outcome`,
-   `close_reason=session_end_reconciled`. A hardened (goal-declared)
-   episode stays open so the next session's reconciliation prompt can
-   resolve it with a real outcome.
-6. **Next session starts.** Claude calls `memory.reconcile_episodes()`,
+5. **Session ends.** The `Stop` hook fires. If the session has any
+   unrated memory exposures (reflections / semantic memories surfaced
+   this session via the bootstrap hook or `memory.retrieve` /
+   `memory.semantic_retrieve` but not yet credited by `memory.credit`),
+   it emits a `decision:block` directive on stdout asking Claude to
+   invoke the `rate-session-memories` skill. The skill calls
+   `memory.list_session_exposures`, classifies each id as
+   `cited` / `shaped` / `ignored` / `misled`, and submits the batch via
+   `memory.apply_session_ratings`. Claude Code then fires `Stop` again;
+   on the second fire (no unrated exposures left) the hook writes a
+   `session_end` marker to the spool.
+6. **Marker drains.** On the next MCP retrieve drain, an unhardened
+   (background) episode for that session is auto-closed as
+   `outcome=no_outcome`, `close_reason=session_end_reconciled`. A
+   hardened (goal-declared) episode stays open so the next session's
+   reconciliation prompt can resolve it with a real outcome.
+7. **Next session starts.** Claude calls `memory.reconcile_episodes()`,
    sees the prior unclosed episode, and prompts the user in chat per the
    guidance in the CLAUDE.md snippet.
 
