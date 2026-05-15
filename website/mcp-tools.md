@@ -170,6 +170,53 @@ Apply a synthesis decision for one episode. Atomically creates new reflections, 
 
 Returns a step summary: `{episode_id, counts, queue, failure}`.
 
+## Rating tools
+
+Memories prove their worth by being used. The rating loop closes the
+feedback cycle on top of [`memory.record_use`](#memoryrecord_use):
+mid-session credit via `memory.credit`, and an end-of-session sweep
+driven by the
+[`rate-session-memories`](https://github.com/emp3thy/better-memory/blob/main/.claude/skills/rate-session-memories/SKILL.md)
+skill that classifies every exposed reflection / semantic memory as
+`cited`, `shaped`, `ignored`, or `misled`. The session_close hook emits
+a Stop-block directive when unrated exposures remain so the skill fires
+before the session ends.
+
+Session ids resolve server-side from `CLAUDE_SESSION_ID`; none of these
+tools accept a session id parameter.
+
+### `memory.credit`
+
+Opportunistic per-tool-use credit. Call this immediately whenever you
+actively use a memory retrieved this session — quote it, follow its
+guidance, or note that it misled you. Credit-as-you-go survives
+context compaction; the session-end sweep catches anything missed.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `kind` | `reflection` / `semantic` | yes | Memory kind. |
+| `id` | string | yes | Id of the exposed memory. |
+| `class` | `cited` / `shaped` / `misled` | yes | Mid-session credit cannot mark a memory `ignored` — that's only valid via the end-of-session sweep. |
+
+### `memory.list_session_exposures`
+
+Return the unrated `session_memory_exposure` rows for the current Claude
+session. Read-only; no side effects. Used by the `rate-session-memories`
+skill as the authoritative anti-hallucination list. No parameters.
+
+### `memory.apply_session_ratings`
+
+Atomic batch rating for the current Claude session. Called by the
+`rate-session-memories` skill at session end after `memory.list_session_exposures`.
+Raises if `CLAUDE_SESSION_ID` is unset.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `ratings` | array | yes | One entry per exposure. Each entry: `{kind: "reflection" \| "semantic", id: string, class: "cited" \| "shaped" \| "ignored" \| "misled"}`. Minimum one entry. |
+
+Returns `{applied: {...}, skipped: {...}}`. Ids not in the
+authoritative exposure list land in `skipped.not_exposed`.
+
 ## Knowledge tools
 
 ### `knowledge.search`

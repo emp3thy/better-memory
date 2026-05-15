@@ -154,7 +154,7 @@ despite the shared name.
 
 ## MCP tools
 
-The server registers 19 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
+The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
 
 **Episodic memory** — observations the AI writes during a session.
 
@@ -190,6 +190,14 @@ The server registers 19 tools, grouped below. Full schemas are in [`website/mcp-
 | `memory.synthesize_next_get_context(project?)` | One pending episode's full context for the IDE-LLM to act on. |
 | `memory.synthesize_next_apply(episode_id, decision, project?)` | Atomically apply Claude's `new` / `augment` / `merge` / `ignore` decision. |
 
+**Rating** — closed-loop reinforcement on top of `memory.record_use`. Session id is resolved server-side from `CLAUDE_SESSION_ID`; none of these tools take a session id.
+
+| Tool | Purpose |
+|---|---|
+| `memory.credit(kind, id, class)` | Opportunistic per-tool-use credit. `class` ∈ `cited` / `shaped` / `misled` (not `ignored`). Call immediately when a retrieved memory is actually used. |
+| `memory.list_session_exposures()` | Unrated exposure rows for the current session. Read-only; used by the `rate-session-memories` skill. |
+| `memory.apply_session_ratings(ratings)` | Atomic end-of-session batch rating. Each entry: `{kind, id, class}` with `class` ∈ `cited` / `shaped` / `ignored` / `misled`. |
+
 **Knowledge** — human-authored markdown corpus.
 
 | Tool | Purpose |
@@ -216,21 +224,26 @@ The `better_memory/skills/` directory contains four markdown skills the AI shoul
 
 Plus `CLAUDE.snippet.md` — paste into your project's `CLAUDE.md` to teach the AI about better-memory.
 
-### Synthesis skill (Claude Code)
+### Claude Code skills
 
-Reflection synthesis is driven by Claude — episode by episode — via two MCP tools (`memory.synthesize_next_get_context` / `_apply`). The walkthrough lives at `.claude/skills/better-memory-synthesize/SKILL.md`.
+Two skills live in `.claude/skills/` and are auto-symlinked into `~/.claude/skills/` by `./scripts/setup.sh` so Claude triggers them in any repo:
 
-For cross-project availability (so Claude triggers it in any repo where better-memory is configured, not just this one), mirror the skill into your user-level `~/.claude/skills/`. Symlink keeps the repo as the source of truth:
+- **`better-memory-synthesize`** — walks Claude through the per-episode reflection synthesis loop (`memory.synthesize_next_get_context` → decide → `memory.synthesize_next_apply`). Fires when `memory.start_episode` reports `pending_synthesis.pending > 0` or when the user asks to consolidate.
+- **`rate-session-memories`** — classifies exposed reflections / semantic memories at session end (`cited` / `shaped` / `ignored` / `misled`) via `memory.list_session_exposures` + `memory.apply_session_ratings`. Triggered by a Stop-block directive from the `session_close` hook when unrated exposures remain.
+
+For the synthesis skill, also add a section to `~/.claude/CLAUDE.md` telling Claude to invoke it when `mcp__better-memory__memory_start_episode` reports `pending_synthesis.pending > 0`. The rating skill fires from the hook directive and doesn't need an instruction line.
+
+If the auto-symlink failed (e.g. Windows without developer mode or admin), symlink manually:
 
 ```bash
 # Linux / macOS
 ln -s "$PWD/.claude/skills/better-memory-synthesize" ~/.claude/skills/better-memory-synthesize
+ln -s "$PWD/.claude/skills/rate-session-memories"    ~/.claude/skills/rate-session-memories
 
-# Windows (PowerShell, run from this repo)
+# Windows (PowerShell, run from this repo, as Administrator OR with developer mode)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\better-memory-synthesize" -Target "$PWD\.claude\skills\better-memory-synthesize"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\rate-session-memories"    -Target "$PWD\.claude\skills\rate-session-memories"
 ```
-
-Then add a section to `~/.claude/CLAUDE.md` telling Claude to invoke the skill when `mcp__better-memory__memory_start_episode` reports `pending_synthesis.pending > 0`.
 
 ## Development
 

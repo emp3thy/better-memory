@@ -35,6 +35,37 @@ Each observation and reflection has a `reinforcement_score` that decays slowly o
 
 This is the lever that keeps recall faithful: a well-validated `dont` will keep surfacing for the same query class; a once-true-now-misleading observation gets demoted by repeated failure stamps.
 
+## Self-rating loop
+
+`memory.record_use` is the in-band reinforcement primitive. Layered on
+top of it is a closed-loop self-rating cycle that runs per session and
+captures whether memories actually shaped Claude's work:
+
+1. **Exposure** — every reflection or semantic memory surfaced by
+   `memory.retrieve` / `memory.semantic_retrieve` / the SessionStart
+   bootstrap is logged to `session_memory_exposure` with the active
+   `session_id`.
+2. **Mid-session credit** — `memory.credit(kind, id, class)` lets
+   Claude credit a memory as `cited`, `shaped`, or `misled` the moment
+   it's used. Survives context compaction.
+3. **End-of-session sweep** — the
+   [`session_close`](https://github.com/emp3thy/better-memory/blob/main/better_memory/hooks/session_close.py)
+   hook checks for unrated exposures. If any exist, it emits a `Stop`
+   block directive triggering the `rate-session-memories` skill, which
+   calls `memory.list_session_exposures` and submits
+   `memory.apply_session_ratings` with one class per id
+   (`cited` / `shaped` / `ignored` / `misled`). Only on the second Stop
+   fire — after ratings land — does the hook drop the `session_end`
+   marker into the spool.
+4. **Aggregation** — `useful_count` / `misled_count` columns on
+   reflections and semantic memories accumulate. Retrieval queries
+   `ORDER BY useful_count DESC` so memories that proved themselves
+   surface first.
+
+The management UI's Reflections and Semantic tabs surface useful /
+misled badges per row, and `/diagnostics` exposes recent ratings plus a
+`session_id_missing` counter for instrumentation gaps.
+
 ## Synthesis pipeline
 
 Synthesis is **IDE-driven** — Claude itself is the LLM. better-memory ships no chat client; it exposes two MCP tools and a skill that orchestrates them.
