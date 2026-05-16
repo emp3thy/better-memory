@@ -45,13 +45,21 @@ panel or dashboard — the signal belongs next to the memory it describes.
 
 | Page | Inline indicator | Always shown? | Colour |
 |---|---|---|---|
-| Reflections | `useful N · misled N` pair | Yes, even at `0 · 0` | useful green, misled red |
-| Semantic | `useful N · misled N` pair | Yes, even at `0 · 0` | useful green, misled red |
-| Observations | `reinforcement_score` (1 dp) | Yes, even at `0.0` | `> 0` green, `< 0` red, `== 0` muted |
+| Reflections | `useful N · misled N` pair | Yes, even at `0 · 0` | each badge: green/red when `> 0`, grey when `0` |
+| Semantic | `useful N · misled N` pair | Yes, even at `0 · 0` | each badge: green/red when `> 0`, grey when `0` |
+| Observations | `reinforcement_score` (1 dp) | Yes, even at `0.0` | `> 0` green, `< 0` red, `== 0` grey |
 
 "Always shown" was an explicit decision: a fixed mini-stat on every row
 lets the user distinguish a never-rated memory (`0 · 0`) from a
 rated-clean one, and keeps the negative signal visible.
+
+**Zero renders grey.** A badge at `0` (or a reinforcement score of
+`0.0`) takes a muted/grey style rather than its signal colour. Grey
+communicates "default value, no signal yet" and stops a wall of
+never-rated rows from reading as a wall of red/green. The signal colour
+(green useful, red misled, green/red reinforcement) appears only once
+the count moves off `0`. This rule is uniform across all three
+indicators.
 
 `reinforcement_score` is a SQLite `REAL`. It is rendered rounded to one
 decimal place. It may be negative (repeated `failure` reinforcement).
@@ -110,8 +118,10 @@ Contract:
   {% endwith %}
   ```
 
-- Output: a `<span class="rating-stat">` containing a green
-  `useful N` badge and a red `misled N` badge, both always present.
+- Output: a `<span class="rating-stat">` containing a `useful N` badge
+  and a `misled N` badge, both always present. Each badge's class is
+  chosen by its own count: the signal colour (green useful / red
+  misled) when `> 0`, the grey/default class when `0`.
 
 Observations do **not** use this partial — their signal is a single
 score, not a pair. `observation_row.html` renders its own inline
@@ -134,10 +144,13 @@ The UI stylesheet already defines `badge` and `bg-success` (used by the
 current useful badge). Add:
 
 - A red misled badge style (`bg-danger` or an equivalent class).
+- A grey/default badge style for the `0` case, applied to either badge
+  (useful or misled) when its count is `0`.
 - `reinforcement-stat` colour classes for positive / negative / zero
-  (`reinf-pos`, `reinf-neg`, `reinf-zero` or similar).
+  (`reinf-pos`, `reinf-neg`, `reinf-zero` or similar) — the zero class
+  reuses the same grey treatment.
 
-No new colour tokens beyond green / red / muted, which the UI already
+No new colour tokens beyond green / red / grey, which the UI already
 uses elsewhere (e.g. `outcome-*` chips, `text-danger`).
 
 ## Data flow
@@ -163,9 +176,10 @@ endpoints.
   created after the migration. The read-models already coalesce with
   `or 0` defensively; the partial treats any falsy value as `0`.
 - **Negative reinforcement.** `reinforcement_score` may be negative;
-  the sign drives the colour class. Rounding uses one decimal place so
-  a small negative score does not display as `-0.0` — values within
-  `(-0.05, 0.05)` render as `0.0` and take the muted/zero class.
+  the value drives the colour class (positive / negative / zero).
+  Rounding uses one decimal place so a small negative score does not
+  display as `-0.0` — values within `(-0.05, 0.05)` render as `0.0` and
+  take the grey/zero class.
 - **Missing column on legacy rows.** Not possible — `reinforcement_score`
   has existed since migration 0001 / 0002.
 
@@ -174,14 +188,18 @@ endpoints.
 Extend the existing Playwright UI suite (`tests/ui/`). New assertions:
 
 1. **Reflections** — a row with `useful_count = 0, times_misled = 0`
-   still renders the `useful 0` and `misled 0` badges (always-shown).
-2. **Reflections** — a row with `times_misled > 0` renders the misled
-   badge with the red style.
-3. **Semantic** — same two assertions as reflections (the shared
-   partial means one of these doubles as the partial's contract test).
+   still renders the `useful 0` and `misled 0` badges (always-shown),
+   and both badges carry the grey/default class, not the signal colour.
+2. **Reflections** — a row with `useful_count > 0` renders the useful
+   badge with the green style; a row with `times_misled > 0` renders
+   the misled badge with the red style. A mixed row (e.g.
+   `useful > 0, misled = 0`) shows one signal-coloured and one grey
+   badge — confirming each badge is classed by its own count.
+3. **Semantic** — same assertions as reflections (the shared partial
+   means these double as the partial's contract test).
 4. **Observations** — a row renders the reinforcement indicator;
    a positive score takes the positive class, a negative score the
-   negative class, `0.0` the muted class.
+   negative class, `0.0` the grey/zero class.
 5. **Drawer** — the reflection and semantic drawers render the `Misled`
    line even when the count is `0`.
 
