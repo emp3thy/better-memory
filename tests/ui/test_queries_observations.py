@@ -158,6 +158,21 @@ class TestObservationListForUi:
         assert row.status == "active"
         assert row.episode_id == "ep-1"
 
+    def test_row_carries_reinforcement_score(self, conn):
+        _seed_episode(conn)
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, component, theme, outcome, status, "
+            " episode_id, reinforcement_score, created_at) "
+            "VALUES ('o-r', 'x', 'proj-a', 'ui_launcher', 'bug', "
+            " 'neutral', 'active', 'ep-1', 2.5, "
+            " '2026-04-26T10:00:00+00:00')"
+        )
+        conn.commit()
+
+        [row] = observation_list_for_ui(conn, project="proj-a")
+        assert row.reinforcement_score == 2.5
+
 
 class TestObservationDetail:
     def test_returns_none_for_unknown_id(self, conn):
