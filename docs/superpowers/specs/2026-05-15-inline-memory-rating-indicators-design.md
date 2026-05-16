@@ -45,9 +45,14 @@ panel or dashboard — the signal belongs next to the memory it describes.
 
 | Page | Inline indicator | Always shown? | Colour |
 |---|---|---|---|
-| Reflections | `useful N · misled N` pair | Yes, even at `0 · 0` | each badge: green/red when `> 0`, grey when `0` |
-| Semantic | `useful N · misled N` pair | Yes, even at `0 · 0` | each badge: green/red when `> 0`, grey when `0` |
-| Observations | `reinforcement_score` (1 dp) | Yes, even at `0.0` | `> 0` green, `< 0` red, `== 0` grey |
+| Reflections | `useful N · misled N` pair | Yes, even at `0 · 0` | each badge: ink/amber when `> 0`, grey when `0` |
+| Semantic | `useful N · misled N` pair | Yes, even at `0 · 0` | each badge: ink/amber when `> 0`, grey when `0` |
+| Observations | `reinforcement_score` (1 dp) | Yes, even at `0.0` | `> 0` ink, `< 0` amber, `== 0` grey |
+
+The UI is a brutalist ink / amber / paper theme — it has no green or red. The
+value semantics map onto the existing palette: positive (useful, positive
+reinforcement) → **ink**; negative (misled, negative reinforcement) → **amber**;
+default/zero → **muted grey**.
 
 "Always shown" was an explicit decision: a fixed mini-stat on every row
 lets the user distinguish a never-rated memory (`0 · 0`) from a
@@ -56,8 +61,8 @@ rated-clean one, and keeps the negative signal visible.
 **Zero renders grey.** A badge at `0` (or a reinforcement score of
 `0.0`) takes a muted/grey style rather than its signal colour. Grey
 communicates "default value, no signal yet" and stops a wall of
-never-rated rows from reading as a wall of red/green. The signal colour
-(green useful, red misled, green/red reinforcement) appears only once
+never-rated rows from reading as a wall of ink/amber. The signal colour
+(ink useful, amber misled, ink/amber reinforcement) appears only once
 the count moves off `0`. This rule is uniform across all three
 indicators.
 
@@ -140,18 +145,23 @@ score, not a pair. `observation_row.html` renders its own inline
 
 ### 4. CSS
 
-The UI stylesheet already defines `badge` and `bg-success` (used by the
-current useful badge). Add:
+The current `★ useful` badge markup uses `badge bg-success` — but those
+classes are **not defined** in the brutalist `app.css`, so that badge
+renders unstyled today. The new indicators define real classes against
+the existing palette tokens (`--brut-ink`, `--brut-amber`, `--brut-muted`,
+`--brut-rule`). Add to `app.css`:
 
-- A red misled badge style (`bg-danger` or an equivalent class).
-- A grey/default badge style for the `0` case, applied to either badge
-  (useful or misled) when its count is `0`.
-- `reinforcement-stat` colour classes for positive / negative / zero
-  (`reinf-pos`, `reinf-neg`, `reinf-zero` or similar) — the zero class
-  reuses the same grey treatment.
+- `.rating-stat` — inline-flex container for the badge pair.
+- `.rating-badge` — base badge; grey/muted by default (this is the `0`
+  state, so `.rating-zero` needs no override).
+- `.rating-badge.rating-useful` — ink fill.
+- `.rating-badge.rating-misled` — amber fill.
+- `.reinforcement-stat` with `.reinf-pos` (ink) / `.reinf-neg` (amber) /
+  `.reinf-zero` (muted, the base colour).
+- `.text-danger` — referenced by both drawers' Misled line but currently
+  undefined; add a one-line amber rule.
 
-No new colour tokens beyond green / red / grey, which the UI already
-uses elsewhere (e.g. `outcome-*` chips, `text-danger`).
+No new colour tokens — ink / amber / muted / rule already exist.
 
 ## Data flow
 
@@ -185,7 +195,12 @@ endpoints.
 
 ## Testing
 
-Extend the existing Playwright UI suite (`tests/ui/`). New assertions:
+Extend the UI test suite (`tests/ui/`) with Flask test-client render
+tests — the established pattern in `test_observations.py` /
+`test_reflections.py` / `test_semantic.py`. They assert the rendered
+HTML fragment contains the expected text and class names, which is
+exactly what this feature changes; a browser is not needed. New
+assertions:
 
 1. **Reflections** — a row with `useful_count = 0, times_misled = 0`
    still renders the `useful 0` and `misled 0` badges (always-shown),
