@@ -1,5 +1,9 @@
 # Memory Rating — Design Spec
 
+> **Update (2026-05-17):** The rating model was extended to a 5th class,
+> `overlooked`, by issue #60. See
+> `docs/superpowers/specs/2026-05-17-overlooked-memory-rating-class-design.md`.
+
 **Date:** 2026-05-10
 **Status:** Draft (pending implementation plan)
 **Scope:** Reflections + semantic memories. Observations out of scope (they already have their own `reinforcement_score` mechanic via `ObservationService.record_use`).

@@ -98,7 +98,7 @@ Adjust the `command` to match your environment — for example:
    it emits a `decision:block` directive on stdout asking Claude to
    invoke the `rate-session-memories` skill. The skill calls
    `memory.list_session_exposures`, classifies each id as
-   `cited` / `shaped` / `ignored` / `misled`, and submits the batch via
+   `cited` / `shaped` / `ignored` / `misled` / `overlooked`, and submits the batch via
    `memory.apply_session_ratings`. Claude Code then fires `Stop` again;
    on the second fire (no unrated exposures left) the hook writes a
    `session_end` marker to the spool.

@@ -178,7 +178,7 @@ mid-session credit via `memory.credit`, and an end-of-session sweep
 driven by the
 [`rate-session-memories`](https://github.com/emp3thy/better-memory/blob/main/.claude/skills/rate-session-memories/SKILL.md)
 skill that classifies every exposed reflection / semantic memory as
-`cited`, `shaped`, `ignored`, or `misled`. The session_close hook emits
+`cited`, `shaped`, `ignored`, `misled`, or `overlooked`. The session_close hook emits
 a Stop-block directive when unrated exposures remain so the skill fires
 before the session ends.
 
@@ -196,7 +196,7 @@ context compaction; the session-end sweep catches anything missed.
 |---|---|---|---|
 | `kind` | `reflection` / `semantic` | yes | Memory kind. |
 | `id` | string | yes | Id of the exposed memory. |
-| `class` | `cited` / `shaped` / `misled` | yes | Mid-session credit cannot mark a memory `ignored` — that's only valid via the end-of-session sweep. |
+| `class` | `cited` / `shaped` / `misled` / `overlooked` | yes | Mid-session credit cannot mark a memory `ignored` — that's only valid via the end-of-session sweep. |
 
 ### `memory.list_session_exposures`
 
@@ -212,7 +212,7 @@ Raises if `CLAUDE_SESSION_ID` is unset.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
-| `ratings` | array | yes | One entry per exposure. Each entry: `{kind: "reflection" \| "semantic", id: string, class: "cited" \| "shaped" \| "ignored" \| "misled"}`. Minimum one entry. |
+| `ratings` | array | yes | One entry per exposure. Each entry: `{kind: "reflection" \| "semantic", id: string, class: "cited" \| "shaped" \| "ignored" \| "misled" \| "overlooked"}`. Minimum one entry. |
 
 Returns `{applied: {...}, skipped: {...}}`. Ids not in the
 authoritative exposure list land in `skipped.not_exposed`.
