@@ -468,6 +468,7 @@ class ObservationRow:
     status: str
     created_at: str
     episode_id: str | None
+    reinforcement_score: float
 
 
 def observation_list_for_ui(
@@ -503,7 +504,7 @@ def observation_list_for_ui(
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
         "SELECT id, content, project, component, theme, outcome, status, "
-        "       created_at, episode_id "
+        "       created_at, episode_id, reinforcement_score "
         "FROM observations "
         f"{where} "
         "ORDER BY created_at DESC, rowid DESC "
@@ -521,6 +522,7 @@ def observation_list_for_ui(
             status=r["status"],
             created_at=r["created_at"],
             episode_id=r["episode_id"],
+            reinforcement_score=r["reinforcement_score"],
         )
         for r in conn.execute(sql, params).fetchall()
     ]

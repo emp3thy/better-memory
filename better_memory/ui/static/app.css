@@ -1348,6 +1348,35 @@ textarea { resize: vertical; line-height: 1.55; }
 }
 
 /* ============================================================
+   Rating indicators — useful / misled badge pair
+   ============================================================ */
+.rating-stat { display: inline-flex; gap: 6px; }
+
+.rating-badge {
+  font-family: var(--brut-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  white-space: nowrap;
+  border: 1.5px solid var(--brut-rule);
+  background: var(--brut-paper);
+  color: var(--brut-muted);
+}
+.rating-badge.rating-useful {
+  border-color: var(--brut-ink);
+  background: var(--brut-ink);
+  color: var(--brut-paper);
+}
+.rating-badge.rating-misled {
+  border-color: var(--brut-ink);
+  background: var(--brut-amber);
+  color: var(--brut-amber-ink);
+}
+/* .rating-zero keeps the muted base style — no override needed. */
+
+/* ============================================================
    Synthesis button
    ============================================================ */
 .btn-synth { position: relative; min-height: 30px; }
@@ -1419,6 +1448,26 @@ textarea { resize: vertical; line-height: 1.55; }
 }
 .promote-form { display: flex; gap: 0; }
 .promote-form select { margin-right: 8px; }
+
+/* ============================================================
+   Reinforcement score indicator — observation rows
+   ============================================================ */
+.reinforcement-stat {
+  font-family: var(--brut-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--brut-muted);
+  margin-right: 10px;
+}
+.reinforcement-stat.reinf-pos { color: var(--brut-ink); }
+.reinforcement-stat.reinf-neg { color: var(--brut-amber); }
+/* .reinf-zero keeps the muted base colour. */
+
+/* ============================================================
+   Misled count emphasis — drawer meta
+   ============================================================ */
+.text-danger { color: var(--brut-amber); font-weight: 700; }
 
 /* ============================================================
    Responsive

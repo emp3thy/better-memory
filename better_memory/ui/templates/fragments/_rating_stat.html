@@ -1,0 +1,9 @@
+{# Useful / misled rating pair for a memory list row. Expects
+   `rating_useful` and `rating_misled` (ints) in context — each row
+   supplies them via {% with %}. Each badge is classed by its own
+   count: rating-useful / rating-misled when > 0, else rating-zero
+   (grey, default-value). #}
+<span class="rating-stat">
+  <span class="rating-badge rating-{{ 'useful' if rating_useful else 'zero' }}">useful {{ rating_useful or 0 }}</span>
+  <span class="rating-badge rating-{{ 'misled' if rating_misled else 'zero' }}">misled {{ rating_misled or 0 }}</span>
+</span>
