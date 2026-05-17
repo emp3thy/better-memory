@@ -496,7 +496,8 @@ class TestReflectionDrawerMisledAlwaysShown:
         monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
         _seed_reflection(tmp_db, rid="r-1", status="confirmed")
         body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
-        assert "Misled" in body
+        # Precise: the Misled <dt> renders even though times_misled == 0.
+        assert "<dt>Misled</dt>" in body
 
 
 class TestReflectionRowRatingStat:

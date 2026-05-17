@@ -343,7 +343,8 @@ class TestSemanticDrawerMisledAlwaysShown:
             )
             c.commit()
         body = client.get("/semantic/m1/drawer").get_data(as_text=True)
-        assert "Misled" in body
+        # Precise: the Misled <dt> renders even though times_misled == 0.
+        assert "<dt>Misled</dt>" in body
 
 
 class TestSemanticRowRatingStat:
