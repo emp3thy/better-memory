@@ -543,3 +543,22 @@ class TestReflectionRowRatingStat:
         ).get_data(as_text=True)
         assert "misled 2" in body
         assert "rating-misled" in body
+
+    def test_mixed_row_one_coloured_one_grey(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A row with useful > 0 and misled == 0 classes each badge by its
+        own count: useful inked, misled grey."""
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", title="Mixed", useful_count=1, times_misled=0
+        )
+
+        body = client.get(
+            "/reflections/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "rating-useful" in body
+        assert "rating-zero" in body
+        assert "rating-misled" not in body
