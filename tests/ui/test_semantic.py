@@ -326,6 +326,50 @@ class TestSemanticDrawer:
         assert response.status_code == 404
 
 
+class TestSemanticRowRatingStat:
+    def test_row_shows_both_badges_at_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sqlite3
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        with sqlite3.connect(tmp_db) as c:
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) VALUES "
+                "('m1','rule','proj-a','project',"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+            )
+            c.commit()
+        body = client.get("/semantic/panel").get_data(as_text=True)
+        assert "useful 0" in body
+        assert "misled 0" in body
+        assert body.count("rating-zero") >= 2
+
+    def test_badges_coloured_when_positive(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sqlite3
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        with sqlite3.connect(tmp_db) as c:
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, useful_count, times_misled, "
+                " created_at, updated_at) VALUES "
+                "('m1','rule','proj-a','project', 4, 1,"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+            )
+            c.commit()
+        body = client.get("/semantic/panel").get_data(as_text=True)
+        assert "useful 4" in body
+        assert "rating-useful" in body
+        assert "misled 1" in body
+        assert "rating-misled" in body
+
+
 class TestSemanticUpdate:
     def test_update_changes_content(
         self, client: FlaskClient, tmp_db: Path,
