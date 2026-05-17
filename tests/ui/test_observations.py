@@ -413,6 +413,22 @@ class TestObservationRowReinforcement:
         assert "reinf 0.0" in body
         assert "reinf-zero" in body
 
+    def test_negative_zero_score_treated_as_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        # -0.04 rounds to IEEE-754 -0.0; the or-guard must suppress "-0.0".
+        self._seed_obs_score(tmp_db, oid="o-1", score=-0.04)
+        body = client.get(
+            "/observations/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "reinf 0.0" in body
+        assert "reinf-zero" in body
+        assert "reinf -0.0" not in body
+
 
 class TestObservationDrawerPromoteForm:
     def _drawer_for(self, client, conn, obs_id, status):
