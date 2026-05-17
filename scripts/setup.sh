@@ -2,10 +2,14 @@
 # better-memory setup script. Cross-platform bash (Linux, macOS, Git Bash on
 # Windows). Detects prerequisites (Python, uv, Ollama), installs what's
 # missing, creates the runtime filesystem layout under ~/.better-memory,
-# then auto-installs the MCP server registration into ~/.claude.json and
+# then auto-installs the MCP server registration into ~/.claude.json,
 # the three hooks (session_bootstrap, observer, session_close) into
-# ~/.claude/settings.json by shelling out to
-# `python -m better_memory.cli.install_hooks`.
+# ~/.claude/settings.json, and every bundled skill into ~/.claude/skills/
+# by shelling out to `python -m better_memory.cli.install_hooks`.
+#
+# NOTE: all better-memory skills are installed in USER scope
+# (~/.claude/skills/), never project scope, so they are available in every
+# Claude Code session regardless of the open project directory.
 #
 # The installer is idempotent and smart-merges — re-running yields the same
 # end state, and any user customizations (custom env values, non-better-

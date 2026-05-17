@@ -2,7 +2,8 @@
 
 Invoked by ``scripts/setup.sh`` after the filesystem-layout step. Merges
 canonical entries into ``~/.claude.json`` (MCP server) and
-``~/.claude/settings.json`` (the configured hooks). Idempotent: running
+``~/.claude/settings.json`` (the configured hooks), and symlinks every
+bundled skill into ``~/.claude/skills/`` (user scope). Idempotent: running
 twice produces the same end state. Smart-merge: user's customizations
 (custom env values, non-better-memory hooks) are preserved.
 
@@ -23,6 +24,12 @@ from pathlib import Path
 from typing import Callable
 
 # --------------------------------------------------------------- skill registry
+#
+# NOTE: every better-memory skill is installed in USER scope — symlinked
+# into ~/.claude/skills/ by install_skill_symlinks() — never project scope.
+# User scope makes the skills available in every Claude Code session
+# regardless of which project directory is open. Any new better-memory
+# skill MUST be added to this tuple so the installer picks it up.
 
 _SKILLS_TO_INSTALL: tuple[str, ...] = (
     "better-memory-synthesize",
