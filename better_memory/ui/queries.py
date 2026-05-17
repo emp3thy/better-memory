@@ -211,6 +211,7 @@ class ReflectionListRow:
     updated_at: str
     useful_count: int = 0
     times_misled: int = 0
+    times_overlooked: int = 0
 
 
 # Default status filter — matches retrieve_reflections (active set only).
@@ -278,7 +279,7 @@ def reflection_list_for_ui(
     sql = (
         "SELECT id, title, project, tech, phase, polarity, "
         "confidence, status, use_cases, evidence_count, updated_at, "
-        "useful_count, times_misled "
+        "useful_count, times_misled, times_overlooked "
         f"FROM reflections WHERE {where} "
         "ORDER BY confidence DESC, updated_at DESC, rowid DESC "
         "LIMIT ?"
@@ -300,6 +301,7 @@ def reflection_list_for_ui(
             updated_at=r["updated_at"],
             useful_count=r["useful_count"],
             times_misled=r["times_misled"],
+            times_overlooked=r["times_overlooked"],
         )
         for r in rows
     ]
@@ -327,6 +329,8 @@ class ReflectionFull:
     last_useful_at: str | None = None
     times_misled: int = 0
     last_misled_at: str | None = None
+    times_overlooked: int = 0
+    last_overlooked_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -369,6 +373,14 @@ class ReflectionDetail:
     def last_misled_at(self) -> str | None:
         return self.reflection.last_misled_at
 
+    @property
+    def times_overlooked(self) -> int:
+        return self.reflection.times_overlooked
+
+    @property
+    def last_overlooked_at(self) -> str | None:
+        return self.reflection.last_overlooked_at
+
 
 def reflection_detail(
     conn: sqlite3.Connection, *, reflection_id: str
@@ -389,7 +401,8 @@ def reflection_detail(
         "SELECT id, title, project, tech, phase, polarity, "
         "confidence, status, use_cases, hints, evidence_count, scope, "
         "created_at, updated_at, "
-        "useful_count, last_useful_at, times_misled, last_misled_at "
+        "useful_count, last_useful_at, times_misled, last_misled_at, "
+        "times_overlooked, last_overlooked_at "
         "FROM reflections WHERE id = ?",
         (reflection_id,),
     ).fetchone()
@@ -452,6 +465,8 @@ def reflection_detail(
             last_useful_at=r_row["last_useful_at"],
             times_misled=r_row["times_misled"] or 0,
             last_misled_at=r_row["last_misled_at"],
+            times_overlooked=r_row["times_overlooked"] or 0,
+            last_overlooked_at=r_row["last_overlooked_at"],
         ),
         sources=sources,
     )

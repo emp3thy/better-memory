@@ -365,3 +365,59 @@ class TestUsefulMisledInDetail:
         assert detail.last_useful_at is None
         assert detail.times_misled == 0
         assert detail.last_misled_at is None
+
+
+class TestOverlookedInReadModel:
+    def test_reflection_list_includes_times_overlooked(self, conn):
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at, times_overlooked)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01', 4)"""
+        )
+        conn.commit()
+        rows = reflection_list_for_ui(conn, project="p")
+        assert any(r.times_overlooked == 4 for r in rows)
+
+    def test_reflection_list_times_overlooked_defaults_zero(self, conn):
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01')"""
+        )
+        conn.commit()
+        [row] = reflection_list_for_ui(conn, project="p")
+        assert row.times_overlooked == 0
+
+    def test_reflection_detail_includes_overlooked_fields(self, conn):
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at,
+                times_overlooked, last_overlooked_at)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01',
+                       3, '2026-05-17T11:00:00+00:00')"""
+        )
+        conn.commit()
+        detail = reflection_detail(conn, reflection_id="r1")
+        assert detail is not None
+        assert detail.times_overlooked == 3
+        assert detail.last_overlooked_at == "2026-05-17T11:00:00+00:00"
+
+    def test_reflection_detail_overlooked_defaults_zero(self, conn):
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01')"""
+        )
+        conn.commit()
+        detail = reflection_detail(conn, reflection_id="r1")
+        assert detail is not None
+        assert detail.times_overlooked == 0
+        assert detail.last_overlooked_at is None
