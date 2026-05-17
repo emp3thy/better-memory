@@ -27,6 +27,7 @@ def _seed_reflection(
     scope: str = "project",
     useful_count: int = 0,
     times_misled: int = 0,
+    times_overlooked: int = 0,
 ) -> None:
     conn = connect(db_path)
     try:
@@ -34,13 +35,13 @@ def _seed_reflection(
             "INSERT INTO reflections "
             "(id, title, project, tech, phase, polarity, use_cases, hints, "
             "confidence, status, evidence_count, scope, useful_count, "
-            "times_misled, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "times_misled, times_overlooked, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
             "'2026-04-26T10:00:00+00:00', '2026-04-26T10:00:00+00:00')",
             (
                 rid, title or f"title-{rid}", project, tech, phase, polarity,
                 use_cases, hints, confidence, status, evidence_count, scope,
-                useful_count, times_misled,
+                useful_count, times_misled, times_overlooked,
             ),
         )
         conn.commit()
@@ -562,3 +563,28 @@ class TestReflectionRowRatingStat:
         assert "rating-useful" in body
         assert "rating-zero" in body
         assert "rating-misled" not in body
+
+    def test_row_shows_overlooked_badge_at_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", title="Zero rated")
+        body = client.get(
+            "/reflections/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "overlooked 0" in body
+
+    def test_overlooked_badge_ambered_when_positive(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", title="Overlooked one", times_overlooked=2,
+        )
+        body = client.get(
+            "/reflections/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "overlooked 2" in body
+        assert "rating-overlooked" in body

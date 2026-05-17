@@ -14,7 +14,7 @@
         <span><span class="n">{{ row.evidence_count }}</span> obs</span>
         <span><span class="n">{{ (row.confidence * 100) | round(0) | int }}%</span> con</span>
       </span>
-      {% with rating_useful = row.useful_count, rating_misled = row.times_misled %}
+      {% with rating_useful = row.useful_count, rating_overlooked = row.times_overlooked, rating_misled = row.times_misled %}
         {% include "fragments/_rating_stat.html" %}
       {% endwith %}
       <span class="status-{{ row.status }}">{{ row.status }}</span>

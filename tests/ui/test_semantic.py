@@ -390,6 +390,44 @@ class TestSemanticRowRatingStat:
         assert "misled 1" in body
         assert "rating-misled" in body
 
+    def test_row_shows_overlooked_badge_at_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sqlite3
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        with sqlite3.connect(tmp_db) as c:
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) VALUES "
+                "('m1','rule','proj-a','project',"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+            )
+            c.commit()
+        body = client.get("/semantic/panel").get_data(as_text=True)
+        assert "overlooked 0" in body
+
+    def test_overlooked_badge_ambered_when_positive(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sqlite3
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        with sqlite3.connect(tmp_db) as c:
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, times_overlooked, "
+                " created_at, updated_at) VALUES "
+                "('m1','rule','proj-a','project', 3,"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+            )
+            c.commit()
+        body = client.get("/semantic/panel").get_data(as_text=True)
+        assert "overlooked 3" in body
+        assert "rating-overlooked" in body
+
 
 class TestSemanticUpdate:
     def test_update_changes_content(

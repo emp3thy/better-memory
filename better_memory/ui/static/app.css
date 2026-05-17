@@ -1374,6 +1374,11 @@ textarea { resize: vertical; line-height: 1.55; }
   background: var(--brut-amber);
   color: var(--brut-amber-ink);
 }
+.rating-badge.rating-overlooked {
+  border-color: var(--brut-amber);
+  background: var(--brut-paper);
+  color: var(--brut-amber-ink);
+}
 /* .rating-zero keeps the muted base style — no override needed. */
 
 /* ============================================================
