@@ -19,7 +19,6 @@ from uuid import uuid4
 from better_memory.services.memory_rating import OVERLOOKED_RANKING_WEIGHT
 
 
-
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
