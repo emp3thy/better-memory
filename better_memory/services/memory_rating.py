@@ -244,7 +244,7 @@ class MemoryRatingService:
         - session_id must be non-empty.
         - ratings must be non-empty.
         - each entry must have kind in {'reflection', 'semantic'},
-          class in {'cited', 'shaped', 'ignored', 'misled'},
+          class in {'cited', 'shaped', 'ignored', 'misled', 'overlooked'},
           and a string id.
         - no duplicate (kind, id) pairs in one batch.
 
@@ -255,7 +255,7 @@ class MemoryRatingService:
         Returns:
             {
                 "session_id": str,
-                "applied":  {"cited": int, "shaped": int, "ignored": int, "misled": int},
+                "applied":  {"cited": int, "shaped": int, "ignored": int, "misled": int, "overlooked": int},
                 "skipped":  {"not_exposed": int, "already_rated": int,
                              "memory_missing": int, "memory_retired": int},
             }
