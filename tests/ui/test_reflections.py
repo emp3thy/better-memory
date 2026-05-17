@@ -487,6 +487,18 @@ class TestReflectionDrawerScope:
         assert "action-promote" not in body
 
 
+class TestReflectionDrawerMisledAlwaysShown:
+    def test_drawer_shows_misled_line_at_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "Misled" in body
+
+
 class TestReflectionRowRatingStat:
     def test_row_shows_both_badges_at_zero(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch

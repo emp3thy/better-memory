@@ -326,6 +326,26 @@ class TestSemanticDrawer:
         assert response.status_code == 404
 
 
+class TestSemanticDrawerMisledAlwaysShown:
+    def test_drawer_shows_misled_line_at_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sqlite3
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        with sqlite3.connect(tmp_db) as c:
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) VALUES "
+                "('m1','rule','proj-a','project',"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+            )
+            c.commit()
+        body = client.get("/semantic/m1/drawer").get_data(as_text=True)
+        assert "Misled" in body
+
+
 class TestSemanticRowRatingStat:
     def test_row_shows_both_badges_at_zero(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch

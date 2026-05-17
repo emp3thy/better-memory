@@ -20,10 +20,8 @@
     <dl class="drawer-meta">
       <dt>Useful</dt>
       <dd>{{ memory.useful_count }}{% if memory.last_useful_at %} (last: {{ memory.last_useful_at }}){% endif %}</dd>
-      {% if memory.times_misled > 0 %}
       <dt>Misled</dt>
       <dd class="text-danger">{{ memory.times_misled }}{% if memory.last_misled_at %} (last: {{ memory.last_misled_at }}){% endif %}</dd>
-      {% endif %}
     </dl>
     <div class="drawer-actions">
       <button type="submit">Save</button>

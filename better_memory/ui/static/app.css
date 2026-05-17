@@ -1449,7 +1449,9 @@ textarea { resize: vertical; line-height: 1.55; }
 .promote-form { display: flex; gap: 0; }
 .promote-form select { margin-right: 8px; }
 
-/* Reinforcement score indicator — observation rows */
+/* ============================================================
+   Reinforcement score indicator — observation rows
+   ============================================================ */
 .reinforcement-stat {
   font-family: var(--brut-mono);
   font-size: 10.5px;
@@ -1461,6 +1463,11 @@ textarea { resize: vertical; line-height: 1.55; }
 .reinforcement-stat.reinf-pos { color: var(--brut-ink); }
 .reinforcement-stat.reinf-neg { color: var(--brut-amber); }
 /* .reinf-zero keeps the muted base colour. */
+
+/* ============================================================
+   Misled count emphasis — drawer meta
+   ============================================================ */
+.text-danger { color: var(--brut-amber); font-weight: 700; }
 
 /* ============================================================
    Responsive
