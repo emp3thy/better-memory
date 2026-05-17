@@ -22,12 +22,19 @@ For each `(kind, id)` pair returned by the list, assign exactly ONE class:
 - **shaped** — the memory guided a decision but wasn't cited verbatim.
 - **ignored** — you saw it but it didn't affect this session. (Default.)
 - **misled** — it caused a wrong direction or wasted effort.
+- **overlooked** — the memory was relevant and you should have applied
+  it, but you didn't, until the user explicitly pointed you back to it.
 
 Rules:
 - Quote the id in your reasoning so you can't drift.
 - Do not invent ids. Do not skip ids.
 - If genuinely uncertain between two classes, prefer the lower one
   (shaped > cited, ignored > shaped). `misled` is never a fallback.
+- `overlooked` is never a fallback. Use it ONLY when the user explicitly
+  pointed you back to a memory you already had and had not applied —
+  that user intervention is the observable anchor. Test for it first,
+  separately from the cited/shaped/ignored axis. No anchor event → not
+  `overlooked`.
 - Default is `ignored`. "Shaped" requires evidence you can point to.
 
 ## STEP 3 — Submit ALL ratings in ONE call
