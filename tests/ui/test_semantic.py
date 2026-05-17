@@ -348,7 +348,7 @@ class TestSemanticDrawerMisledAlwaysShown:
 
 
 class TestSemanticRowRatingStat:
-    def test_row_shows_both_badges_at_zero(
+    def test_row_shows_all_three_badges_at_zero(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
     ):
         import sqlite3
@@ -365,6 +365,7 @@ class TestSemanticRowRatingStat:
             c.commit()
         body = client.get("/semantic/panel").get_data(as_text=True)
         assert "useful 0" in body
+        assert "overlooked 0" in body
         assert "misled 0" in body
         assert body.count("rating-zero") >= 2
 

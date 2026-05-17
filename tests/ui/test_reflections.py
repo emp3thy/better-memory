@@ -502,7 +502,7 @@ class TestReflectionDrawerMisledAlwaysShown:
 
 
 class TestReflectionRowRatingStat:
-    def test_row_shows_both_badges_at_zero(
+    def test_row_shows_all_three_badges_at_zero(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
     ):
         from better_memory.ui import app as app_module
@@ -514,6 +514,7 @@ class TestReflectionRowRatingStat:
             "/reflections/panel?project=proj-a"
         ).get_data(as_text=True)
         assert "useful 0" in body
+        assert "overlooked 0" in body
         assert "misled 0" in body
         assert body.count("rating-zero") >= 2
 
@@ -548,8 +549,8 @@ class TestReflectionRowRatingStat:
     def test_mixed_row_one_coloured_one_grey(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """A row with useful > 0 and misled == 0 classes each badge by its
-        own count: useful inked, misled grey."""
+        """A row with useful > 0 and misled == overlooked == 0 classes each
+        badge by its own count: useful inked, overlooked + misled grey."""
         from better_memory.ui import app as app_module
 
         monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
@@ -563,6 +564,7 @@ class TestReflectionRowRatingStat:
         assert "rating-useful" in body
         assert "rating-zero" in body
         assert "rating-misled" not in body
+        assert "rating-overlooked" not in body
 
     def test_row_shows_overlooked_badge_at_zero(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
