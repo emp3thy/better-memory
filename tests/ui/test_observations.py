@@ -355,6 +355,65 @@ class TestPromoteToSemantic:
         assert obs_status == "active"
 
 
+class TestObservationRowReinforcement:
+    def _seed_obs_score(self, db_path: Path, *, oid: str, score: float) -> None:
+        conn = connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO observations "
+                "(id, content, project, component, theme, outcome, status, "
+                " episode_id, reinforcement_score, created_at) VALUES "
+                "(?, 'obs body', 'proj-a', 'ui_launcher', 'bug', 'neutral', "
+                " 'active', 'ep-1', ?, '2026-04-26T10:00:00+00:00')",
+                (oid, score),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_positive_score_takes_pos_class(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        self._seed_obs_score(tmp_db, oid="o-1", score=2.5)
+        body = client.get(
+            "/observations/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "reinf 2.5" in body
+        assert "reinf-pos" in body
+
+    def test_negative_score_takes_neg_class(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        self._seed_obs_score(tmp_db, oid="o-1", score=-1.5)
+        body = client.get(
+            "/observations/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "reinf -1.5" in body
+        assert "reinf-neg" in body
+
+    def test_zero_score_takes_zero_class(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_episode(tmp_db)
+        self._seed_obs_score(tmp_db, oid="o-1", score=0.0)
+        body = client.get(
+            "/observations/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "reinf 0.0" in body
+        assert "reinf-zero" in body
+
+
 class TestObservationDrawerPromoteForm:
     def _drawer_for(self, client, conn, obs_id, status):
         conn.execute(

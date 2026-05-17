@@ -7,5 +7,8 @@
   <span class="project">{{ row.project }}</span>
   <span class="component">{{ row.component or "—" }}</span>
   <span class="time">{{ row.created_at[11:16] }}</span>
+  {% set rscore = row.reinforcement_score | round(1) %}
+  <span class="reinforcement-stat reinf-{{ 'pos' if rscore > 0 else 'neg' if rscore < 0 else 'zero' }}"
+        title="Reinforcement score">reinf {{ '%.1f' | format(rscore or 0.0) }}</span>
   <span class="content">{{ row.content }}</span>
 </div>
