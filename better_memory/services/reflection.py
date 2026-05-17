@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from better_memory import _diag
+from better_memory.services.memory_rating import OVERLOOKED_RANKING_WEIGHT
 
 
 def _default_clock() -> datetime:
@@ -1160,6 +1161,7 @@ class ReflectionSynthesisService:
                 params.append(polarity)
 
             where = " AND ".join(clauses)
+            params.append(OVERLOOKED_RANKING_WEIGHT)
             _diag.step(fn, "executing_select")
             rows = self._conn.execute(
                 f"""
@@ -1167,7 +1169,8 @@ class ReflectionSynthesisService:
                        confidence, tech, evidence_count, useful_count
                 FROM reflections
                 WHERE {where}
-                ORDER BY useful_count DESC, confidence DESC, updated_at DESC
+                ORDER BY (useful_count + ? * times_overlooked) DESC,
+                         confidence DESC, updated_at DESC
                 """,
                 params,
             ).fetchall()
