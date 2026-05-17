@@ -590,3 +590,30 @@ class TestReflectionRowRatingStat:
         ).get_data(as_text=True)
         assert "overlooked 2" in body
         assert "rating-overlooked" in body
+
+
+class TestReflectionDrawerOverlookedAlwaysShown:
+    def test_drawer_shows_overlooked_line_at_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "<dt>Overlooked</dt>" in body
+
+    def test_drawer_shows_overlooked_count_when_positive(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import re
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(
+            tmp_db, rid="r-1", status="confirmed", times_overlooked=4,
+        )
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "<dt>Overlooked</dt>" in body
+        # Anchor on the Overlooked <dd> so an incidental "4" elsewhere
+        # (dates, confidence) cannot satisfy the assertion.
+        m = re.search(r"<dt>Overlooked</dt>\s*<dd>\s*(\d+)", body)
+        assert m is not None and m.group(1) == "4"

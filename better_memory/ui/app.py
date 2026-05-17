@@ -461,7 +461,8 @@ def create_app(
         conn = app.extensions["db_connection"]
         row = conn.execute(
             "SELECT id, content, project, scope, created_at, updated_at, "
-            "useful_count, last_useful_at, times_misled, last_misled_at "
+            "useful_count, last_useful_at, times_misled, last_misled_at, "
+            "times_overlooked, last_overlooked_at "
             "FROM semantic_memories WHERE id = ?",
             (id,),
         ).fetchone()
@@ -475,6 +476,8 @@ def create_app(
             "last_useful_at": row["last_useful_at"],
             "times_misled": row["times_misled"] or 0,
             "last_misled_at": row["last_misled_at"],
+            "times_overlooked": row["times_overlooked"] or 0,
+            "last_overlooked_at": row["last_overlooked_at"],
         }
         return render_template(
             "fragments/semantic_drawer.html", memory=memory,

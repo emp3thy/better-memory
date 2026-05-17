@@ -23,6 +23,8 @@
     <dt>Updated</dt><dd>{{ detail.reflection.updated_at }}</dd>
     <dt>Useful</dt>
     <dd>{{ detail.reflection.useful_count }}{% if detail.reflection.last_useful_at %} (last: {{ detail.reflection.last_useful_at }}){% endif %}</dd>
+    <dt>Overlooked</dt>
+    <dd>{{ detail.reflection.times_overlooked }}{% if detail.reflection.last_overlooked_at %} (last: {{ detail.reflection.last_overlooked_at }}){% endif %}</dd>
     <dt>Misled</dt>
     <dd class="text-danger">{{ detail.reflection.times_misled }}{% if detail.reflection.last_misled_at %} (last: {{ detail.reflection.last_misled_at }}){% endif %}</dd>
   </dl>
