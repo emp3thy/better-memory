@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from better_memory.services.memory_rating import OVERLOOKED_RANKING_WEIGHT
 
 
 def _default_clock() -> datetime:
@@ -36,6 +37,8 @@ class SemanticMemory:
     last_useful_at: str | None = None
     times_misled: int = 0
     last_misled_at: str | None = None
+    times_overlooked: int = 0
+    last_overlooked_at: str | None = None
 
 
 _VALID_SCOPES = ("project", "general")
@@ -237,11 +240,14 @@ class SemanticMemoryService:
 
         sql = (
             "SELECT id, content, project, scope, created_at, updated_at, "
-            "useful_count, last_useful_at, times_misled, last_misled_at "
+            "useful_count, last_useful_at, times_misled, last_misled_at, "
+            "times_overlooked, last_overlooked_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
-            "ORDER BY useful_count DESC, created_at DESC"
+            "ORDER BY (useful_count + ? * times_overlooked) DESC, "
+            "created_at DESC"
         )
+        params.append(OVERLOOKED_RANKING_WEIGHT)
         rows = self._conn.execute(sql, params).fetchall()
         results = [
             SemanticMemory(
@@ -252,6 +258,8 @@ class SemanticMemoryService:
                 last_useful_at=r["last_useful_at"],
                 times_misled=r["times_misled"] or 0,
                 last_misled_at=r["last_misled_at"],
+                times_overlooked=r["times_overlooked"] or 0,
+                last_overlooked_at=r["last_overlooked_at"],
             )
             for r in rows
         ]

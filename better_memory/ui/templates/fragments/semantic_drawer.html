@@ -20,6 +20,8 @@
     <dl class="drawer-meta">
       <dt>Useful</dt>
       <dd>{{ memory.useful_count }}{% if memory.last_useful_at %} (last: {{ memory.last_useful_at }}){% endif %}</dd>
+      <dt>Overlooked</dt>
+      <dd>{{ memory.times_overlooked }}{% if memory.last_overlooked_at %} (last: {{ memory.last_overlooked_at }}){% endif %}</dd>
       <dt>Misled</dt>
       <dd class="text-danger">{{ memory.times_misled }}{% if memory.last_misled_at %} (last: {{ memory.last_misled_at }}){% endif %}</dd>
     </dl>

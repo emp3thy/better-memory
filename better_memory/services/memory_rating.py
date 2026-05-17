@@ -22,8 +22,8 @@ def _default_clock() -> datetime:
 
 
 Kind = Literal["reflection", "semantic"]
-Classification = Literal["cited", "shaped", "ignored", "misled"]
-CreditClassification = Literal["cited", "shaped", "misled"]
+Classification = Literal["cited", "shaped", "ignored", "misled", "overlooked"]
+CreditClassification = Literal["cited", "shaped", "misled", "overlooked"]
 SkipReason = Literal[
     "not_exposed", "already_rated", "memory_missing", "memory_retired"
 ]
@@ -42,6 +42,7 @@ class AppliedCounts(TypedDict):
     shaped: int
     ignored: int
     misled: int
+    overlooked: int
 
 
 class SkippedCounts(TypedDict):
@@ -60,8 +61,14 @@ class ApplySessionRatingsResult(TypedDict):
 _VALID_KINDS: set[str] = {"reflection", "semantic"}
 # Used by apply_session_ratings (Task 3). credit_one accepts only the
 # subset _CREDIT_CLASSES below.
-_VALID_CLASSES: set[str] = {"cited", "shaped", "ignored", "misled"}
-_CREDIT_CLASSES: set[str] = {"cited", "shaped", "misled"}
+_VALID_CLASSES: set[str] = {"cited", "shaped", "ignored", "misled", "overlooked"}
+_CREDIT_CLASSES: set[str] = {"cited", "shaped", "misled", "overlooked"}
+
+# Retrieval-ranking weight for the `overlooked` class. One `overlooked`
+# rating contributes this many points to a memory's rank score — the same
+# unit as one `useful_count`. Per issue #60, an overlooked memory should
+# rank harder than a cited one. Imported by reflection.py and semantic.py.
+OVERLOOKED_RANKING_WEIGHT = 3
 
 
 class MemoryRatingService:
@@ -91,7 +98,7 @@ class MemoryRatingService:
 
         Validation (ValueError before any DB write):
         - kind must be 'reflection' or 'semantic'.
-        - classification must be 'cited', 'shaped', or 'misled' (NOT 'ignored').
+        - classification must be 'cited', 'shaped', 'misled', or 'overlooked' (NOT 'ignored').
 
         Skip outcomes (no exception, no write, returned via dict):
         - 'not_exposed' — no matching exposure row for this session.
@@ -103,6 +110,7 @@ class MemoryRatingService:
         Apply outcomes:
         - 'cited' / 'shaped' → useful_count++, last_useful_at = now.
         - 'misled'           → times_misled++, last_misled_at = now.
+        - 'overlooked'       → times_overlooked++, last_overlooked_at = now.
         And in all apply outcomes, the exposure row is stamped:
         rated_at = now, classification = <input>.
 
@@ -201,6 +209,14 @@ class MemoryRatingService:
                 f"WHERE id = ?",
                 (now, memory_id),
             )
+        elif classification == "overlooked":
+            self._conn.execute(
+                f"UPDATE {table} "
+                f"SET times_overlooked = times_overlooked + 1, "
+                f"last_overlooked_at = ? "
+                f"WHERE id = ?",
+                (now, memory_id),
+            )
         # 'ignored' is a no-op on the memory row; reached only via
         # apply_session_ratings, not credit_one.
 
@@ -228,7 +244,7 @@ class MemoryRatingService:
         - session_id must be non-empty.
         - ratings must be non-empty.
         - each entry must have kind in {'reflection', 'semantic'},
-          class in {'cited', 'shaped', 'ignored', 'misled'},
+          class in {'cited', 'shaped', 'ignored', 'misled', 'overlooked'},
           and a string id.
         - no duplicate (kind, id) pairs in one batch.
 
@@ -239,7 +255,7 @@ class MemoryRatingService:
         Returns:
             {
                 "session_id": str,
-                "applied":  {"cited": int, "shaped": int, "ignored": int, "misled": int},
+                "applied":  {"cited": int, "shaped": int, "ignored": int, "misled": int, "overlooked": int},
                 "skipped":  {"not_exposed": int, "already_rated": int,
                              "memory_missing": int, "memory_retired": int},
             }
@@ -282,6 +298,7 @@ class MemoryRatingService:
         now = self._clock().isoformat()
         applied: AppliedCounts = {
             "cited": 0, "shaped": 0, "ignored": 0, "misled": 0,
+            "overlooked": 0,
         }
         skipped: SkippedCounts = {
             "not_exposed": 0, "already_rated": 0,

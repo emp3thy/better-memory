@@ -46,7 +46,7 @@ captures whether memories actually shaped Claude's work:
    bootstrap is logged to `session_memory_exposure` with the active
    `session_id`.
 2. **Mid-session credit** — `memory.credit(kind, id, class)` lets
-   Claude credit a memory as `cited`, `shaped`, or `misled` the moment
+   Claude credit a memory as `cited`, `shaped`, `misled`, or `overlooked` the moment
    it's used. Survives context compaction.
 3. **End-of-session sweep** — the
    [`session_close`](https://github.com/emp3thy/better-memory/blob/main/better_memory/hooks/session_close.py)
@@ -54,17 +54,19 @@ captures whether memories actually shaped Claude's work:
    block directive triggering the `rate-session-memories` skill, which
    calls `memory.list_session_exposures` and submits
    `memory.apply_session_ratings` with one class per id
-   (`cited` / `shaped` / `ignored` / `misled`). Only on the second Stop
+   (`cited` / `shaped` / `ignored` / `misled` / `overlooked`). Only on the second Stop
    fire — after ratings land — does the hook drop the `session_end`
    marker into the spool.
-4. **Aggregation** — `useful_count` / `misled_count` columns on
-   reflections and semantic memories accumulate. Retrieval queries
-   `ORDER BY useful_count DESC` so memories that proved themselves
+4. **Aggregation** — `useful_count` / `times_overlooked` / `times_misled`
+   columns on reflections and semantic memories accumulate. Retrieval
+   queries `ORDER BY (useful_count + 3 × times_overlooked) DESC` so
+   memories that proved themselves — or that the user had to recover —
    surface first.
 
 The management UI's Reflections and Semantic tabs surface useful /
-misled badges per row, and `/diagnostics` exposes recent ratings plus a
-`session_id_missing` counter for instrumentation gaps.
+overlooked / misled badges per row, and `/diagnostics` exposes recent
+ratings, a total overlooked count, and a `session_id_missing` counter
+for instrumentation gaps.
 
 ## Synthesis pipeline
 

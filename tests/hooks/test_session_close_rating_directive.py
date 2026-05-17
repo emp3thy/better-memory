@@ -151,3 +151,15 @@ class TestRatingDirectiveEmission:
         # Marker should still be written even though DB is absent.
         markers = list((home / "spool").glob("*_session_end_*.json"))
         assert len(markers) == 1
+
+    def test_directive_lists_overlooked_class(self, tmp_path, tmp_memory_db):
+        _seed_unrated_exposure(tmp_memory_db, "S1")
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        assert "overlooked" in directive

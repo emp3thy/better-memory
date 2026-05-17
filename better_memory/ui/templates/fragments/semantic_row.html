@@ -4,7 +4,7 @@
   <div class="row-meta">
     <span class="scope-badge scope-{{ row.scope }}">{{ row.scope }}</span>
     <span class="updated-at">{{ row.updated_at }}</span>
-    {% with rating_useful = row.useful_count, rating_misled = row.times_misled %}
+    {% with rating_useful = row.useful_count, rating_overlooked = row.times_overlooked, rating_misled = row.times_misled %}
       {% include "fragments/_rating_stat.html" %}
     {% endwith %}
   </div>

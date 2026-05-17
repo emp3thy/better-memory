@@ -289,6 +289,60 @@ class TestCreditOneValidation:
             )
 
 
+class TestCreditOneOverlooked:
+    def test_overlooked_bumps_times_overlooked_on_reflection(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.credit_one(
+            session_id="S1", kind="reflection", id="r1",
+            classification="overlooked",
+        )
+        assert result == {"applied": "overlooked", "skipped": None}
+        row = conn.execute(
+            "SELECT useful_count, times_misled, times_overlooked, "
+            "last_overlooked_at FROM reflections WHERE id='r1'"
+        ).fetchone()
+        assert row["times_overlooked"] == 1
+        assert row["last_overlooked_at"] == "2026-05-11T12:00:00+00:00"
+        assert row["useful_count"] == 0
+        assert row["times_misled"] == 0
+
+    def test_overlooked_bumps_times_overlooked_on_semantic(
+        self, conn, fixed_clock,
+    ):
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_semantic(conn, "s1")
+        _seed_exposure(conn, "S1", "semantic", "s1")
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        svc.credit_one(
+            session_id="S1", kind="semantic", id="s1",
+            classification="overlooked",
+        )
+        row = conn.execute(
+            "SELECT times_overlooked FROM semantic_memories WHERE id='s1'"
+        ).fetchone()
+        assert row["times_overlooked"] == 1
+
+    def test_overlooked_stamps_exposure_row(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        svc.credit_one(
+            session_id="S1", kind="reflection", id="r1",
+            classification="overlooked",
+        )
+        row = conn.execute(
+            "SELECT classification FROM session_memory_exposure "
+            "WHERE session_id='S1'"
+        ).fetchone()
+        assert row["classification"] == "overlooked"
+
+
 class TestApplySessionRatings:
     def test_each_class_produces_right_updates(self, conn, fixed_clock):
         from better_memory.services.memory_rating import MemoryRatingService
@@ -314,6 +368,7 @@ class TestApplySessionRatings:
         assert result["session_id"] == "S1"
         assert result["applied"] == {
             "cited": 1, "shaped": 1, "ignored": 1, "misled": 1,
+            "overlooked": 0,
         }
         assert all(v == 0 for v in result["skipped"].values())
 
@@ -385,6 +440,7 @@ class TestApplySessionRatings:
         )
         assert result["applied"] == {
             "cited": 0, "shaped": 0, "ignored": 0, "misled": 0,
+            "overlooked": 0,
         }
         assert result["skipped"] == {
             "not_exposed": 1, "already_rated": 1,
@@ -508,3 +564,20 @@ class TestApplySessionRatings:
             "SELECT useful_count FROM reflections WHERE id='r1'"
         ).fetchone()
         assert row["useful_count"] == 1
+
+    def test_overlooked_counted_in_applied(self, conn, fixed_clock):
+        from better_memory.services.memory_rating import MemoryRatingService
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        svc = MemoryRatingService(conn, clock=fixed_clock)
+        result = svc.apply_session_ratings(
+            session_id="S1",
+            ratings=[
+                {"kind": "reflection", "id": "r1", "class": "overlooked"},
+            ],
+        )
+        assert result["applied"]["overlooked"] == 1
+        row = conn.execute(
+            "SELECT times_overlooked FROM reflections WHERE id='r1'"
+        ).fetchone()
+        assert row["times_overlooked"] == 1

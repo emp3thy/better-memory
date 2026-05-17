@@ -20,14 +20,17 @@ def conn(tmp_memory_db: Path):
 
 
 def _seed_reflection(conn, rid, *, useful_count=0, confidence=0.5,
-                     polarity="do", updated_at="2026-01-01"):
+                     polarity="do", updated_at="2026-01-01",
+                     times_overlooked=0):
     conn.execute(
         """INSERT INTO reflections
            (id, title, project, phase, polarity, use_cases, hints,
-            confidence, created_at, updated_at, useful_count)
+            confidence, created_at, updated_at, useful_count,
+            times_overlooked)
            VALUES (?, ?, 'p', 'general', ?, 'uc', '[]', ?,
-                   '2026-01-01', ?, ?)""",
-        (rid, rid, polarity, confidence, updated_at, useful_count),
+                   '2026-01-01', ?, ?, ?)""",
+        (rid, rid, polarity, confidence, updated_at, useful_count,
+         times_overlooked),
     )
     conn.commit()
 
@@ -66,12 +69,14 @@ class TestReflectionRanking:
         assert ids[0] == "r-newer"
 
 
-def _seed_semantic(conn, sid, *, useful_count=0, created_at="2026-01-01"):
+def _seed_semantic(conn, sid, *, useful_count=0, created_at="2026-01-01",
+                   times_overlooked=0):
     conn.execute(
         """INSERT INTO semantic_memories
-           (id, content, project, scope, created_at, updated_at, useful_count)
-           VALUES (?, 'fact', 'p', 'project', ?, ?, ?)""",
-        (sid, created_at, created_at, useful_count),
+           (id, content, project, scope, created_at, updated_at,
+            useful_count, times_overlooked)
+           VALUES (?, 'fact', 'p', 'project', ?, ?, ?, ?)""",
+        (sid, created_at, created_at, useful_count, times_overlooked),
     )
     conn.commit()
 
@@ -98,3 +103,58 @@ class TestSemanticRanking:
         results = svc.list_for_project(project="p", track_exposure=False)
         ids = [m.id for m in results]
         assert ids[0] == "s-newer"
+
+
+class TestOverlookedRanking:
+    def test_overlooked_outranks_lower_useful_count(self, conn):
+        """One overlooked (weight 3) beats useful_count=2 (score 2 < 3)."""
+        from better_memory.services.reflection import ReflectionSynthesisService
+        _seed_reflection(conn, "r-useful-2", useful_count=2,
+                         times_overlooked=0)
+        _seed_reflection(conn, "r-overlooked-1", useful_count=0,
+                         times_overlooked=1)
+        svc = ReflectionSynthesisService(conn)
+        result = svc.retrieve_reflections(project="p")
+        ids = [r["id"] for r in result["do"]]
+        assert ids.index("r-overlooked-1") < ids.index("r-useful-2")
+
+    def test_high_useful_count_still_beats_one_overlooked(self, conn):
+        """useful_count=4 (score 4) beats one overlooked (score 3)."""
+        from better_memory.services.reflection import ReflectionSynthesisService
+        _seed_reflection(conn, "r-useful-4", useful_count=4,
+                         times_overlooked=0)
+        _seed_reflection(conn, "r-overlooked-1", useful_count=0,
+                         times_overlooked=1)
+        svc = ReflectionSynthesisService(conn)
+        result = svc.retrieve_reflections(project="p")
+        ids = [r["id"] for r in result["do"]]
+        assert ids.index("r-useful-4") < ids.index("r-overlooked-1")
+
+    def test_semantic_overlooked_outranks_lower_useful_count(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        _seed_semantic(conn, "s-useful-2", useful_count=2,
+                       times_overlooked=0)
+        _seed_semantic(conn, "s-overlooked-1", useful_count=0,
+                       times_overlooked=1)
+        svc = SemanticMemoryService(conn)
+        results = svc.list_for_project(project="p", track_exposure=False)
+        ids = [m.id for m in results]
+        assert ids.index("s-overlooked-1") < ids.index("s-useful-2")
+
+    def test_semantic_high_useful_count_still_beats_one_overlooked(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        _seed_semantic(conn, "s-useful-4", useful_count=4,
+                       times_overlooked=0)
+        _seed_semantic(conn, "s-overlooked-1", useful_count=0,
+                       times_overlooked=1)
+        svc = SemanticMemoryService(conn)
+        results = svc.list_for_project(project="p", track_exposure=False)
+        ids = [m.id for m in results]
+        assert ids.index("s-useful-4") < ids.index("s-overlooked-1")
+
+    def test_semantic_read_model_carries_times_overlooked(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        _seed_semantic(conn, "s1", times_overlooked=5)
+        svc = SemanticMemoryService(conn)
+        results = svc.list_for_project(project="p", track_exposure=False)
+        assert results[0].times_overlooked == 5

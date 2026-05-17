@@ -125,7 +125,8 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
             + f"\n\nSemantic memories ({len(sem_lines)}):\n"
             + ("\n".join(sem_lines) if sem_lines else "  (none)")
             + "\n\nFor each id, classify as one of:\n"
-            "  cited / shaped / ignored / misled (default: ignored)\n\n"
+            "  cited / shaped / ignored / misled / overlooked "
+            "(default: ignored)\n\n"
             "Most exposures default to `ignored` — only flag the few "
             "that actually shaped the session or misled you. Invoke "
             "the skill `rate-session-memories`."

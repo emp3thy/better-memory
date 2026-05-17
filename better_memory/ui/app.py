@@ -461,7 +461,8 @@ def create_app(
         conn = app.extensions["db_connection"]
         row = conn.execute(
             "SELECT id, content, project, scope, created_at, updated_at, "
-            "useful_count, last_useful_at, times_misled, last_misled_at "
+            "useful_count, last_useful_at, times_misled, last_misled_at, "
+            "times_overlooked, last_overlooked_at "
             "FROM semantic_memories WHERE id = ?",
             (id,),
         ).fetchone()
@@ -475,6 +476,8 @@ def create_app(
             "last_useful_at": row["last_useful_at"],
             "times_misled": row["times_misled"] or 0,
             "last_misled_at": row["last_misled_at"],
+            "times_overlooked": row["times_overlooked"] or 0,
+            "last_overlooked_at": row["last_overlooked_at"],
         }
         return render_template(
             "fragments/semantic_drawer.html", memory=memory,
@@ -585,11 +588,19 @@ def create_app(
             "SELECT metric, value FROM rating_diagnostics"
         ).fetchall()
         rating_diagnostics = {r["metric"]: r["value"] for r in diag_rows}
+        overlooked_total = conn.execute(
+            "SELECT "
+            "(SELECT COALESCE(SUM(times_overlooked), 0) FROM reflections) "
+            "+ "
+            "(SELECT COALESCE(SUM(times_overlooked), 0) FROM semantic_memories) "
+            "AS total"
+        ).fetchone()["total"]
         return render_template(
             "diagnostics.html",
             active_tab="diagnostics",
             recent_ratings=recent_ratings,
             rating_diagnostics=rating_diagnostics,
+            overlooked_total=overlooked_total,
         )
 
     @app.get("/diagnostics/panel/hook-errors")
