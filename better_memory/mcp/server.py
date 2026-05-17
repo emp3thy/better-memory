@@ -753,7 +753,10 @@ def _tool_definitions() -> list[Tool]:
                                 "kind": {"enum": ["reflection", "semantic"]},
                                 "id": {"type": "string"},
                                 "class": {
-                                    "enum": ["cited", "shaped", "ignored", "misled"]
+                                    "enum": [
+                                        "cited", "shaped", "ignored",
+                                        "misled", "overlooked",
+                                    ]
                                 },
                             },
                         },
@@ -768,7 +771,10 @@ def _tool_definitions() -> list[Tool]:
                 "retrieved during this session (quote it, follow its "
                 "guidance, or it misled you), call this immediately. "
                 "Resolved server-side from CLAUDE_SESSION_ID. "
-                "class must be 'cited', 'shaped', or 'misled' — NOT 'ignored'."
+                "class must be 'cited', 'shaped', 'misled', or "
+                "'overlooked' — NOT 'ignored'. Use 'overlooked' when the "
+                "user pointed you back to a memory you already had but "
+                "had not applied."
             ),
             inputSchema={
                 "type": "object",
@@ -777,7 +783,7 @@ def _tool_definitions() -> list[Tool]:
                 "properties": {
                     "kind": {"enum": ["reflection", "semantic"]},
                     "id": {"type": "string"},
-                    "class": {"enum": ["cited", "shaped", "misled"]},
+                    "class": {"enum": ["cited", "shaped", "misled", "overlooked"]},
                 },
             },
         ),

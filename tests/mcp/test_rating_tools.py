@@ -345,3 +345,38 @@ class TestMemoryCreditTool:
         ))
         payload = json.loads(result[0].text)
         assert payload == {"applied": None, "skipped": "no_session"}
+
+
+class TestOverlookedClassInSchemas:
+    def test_credit_tool_class_enum_includes_overlooked(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions() if t.name == "memory.credit"
+        )
+        enum = tool.inputSchema["properties"]["class"]["enum"]
+        assert "overlooked" in enum
+
+    def test_apply_ratings_tool_class_enum_includes_overlooked(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.apply_session_ratings"
+        )
+        enum = (
+            tool.inputSchema["properties"]["ratings"]
+            ["items"]["properties"]["class"]["enum"]
+        )
+        assert "overlooked" in enum
+
+    def test_credit_dispatch_accepts_overlooked(self, memory_db, monkeypatch):
+        from better_memory.mcp import server as srv_mod
+        conn, _ = memory_db
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.credit",
+            {"kind": "reflection", "id": "r1", "class": "overlooked"},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload == {"applied": "overlooked", "skipped": None}
