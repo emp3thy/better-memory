@@ -10,9 +10,13 @@
 
 **Branch:** `feat/overlooked-rating-class` (already created; the design spec is committed there).
 
+**Confidence:** Every task carries a confidence rating (per reflection `e4d4f4da`). All ten are ≥93%. The lowest — Task 10, the docs sweep — was lifted from ~85% by grepping every four-class reference and pinning the exact per-file edit, so there are no residual sub-90% tasks.
+
 ---
 
 ## Task 1: Migration 0010 — schema
+
+**Confidence:** 93% — mirrors migration 0009's structure; SQLite table-recreation is the standard CHECK-widening procedure; no table FK-references `session_memory_exposure` (grep-verified); multi-statement migration files are proven by 0006–0009.
 
 **Files:**
 - Create: `better_memory/db/migrations/0010_overlooked_rating.sql`
@@ -214,6 +218,8 @@ git commit -m "feat(db): migration 0010 — overlooked rating class schema"
 
 ## Task 2: Rating service — `overlooked` class
 
+**Confidence:** 96% — every edit is against the full current `memory_rating.py` source; the `overlooked` branch mirrors the `misled` branch; the two existing tests broken by the new `AppliedCounts` key are fixed in-task (Step 4).
+
 **Files:**
 - Modify: `better_memory/services/memory_rating.py`
 - Test: `tests/services/test_memory_rating.py`
@@ -414,6 +420,8 @@ git commit -m "feat(rating): MemoryRatingService accepts the overlooked class"
 
 ## Task 3: MCP tool schemas — `overlooked` in the enums
 
+**Confidence:** 96% — exact server.py lines for the credit + apply_session_ratings enums and the description string; the red/green driver is a schema-enum test using the verified `_tool_definitions()` pattern.
+
 **Files:**
 - Modify: `better_memory/mcp/server.py`
 - Test: `tests/mcp/test_rating_tools.py`
@@ -511,6 +519,8 @@ git commit -m "feat(mcp): allow overlooked in credit + apply_session_ratings"
 ---
 
 ## Task 4: Retrieval ranking + semantic read-model
+
+**Confidence:** 93% — exact SQL for both queries; `?` parameters are valid in SQLite `ORDER BY` expressions and bind positionally after the WHERE params; the imported `OVERLOOKED_RANKING_WEIGHT` creates no import cycle (`memory_rating.py` imports no `better_memory` modules).
 
 **Files:**
 - Modify: `better_memory/services/reflection.py` (`retrieve_reflections`)
@@ -757,6 +767,8 @@ git commit -m "feat(retrieval): weight times_overlooked into ranking (useful + 3
 
 ## Task 5: Session-close directive + rating skill
 
+**Confidence:** 96% — exact directive string and SKILL.md old/new blocks; the directive test follows the existing subprocess pattern; the added word is far under the 8 KB directive cap.
+
 **Files:**
 - Modify: `better_memory/hooks/session_close.py`
 - Modify: `.claude/skills/rate-session-memories/SKILL.md`
@@ -862,6 +874,8 @@ git commit -m "feat(rating): list overlooked in session-close directive + skill"
 ---
 
 ## Task 6: UI read-models — reflection rows + drawer
+
+**Confidence:** 96% — exact `queries.py` dataclasses and functions; tests follow the `test_queries_reflections.py` `conn`-fixture pattern.
 
 **Files:**
 - Modify: `better_memory/ui/queries.py`
@@ -1029,6 +1043,8 @@ git commit -m "feat(ui): reflection read-models carry times_overlooked"
 ---
 
 ## Task 7: Inline `overlooked` badge on list rows
+
+**Confidence:** 94% — exact templates and CSS region; `.rating-overlooked` mirrors the proven `.rating-misled` rule structure; tests assert on emitted class strings, not rendered CSS, so they hold regardless of cosmetic tuning.
 
 **Files:**
 - Modify: `better_memory/ui/templates/fragments/_rating_stat.html`
@@ -1238,6 +1254,8 @@ git commit -m "feat(ui): inline overlooked badge on reflection + semantic rows"
 
 ## Task 8: `Overlooked` line in the drawers
 
+**Confidence:** 95% — exact drawer templates and `semantic_drawer` route; count assertions are anchored on the `Overlooked` `<dd>` via regex so an incidental digit cannot pass them.
+
 **Files:**
 - Modify: `better_memory/ui/templates/fragments/reflection_drawer.html`
 - Modify: `better_memory/ui/templates/fragments/semantic_drawer.html`
@@ -1372,6 +1390,8 @@ git commit -m "feat(ui): always-shown Overlooked line in reflection + semantic d
 
 ## Task 9: `/diagnostics` overlooked total
 
+**Confidence:** 94% — exact route and template; the aggregate is a plain scalar subquery sum; the count assertion is regex-anchored on the `overlooked (total)` `<dd>`.
+
 **Files:**
 - Modify: `better_memory/ui/app.py` (`diagnostics` route)
 - Modify: `better_memory/ui/templates/diagnostics.html`
@@ -1475,6 +1495,8 @@ git commit -m "feat(ui): /diagnostics shows total overlooked count"
 
 ## Task 10: Documentation sync
 
+**Confidence:** 95% — every four-class doc location was grepped and the exact replacement substring is pinned per file below; no automated test (markdown content), so Step 6 is a verifying grep sweep.
+
 **Files:**
 - Modify: `website/mcp-tools.md`
 - Modify: `website/architecture.md`
@@ -1482,31 +1504,73 @@ git commit -m "feat(ui): /diagnostics shows total overlooked count"
 - Modify: `docs/hooks-setup.md`
 - Modify: `docs/superpowers/specs/2026-05-10-memory-rating-design.md`
 
-- [ ] **Step 1: Update `website/mcp-tools.md`**
+Each step below is a literal find-and-replace. No automated test — these are markdown content edits; Step 6 confirms no current-tense four-class list survives.
 
-Find the `memory.credit` and `memory.apply_session_ratings` tool entries. Wherever the rating `class` values are listed (`cited` / `shaped` / `ignored` / `misled`), add `overlooked`. For `memory.credit`, note `overlooked` is accepted (only `ignored` is rejected there).
+- [ ] **Step 1: Update `website/mcp-tools.md` (3 edits)**
 
-- [ ] **Step 2: Update `website/architecture.md`**
+Replace `` `cited`, `shaped`, `ignored`, or `misled`. `` with `` `cited`, `shaped`, `ignored`, `misled`, or `overlooked`. ``
 
-Find the description of the closed-loop rating model. Update the class list from four to five classes, adding `overlooked` — *relevant, not applied until the user intervened; bumps `times_overlooked` and weights retrieval ranking*.
+Replace the `memory.credit` table cell `` `cited` / `shaped` / `misled` `` with `` `cited` / `shaped` / `misled` / `overlooked` `` (the cell in the row beginning `` | `class` | ``).
 
-- [ ] **Step 3: Update `README.md`**
+Replace `class: "cited" \| "shaped" \| "ignored" \| "misled"}` with `class: "cited" \| "shaped" \| "ignored" \| "misled" \| "overlooked"}`
 
-Search `README.md` for the rating classes (`cited`, `shaped`, `ignored`, `misled`). If they are enumerated, add `overlooked`. The MCP tool-count tables are unaffected — no tool is added or removed.
+- [ ] **Step 2: Update `website/architecture.md` (4 edits)**
 
-Run: `grep -n "misled\|cited\|rating" README.md`
-Apply edits only where the four-class list appears.
+Replace `` as `cited`, `shaped`, or `misled` the moment `` with `` as `cited`, `shaped`, `misled`, or `overlooked` the moment ``
 
-- [ ] **Step 4: Update `docs/hooks-setup.md`**
+Replace `` (`cited` / `shaped` / `ignored` / `misled`). Only on the second Stop `` with `` (`cited` / `shaped` / `ignored` / `misled` / `overlooked`). Only on the second Stop ``
 
-Search for the `RATE_MEMORIES` directive or the rating class list. If the four classes are shown, add `overlooked` to match `session_close.py`.
+Replace the Aggregation list item:
 
-Run: `grep -n "misled\|RATE_MEMORIES\|cited" docs/hooks-setup.md`
-Apply edits only where the class list appears.
+```
+4. **Aggregation** — `useful_count` / `misled_count` columns on
+   reflections and semantic memories accumulate. Retrieval queries
+   `ORDER BY useful_count DESC` so memories that proved themselves
+   surface first.
+```
+
+with:
+
+```
+4. **Aggregation** — `useful_count` / `times_overlooked` / `misled_count`
+   columns on reflections and semantic memories accumulate. Retrieval
+   queries `ORDER BY (useful_count + 3 × times_overlooked) DESC` so
+   memories that proved themselves — or that the user had to recover —
+   surface first.
+```
+
+Replace the UI sentence:
+
+```
+The management UI's Reflections and Semantic tabs surface useful /
+misled badges per row, and `/diagnostics` exposes recent ratings plus a
+`session_id_missing` counter for instrumentation gaps.
+```
+
+with:
+
+```
+The management UI's Reflections and Semantic tabs surface useful /
+overlooked / misled badges per row, and `/diagnostics` exposes recent
+ratings, a total overlooked count, and a `session_id_missing` counter
+for instrumentation gaps.
+```
+
+- [ ] **Step 3: Update `README.md` (3 edits)**
+
+Replace `` `class` ∈ `cited` / `shaped` / `misled` (not `ignored`) `` with `` `class` ∈ `cited` / `shaped` / `misled` / `overlooked` (not `ignored`) ``
+
+Replace `` with `class` ∈ `cited` / `shaped` / `ignored` / `misled`. `` with `` with `class` ∈ `cited` / `shaped` / `ignored` / `misled` / `overlooked`. ``
+
+Replace `` at session end (`cited` / `shaped` / `ignored` / `misled`) via `` with `` at session end (`cited` / `shaped` / `ignored` / `misled` / `overlooked`) via ``
+
+- [ ] **Step 4: Update `docs/hooks-setup.md` (1 edit)**
+
+Replace `` `cited` / `shaped` / `ignored` / `misled`, and submits `` with `` `cited` / `shaped` / `ignored` / `misled` / `overlooked`, and submits ``
 
 - [ ] **Step 5: Add an update note to the prior design doc**
 
-At the top of `docs/superpowers/specs/2026-05-10-memory-rating-design.md`, directly under the title, add:
+At the top of `docs/superpowers/specs/2026-05-10-memory-rating-design.md`, directly under the title line, add:
 
 ```markdown
 > **Update (2026-05-17):** The rating model was extended to a 5th class,
@@ -1516,8 +1580,8 @@ At the top of `docs/superpowers/specs/2026-05-10-memory-rating-design.md`, direc
 
 - [ ] **Step 6: Verify no four-class list was missed**
 
-Run: `grep -rn "cited.*shaped.*ignored.*misled\|cited / shaped / ignored / misled" website/ README.md docs/`
-Expected: every remaining match is either historical context or already includes `overlooked`. Fix any current-tense four-class list that should now read five.
+Run: `grep -rn "cited.*shaped.*ignored.*misled" website/ README.md docs/`
+Expected: every match now reads five classes, OR sits inside a dated historical spec — `docs/superpowers/specs/2026-05-10-memory-rating-design.md` (carries the Step 5 update note) and `2026-05-15-inline-memory-rating-indicators-design.md` (a prior design, left as historical record). Fix any other current-tense four-class list.
 
 - [ ] **Step 7: Commit**
 
