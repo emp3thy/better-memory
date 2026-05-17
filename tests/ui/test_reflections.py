@@ -25,18 +25,22 @@ def _seed_reflection(
     title: str | None = None,
     evidence_count: int = 0,
     scope: str = "project",
+    useful_count: int = 0,
+    times_misled: int = 0,
 ) -> None:
     conn = connect(db_path)
     try:
         conn.execute(
             "INSERT INTO reflections "
             "(id, title, project, tech, phase, polarity, use_cases, hints, "
-            "confidence, status, evidence_count, scope, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "confidence, status, evidence_count, scope, useful_count, "
+            "times_misled, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
             "'2026-04-26T10:00:00+00:00', '2026-04-26T10:00:00+00:00')",
             (
                 rid, title or f"title-{rid}", project, tech, phase, polarity,
                 use_cases, hints, confidence, status, evidence_count, scope,
+                useful_count, times_misled,
             ),
         )
         conn.commit()
@@ -481,3 +485,48 @@ class TestReflectionDrawerScope:
         # No promote button (existing actions block already hidden on retired).
         assert "Promote to general" not in body
         assert "action-promote" not in body
+
+
+class TestReflectionRowRatingStat:
+    def test_row_shows_both_badges_at_zero(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", title="Zero rated")
+
+        body = client.get(
+            "/reflections/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "useful 0" in body
+        assert "misled 0" in body
+        assert body.count("rating-zero") >= 2
+
+    def test_useful_badge_inked_when_positive(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", title="Useful one", useful_count=3)
+
+        body = client.get(
+            "/reflections/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "useful 3" in body
+        assert "rating-useful" in body
+
+    def test_misled_badge_ambered_when_positive(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", title="Misled one", times_misled=2)
+
+        body = client.get(
+            "/reflections/panel?project=proj-a"
+        ).get_data(as_text=True)
+        assert "misled 2" in body
+        assert "rating-misled" in body
