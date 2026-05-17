@@ -141,3 +141,37 @@ class TestDiagnosticsPanel:
         body = response.data.decode("utf-8")
         assert "session_id_missing" in body
         assert "3" in body
+
+    def test_overlooked_total_displayed(
+        self, conn, tmp_memory_db, monkeypatch,
+    ):
+        from better_memory.ui.app import create_app
+
+        # One reflection overlooked twice, one semantic memory overlooked once.
+        conn.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at, times_overlooked)
+               VALUES ('r1', 't', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01', 2)"""
+        )
+        conn.execute(
+            """INSERT INTO semantic_memories
+               (id, content, project, scope, created_at, updated_at,
+                times_overlooked)
+               VALUES ('s1', 'fact', 'p', 'project',
+                       '2026-01-01', '2026-01-01', 1)"""
+        )
+        conn.commit()
+
+        monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_memory_db.parent))
+        app = create_app()
+        client = app.test_client()
+        body = client.get("/diagnostics").data.decode("utf-8")
+        assert "overlooked (total)" in body
+        assert "memories the agent dropped until the user intervened" in body
+        # Anchor on the overlooked-total <dd> so an incidental "3"
+        # elsewhere on the page cannot satisfy the assertion.
+        import re
+        m = re.search(r"overlooked \(total\)</dt>\s*<dd>\s*(\d+)", body)
+        assert m is not None and m.group(1) == "3"  # 2 + 1

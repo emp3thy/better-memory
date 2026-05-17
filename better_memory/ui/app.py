@@ -588,11 +588,19 @@ def create_app(
             "SELECT metric, value FROM rating_diagnostics"
         ).fetchall()
         rating_diagnostics = {r["metric"]: r["value"] for r in diag_rows}
+        overlooked_total = conn.execute(
+            "SELECT "
+            "(SELECT COALESCE(SUM(times_overlooked), 0) FROM reflections) "
+            "+ "
+            "(SELECT COALESCE(SUM(times_overlooked), 0) FROM semantic_memories) "
+            "AS total"
+        ).fetchone()["total"]
         return render_template(
             "diagnostics.html",
             active_tab="diagnostics",
             recent_ratings=recent_ratings,
             rating_diagnostics=rating_diagnostics,
+            overlooked_total=overlooked_total,
         )
 
     @app.get("/diagnostics/panel/hook-errors")

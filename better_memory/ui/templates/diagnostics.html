@@ -43,6 +43,9 @@
       <dt>session_id_missing</dt>
       <dd>{{ rating_diagnostics.get('session_id_missing', 0) }}
         (calls where CLAUDE_SESSION_ID was unset)</dd>
+      <dt>overlooked (total)</dt>
+      <dd>{{ overlooked_total }}
+        (memories the agent dropped until the user intervened)</dd>
     </dl>
   </section>
 </section>
