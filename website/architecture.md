@@ -57,7 +57,7 @@ captures whether memories actually shaped Claude's work:
    (`cited` / `shaped` / `ignored` / `misled` / `overlooked`). Only on the second Stop
    fire — after ratings land — does the hook drop the `session_end`
    marker into the spool.
-4. **Aggregation** — `useful_count` / `times_overlooked` / `misled_count`
+4. **Aggregation** — `useful_count` / `times_overlooked` / `times_misled`
    columns on reflections and semantic memories accumulate. Retrieval
    queries `ORDER BY (useful_count + 3 × times_overlooked) DESC` so
    memories that proved themselves — or that the user had to recover —
