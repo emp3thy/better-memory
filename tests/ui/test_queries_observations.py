@@ -44,15 +44,16 @@ def _seed_obs(
     content: str = "test obs",
     episode_id: str = "ep-1",
     created_at: str = "2026-04-26T10:00:00+00:00",
+    reinforcement_score: float = 0.0,
 ) -> None:
     conn.execute(
         "INSERT INTO observations "
         "(id, content, project, component, theme, outcome, status, "
-        " episode_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " episode_id, reinforcement_score, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             oid, content, project, component, theme, outcome, status,
-            episode_id, created_at,
+            episode_id, reinforcement_score, created_at,
         ),
     )
     conn.commit()
@@ -157,18 +158,11 @@ class TestObservationListForUi:
         assert row.outcome == "failure"
         assert row.status == "active"
         assert row.episode_id == "ep-1"
+        assert row.reinforcement_score == 0.0
 
     def test_row_carries_reinforcement_score(self, conn):
         _seed_episode(conn)
-        conn.execute(
-            "INSERT INTO observations "
-            "(id, content, project, component, theme, outcome, status, "
-            " episode_id, reinforcement_score, created_at) "
-            "VALUES ('o-r', 'x', 'proj-a', 'ui_launcher', 'bug', "
-            " 'neutral', 'active', 'ep-1', 2.5, "
-            " '2026-04-26T10:00:00+00:00')"
-        )
-        conn.commit()
+        _seed_obs(conn, oid="o-r", reinforcement_score=2.5)
 
         [row] = observation_list_for_ui(conn, project="proj-a")
         assert row.reinforcement_score == 2.5
