@@ -1,23 +1,31 @@
 # better-memory
 
-A local-first semantic + episodic memory manager for Claude Code. All state lives on your machine — SQLite databases for observations and the knowledge base, and a local Ollama instance for embeddings. Synthesis (turning observations into distilled reflections) runs inside your Claude Code session via an MCP-driven skill — no separate cloud LLM.
+**better-memory gives your AI coding assistant a memory that grows with your project.** It remembers what worked and what didn't, picks up the preferences and conventions you care about, and when you have to point it back to something it should have used, it records that too — so the same lesson surfaces on its own next time. Every lesson is captured the moment a decision is made and distilled into short, relevance-ranked guidance the assistant pulls up on its own. The result: an assistant that *compounds* — getting sharper on your codebase the more you work together.
 
-## What it gives you
+It's a memory layer for Claude Code that runs entirely on your machine. Your observations, distilled lessons, and knowledge base live in a local SQLite database — nothing is sent to a cloud service. Even the work of turning raw notes into durable lessons runs inside your own Claude Code session — no separate cloud LLM, no second subscription, no third party seeing your code.
 
-- **Observations** the AI writes at decision points (`memory.observe`), tagged with an `outcome` of `success` / `failure` / `neutral`.
-- **Retrieval in three buckets** (`memory.retrieve`): `do` (prior successes), `dont` (approaches to avoid), `neutral` (context). Reinforcement-weighted.
-- **Knowledge base** (`~/.better-memory/knowledge-base/`) — human-authored markdown indexed via FTS5. Standards, language conventions, per-project docs.
-- **Fire-and-forget hooks** that snapshot Claude Code's tool calls into a spool, drained lazily on the next retrieve.
-- **Full audit trail** in `audit_log` — every state change is an immutable append.
+## How it works
 
-## Prerequisites
+1. **As it works**, the assistant records what it tried and how it turned out — a fix that worked, an approach that failed, a preference you stated.
+2. **Between sessions**, those raw notes are distilled into short, durable lessons — signal kept, noise dropped.
+3. **Next session**, the relevant lessons are handed back to the assistant automatically, before it touches your code, so it starts already informed about your project.
+
+## What you get
+
+- **Even the failures pay off** — a botched approach is recorded just as carefully as a working fix, so the assistant turns a dead end into a *don't* the next session won't repeat.
+- **The right lesson at the right time** — past lessons come back sorted into *do this*, *avoid this*, and *context*, weighted by how reliable each has proven.
+- **Your standards, on hand** — drop your own conventions, language guides, and project docs into a knowledge base the assistant can search.
+- **Zero ceremony** — once it's installed, capture is automatic: hooks inside Claude Code snapshot your session for you, with nothing to call or manage mid-task.
+- **Nothing happens silently** — every change to memory is an append-only record you can audit.
+
+## Requirements
 
 - **Python 3.12+**
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for environment management
-- **[Ollama](https://ollama.com/)** running locally with the `nomic-embed-text` model pulled (embeddings only — synthesis is Claude-driven)
+- **[Ollama](https://ollama.com/)** — a local model runner (installed separately) with the `nomic-embed-text` embedding model pulled. better-memory uses it *only* to turn text into search vectors; lesson-distilling is done by Claude, and your code never leaves your machine
 - **Claude Code** installed
 
-SQLite ships with Python; `sqlite-vec` is installed as a pip dependency.
+SQLite ships with Python; `sqlite-vec` is installed as a pip dependency — nothing else to set up.
 
 ## Quick start
 
