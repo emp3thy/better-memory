@@ -558,6 +558,21 @@ def observation_distinct_projects(conn: sqlite3.Connection) -> list[str]:
     ]
 
 
+def reflection_distinct_projects(conn: sqlite3.Connection) -> list[str]:
+    """Return all distinct project values in the reflections table, sorted.
+
+    Powers the Project dropdown on the reflections page.
+    """
+    return [
+        r["project"]
+        for r in conn.execute(
+            "SELECT DISTINCT project FROM reflections "
+            "WHERE project IS NOT NULL AND project != '' "
+            "ORDER BY project COLLATE NOCASE"
+        ).fetchall()
+    ]
+
+
 @dataclass(frozen=True)
 class ObservationFull:
     """All columns from observations that the drawer renders."""

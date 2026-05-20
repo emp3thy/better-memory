@@ -28,7 +28,7 @@ No deletion, just status flips. Atomic per run.
 | LLM marks as not reflection-worthy (`ignore`) | `consumed_without_reflection` | No link, just marked done. |
 | Untouched by this run | (unchanged — usually `active`) | Picked up by the next synthesis run. |
 
-`merge` is link-only: the source reflection's `reflection_sources` rows move to the target; observation status doesn't change.
+`merge` does not change observation status: the source reflection's `reflection_sources` rows move to the target, and the source's rating counters (`useful_count`, `times_misled`, `times_overlooked`) are summed onto the target with `last_*_at` timestamps taking the later of the two. Source is marked `superseded`.
 
 ## Retention rules
 

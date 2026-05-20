@@ -217,7 +217,7 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 
 | Tool | Purpose |
 |---|---|
-| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. |
+| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Reflections capped at 20 per polarity bucket, ranked by usefulness then confidence. Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. |
 | `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` | Apply spec §9 retention rules; archive or hard-delete. |
 | `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 
@@ -317,7 +317,7 @@ stateDiagram-v2
 | LLM marks as not reflection-worthy (`ignore`) | `consumed_without_reflection` | No link, just marked done. |
 | Untouched by this run | (unchanged — usually `active`) | Picked up by the next synthesis run. |
 
-`merge` is link-only: source reflection's `reflection_sources` rows move to the target; observation status doesn't change.
+`merge` does not change observation status: source reflection's `reflection_sources` rows move to the target, and the source's rating counters (`useful_count`, `times_misled`, `times_overlooked`) are summed onto the target with `last_*_at` timestamps taking the later of the two. Source is marked `superseded`.
 
 **Retention** (`better_memory.services.retention.RetentionService.run`, default `retention_days=90`):
 

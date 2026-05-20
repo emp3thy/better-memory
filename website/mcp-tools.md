@@ -100,7 +100,7 @@ Spawn or reuse the management UI. Returns `{"url": "...", "reused": bool}`.
 
 ### `memory.session_bootstrap`
 
-Open or reuse a session episode and inject all project + general semantic memories and reflections as `additionalContext` markdown. Mirrors what the SessionStart hook does; callable manually for recovery, testing, or post-`/clear` re-injection.
+Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Reflections are capped at 20 per polarity bucket (`do` / `dont` / `neutral`), ranked by usefulness then confidence. Mirrors what the SessionStart hook does; callable manually for recovery, testing, or post-`/clear` re-injection.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
@@ -160,7 +160,7 @@ Return the next pending episode's full context: episode metadata, all observatio
 
 ### `memory.synthesize_next_apply`
 
-Apply a synthesis decision for one episode. Atomically creates new reflections, augments existing ones, merges duplicates, marks observations consumed (or ignored), and stamps the episode synthesized.
+Apply a synthesis decision for one episode. Atomically creates new reflections, augments existing ones, merges near-duplicates (combining their evidence and rating counters onto the survivor), marks observations consumed (or ignored), and stamps the episode synthesized.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|

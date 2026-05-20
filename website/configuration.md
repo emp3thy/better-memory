@@ -54,7 +54,7 @@ The two SQLite files are never shared between processes — the MCP server owns 
 
 Three Claude Code hooks ship with better-memory and read or write the filesystem layout above. They are installed automatically by `./scripts/setup.sh` (which calls `python -m better_memory.cli.install_hooks` to merge them idempotently into `~/.claude/settings.json`). The list below is reference material:
 
-- **`better_memory.hooks.session_bootstrap`** (SessionStart) — opens or reuses a background episode for the session and injects the project's curated context (project-scoped and general-scope semantic memories plus all distilled reflections — `do` / `dont` / `neutral` buckets) as `additionalContext` for Claude's first turn. Runs in-process against `memory.db`; failure-isolated: if bootstrap breaks, a fallback directive is injected and the failure is recorded in the `hook_errors` table.
+- **`better_memory.hooks.session_bootstrap`** (SessionStart) — opens or reuses a background episode for the session and injects the project's curated context (project-scoped and general-scope semantic memories plus the top distilled reflections in `do` / `dont` / `neutral` buckets, capped at 20 per bucket and ranked by usefulness then confidence) as `additionalContext` for Claude's first turn. Runs in-process against `memory.db`; failure-isolated: if bootstrap breaks, a fallback directive is injected and the failure is recorded in the `hook_errors` table.
 - **`better_memory.hooks.observer`** (PostToolUse) — captures tool-call snapshots into `spool/` for later observation creation.
 - **`better_memory.hooks.session_close`** (Stop) — writes a session-close marker into `spool/`.
 

@@ -225,13 +225,22 @@ def create_app(
 
     @app.get("/reflections")
     def reflections() -> str:
+        conn = app.extensions["db_connection"]
+        current = project_name()
+        db_projects = queries.reflection_distinct_projects(conn)
+        # Union + sort so the current project is always selectable, even
+        # when no reflections exist for it yet.
+        projects = sorted(
+            {current, *db_projects}, key=lambda s: s.casefold()
+        )
         return render_template(
             "reflections.html",
             active_tab="reflections",
+            projects=projects,
             # The filter-form initial state mirrors the no-filter
             # default — current project, status=active, no others.
             initial_filters={
-                "project": project_name(),
+                "project": current,
                 "tech": "",
                 "phase": "",
                 "polarity": "",
