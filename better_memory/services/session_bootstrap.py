@@ -180,8 +180,12 @@ class SessionBootstrapService:
             )
 
         reflection_svc = ReflectionSynthesisService(self._conn)
+        # Cap each polarity bucket so the bootstrap injection stays
+        # signal-dense. Ranking inside retrieve_reflections already
+        # surfaces battle-tested + recently-updated rows first, so the
+        # rows that get dropped are the never-used long tail.
         buckets = reflection_svc.retrieve_reflections(
-            project=project, limit_per_bucket=None, track_exposure=False,
+            project=project, limit_per_bucket=20, track_exposure=False,
         )
 
         semantic_count = len(semantic)

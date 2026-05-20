@@ -6,7 +6,11 @@
       hx-swap="innerHTML">
   <label>
     Project
-    <input name="project" value="{{ initial_filters.project }}">
+    <select name="project">
+      {% for p in projects %}
+        <option value="{{ p }}" {% if initial_filters.project == p %}selected{% endif %}>{{ p }}</option>
+      {% endfor %}
+    </select>
   </label>
   <label>
     Tech

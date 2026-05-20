@@ -40,6 +40,19 @@ def _default_clock() -> datetime:
     return datetime.now(UTC)
 
 
+def _later_ts(a: str | None, b: str | None) -> str | None:
+    """Return the later of two ISO-8601 timestamps, treating NULL as -inf.
+
+    ISO-8601 strings with consistent format sort correctly as strings,
+    so a plain max() suffices once NULL is handled.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if a >= b else b
+
+
 @dataclass(frozen=True)
 class ReflectionForPrompt:
     """Read model for an existing reflection, as seen by the synthesis prompt."""
@@ -493,11 +506,18 @@ class ReflectionSynthesisService:
             "reflection applies, use []."
         )
         lines.append(
-            '- "merge" entries: ONLY use to combine TWO existing '
-            "reflection ids (both must appear in the EXISTING "
-            "REFLECTIONS section above) that name the SAME lesson. "
-            "If no two reflections need merging, use []. NEVER emit "
-            "a merge entry with null, empty, or invented ids."
+            '- "merge" entries: combine TWO existing reflection ids '
+            "(both must appear in the EXISTING REFLECTIONS section "
+            "above) that express SUBSTANTIALLY the same lesson — "
+            "paraphrased, differently scoped, or differently worded "
+            "variants of the same underlying insight. PREFER to merge "
+            "when you can do so with high confidence: merging combines "
+            "evidence and rating signals (useful_count, "
+            "times_overlooked, times_misled, and last_*_at timestamps) "
+            "from the source onto the target, strengthening the "
+            "surviving reflection and reducing duplicate noise at "
+            "retrieval. If no two reflections meet that bar, use []. "
+            "NEVER emit a merge entry with null, empty, or invented ids."
         )
         lines.append(
             '- For each entry in "new", ALL FIELDS ARE REQUIRED: '
@@ -892,6 +912,12 @@ class ReflectionSynthesisService:
           (INSERT OR IGNORE dedups against existing target sources).
         - DELETE source's ``reflection_sources`` rows.
         - Recompute target.evidence_count from actual COUNT(*).
+        - Accumulate source's rating counters onto target:
+          useful_count, times_misled, times_overlooked are summed;
+          last_useful_at, last_misled_at, last_overlooked_at take the
+          later of the two timestamps. Source counters are left in
+          place but become inert because source.status='superseded'
+          excludes the row from retrieval.
         - Set source.status='superseded', superseded_by=target.
         - Bump both updated_at.
 
@@ -914,7 +940,10 @@ class ReflectionSynthesisService:
                 continue
 
             src = self._conn.execute(
-                "SELECT status FROM reflections WHERE id = ?",
+                "SELECT status, useful_count, last_useful_at, "
+                "       times_misled, last_misled_at, "
+                "       times_overlooked, last_overlooked_at "
+                "FROM reflections WHERE id = ?",
                 (action.source_id,),
             ).fetchone()
             if src is None:
@@ -923,7 +952,10 @@ class ReflectionSynthesisService:
                 continue
 
             tgt = self._conn.execute(
-                "SELECT id FROM reflections WHERE id = ?",
+                "SELECT useful_count, last_useful_at, "
+                "       times_misled, last_misled_at, "
+                "       times_overlooked, last_overlooked_at "
+                "FROM reflections WHERE id = ?",
                 (action.target_id,),
             ).fetchone()
             if tgt is None:
@@ -949,6 +981,25 @@ class ReflectionSynthesisService:
                 (action.target_id,),
             ).fetchone()["c"]
 
+            # Accumulate rating counters: sum hit counts, take the later
+            # of each last_*_at timestamp. _later_ts handles either side
+            # being NULL.
+            new_useful = (tgt["useful_count"] or 0) + (src["useful_count"] or 0)
+            new_misled = (tgt["times_misled"] or 0) + (src["times_misled"] or 0)
+            new_overlooked = (
+                (tgt["times_overlooked"] or 0)
+                + (src["times_overlooked"] or 0)
+            )
+            new_last_useful = _later_ts(
+                tgt["last_useful_at"], src["last_useful_at"]
+            )
+            new_last_misled = _later_ts(
+                tgt["last_misled_at"], src["last_misled_at"]
+            )
+            new_last_overlooked = _later_ts(
+                tgt["last_overlooked_at"], src["last_overlooked_at"]
+            )
+
             # Update source + target.
             self._conn.execute(
                 "UPDATE reflections "
@@ -958,8 +1009,20 @@ class ReflectionSynthesisService:
             )
             self._conn.execute(
                 "UPDATE reflections "
-                "SET evidence_count = ?, updated_at = ? WHERE id = ?",
-                (new_count, now, action.target_id),
+                "SET evidence_count = ?, "
+                "    useful_count = ?, last_useful_at = ?, "
+                "    times_misled = ?, last_misled_at = ?, "
+                "    times_overlooked = ?, last_overlooked_at = ?, "
+                "    updated_at = ? "
+                "WHERE id = ?",
+                (
+                    new_count,
+                    new_useful, new_last_useful,
+                    new_misled, new_last_misled,
+                    new_overlooked, new_last_overlooked,
+                    now,
+                    action.target_id,
+                ),
             )
 
     # ------------------------------------------------------------ _apply_ignore

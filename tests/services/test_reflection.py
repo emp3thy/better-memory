@@ -622,6 +622,50 @@ class TestApplyMerge:
         ).fetchall()
         assert [s["observation_id"] for s in tgt_sources] == ["obs-A", "obs-B"]
 
+    def test_merge_accumulates_rating_counters(self, conn, fixed_clock):
+        """Merging adds source's rating counters onto target; timestamps take the later value."""
+        _insert_reflection(conn, refl_id="src", project="p")
+        _insert_reflection(conn, refl_id="tgt", project="p")
+        # Set rating counters directly. Source has earlier last_useful;
+        # target has later last_misled; source has the only last_overlooked.
+        conn.execute(
+            "UPDATE reflections SET "
+            "  useful_count = 3, last_useful_at = '2026-04-01T00:00:00+00:00', "
+            "  times_misled = 1, last_misled_at = '2026-04-02T00:00:00+00:00', "
+            "  times_overlooked = 4, last_overlooked_at = '2026-04-05T00:00:00+00:00' "
+            "WHERE id = 'src'"
+        )
+        conn.execute(
+            "UPDATE reflections SET "
+            "  useful_count = 2, last_useful_at = '2026-04-10T00:00:00+00:00', "
+            "  times_misled = 5, last_misled_at = '2026-04-03T00:00:00+00:00', "
+            "  times_overlooked = 0, last_overlooked_at = NULL "
+            "WHERE id = 'tgt'"
+        )
+        conn.commit()
+
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        svc._apply_merge(
+            [MergeAction(source_id="src", target_id="tgt", justification="dupes")]
+        )
+        conn.commit()
+
+        tgt = conn.execute(
+            "SELECT useful_count, last_useful_at, "
+            "       times_misled, last_misled_at, "
+            "       times_overlooked, last_overlooked_at "
+            "FROM reflections WHERE id = 'tgt'"
+        ).fetchone()
+        # Counters sum.
+        assert tgt["useful_count"] == 5
+        assert tgt["times_misled"] == 6
+        assert tgt["times_overlooked"] == 4
+        # last_*_at: take the later of two non-null; non-null wins
+        # against null.
+        assert tgt["last_useful_at"] == "2026-04-10T00:00:00+00:00"
+        assert tgt["last_misled_at"] == "2026-04-03T00:00:00+00:00"
+        assert tgt["last_overlooked_at"] == "2026-04-05T00:00:00+00:00"
+
     def test_merge_dedupes_shared_sources(self, conn, fixed_clock):
         """If both reflections already link the same observation, target count is still correct."""
         epsvc = EpisodeService(conn, clock=fixed_clock)
