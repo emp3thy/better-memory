@@ -1,6 +1,6 @@
 # Architecture
 
-better-memory is a four-layer epistemic hierarchy backed by a single SQLite database, with embeddings supplied by a local Ollama instance.
+better-memory is a four-layer epistemic hierarchy backed by a single SQLite database, with embeddings supplied by one of two pluggable backends (Ollama, or an in-memory TF-IDF retriever).
 
 ## The four layers
 
