@@ -89,7 +89,7 @@ class TfidfRetriever:
     def fit_from_db(self) -> None:
         """Reload corpus from the ``observations`` table and refit."""
         rows = self._conn.execute(
-            "SELECT id, content FROM observations WHERE status != 'deleted'"
+            "SELECT id, content FROM observations WHERE status = 'active'"
         ).fetchall()
         docs = {row[0]: row[1] for row in rows}
         self._fit_docs(docs)
@@ -101,7 +101,7 @@ class TfidfRetriever:
         document plus any other observations that exist in the DB.
         """
         rows = self._conn.execute(
-            "SELECT id, content FROM observations WHERE status != 'deleted'"
+            "SELECT id, content FROM observations WHERE status = 'active'"
         ).fetchall()
         docs = {row[0]: row[1] for row in rows}
         # Ensure the newly-supplied doc is present even if not yet visible
@@ -112,7 +112,7 @@ class TfidfRetriever:
     def remove_doc(self, doc_id: str) -> None:
         """Drop a doc from the corpus and refit."""
         rows = self._conn.execute(
-            "SELECT id, content FROM observations WHERE status != 'deleted' AND id != ?",
+            "SELECT id, content FROM observations WHERE status = 'active' AND id != ?",
             (doc_id,),
         ).fetchall()
         docs = {row[0]: row[1] for row in rows}
