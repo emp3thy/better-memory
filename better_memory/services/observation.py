@@ -610,8 +610,6 @@ class ObservationService:
         query: str,
         limit: int,
     ) -> list[dict[str, Any]]:
-        # Embed the query; reuse the same embedder used for writes.
-        vector = await self._embedder.embed(query)
         fts_query_text = sanitize_fts5_query(query) or None
 
         # Drill-down should see ALL statuses and have no time cap.
@@ -622,14 +620,27 @@ class ObservationService:
             status=None,
             window_days=None,
         )
-        results = hybrid_search(
-            self._conn,
-            query_text=fts_query_text,
-            query_vector=vector,
-            filters=filters,
-            limit=limit,
-            clock=self._clock,
-        )
+        if self._retriever is not None:
+            from better_memory.search.tfidf_search import tfidf_search
+            results = tfidf_search(
+                self._conn,
+                self._retriever,
+                query_text=fts_query_text,
+                filters=filters,
+                limit=limit,
+                clock=self._clock,
+            )
+        else:
+            # Embed the query; reuse the same embedder used for writes.
+            vector = await self._embedder.embed(query)
+            results = hybrid_search(
+                self._conn,
+                query_text=fts_query_text,
+                query_vector=vector,
+                filters=filters,
+                limit=limit,
+                clock=self._clock,
+            )
         return [
             {
                 "id": r.id,

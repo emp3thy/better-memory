@@ -98,3 +98,14 @@ async def test_retrieve_returns_bucketed_results_in_tfidf_mode(
     )
     assert len(buckets.do) >= 1
     assert buckets.do[0].content == "windows pytest junit-xml output"
+
+
+async def test_list_observations_query_mode_in_tfidf(
+    service: ObservationService,
+) -> None:
+    await service.create(content="alpha bravo charlie", outcome="success")
+    await service.create(content="completely separate topic", outcome="neutral")
+
+    results = await service.list_observations(query="alpha", limit=5)
+    contents = {r["content"] for r in results}
+    assert "alpha bravo charlie" in contents
