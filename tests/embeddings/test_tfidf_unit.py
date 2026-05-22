@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import math
+import sqlite3
+from pathlib import Path
 
 import pytest
 
+from better_memory.db.connection import connect
+from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.tfidf import TfidfRetriever, tokenize
 
 
@@ -81,3 +85,70 @@ class TestTfidfRetrieverInMemory:
     def test_score_for_empty_corpus_returns_empty(self) -> None:
         r = TfidfRetriever(conn=None)  # type: ignore[arg-type]
         assert r.score("anything", []) == []
+
+
+@pytest.fixture
+def conn(tmp_memory_db: Path):
+    c = connect(tmp_memory_db)
+    try:
+        apply_migrations(c)
+        yield c
+    finally:
+        c.close()
+
+
+def _insert_obs(conn: sqlite3.Connection, obs_id: str, content: str) -> None:
+    # Episode required by FK; create a background episode.
+    conn.execute(
+        "INSERT INTO episodes (id, project, started_at, outcome) "
+        "VALUES (?, 'p', '2026-01-01T00:00:00+00:00', NULL)",
+        (f"ep-{obs_id}",),
+    )
+    conn.execute(
+        "INSERT INTO observations (id, content, project, episode_id, "
+        "status, outcome, created_at, status_changed_at) "
+        "VALUES (?, ?, 'p', ?, 'active', 'neutral', "
+        "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+        (obs_id, content, f"ep-{obs_id}"),
+    )
+    conn.commit()
+
+
+class TestTfidfRetrieverDB:
+    def test_fit_from_db_loads_existing_observations(self, conn: sqlite3.Connection) -> None:
+        _insert_obs(conn, "o1", "first observation content")
+        _insert_obs(conn, "o2", "second observation content")
+
+        r = TfidfRetriever(conn)
+        r.fit_from_db()
+
+        assert set(r._doc_vectors.keys()) == {"o1", "o2"}
+
+    def test_fit_from_db_empty_corpus_is_safe(self, conn: sqlite3.Connection) -> None:
+        r = TfidfRetriever(conn)
+        r.fit_from_db()
+        assert r._doc_vectors == {}
+        assert r._vocab == set()
+
+    def test_add_doc_refits_and_includes_new(self, conn: sqlite3.Connection) -> None:
+        _insert_obs(conn, "o1", "alpha bravo")
+        r = TfidfRetriever(conn)
+        r.fit_from_db()
+
+        _insert_obs(conn, "o2", "charlie delta")
+        r.add_doc("o2", "charlie delta")
+
+        assert "o2" in r._doc_vectors
+        assert "charlie" in r._vocab
+
+    def test_remove_doc_refits_without_removed(self, conn: sqlite3.Connection) -> None:
+        _insert_obs(conn, "o1", "stay")
+        _insert_obs(conn, "o2", "leave")
+        r = TfidfRetriever(conn)
+        r.fit_from_db()
+
+        conn.execute("DELETE FROM observations WHERE id = 'o2'")
+        conn.commit()
+        r.remove_doc("o2")
+
+        assert "o2" not in r._doc_vectors

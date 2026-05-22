@@ -19,7 +19,6 @@ import math
 import re
 import sqlite3
 from collections import Counter
-from collections.abc import Iterable
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 _NGRAM_N = 4
@@ -86,6 +85,38 @@ class TfidfRetriever:
             scored.append((doc_id, _cosine_normalised(qv, dv)))
         scored.sort(key=lambda x: (-x[1], x[0]))
         return scored
+
+    def fit_from_db(self) -> None:
+        """Reload corpus from the ``observations`` table and refit."""
+        rows = self._conn.execute(
+            "SELECT id, content FROM observations WHERE status != 'deleted'"
+        ).fetchall()
+        docs = {row[0]: row[1] for row in rows}
+        self._fit_docs(docs)
+
+    def add_doc(self, doc_id: str, text: str) -> None:
+        """Add a doc to the corpus and refit.
+
+        Re-fetches the full corpus so the IDF and vectors reflect the new
+        document plus any other observations that exist in the DB.
+        """
+        rows = self._conn.execute(
+            "SELECT id, content FROM observations WHERE status != 'deleted'"
+        ).fetchall()
+        docs = {row[0]: row[1] for row in rows}
+        # Ensure the newly-supplied doc is present even if not yet visible
+        # to a concurrent reader of the connection.
+        docs[doc_id] = text
+        self._fit_docs(docs)
+
+    def remove_doc(self, doc_id: str) -> None:
+        """Drop a doc from the corpus and refit."""
+        rows = self._conn.execute(
+            "SELECT id, content FROM observations WHERE status != 'deleted' AND id != ?",
+            (doc_id,),
+        ).fetchall()
+        docs = {row[0]: row[1] for row in rows}
+        self._fit_docs(docs)
 
     # ----------------------------------------------------------- internals
     def _fit_docs(self, docs: dict[str, str]) -> None:
