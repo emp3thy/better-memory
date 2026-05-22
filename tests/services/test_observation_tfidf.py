@@ -82,3 +82,19 @@ async def test_create_requires_exactly_one_of_embedder_retriever(
             conn, embedder=None, retriever=None,
             clock=fixed_clock, episodes=episodes,
         )
+
+
+async def test_retrieve_returns_bucketed_results_in_tfidf_mode(
+    service: ObservationService,
+) -> None:
+    await service.create(content="windows pytest junit-xml output", outcome="success")
+    await service.create(content="merge conflict resolution strategy", outcome="failure")
+    await service.create(content="unrelated trivia notes", outcome="neutral")
+
+    buckets = await service.retrieve(
+        query="windows pytest",
+        do_limit=5, dont_limit=5, neutral_limit=5,
+        window_days=None,
+    )
+    assert len(buckets.do) >= 1
+    assert buckets.do[0].content == "windows pytest junit-xml output"

@@ -332,7 +332,7 @@ class ObservationService:
         # Embed the query once, if any, so vector search is available to every
         # bucket without paying three embed calls.
         query_vector: list[float] | None = None
-        if query is not None and query.strip():
+        if query is not None and query.strip() and self._embedder is not None:
             query_vector = await self._embedder.embed(query)
 
         # Sanitise before FTS5 MATCH: user queries like ``better-memory retrieval``
@@ -354,6 +354,18 @@ class ObservationService:
 
         def _run(outcome: Outcome, limit: int) -> list[SearchResult]:
             filters = SearchFilters(outcome=outcome, **base_kwargs)
+            if self._retriever is not None:
+                from better_memory.search.tfidf_search import tfidf_search
+                return tfidf_search(
+                    self._conn,
+                    self._retriever,
+                    query_text=fts_query_text,
+                    filters=filters,
+                    limit=limit,
+                    candidate_k=candidate_k,
+                    reinforcement_alpha=reinforcement_alpha,
+                    clock=self._clock,
+                )
             return hybrid_search(
                 self._conn,
                 query_text=fts_query_text,
