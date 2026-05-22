@@ -1,6 +1,6 @@
 # Architecture
 
-better-memory is a four-layer epistemic hierarchy backed by a single SQLite database, with embeddings supplied by a local Ollama instance.
+better-memory is a four-layer epistemic hierarchy backed by a single SQLite database, with embeddings supplied by one of two pluggable backends (Ollama, or an in-memory TF-IDF retriever).
 
 ## The four layers
 
@@ -25,6 +25,30 @@ better-memory is a four-layer epistemic hierarchy backed by a single SQLite data
 2. **sqlite-vec** dense vector match against observation embeddings (768-dim from `nomic-embed-text`).
 3. **Reciprocal Rank Fusion (RRF)** combines the two ranked lists.
 4. Results are filtered by the bucket's polarity and weighted by `reinforcement_score` (each `memory.record_use` shifts a memory's score up on success or down on failure).
+
+## Embeddings backends
+
+better-memory supports two backends behind the
+`BETTER_MEMORY_EMBEDDINGS_BACKEND` env var.
+
+**`ollama` (default).** Observation text is embedded by a local Ollama
+server (model: `nomic-embed-text`, 768-dim). Vectors land in the
+`observation_embeddings` virtual table; retrieval fuses FTS5 BM25 with
+sqlite-vec kNN via Reciprocal Rank Fusion. Same quality as previous
+versions; requires Ollama running on `OLLAMA_HOST`.
+
+**`tfidf`.** A hand-rolled TF-IDF retriever (`TfidfRetriever`) lives
+in-memory and refits after every observation write. The vector half of
+hybrid search runs in pure Python instead of sqlite-vec. No model
+downloads, no external service. Lower semantic quality than Ollama
+(lexical match plus character 4-grams) but works in environments that
+block Ollama or model file downloads.
+
+Switching backends does not migrate existing data. Observations written
+under one backend remain searchable via FTS5 BM25 under the other; only
+the vector half degrades for cross-backend rows. A future
+`memory.reindex` MCP tool can backfill if the half-state becomes a
+problem.
 
 ## Reinforcement
 

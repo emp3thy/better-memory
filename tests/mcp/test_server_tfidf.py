@@ -1,0 +1,71 @@
+"""MCP server boot + roundtrip test for the TF-IDF backend.
+
+Verifies that ``create_server()`` wires the TF-IDF retriever (not the
+OllamaEmbedder) when ``BETTER_MEMORY_EMBEDDINGS_BACKEND=tfidf`` even
+with Ollama unreachable. ``memory.observe`` and ``memory.retrieve``
+must round-trip without any HTTP call to Ollama, and ``cleanup()`` must
+not blow up on a ``None`` embedder.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+
+def test_create_server_in_tfidf_mode_without_ollama(
+    tmp_memory_db: Path,
+    tmp_knowledge_base: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server should start AND serve observe/retrieve in tfidf mode without Ollama.
+
+    The OLLAMA_HOST is pointed at an unresolvable address so any code
+    path that still tries to embed via HTTP would surface as a clean
+    failure on the first tool call. Under the tfidf wiring this path
+    is dead — the TfidfRetriever is fully in-memory.
+    """
+    home = tmp_memory_db.parent
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "tfidf")
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+    monkeypatch.setenv("OLLAMA_HOST", "http://does-not-exist.invalid:1")
+
+    from better_memory.mcp.server import _dispatch_for_tests, create_server
+
+    server, cleanup = create_server()
+    try:
+        assert server is not None
+    finally:
+        asyncio.run(cleanup())
+
+    # End-to-end: observe a memory then drill it back out with a query.
+    # Both calls run a fresh create_server() under the hood (via
+    # _dispatch_for_tests), so this also catches any state that leaks
+    # across server instances in tfidf mode. ``memory.retrieve_observations``
+    # exercises the tfidf_search path when ``query`` is set.
+    async def _roundtrip() -> list[dict]:
+        observe_result = await _dispatch_for_tests(
+            "memory.observe",
+            {
+                "content": "tfidf wiring smoke probe alpha bravo charlie",
+                "outcome": "success",
+                "component": "mcp",
+            },
+        )
+        assert observe_result and observe_result[0].text
+        retrieve_result = await _dispatch_for_tests(
+            "memory.retrieve_observations",
+            {"query": "tfidf wiring smoke probe", "limit": 5},
+        )
+        assert retrieve_result and retrieve_result[0].text
+        return json.loads(retrieve_result[0].text)
+
+    rows = asyncio.run(_roundtrip())
+    # ``rows`` is a list of observation dicts ordered by query relevance.
+    assert any(
+        "tfidf wiring smoke probe" in (row.get("content") or "")
+        for row in rows
+    ), f"observed memory not returned by retrieve_observations; rows={rows!r}"

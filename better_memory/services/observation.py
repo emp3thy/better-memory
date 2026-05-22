@@ -115,8 +115,9 @@ class ObservationService:
     def __init__(
         self,
         conn: sqlite3.Connection,
-        embedder: Any,
+        embedder: Any = None,
         *,
+        retriever: Any = None,
         clock: Callable[[], datetime] | None = None,
         project_resolver: Callable[[], str] | None = None,
         scope_resolver: Callable[[], str | None] | None = None,
@@ -124,8 +125,13 @@ class ObservationService:
         audit_log_retrieved: bool | None = None,
         episodes: EpisodeService | None = None,
     ) -> None:
+        if (embedder is None) == (retriever is None):
+            raise ValueError(
+                "exactly one of embedder/retriever must be supplied (got both or neither)"
+            )
         self._conn = conn
         self._embedder = embedder
+        self._retriever = retriever
         self._clock: Callable[[], datetime] = clock or _default_clock
         self._project_resolver: Callable[[], str] = (
             project_resolver if project_resolver is not None else project_name
@@ -210,11 +216,18 @@ class ObservationService:
             # slow / broken Ollama server does not hold an open SAVEPOINT. Note
             # that the episode lookup / background-open above has already
             # committed if a new background was created — see module docstring.
-            _diag.step(fn, "about_to_embed", model=getattr(self._embedder, "_model", "?"))
-            vector = await self._embedder.embed(content)
-            _diag.step(fn, "embed_returned", dim=len(vector))
-            vec_blob = sqlite_vec.serialize_float32(vector)
-            _diag.step(fn, "vec_serialized", bytes=len(vec_blob))
+            #
+            # Embed-or-defer step: with an embedder, compute the vec0 blob
+            # before opening the SAVEPOINT so a slow Ollama doesn't hold it
+            # open. With a retriever, defer the index step until AFTER commit
+            # so a refit failure can't kill a durable write.
+            vec_blob: bytes | None = None
+            if self._embedder is not None:
+                _diag.step(fn, "about_to_embed", model=getattr(self._embedder, "_model", "?"))
+                vector = await self._embedder.embed(content)
+                _diag.step(fn, "embed_returned", dim=len(vector))
+                vec_blob = sqlite_vec.serialize_float32(vector)
+                _diag.step(fn, "vec_serialized", bytes=len(vec_blob))
 
             now = self._clock().isoformat()
 
@@ -249,12 +262,13 @@ class ObservationService:
                     ),
                 )
 
-                _diag.step(fn, "insert_embedding_row")
-                conn.execute(
-                    "INSERT INTO observation_embeddings (observation_id, embedding) "
-                    "VALUES (?, ?)",
-                    (obs_id, vec_blob),
-                )
+                if vec_blob is not None:
+                    _diag.step(fn, "insert_embedding_row")
+                    conn.execute(
+                        "INSERT INTO observation_embeddings (observation_id, embedding) "
+                        "VALUES (?, ?)",
+                        (obs_id, vec_blob),
+                    )
 
                 _diag.step(fn, "write_audit_row")
                 self._write_audit(
@@ -281,6 +295,15 @@ class ObservationService:
             _diag.step(fn, "commit")
             conn.commit()
             _diag.step(fn, "commit_done", obs_id=obs_id)
+
+            # Post-commit indexing for the TF-IDF backend. If add_doc raises,
+            # the observation is still durable; the next MCP restart will
+            # rebuild the in-memory state via fit_from_db.
+            if self._retriever is not None:
+                try:
+                    self._retriever.add_doc(obs_id, content)
+                except Exception:  # noqa: BLE001 — best-effort post-commit index
+                    _diag.step(fn, "retriever_add_doc_failed")
             return obs_id
 
     async def retrieve(
@@ -309,7 +332,7 @@ class ObservationService:
         # Embed the query once, if any, so vector search is available to every
         # bucket without paying three embed calls.
         query_vector: list[float] | None = None
-        if query is not None and query.strip():
+        if query is not None and query.strip() and self._embedder is not None:
             query_vector = await self._embedder.embed(query)
 
         # Sanitise before FTS5 MATCH: user queries like ``better-memory retrieval``
@@ -331,6 +354,18 @@ class ObservationService:
 
         def _run(outcome: Outcome, limit: int) -> list[SearchResult]:
             filters = SearchFilters(outcome=outcome, **base_kwargs)
+            if self._retriever is not None:
+                from better_memory.search.tfidf_search import tfidf_search
+                return tfidf_search(
+                    self._conn,
+                    self._retriever,
+                    query_text=fts_query_text,
+                    filters=filters,
+                    limit=limit,
+                    candidate_k=candidate_k,
+                    reinforcement_alpha=reinforcement_alpha,
+                    clock=self._clock,
+                )
             return hybrid_search(
                 self._conn,
                 query_text=fts_query_text,
@@ -575,8 +610,6 @@ class ObservationService:
         query: str,
         limit: int,
     ) -> list[dict[str, Any]]:
-        # Embed the query; reuse the same embedder used for writes.
-        vector = await self._embedder.embed(query)
         fts_query_text = sanitize_fts5_query(query) or None
 
         # Drill-down should see ALL statuses and have no time cap.
@@ -587,14 +620,27 @@ class ObservationService:
             status=None,
             window_days=None,
         )
-        results = hybrid_search(
-            self._conn,
-            query_text=fts_query_text,
-            query_vector=vector,
-            filters=filters,
-            limit=limit,
-            clock=self._clock,
-        )
+        if self._retriever is not None:
+            from better_memory.search.tfidf_search import tfidf_search
+            results = tfidf_search(
+                self._conn,
+                self._retriever,
+                query_text=fts_query_text,
+                filters=filters,
+                limit=limit,
+                clock=self._clock,
+            )
+        else:
+            # Embed the query; reuse the same embedder used for writes.
+            vector = await self._embedder.embed(query)
+            results = hybrid_search(
+                self._conn,
+                query_text=fts_query_text,
+                query_vector=vector,
+                filters=filters,
+                limit=limit,
+                clock=self._clock,
+            )
         return [
             {
                 "id": r.id,
