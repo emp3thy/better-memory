@@ -19,12 +19,15 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from better_memory import _diag
 
 _DEFAULT_HOME = "~/.better-memory"
 _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 _DEFAULT_EMBED_MODEL = "nomic-embed-text"
+_DEFAULT_EMBEDDINGS_BACKEND = "ollama"
+_VALID_EMBEDDINGS_BACKENDS = ("ollama", "tfidf")
 
 
 def resolve_home() -> Path:
@@ -196,6 +199,17 @@ class Config:
     audit_log_retrieved: bool
     auto_prune: bool
     diag_logging: bool
+    embeddings_backend: Literal["ollama", "tfidf"]
+
+
+def _resolve_embeddings_backend() -> Literal["ollama", "tfidf"]:
+    raw = os.environ.get("BETTER_MEMORY_EMBEDDINGS_BACKEND", _DEFAULT_EMBEDDINGS_BACKEND)
+    if raw not in _VALID_EMBEDDINGS_BACKENDS:
+        raise ValueError(
+            f"BETTER_MEMORY_EMBEDDINGS_BACKEND must be one of "
+            f"{_VALID_EMBEDDINGS_BACKENDS}, got {raw!r}"
+        )
+    return raw  # type: ignore[return-value]
 
 
 def get_config() -> Config:
@@ -215,4 +229,5 @@ def get_config() -> Config:
         audit_log_retrieved=_resolve_bool("AUDIT_LOG_RETRIEVED", default=True),
         auto_prune=_resolve_bool("BETTER_MEMORY_AUTO_PRUNE", default=False),
         diag_logging=_resolve_bool("BETTER_MEMORY_DIAG_LOGGING", default=False),
+        embeddings_backend=_resolve_embeddings_backend(),
     )

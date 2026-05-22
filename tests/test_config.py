@@ -237,6 +237,24 @@ def test_project_name_override_file_beats_git(tmp_path: Path) -> None:
     assert project_name(repo) == "override-name"
 
 
+def test_embeddings_backend_defaults_to_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", raising=False)
+    cfg = get_config()
+    assert cfg.embeddings_backend == "ollama"
+
+
+def test_embeddings_backend_tfidf_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "tfidf")
+    cfg = get_config()
+    assert cfg.embeddings_backend == "tfidf"
+
+
+def test_embeddings_backend_unknown_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "nope")
+    with pytest.raises(ValueError, match="BETTER_MEMORY_EMBEDDINGS_BACKEND"):
+        get_config()
+
+
 def test_project_name_caches_negative_lookup(tmp_path: Path) -> None:
     """A 'no git tree' result is cached so repeat lookups don't re-walk.
 
