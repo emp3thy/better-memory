@@ -10,8 +10,9 @@ filesystem layout. Everything lives under that directory:
         knowledge-base/
 
 Default home is ``~/.better-memory``. External-service knobs
-(``OLLAMA_HOST``, ``EMBED_MODEL``, ``AUDIT_LOG_RETRIEVED``) are separate env
-vars because they're orthogonal to path layout.
+(``OLLAMA_HOST``, ``EMBED_MODEL``, ``AUDIT_LOG_RETRIEVED``,
+``BETTER_MEMORY_EMBEDDINGS_BACKEND``) are separate env vars because they're
+orthogonal to path layout.
 """
 
 from __future__ import annotations

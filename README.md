@@ -22,7 +22,7 @@ It's a memory layer for Claude Code that runs entirely on your machine. Your obs
 
 - **Python 3.12+**
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for environment management
-- **[Ollama](https://ollama.com/)** — a local model runner (installed separately) with the `nomic-embed-text` embedding model pulled. better-memory uses it *only* to turn text into search vectors; lesson-distilling is done by Claude, and your code never leaves your machine
+- **[Ollama](https://ollama.com/)** — a local model runner (installed separately) with the `nomic-embed-text` embedding model pulled. better-memory uses it *only* to turn text into search vectors; lesson-distilling is done by Claude, and your code never leaves your machine. Ollama is only required when `BETTER_MEMORY_EMBEDDINGS_BACKEND=ollama` (the default). Set it to `tfidf` to use a stdlib-only in-memory retriever with no model downloads.
 - **Claude Code** installed
 
 SQLite ships with Python; `sqlite-vec` is installed as a pip dependency — nothing else to set up.
@@ -130,6 +130,7 @@ One env var roots the runtime filesystem layout:
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model (must produce 768-dim vectors) |
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
+| `BETTER_MEMORY_EMBEDDINGS_BACKEND` | `ollama` | `ollama` (default) uses local Ollama at `OLLAMA_HOST`; `tfidf` uses an in-memory TF-IDF retriever, stdlib only, no model downloads. |
 | `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 
 ### Project-name override
