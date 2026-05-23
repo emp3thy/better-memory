@@ -117,7 +117,6 @@ class ObservationService:
         conn: sqlite3.Connection,
         embedder: Any = None,
         *,
-        retriever: Any = None,
         clock: Callable[[], datetime] | None = None,
         project_resolver: Callable[[], str] | None = None,
         scope_resolver: Callable[[], str | None] | None = None,
@@ -125,13 +124,8 @@ class ObservationService:
         audit_log_retrieved: bool | None = None,
         episodes: EpisodeService | None = None,
     ) -> None:
-        if (embedder is None) == (retriever is None):
-            raise ValueError(
-                "exactly one of embedder/retriever must be supplied (got both or neither)"
-            )
         self._conn = conn
         self._embedder = embedder
-        self._retriever = retriever
         self._clock: Callable[[], datetime] = clock or _default_clock
         self._project_resolver: Callable[[], str] = (
             project_resolver if project_resolver is not None else project_name
@@ -216,11 +210,8 @@ class ObservationService:
             # slow / broken Ollama server does not hold an open SAVEPOINT. Note
             # that the episode lookup / background-open above has already
             # committed if a new background was created — see module docstring.
-            #
-            # Embed-or-defer step: with an embedder, compute the vec0 blob
-            # before opening the SAVEPOINT so a slow Ollama doesn't hold it
-            # open. With a retriever, defer the index step until AFTER commit
-            # so a refit failure can't kill a durable write.
+            # When embedder is None (sqlite backend) skip the vec0 path entirely;
+            # FTS5 triggers populate both the word and trigram indexes for us.
             vec_blob: bytes | None = None
             if self._embedder is not None:
                 _diag.step(fn, "about_to_embed", model=getattr(self._embedder, "_model", "?"))
@@ -295,15 +286,6 @@ class ObservationService:
             _diag.step(fn, "commit")
             conn.commit()
             _diag.step(fn, "commit_done", obs_id=obs_id)
-
-            # Post-commit indexing for the TF-IDF backend. If add_doc raises,
-            # the observation is still durable; the next MCP restart will
-            # rebuild the in-memory state via fit_from_db.
-            if self._retriever is not None:
-                try:
-                    self._retriever.add_doc(obs_id, content)
-                except Exception:  # noqa: BLE001 — best-effort post-commit index
-                    _diag.step(fn, "retriever_add_doc_failed")
             return obs_id
 
     async def retrieve(
@@ -354,22 +336,12 @@ class ObservationService:
 
         def _run(outcome: Outcome, limit: int) -> list[SearchResult]:
             filters = SearchFilters(outcome=outcome, **base_kwargs)
-            if self._retriever is not None:
-                from better_memory.search.tfidf_search import tfidf_search
-                return tfidf_search(
-                    self._conn,
-                    self._retriever,
-                    query_text=fts_query_text,
-                    filters=filters,
-                    limit=limit,
-                    candidate_k=candidate_k,
-                    reinforcement_alpha=reinforcement_alpha,
-                    clock=self._clock,
-                )
+            second_source = "vec0" if self._embedder is not None else "trigram"
             return hybrid_search(
                 self._conn,
                 query_text=fts_query_text,
                 query_vector=query_vector,
+                second_source=second_source,
                 filters=filters,
                 limit=limit,
                 candidate_k=candidate_k,
@@ -620,27 +592,19 @@ class ObservationService:
             status=None,
             window_days=None,
         )
-        if self._retriever is not None:
-            from better_memory.search.tfidf_search import tfidf_search
-            results = tfidf_search(
-                self._conn,
-                self._retriever,
-                query_text=fts_query_text,
-                filters=filters,
-                limit=limit,
-                clock=self._clock,
-            )
-        else:
-            # Embed the query; reuse the same embedder used for writes.
+        second_source = "vec0" if self._embedder is not None else "trigram"
+        vector: list[float] | None = None
+        if self._embedder is not None:
             vector = await self._embedder.embed(query)
-            results = hybrid_search(
-                self._conn,
-                query_text=fts_query_text,
-                query_vector=vector,
-                filters=filters,
-                limit=limit,
-                clock=self._clock,
-            )
+        results = hybrid_search(
+            self._conn,
+            query_text=fts_query_text,
+            query_vector=vector,
+            second_source=second_source,
+            filters=filters,
+            limit=limit,
+            clock=self._clock,
+        )
         return [
             {
                 "id": r.id,
