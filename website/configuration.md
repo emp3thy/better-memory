@@ -10,7 +10,7 @@ One environment variable roots the runtime filesystem layout. Everything else ha
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint (embeddings only — see [Architecture](architecture.md#synthesis-pipeline) for why synthesis no longer uses Ollama) |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model (must produce 768-dim vectors) |
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
-| `BETTER_MEMORY_EMBEDDINGS_BACKEND` | `ollama` | `ollama` (default) uses local Ollama at `OLLAMA_HOST`; `tfidf` uses an in-memory TF-IDF retriever, stdlib only, no model downloads. See [Architecture](architecture.md#embeddings-backends). |
+| `BETTER_MEMORY_EMBEDDINGS_BACKEND` | `ollama` | `ollama` (default) — local Ollama at `OLLAMA_HOST`; `sqlite` — pure-SQL trigram-FTS5 fusion, no model downloads and no in-memory state. See [Architecture](architecture.md#embeddings-backends). |
 | `BETTER_MEMORY_AUTO_PRUNE` | unset (`false`) | When `1`, the auto-retention runner that fires on `memory.retrieve` (throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 
 ## Project-name override

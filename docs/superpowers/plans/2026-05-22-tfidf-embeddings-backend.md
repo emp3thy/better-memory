@@ -1,5 +1,7 @@
 # TF-IDF Embeddings Backend Implementation Plan
 
+> **SUPERSEDED 2026-05-23** by [`2026-05-23-trigram-fts5-backend.md`](2026-05-23-trigram-fts5-backend.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add `BETTER_MEMORY_EMBEDDINGS_BACKEND=ollama|tfidf` config switch with a hand-rolled, stdlib-only TF-IDF retriever as a no-Ollama, no-download alternative.
