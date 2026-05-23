@@ -1518,9 +1518,9 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             knowledge_conn.close()
         except Exception:  # noqa: BLE001 — best-effort shutdown
             pass
-        # In tfidf mode there is no embedder to close — the retriever
-        # has no external resources. Guard against the None case so this
-        # cleanup stays idempotent across both backends.
+        # In the sqlite backend no embedder is built (FTS5 triggers handle
+        # indexing). Guard against the None case so this cleanup stays
+        # idempotent across both backends.
         if embedder is not None:
             try:
                 await embedder.aclose()
