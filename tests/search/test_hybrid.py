@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skip(
+_LEGACY_SKIP = pytest.mark.skip(
     reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
 )
 
@@ -113,11 +113,13 @@ def _seed(
 # ---------------------------------------------------------------------------
 
 
+@_LEGACY_SKIP
 def test_empty_query_returns_empty_list(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="anything")
     assert hybrid_search(conn, clock=clock) == []
 
 
+@_LEGACY_SKIP
 def test_text_only_hybrid_ranks_matching_first(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="python bug caught")
     _seed(conn, obs_id="b", content="python feature request")
@@ -130,6 +132,7 @@ def test_text_only_hybrid_ranks_matching_first(conn: sqlite3.Connection, clock) 
     assert results[0].id == "a"
 
 
+@_LEGACY_SKIP
 def test_vector_only_hybrid_ranks_closer_first(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="alpha", vector=_unit_vector(0))
     _seed(conn, obs_id="b", content="beta", vector=_unit_vector(1))
@@ -142,6 +145,7 @@ def test_vector_only_hybrid_ranks_closer_first(conn: sqlite3.Connection, clock) 
     assert results[0].id == "a"
 
 
+@_LEGACY_SKIP
 def test_both_sources_merge_via_rrf(conn: sqlite3.Connection, clock) -> None:
     # 'a' matches both FTS and vector; 'b' matches FTS only; 'c' matches
     # vector only. 'a' should therefore rank above 'b' and 'c'.
@@ -161,6 +165,7 @@ def test_both_sources_merge_via_rrf(conn: sqlite3.Connection, clock) -> None:
     assert ids[0] == "a"
 
 
+@_LEGACY_SKIP
 def test_filter_by_project(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="shared marker", project="alpha")
     _seed(conn, obs_id="b", content="shared marker", project="beta")
@@ -174,6 +179,7 @@ def test_filter_by_project(conn: sqlite3.Connection, clock) -> None:
     assert [r.id for r in results] == ["a"]
 
 
+@_LEGACY_SKIP
 def test_filter_by_component(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="shared marker", component="auth")
     _seed(conn, obs_id="b", content="shared marker", component="db")
@@ -187,6 +193,7 @@ def test_filter_by_component(conn: sqlite3.Connection, clock) -> None:
     assert [r.id for r in results] == ["a"]
 
 
+@_LEGACY_SKIP
 def test_filter_by_scope_path(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="marker", scope_path="foo/bar")
     _seed(conn, obs_id="b", content="marker", scope_path="baz/qux")
@@ -200,6 +207,7 @@ def test_filter_by_scope_path(conn: sqlite3.Connection, clock) -> None:
     assert [r.id for r in results] == ["a"]
 
 
+@_LEGACY_SKIP
 def test_status_filter_defaults_to_active(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="marker", status="active")
     _seed(conn, obs_id="b", content="marker", status="archived")
@@ -208,6 +216,7 @@ def test_status_filter_defaults_to_active(conn: sqlite3.Connection, clock) -> No
     assert [r.id for r in results] == ["a"]
 
 
+@_LEGACY_SKIP
 def test_status_filter_can_be_overridden_to_none(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="a", content="marker", status="active")
     _seed(conn, obs_id="b", content="marker", status="archived")
@@ -221,6 +230,7 @@ def test_status_filter_can_be_overridden_to_none(conn: sqlite3.Connection, clock
     assert {r.id for r in results} == {"a", "b"}
 
 
+@_LEGACY_SKIP
 def test_window_days_excludes_older(
     conn: sqlite3.Connection, fixed_now: datetime, clock
 ) -> None:
@@ -246,6 +256,7 @@ def test_window_days_excludes_older(
     assert {r.id for r in unwindowed} == {"new", "old"}
 
 
+@_LEGACY_SKIP
 def test_outcome_filter(conn: sqlite3.Connection, clock) -> None:
     _seed(conn, obs_id="s", content="marker", outcome="success")
     _seed(conn, obs_id="f", content="marker", outcome="failure")
@@ -266,6 +277,7 @@ def test_outcome_filter(conn: sqlite3.Connection, clock) -> None:
 # ---------------------------------------------------------------------------
 
 
+@_LEGACY_SKIP
 def test_reinforcement_boosts_same_similarity_item(
     conn: sqlite3.Connection, clock
 ) -> None:
@@ -296,6 +308,7 @@ def test_reinforcement_boosts_same_similarity_item(
     assert ids.index("high") < ids.index("low")
 
 
+@_LEGACY_SKIP
 def test_recency_decay_boosts_new(
     conn: sqlite3.Connection, fixed_now: datetime, clock
 ) -> None:
@@ -325,6 +338,7 @@ def test_recency_decay_boosts_new(
     assert ids.index("new") < ids.index("old")
 
 
+@_LEGACY_SKIP
 def test_limit_caps_results(conn: sqlite3.Connection, clock) -> None:
     for i in range(5):
         _seed(conn, obs_id=f"id{i}", content=f"marker item{i}")
@@ -333,6 +347,7 @@ def test_limit_caps_results(conn: sqlite3.Connection, clock) -> None:
     assert len(results) == 2
 
 
+@_LEGACY_SKIP
 def test_returns_final_score_descending(conn: sqlite3.Connection, clock) -> None:
     for i in range(3):
         _seed(conn, obs_id=f"id{i}", content=f"marker item{i}")
@@ -342,6 +357,7 @@ def test_returns_final_score_descending(conn: sqlite3.Connection, clock) -> None
     assert scores == sorted(scores, reverse=True)
 
 
+@_LEGACY_SKIP
 def test_search_result_carries_fields(conn: sqlite3.Connection, clock) -> None:
     _seed(
         conn,
@@ -363,3 +379,105 @@ def test_search_result_carries_fields(conn: sqlite3.Connection, clock) -> None:
     assert r.reinforcement_score == pytest.approx(2.5)
     assert isinstance(r.created_at, str)
     assert isinstance(r.final_score, float)
+
+
+# ---------------------------------------------------------------------------
+# second_source parameter (vec0 | trigram | none)
+# ---------------------------------------------------------------------------
+#
+# These tests use a self-contained ``_seed_obs`` helper rather than the legacy
+# ``_seed`` above. The legacy helper predates the Phase 1 episodic schema (it
+# omits the now-mandatory ``episode_id``) which is why every test using it
+# carries ``@_LEGACY_SKIP``. The new helper inserts a parent episode first.
+
+
+def _seed_obs(
+    conn: sqlite3.Connection,
+    *,
+    obs_id: str,
+    content: str,
+    project: str = "alpha",
+    outcome: str = "neutral",
+    created_at: datetime | None = None,
+    vector: list[float] | None = None,
+) -> None:
+    """Insert an observation (and its parent episode) compatible with current schema."""
+    episode_id = f"ep-{obs_id}"
+    created = (
+        created_at or datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
+    ).isoformat()
+    conn.execute(
+        "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+        "close_reason, goal, synthesized_at) "
+        "VALUES (?, ?, ?, NULL, NULL, NULL, ?, NULL)",
+        (episode_id, project, created, f"goal for {obs_id}"),
+    )
+    conn.execute(
+        """
+        INSERT INTO observations (
+            id, content, project, component, theme, session_id,
+            trigger_type, status, outcome, reinforcement_score, scope_path,
+            created_at, status_changed_at, episode_id
+        ) VALUES (?, ?, ?, NULL, NULL, 'sess', NULL, 'active', ?, 0.0, NULL,
+                  ?, ?, ?)
+        """,
+        (obs_id, content, project, outcome, created, created, episode_id),
+    )
+    vec = vector if vector is not None else _unit_vector(0)
+    conn.execute(
+        "INSERT INTO observation_embeddings (observation_id, embedding) VALUES (?, ?)",
+        (obs_id, sqlite_vec.serialize_float32(vec)),
+    )
+    conn.commit()
+
+
+def test_hybrid_search_second_source_trigram(conn: sqlite3.Connection, clock) -> None:
+    """When second_source='trigram', the second source is FTS5 trigram BM25 over observation_trigram_fts."""
+    _seed_obs(conn, obs_id="hit", content="pytest junit-xml on windows")
+    _seed_obs(conn, obs_id="miss", content="completely unrelated topic")
+
+    results = hybrid_search(
+        conn,
+        query_text="pytest windows",
+        second_source="trigram",
+        filters=SearchFilters(window_days=None),
+        limit=2,
+        clock=clock,
+    )
+
+    assert len(results) >= 1
+    assert results[0].id == "hit"
+
+
+def test_hybrid_search_second_source_none(conn: sqlite3.Connection, clock) -> None:
+    """When second_source='none', only word-FTS5 BM25 runs (no second source)."""
+    _seed_obs(conn, obs_id="o1", content="alpha bravo charlie")
+
+    results = hybrid_search(
+        conn,
+        query_text="alpha",
+        second_source="none",
+        filters=SearchFilters(window_days=None),
+        limit=5,
+        clock=clock,
+    )
+
+    assert any(r.id == "o1" for r in results)
+
+
+def test_hybrid_search_second_source_trigram_substring_match(
+    conn: sqlite3.Connection, clock
+) -> None:
+    """Trigram source matches substrings the word tokenizer misses."""
+    _seed_obs(conn, obs_id="sub", content="testing junitxml output")
+
+    results = hybrid_search(
+        conn,
+        query_text="estin",
+        second_source="trigram",
+        filters=SearchFilters(window_days=None),
+        limit=5,
+        clock=clock,
+    )
+
+    assert any(r.id == "sub" for r in results)
