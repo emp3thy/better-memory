@@ -59,7 +59,6 @@ from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.embeddings.tfidf import TfidfRetriever
 from better_memory.runtime.session_marker import read_session_id
 from better_memory.services import ui_launcher
 from better_memory.services.episode import EpisodeService
@@ -932,11 +931,10 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     knowledge_conn = connect(config.knowledge_db)
     apply_migrations(knowledge_conn, migrations_dir=_KNOWLEDGE_MIGRATIONS)
 
-    # Build embedder OR retriever depending on the configured backend.
-    # Exactly one is non-None and is passed to ObservationService — the
-    # service raises if both or neither are supplied.
+    # Embedder is only built for the ollama backend. For sqlite, FTS5
+    # triggers handle indexing automatically (see migration 0011) and no
+    # embedder is needed.
     embedder: OllamaEmbedder | None = None
-    retriever: TfidfRetriever | None = None
     if config.embeddings_backend == "ollama":
         # One embedder per server. Construction is cheap and does NOT contact
         # Ollama (see OllamaEmbedder.__init__); the first embed() call does.
@@ -946,12 +944,6 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
         # without Ollama, and if Ollama comes up later, memory.observe /
         # memory.retrieve will succeed on their next call without a restart.
         _probe_ollama(config.ollama_host)
-    else:
-        # tfidf backend: load the corpus into the retriever's in-memory
-        # state. No Ollama probe, no HTTP client. fit_from_db() reads
-        # active observations + their tokens and is cheap on a fresh DB.
-        retriever = TfidfRetriever(memory_conn)
-        retriever.fit_from_db()
 
     # Concurrency invariant: the five memory-side services below
     # (EpisodeService, ObservationService, ReflectionSynthesisService,
@@ -966,9 +958,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
     # breaks and the services must be reworked to use per-task
     # connections (or a connection pool with explicit checkout).
     episodes = EpisodeService(memory_conn)
-    observations = ObservationService(
-        memory_conn, embedder=embedder, retriever=retriever, episodes=episodes
-    )
+    observations = ObservationService(memory_conn, embedder=embedder, episodes=episodes)
 
     # Reflection synthesis is driven by the IDE-LLM via two MCP tools
     # (memory.synthesize_next_get_context / _apply). The service no
