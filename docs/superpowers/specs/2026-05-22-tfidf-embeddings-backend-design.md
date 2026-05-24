@@ -1,5 +1,7 @@
 # TF-IDF Embeddings Backend — Design
 
+> **SUPERSEDED 2026-05-23** by [`2026-05-23-trigram-fts5-backend-design.md`](2026-05-23-trigram-fts5-backend-design.md). The Python TF-IDF backend was replaced with a SQL-only trigram-FTS5 implementation less than 24 hours after merging. The backend value `tfidf` was renamed to `sqlite`.
+
 **Status:** Approved (design phase)
 **Date:** 2026-05-22
 **Author:** gethin (with Claude)

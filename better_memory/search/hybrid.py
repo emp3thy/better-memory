@@ -83,6 +83,7 @@ def hybrid_search(
     *,
     query_text: str | None = None,
     query_vector: list[float] | None = None,
+    second_source: Literal["vec0", "trigram", "none"] = "vec0",
     filters: SearchFilters = _DEFAULT_FILTERS,
     limit: int = 10,
     candidate_k: int = 50,
@@ -91,8 +92,20 @@ def hybrid_search(
     recency_half_life_days: float = 14.0,
     clock: Callable[[], datetime] | None = None,
 ) -> list[SearchResult]:
-    """Run hybrid search and return the top ``limit`` results."""
-    if query_text is None and query_vector is None:
+    """Run hybrid search and return the top ``limit`` results.
+
+    ``second_source`` selects the companion ranker that fuses with word-FTS5
+    BM25 via RRF:
+      * ``"vec0"`` (default) — sqlite-vec kNN over ``query_vector``.
+      * ``"trigram"`` — FTS5 BM25 over ``observation_trigram_fts`` using
+        ``query_text``. Used by the ``sqlite`` embeddings backend.
+      * ``"none"`` — skip the second source; only word-FTS5 runs.
+    The RRF source tag stays ``"vec"`` for both vec0 and trigram so downstream
+    code that treats it as "the second source" is unaffected.
+    """
+    if query_text is None and query_vector is None and second_source != "trigram":
+        return []
+    if second_source == "trigram" and (query_text is None or not query_text.strip()):
         return []
 
     now = (clock or _default_clock)()
@@ -100,7 +113,7 @@ def hybrid_search(
 
     # Gather candidate rowids from each active source.
     fts_ids: list[str] = []
-    vec_ids: list[str] = []
+    second_ids: list[str] = []
 
     if query_text is not None and query_text.strip():
         fts_ids = _fts_candidates(
@@ -110,22 +123,33 @@ def hybrid_search(
             where_params=where_params,
             candidate_k=candidate_k,
         )
-    if query_vector is not None:
-        vec_ids = _vec_candidates(
+    if second_source == "vec0" and query_vector is not None:
+        second_ids = _vec_candidates(
             conn,
             query_vector=query_vector,
             where_sql=where_sql,
             where_params=where_params,
             candidate_k=candidate_k,
         )
+    elif second_source == "trigram" and query_text is not None and query_text.strip():
+        second_ids = _trigram_candidates(
+            conn,
+            query_text=query_text,
+            where_sql=where_sql,
+            where_params=where_params,
+            candidate_k=candidate_k,
+        )
+    # second_source == "none" → second_ids stays []
 
-    if not fts_ids and not vec_ids:
+    if not fts_ids and not second_ids:
         return []
 
-    # Fuse with Reciprocal Rank Fusion.
+    # Fuse with Reciprocal Rank Fusion. The second-source tag stays "vec" so
+    # downstream rank-bookkeeping (which treats it as "the companion source")
+    # is unchanged whether vec0 or trigram populated it.
     candidates: dict[str, _Candidate] = {}
     _add_rrf_ranks(candidates, fts_ids, source="fts", rrf_k=rrf_k)
-    _add_rrf_ranks(candidates, vec_ids, source="vec", rrf_k=rrf_k)
+    _add_rrf_ranks(candidates, second_ids, source="vec", rrf_k=rrf_k)
 
     if not candidates:
         return []
@@ -268,6 +292,35 @@ def _vec_candidates(
     allowed = {r["id"] for r in conn.execute(sql, params).fetchall()}
     # Preserve kNN order while filtering.
     return [i for i in ids_in_order if i in allowed]
+
+
+def _trigram_candidates(
+    conn: sqlite3.Connection,
+    *,
+    query_text: str,
+    where_sql: str,
+    where_params: list[Any],
+    candidate_k: int,
+) -> list[str]:
+    """Return observation ids ordered by trigram-FTS5 BM25 (best first)."""
+    sql = (
+        "SELECT o.id AS id, bm25(observation_trigram_fts) AS bm "
+        "FROM observation_trigram_fts "
+        "JOIN observations o ON o.rowid = observation_trigram_fts.rowid "
+        "WHERE observation_trigram_fts MATCH ?"
+    )
+    params: list[Any] = [query_text]
+    if where_sql:
+        sql += " AND " + where_sql
+        params.extend(where_params)
+    sql += " ORDER BY bm ASC LIMIT ?"
+    params.append(candidate_k)
+
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [r["id"] for r in rows]
 
 
 # ---------------------------------------------------------------------------
