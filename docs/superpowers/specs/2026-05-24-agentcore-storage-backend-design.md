@@ -1,6 +1,6 @@
 # AgentCore Storage Backend — Design
 
-**Status:** Draft (design phase)
+**Status:** Draft (design phase, post-spike)
 **Date:** 2026-05-24
 **Author:** gethin (with Claude)
 **Drivers:** [2026-05-23-ralph-umbrella-design.md](../../../../ralph/docs/superpowers/specs/2026-05-23-ralph-umbrella-design.md), [2026-05-23-ralph-v1-per-repo-loop-design.md](../../../../ralph/docs/superpowers/specs/2026-05-23-ralph-v1-per-repo-loop-design.md)
@@ -12,7 +12,7 @@ Add an opt-in storage backend that delegates to AWS Bedrock AgentCore Memory, so
 A single configuration switch:
 
 ```
-BETTER_MEMORY_STORAGE_BACKEND=sqlite   # default — current behaviour
+BETTER_MEMORY_STORAGE_BACKEND=sqlite     # default - current behaviour
 BETTER_MEMORY_STORAGE_BACKEND=agentcore  # delegate storage to AgentCore Memory
 ```
 
@@ -23,16 +23,17 @@ BETTER_MEMORY_STORAGE_BACKEND=agentcore  # delegate storage to AgentCore Memory
 - **Knowledge base port.** The local markdown corpus + BM25 index stays SQLite-backed regardless of `BETTER_MEMORY_STORAGE_BACKEND`. It's not Claude-derived; it doesn't need server-side extraction.
 - **Embeddings backend in agentcore mode.** AgentCore's `retrieve-memory-records` is the search path; the existing Ollama / TF-IDF backends are no-ops in agentcore mode.
 - **Multi-region / DR.** Single AgentCore region per deployment. Cross-region replication is out of scope.
-- **A web UI for AgentCore-specific admin tasks.** Existing better-memory management UI works read-only against either backend; agentcore-specific admin lives in CLI commands.
+- **A web UI for AgentCore-specific admin tasks.** The existing better-memory management UI works read-only against either backend; agentcore-specific admin lives in CLI commands.
 
 ## Constraints
 
 - **Backend dispatch is one env var.** No mixed-mode or per-tool override.
 - **MCP surface unchanged.** All existing tools and hooks present the same shape; behavioural differences are documented per-tool.
 - **Project scoping unchanged.** `git rev-parse --git-common-dir` is still the source of truth for project identity.
-- **Synthesis is server-side in agentcore mode.** Claude-driven `memory_synthesize_next_*` is unavailable when storage is AgentCore.
+- **Synthesis is AgentCore-driven in agentcore mode.** Built-in strategies handle extraction; the Claude-driven `memory_synthesize_next_*` loop is unavailable when storage is AgentCore.
 - **Region:** default `eu-west-2`. Configurable via `AWS_REGION` / `BETTER_MEMORY_AGENTCORE_REGION`.
 - **Auth:** standard AWS credential chain — environment, profile, IRSA on ROSA. The MCP server doesn't manage credentials.
+- **No `memoryExecutionRoleArn` required.** Built-in strategies run extraction in AgentCore's account; no Bedrock model access opt-in on the operator side.
 - **Single user is no longer a safe assumption** in agentcore mode. The fleet writes concurrently against shared resources.
 
 ## Architecture
@@ -57,11 +58,11 @@ flowchart LR
 
   subgraph backends["Storage backends"]
     direction TB
-    SQLite[("SQLite<br/>BETTER_MEMORY_STORAGE_BACKEND=sqlite<br/>default")]
-    subgraph agentcore["BETTER_MEMORY_STORAGE_BACKEND=agentcore"]
+    SQLite[("SQLite<br/>backend=sqlite (default)")]
+    subgraph agentcore["backend=agentcore (both built-in)"]
       direction LR
-      MSemantic[("better-memory-semantic<br/>built-in extraction")]
-      MEpisodic[("better-memory-episodic<br/>custom-override extraction")]
+      MSemantic[("better-memory-semantic<br/>userPreferenceMemoryStrategy")]
+      MEpisodic[("better-memory-episodic<br/>episodicMemoryStrategy")]
     end
   end
 
@@ -87,24 +88,24 @@ Services depend on a `StorageBackend` protocol (Python `typing.Protocol`). Two c
 - `better_memory.storage.sqlite.SqliteBackend` — wraps the existing services / SQL. Behaviour-preserving.
 - `better_memory.storage.agentcore.AgentCoreBackend` — `boto3` client over `bedrock-agentcore` (data plane) and `bedrock-agentcore-control` (control plane).
 
-The protocol is the contract. New methods on the protocol must be implementable by both backends or marked `NotImplementedError` with a clear reason (e.g., synthesize_next is sqlite-only).
+The protocol is the contract. Backend-only methods (e.g., synthesize_next is sqlite-only) raise `NotImplementedError` and are flagged via a capability bit so the MCP server can branch on registration.
 
-### Two AgentCore memory resources
+### Two AgentCore memory resources, both built-in
 
-`agentcore` mode requires two memory resources, both per-deployment (not per-project):
+| Memory name | Strategy | Latency | Purpose |
+|---|---|---|---|
+| `better-memory-semantic` | built-in `userPreferenceMemoryStrategy` (and optionally `semanticMemoryStrategy`) | ~3 min from event to record (measured) | Long-term user preferences and facts. Next session must see them. |
+| `better-memory-episodic` | built-in `episodicMemoryStrategy` with `reflectionConfiguration` | ~15-30 min from session end to reflection (measured) | Episodic events distilled into reflections. Eventual surfacing is fine — matches today's manual-synthesis cadence. |
 
-| Memory name | Strategies | Purpose |
-|---|---|---|
-| `better-memory-semantic` | built-in `semanticMemoryStrategy` + `userPreferenceMemoryStrategy` | Long-term semantic memories ("preferences"). Stock AgentCore extraction; cheapest path. |
-| `better-memory-episodic` | `customMemoryStrategy` with `episodicOverride` | Episodic events → reflection records via our prompt running on Bedrock. Polarity / outcome metadata declared in `memoryRecordSchema`. |
+Both built-in. Both use AWS-managed extraction models in AgentCore's account; no `memoryExecutionRoleArn` needed, no Bedrock model access opt-in for the operator, no Bedrock invocation costs in the operator's account.
 
-Why two memories and not one with both strategies attached:
+Why two memory resources rather than one with both strategies:
 
-- **Independent cost profiles.** Built-in has AgentCore-managed pricing; custom-override runs Bedrock invocations in your account. Splitting makes attribution unambiguous.
-- **Independent retention.** `eventExpiryDuration` is per-memory. Episodic events probably want shorter expiry (90d) than semantic events (1y).
-- **Independent evolution.** The custom strategy prompt iterates separately from the stock semantic extraction.
+- **Independent retention.** `eventExpiryDuration` is per-memory. Episodic events can churn (30-90 days); preference events keep longer (365 days).
+- **Independent latency expectations.** Preferences need to be ~immediate; reflections can take 30 minutes. Documenting each separately keeps operator expectations clear.
+- **Independent evolution.** Schema changes (especially metadata schema on the episodic side) iterate without touching the preferences memory.
 
-A single memory resource with mixed strategies is supported by AgentCore and remains an option if operational cost dominates — flagged as a deferred decision.
+A single memory resource with mixed strategies is valid in AgentCore and remains an option if operational cost dominates — flagged as a deferred decision.
 
 ### actorId encodes project
 
@@ -113,57 +114,100 @@ Across both memories:
 - `actorId` = the project name resolved from `git rev-parse --git-common-dir` (e.g. `nuke`, `better-memory`)
 - `actorId = general` is a reserved value for the cross-project bucket
 - Strategy `namespaceTemplates` use `{actorId}` for project-scoped extraction landing zones
-- `sessionId` = the Claude session identifier (CLAUDE_SESSION_ID env var if present, else a generated UUID)
+- `sessionId` = the Claude session identifier (`CLAUDE_SESSION_ID` env var if present, else a generated UUID)
 
-`actorId` is opaque to AWS; AgentCore does not validate it against IAM identities. It exists purely for namespace substitution and as an IAM context key (`bedrock-agentcore:actorId`) if we add per-project IAM scoping later.
+`actorId` is opaque to AWS; AgentCore doesn't validate it against IAM identities. It exists purely for namespace substitution and as an IAM context key (`bedrock-agentcore:actorId`) if we add per-project IAM scoping later.
 
-### Namespace shape (flat)
+### Namespace shape
+
+Constraint discovered in the spike: a strategy's `reflectionConfiguration.namespaceTemplates` must be the same as or a prefix of the strategy's `namespaceTemplates`. We satisfy this by nesting episodes under reflections in the path:
 
 ```
-projects/{actorId}/reflections/         ← active reflections, this project
-projects/{actorId}/semantic/            ← project-scoped semantic memories
-projects/{actorId}/retired/             ← retire = move record here
-general/reflections/                    ← cross-project (post-promotion)
+projects/{actorId}/reflections/             ← extracted reflections land here
+projects/{actorId}/reflections/episodes/    ← episode records land here (under reflections)
+projects/{actorId}/semantic/                ← user-preference records
+projects/{actorId}/retired/                 ← retire = move record here
+general/reflections/                        ← cross-project (post-promotion)
+general/reflections/episodes/
 general/semantic/
 general/retired/
 ```
 
-Polarity (do / dont / neutral) is **not** in the namespace — it's a record metadata field. Namespaces stay flat because a strategy can only declare one namespace template (`min: 1, max: 1`) and the placeholder set doesn't include `{polarity}`. Metadata-filtered retrieval is the path.
+Polarity (do / dont / neutral) is **not** in the namespace — it's a record metadata field declared on the episodic strategy's reflection schema. Strategies are bound to exactly one namespace template each (spike Finding 4), so polarity-as-namespace would require three strategies. Metadata-on-flat-namespace is the cleaner fit.
 
-### Memory record metadata schema
+### Memory record metadata schema (episodic memory)
 
-Declared in `memoryRecordSchema.metadataSchema` on the episodic memory's custom strategy:
+Declared in `episodicMemoryStrategy.reflectionConfiguration.memoryRecordSchema.metadataSchema`:
 
-| Key | Type | Notes |
-|---|---|---|
-| `polarity` | `stringValue` with allowed values `do` / `dont` / `neutral` | What category of lesson this is |
-| `useful_count` | `numberValue` | ++ on record_use success |
-| `missed_count` | `numberValue` | ++ on record_use failure |
-| `ignored_count` | `numberValue` | from session exposure rating loop |
-| `times_misled` | `numberValue` | from session exposure rating loop (mirrors SQLite column) |
-| `last_credited_at` | `dateTimeValue` | recency for decay calc on the client |
-| `status` | `stringValue` with allowed values `active` / `retired` / `promoted` | lifecycle state |
+| Key | Type | LLM extraction | Notes |
+|---|---|---|---|
+| `polarity` | `STRING` allowedValues `do` / `dont` / `neutral` | Per-field instruction telling the LLM to classify do/dont/neutral | Verified working in spike (3/3 reflections correctly classified) |
+| `useful_count` | `NUMBER` | — | App-managed via `batch-update-memory-records`. ++ on record_use success. |
+| `missed_count` | `NUMBER` | — | App-managed. ++ on record_use failure. |
+| `ignored_count` | `NUMBER` | — | App-managed. From session exposure rating loop. |
+| `times_misled` | `NUMBER` | — | App-managed. Mirrors the SQLite column name. |
+| `last_credited_at` | `dateTimeValue` | — | App-managed. Recency for client-side decay. |
+| `status` | `STRING` allowedValues `active` / `retired` / `promoted` | — | App-managed. Lifecycle state. |
 
-`indexedKeys` on the memory resource includes `polarity`, `status`, and `last_credited_at` so metadata-filtered retrieval works without full scans.
+System metadata (`x-amz-agentcore-memory-recordType`, `createdAt`, `updatedAt`) is always present without declaration.
+
+`indexedKeys` on the episodic memory: `polarity`, `status`, `last_credited_at` — so metadata-filtered retrieval skips full scans.
+
+### Reflection content shape (returned by AgentCore)
+
+Built-in episodic produces reflections as structured JSON in `content.text`:
+
+```json
+{
+  "title": "Per-Step Confidence Rating Gate for Implementation Plans",
+  "use_cases": "Applies when creating or reviewing implementation plans ...",
+  "hints": "Assign a confidence percentage to every task ... Treat this as a hard gate, not a suggestion ...",
+  "confidence": "0.9"
+}
+```
+
+The shape lines up with better-memory's existing reflection model (title / use_cases / hints / confidence / polarity). The only structural difference is `hints` returned as one prose string rather than a list. The retrieval layer parses the JSON and maps onto the existing `Reflection` dataclass; the prose `hints` is split into a list on `\n- ` or sentence boundaries (working approach; iterate if quality requires).
+
+### Session lifecycle and the closure event
+
+AgentCore's built-in episodic strategy waits for an episode to look complete before triggering extraction. The strategy detects completion from a combination of conversational closure signals in the payload and a session-idle window. Without an explicit closure cue, the spike measured ~15-20 min idle before trigger.
+
+Better-memory already has the right primitive for this — the `Stop` hook (session_close). In agentcore mode, the Stop hook fires one final `CreateEvent` against the AgentCore session whose payload is a closure marker:
+
+```json
+{
+  "conversational": {
+    "role": "USER",
+    "content": {"text": "Session complete. All work for this session has been recorded."}
+  }
+}
+```
+
+The LLM's completion-detection picks this up. Extraction triggers within the typical 1-3 minute window for a complete episode instead of waiting out the 15-minute idle. The closure event is fire-and-forget — failure to deliver it just falls back to the idle-detection path.
+
+Operator implication: Ralph executor sessions (`session_close` always fires) get fast extraction; human dev sessions that exit abruptly (closed terminal, killed process) fall back to idle-detection.
 
 ## Decisions (with rationale)
 
 | Decision | Choice | Why |
 |---|---|---|
-| Backend selector | Single env var, default sqlite | Matches the TF-IDF embeddings backend precedent; minimises surprise |
-| Synthesis ownership | AgentCore-driven, with our prompt via custom override | Trust the managed pipeline; preserves our reflection schema and polarity discipline |
-| Polarity placement | Metadata, not namespace | Strategy is bound to ONE namespace template; placeholder set excludes polarity |
-| Topology | Two memory resources (semantic + episodic) | Independent cost / retention / evolution; reversible if cost reasons emerge |
-| actorId semantics | Project name | The most natural map of a per-repo concept onto AgentCore's actor abstraction |
-| Namespace tree | Flat, project-scoped via actorId | Promote / retire are namespace updates; retrieval is path-prefix |
-| Knowledge base | Stays SQLite-only | Not Claude-derived; no synthesis benefit from porting |
-| Embeddings | No-op in agentcore mode | AgentCore retrieval replaces hybrid_search; tfidf_search is unreachable in this mode |
+| Backend selector | Single env var, default `sqlite` | Matches the TF-IDF embeddings backend precedent |
+| Synthesis ownership | AgentCore-driven, both strategies built-in | Spike verified extraction quality is good; no need for custom prompts or our own Bedrock invocations |
+| Strategy types | `userPreferenceMemoryStrategy` (semantic memory) + `episodicMemoryStrategy` (episodic memory) | Built-in covers both use-cases; matches the AWS quickstart and demos exactly |
+| Polarity placement | Metadata, not namespace | Strategy bound to one namespace template (spike Finding 4); polarity-as-metadata verified working in spike |
+| Topology | Two memory resources (semantic + episodic) | Independent retention / latency expectations / evolution |
+| actorId semantics | Project name | The most natural map of a per-repo concept |
+| Namespace tree | Episodes nested under reflections | Satisfies the strategy-namespace-prefix constraint |
+| Knowledge base | Stays SQLite-only | Not Claude-derived; no synthesis benefit |
+| Embeddings | No-op in agentcore mode | AgentCore retrieval replaces hybrid_search |
+| Session closure | Stop hook fires a final closure CreateEvent | Triggers AgentCore's completion detection; bounds latency to ~1-3 min |
+| Custom strategies | Not in v1 | Built-in is sufficient and operationally simpler; revisit only if extraction quality forces it |
 
 ## Components
 
 ### `better_memory/config.py` — modify
 
-Add new fields to `Config`:
+Add to `Config`:
 
 ```python
 storage_backend: Literal["sqlite", "agentcore"]      # default "sqlite"
@@ -174,24 +218,25 @@ agentcore_episodic_memory_id: str | None             # populated by `agentcore i
 
 Read from env: `BETTER_MEMORY_STORAGE_BACKEND`, `BETTER_MEMORY_AGENTCORE_REGION`, `BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID`, `BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID`.
 
-When `storage_backend = agentcore` and the memory IDs are unset, `get_config()` raises with a clear "run `better-memory agentcore init` first" message.
+When `storage_backend = agentcore` and the memory IDs are unset, `get_config()` raises with a "run `better-memory agentcore init` first" message.
 
 ### `better_memory/storage/protocol.py` — new
 
-The `StorageBackend` protocol. Methods cover the storage operations every service relies on today — observe, retrieve, record_use, semantic CRUD, episode lifecycle, reflection lifecycle (apply / retire / promote / archive), and the synthesis tools for backends that support them. The sqlite-only methods are declared on the protocol but with a clear "may raise NotImplementedError" contract so the MCP server can branch on capability at registration time.
+The `StorageBackend` protocol. Methods cover the storage operations every service relies on today — observe, retrieve, record_use, semantic CRUD, episode lifecycle, reflection lifecycle (apply / retire / promote / archive). Sqlite-only methods (e.g., synthesize_next) are declared on the protocol with a documented `NotImplementedError` contract so the MCP server can branch on capability at registration time.
 
-### `better_memory/storage/sqlite.py` — new (refactor)
+### `better_memory/storage/sqlite.py` — new (refactor of existing services)
 
-Wraps the existing services. The refactor is mechanical — extract the service call surface behind the protocol methods. Existing tests should continue to pass.
+Wraps the existing services behind the protocol. Mechanical refactor; existing tests pass without modification.
 
 ### `better_memory/storage/agentcore.py` — new
 
 The boto3-based implementation. Responsibilities:
 
 - Construct two boto3 clients (data plane `bedrock-agentcore`, control plane `bedrock-agentcore-control`)
-- Translate MCP-level concepts to AgentCore primitives — observation → event, reflection → record, project → actorId, claude session → sessionId
+- Translate MCP concepts to AgentCore primitives — observation → event, reflection → record, project → actorId, claude session → sessionId
 - Implement read/write/credit flows by composing AgentCore API calls
-- Translate AgentCore-specific errors back into better-memory's error types
+- Use `list-memory-records` (with namespace filter) or `retrieve-memory-records` (with semantic search) for fetches — never `get-memory-record` (spike Finding 3)
+- Translate AgentCore errors back into better-memory's error types
 
 The module is the only one that imports boto3. Everything else depends on the protocol.
 
@@ -200,12 +245,21 @@ The module is the only one that imports boto3. Everything else depends on the pr
 Helpers for resolving identity:
 
 - `resolve_actor_id(project: str | None) -> str` — returns project name or `"general"`
-- `resolve_session_id() -> str` — uses `CLAUDE_SESSION_ID` if present, otherwise generates
-- `resolve_namespace(actor_id: str, kind: Literal["reflections", "semantic", "retired"]) -> str`
+- `resolve_session_id() -> str` — uses `CLAUDE_SESSION_ID` if present, else generates
+- `resolve_namespace(actor_id: str, kind: Literal["reflections", "episodes", "semantic", "retired"]) -> str`
+- `closure_event_payload() -> list[dict]` — the canonical closure-marker payload fired by the Stop hook
+
+### `better_memory/hooks/session_close.py` — modify
+
+In agentcore mode, after the existing close logic, the Stop hook fires one final `CreateEvent` against the AgentCore session with the closure-marker payload from `closure_event_payload()`. Failure to deliver is logged but non-fatal — the strategy will still trigger eventually via idle-detection.
+
+In sqlite mode, behaviour unchanged.
 
 ### `better_memory/mcp/server.py` — modify
 
-At startup, the server builds a `StorageBackend` based on `config.storage_backend` and injects it into the service constructors. Tool registration branches on backend capability — `memory_synthesize_next_*` is registered only when the backend reports synthesis support (i.e. sqlite).
+At startup, the server builds a `StorageBackend` based on `config.storage_backend` and injects it into the service constructors. Tool registration branches on backend capability — `memory_synthesize_next_*` is registered only when the backend reports synthesis support (sqlite mode).
+
+The session bootstrap hook continues to report `pending_synthesis.pending` in sqlite mode; in agentcore mode the field is omitted (consumers can branch cleanly).
 
 ### `better_memory/cli/agentcore.py` — new
 
@@ -213,65 +267,75 @@ CLI commands under a new `better-memory agentcore` subgroup:
 
 | Command | What it does |
 |---|---|
-| `init` | Creates both memory resources with the configured strategies; prints the IDs; writes them to a state file under `$BETTER_MEMORY_HOME/agentcore.json`. Idempotent (refuses to re-create if IDs are already known). |
+| `init` | Creates both memory resources with built-in strategies; declares the indexedKeys + episodic metadataSchema; prints the IDs; writes them to `$BETTER_MEMORY_HOME/agentcore.json`. Idempotent (refuses to re-create if IDs are known). |
 | `status` | Shows memory IDs, recent extraction job state, namespace populations, last events ingested. |
-| `prompt-test` | Dry-runs the custom-strategy prompt against a sample event batch and prints what records would be extracted. For prompt iteration. |
-| `extract --now` | Calls `start-memory-extraction-job` to force an immediate extraction pass. For debugging cadence questions. |
-| `migrate-from-sqlite` | Stubbed for now; raises NotImplementedError with a pointer to the deferred migration spec. |
+| `smoke` | Minimal observe + closure event + (optional wait) + retrieve loop against the configured memory. For ops verification. |
+| `migrate-from-sqlite` | Stubbed for v1; raises NotImplementedError with a pointer to a future migration spec. |
 
-### Reflection custom-strategy prompt — new
-
-Translate the existing better-memory synthesis prompt into a `customMemoryStrategy` with `episodicOverride`. The override exposes `extraction` (prompt + Bedrock model) and `consolidation` (merge-into-existing-records prompt + model). Both must produce records whose metadata matches our declared schema.
-
-Bedrock model choice and prompt content are TBD — see Open Questions. Step 0 of the implementation plan is a spike that runs the candidate prompt against representative events on each model and compares output quality + cost.
-
-### Synthesis MCP tools — modify
-
-`memory_synthesize_next_get_context` and `memory_synthesize_next_apply`:
-
-- In sqlite mode: behaviour unchanged
-- In agentcore mode: not registered; calls return `unknown tool` from MCP routing (rather than registering a no-op handler that raises — saves a round trip)
-
-The session bootstrap hook continues to report `pending_synthesis.pending` as a count for sqlite mode; in agentcore mode the field is omitted or set to `null` so consumers can branch cleanly.
+Notably absent vs the previous draft: no `prompt-test` (no custom prompt to test), no `extract --now` (no force-trigger API), no IAM-role manipulation (built-in needs no execution role).
 
 ## Data flow
 
 ### Write — `memory.observe` (agentcore mode)
 
 ```
-1. Resolve project (git) → actorId
+1. Resolve project (git) -> actorId
 2. Resolve sessionId (env var or generated)
-3. Build event payload from the observation content, outcome, theme, component, trigger_type
+3. Build event payload from observation content
 4. bedrock-agentcore.CreateEvent(
        memoryId=episodic_memory_id,
        actorId=actorId,
        sessionId=sessionId,
        eventTimestamp=now,
-       payload=[<role:user message with the observation payload as text>],
-       metadata={...}
+       payload=[{conversational: {role, content: {text}}}, ...],
+       metadata={...optional event-level metadata...}
    )
-5. AgentCore stores the event in short-term memory.
-   The custom-override strategy runs server-side on its own cadence; extracted
-   records appear under projects/{actorId}/reflections/ with our metadata schema.
-6. Return event_id to caller.
+5. Return event_id.
+   (No synchronous extraction; the strategy decides when to extract based on
+    session completion signals + idle window.)
+```
+
+### Session close — Stop hook (agentcore mode)
+
+```
+1. The hook fires its existing close-logic.
+2. If agentcore mode AND a sessionId is known for this session:
+     bedrock-agentcore.CreateEvent(
+         memoryId=episodic_memory_id,
+         actorId=actorId,
+         sessionId=sessionId,
+         eventTimestamp=now,
+         payload=closure_event_payload()
+     )
+3. Failure logged, non-fatal — idle-detection still triggers eventually.
 ```
 
 ### Read — `memory.retrieve` (agentcore mode)
 
 ```
 For each polarity in (do, dont, neutral):
-  1. bedrock-agentcore.RetrieveMemoryRecords(
-         memoryId=episodic_memory_id,
-         namespace=f"projects/{actorId}/reflections/",
-         searchCriteria={
-             searchQuery: query_text,
-             topK: candidate_k,
-             metadataFilter: {polarity: {equals: $polarity}}
-         }
-     )
-  2. Apply reinforcement multiplier + recency decay (client-side) using
-     metadata.useful_count, missed_count, last_credited_at
-  3. Sort by final score, truncate to limit
+  bedrock-agentcore.RetrieveMemoryRecords(
+      memoryId=episodic_memory_id,
+      namespace=f"projects/{actorId}/reflections/",
+      searchCriteria={
+          searchQuery: query_text,
+          topK: candidate_k,
+          metadataFilters: [{
+              left:  {metadataKey: "polarity"},
+              operator: "EQUALS_TO",
+              right: {metadataValue: {stringValue: polarity}}
+          }, {
+              left:  {metadataKey: "status"},
+              operator: "EQUALS_TO",
+              right: {metadataValue: {stringValue: "active"}}
+          }]
+      }
+  )
+
+Apply reinforcement multiplier + recency decay client-side using
+metadata.useful_count, missed_count, last_credited_at.
+Parse content.text JSON into the Reflection dataclass.
+Sort by final score, truncate to limit.
 Return SearchResult[] grouped by polarity (same shape as today).
 ```
 
@@ -280,18 +344,22 @@ Knowledge-base BM25 retrieval continues to query the local SQLite knowledge inde
 ### Credit — `memory.record_use`
 
 ```
-1. get-memory-record(memoryRecordId)
-2. new_metadata = current_metadata + {
-       useful_count++ (if outcome=success) OR missed_count++ (if outcome=failure),
-       last_credited_at: now()
-   }
-3. batch-update-memory-records(records=[{memoryRecordId, timestamp, content, metadata}])
+1. Find the record: list-memory-records (with namespace + memoryRecordId
+   filter) — get-memory-record doesn't work reliably for BASE records.
+2. Compute new_metadata = full_current_metadata with:
+     useful_count++ (if outcome=success) OR missed_count++ (if outcome=failure)
+     last_credited_at = now()
+3. batch-update-memory-records(records=[{
+       memoryRecordId, timestamp, content, metadata: new_metadata
+   }])
+   (Always send full metadata snapshot — merge-vs-replace semantics are
+    undetermined; full snapshot is safe under both.)
 ```
 
 ### Promote / retire
 
 ```
-Promote project → general:
+Promote project -> general:
   batch-update-memory-records(records=[{
       memoryRecordId,
       namespaces: ["general/reflections/"],
@@ -306,13 +374,15 @@ Retire:
   }])
 ```
 
-### Semantic memory CRUD
+### Semantic memory CRUD (`memory_semantic_observe`)
 
-`memory_semantic_observe` writes either a tagged event (so the user-preference strategy extracts it) OR directly creates a record via `batch-create-memory-records` (skipping extraction). Working assumption: direct creation, because user-curated semantic memories shouldn't get re-extracted or summarised by AgentCore. Update / delete map to `batch-update-memory-records` and `batch-delete-memory-records`.
+User-curated semantic memories bypass extraction — they're already distilled. Use `batch-create-memory-records` directly into `projects/{actorId}/semantic/` with `memoryStrategyId` of the semantic memory's strategy so AWS applies schema validation. Update / delete map to `batch-update-memory-records` and `batch-delete-memory-records`.
+
+For preferences that emerge organically from conversation (e.g., user says "I always use uv"), let the built-in `userPreferenceMemoryStrategy` extract them automatically (verified working in the spike at ~3 min latency).
 
 ### Session bootstrap (SessionStart hook)
 
-The hook envelope and structure are unchanged. The agentcore implementation issues parallel `RetrieveMemoryRecords` calls (one per polarity bucket + semantic) and assembles the same `additionalContext` payload as today.
+The hook envelope is unchanged. The agentcore implementation issues parallel `RetrieveMemoryRecords` calls — one per polarity bucket against the episodic memory, plus one against the semantic memory — and assembles the same `additionalContext` payload as today.
 
 ## Error handling
 
@@ -321,23 +391,25 @@ The hook envelope and structure are unchanged. The agentcore implementation issu
 | AWS credentials missing at startup (agentcore mode) | `get_config()` raises with a setup pointer; MCP server refuses to start |
 | Memory IDs missing | Raises with "run `better-memory agentcore init` first" |
 | Per-call AWS throttling / 5xx | boto3 default retry policy + adapter with capped backoff; surfaced as `RetryableStorageError` if exhausted |
-| Custom strategy extraction failure | Event is durably stored; AgentCore retries extraction; no user-visible failure |
-| Bedrock model unavailable (custom strategy) | Surfaced via `list-memory-extraction-jobs` status; `better-memory agentcore status` shows the failure for diagnosis |
+| Closure event fails to deliver at Stop hook | Logged, non-fatal — idle-detection still triggers eventually |
+| Built-in strategy extraction failure | Surfaced via `list-memory-extraction-jobs`; `better-memory agentcore status` shows recent failures |
 | Calling `memory_synthesize_next_*` in agentcore mode | MCP returns `unknown tool` (not registered) |
 | Empty namespace on retrieve | Returns empty list; no exception |
-| `record_use` against an extracted record that strategy later overwrites | Counter increment is best-effort; we don't lock records during extraction. If a strategy consolidation runs in between get and update, the update may target a now-superseded record id. Working assumption: rare; surfacing as `RecordSupersededError` with retry guidance. Tested via integration test. |
-| Cross-backend coexistence | Out of scope; agentcore mode and sqlite mode are mutually exclusive per server process |
+| `record_use` against a record that's been consolidated since fetch | `batch-update-memory-records` returns `failedRecords` for that id; surface as `RecordSupersededError` with retry guidance |
+| Cross-backend coexistence | Out of scope; agentcore and sqlite are mutually exclusive per server process |
+| Undeclared metadata key in event or record payload | Silently dropped by AgentCore (spike Finding 2). The backend validates payload metadata keys against a known-schema constant before sending, to fail loudly rather than silently. |
 
 ## Testing strategy
 
 ### Unit
-- `tests/storage/test_protocol.py` — both implementations satisfy the protocol; runtime check via `typing.runtime_checkable`.
+- `tests/storage/test_protocol.py` — both implementations satisfy the protocol via `typing.runtime_checkable`.
 - `tests/storage/test_agentcore_unit.py` — mocked boto3; covers payload construction, namespace resolution, metadata schema serialisation, retrieve-filter construction.
-- `tests/storage/test_agentcore_metadata.py` — polarity validation paths (allowed-values), counter increment semantics, status transitions, promote / retire namespace mutations.
+- `tests/storage/test_agentcore_metadata.py` — polarity validation, counter increment semantics, status transitions, promote / retire namespace mutations, full-snapshot-on-update discipline.
+- `tests/storage/test_agentcore_closure.py` — Stop hook fires a closure event in agentcore mode; failure is non-fatal.
 
 ### Integration (opt-in, AWS-credentials-required)
-- `tests/integration/test_agentcore_roundtrip.py` — observe → wait for extraction → retrieve → credit → promote → retire round-trip against a real AgentCore Memory provisioned via fixture.
-- Gated by `BETTER_MEMORY_TEST_AGENTCORE=1`; skipped by default; CI runs in a follow-up workflow with org-scoped credentials.
+- `tests/integration/test_agentcore_roundtrip.py` — observe (multi-event) → closure event → wait for extraction → retrieve → credit → promote → retire, against a real AgentCore Memory provisioned via fixture.
+- Gated by `BETTER_MEMORY_TEST_AGENTCORE=1`; skipped by default.
 - Cleanup: fixture creates and deletes a throwaway memory resource per test session.
 
 ### CLI tests
@@ -345,70 +417,85 @@ The hook envelope and structure are unchanged. The agentcore implementation issu
 - `tests/cli/test_agentcore_status.py` — output shape with both populated and empty memories.
 
 ### Smoke
-- A CLI command `better-memory agentcore smoke` that runs a minimal observe + retrieve loop against a configured memory. Useful for ops verification post-deploy.
+- `better-memory agentcore smoke` runs a minimal observe + closure + retrieve loop. Useful for ops verification post-deploy.
 
 ### No regression on sqlite path
-- Existing test suite runs unchanged under both backends. Backend-agnostic tests parameterise on `storage_backend` if and when it makes sense.
+- Existing test suite runs unchanged. Backend-agnostic tests parameterise on `storage_backend` when sensible.
 
 ## Documentation
 
-- `README.md` — storage backend env var in prerequisites table; AWS prerequisites + IAM policy snippet.
-- `website/architecture.md` — new section on storage backends; AgentCore data model mapping diagram (reuse the mermaid above).
+- `README.md` — storage backend env var in prerequisites table; AWS prerequisites + IAM policy snippet (narrow `bedrock-agentcore` + `bedrock-agentcore-control` actions; no role-management or Bedrock model perms needed in v1).
+- `website/architecture.md` — new section on storage backends with the architecture mermaid.
 - `website/configuration.md` — env var rows + agentcore-specific fields.
 - New `website/agentcore-setup.md` — step-by-step setup (IAM user, init command, memory IDs, troubleshooting).
-- New `docs/troubleshooting/agentcore.md` — common errors and fixes (credential issues, region mismatches, extraction job failures, etc.).
-- `website/mcp-tools.md` — per-tool agentcore-mode notes (which tools are unavailable, what the behavioural delta is).
+- New `docs/troubleshooting/agentcore.md` — common errors and fixes (credential issues, region mismatches, missing closure events, etc.).
+- `website/mcp-tools.md` — per-tool agentcore-mode notes (synthesize_next unavailable; pending_synthesis omitted from bootstrap).
 
-## Assumptions
+## Spike findings (2026-05-24)
 
-### Real concerns (with mitigation)
+Three focused spikes were run against `eu-west-2`. The first two reshaped the design; the third validated the final shape end-to-end.
 
-1. **Custom strategy prompt quality + Bedrock model cost.** We don't yet know whether the existing better-memory synthesis prompt translates cleanly to a Bedrock model under AgentCore's `episodicOverride` execution path, or what model is the right cost / quality trade.
-   - **Mitigation A (recommended):** Step 0 of the implementation plan is a spike — run the candidate prompt against representative event batches on Haiku 4.5 and Sonnet 4.6; compare output quality and per-batch cost. Decide model before any consumer code lands.
-   - **Mitigation B:** Start with built-in `semanticMemoryStrategy` only; defer the custom-override episodic path to a Phase 2 spec. (Loses the polarity discipline in Phase 1.)
+### Finding 1: Built-in `userPreferenceMemoryStrategy` extracts in ~3 minutes
 
-2. **Extraction cadence / latency.** Docs describe extraction as "automatic" but don't quote a target latency. If extraction runs hourly, Ralph's iteration cadence has to tolerate that; if it runs near-realtime, no concern.
-   - **Mitigation A:** Instrument event-to-record latency in the integration test; document the observed range in the README troubleshooting section.
-   - **Mitigation B:** If latency is too high for Ralph's cadence, the storage layer can call `start-memory-extraction-job` opportunistically (e.g. on each `memory.retrieve` if the most-recent event is older than 5 minutes since extraction).
+3-event session under a built-in user-preference strategy → all three preferences extracted into structured JSON records (`{context, preference, categories}`) **168 seconds** after the last event. No execution role, no Bedrock model access opt-in, no custom prompts. This validates the "next session knows" expectation for the semantic memory.
 
-3. **Update semantics for `metadata` map.** CLI help for `batch-update-memory-records` doesn't clarify whether passing partial `metadata` replaces the entire map or merges keys. If it replaces, every credit call must include the full metadata snapshot.
-   - **Mitigation:** Verify with a small live test before designing the credit flow. Documented as a check in Step 1 of the implementation plan.
+### Finding 2: Built-in `episodicMemoryStrategy` extracts in ~15-20 min from last event, ~1-3 min from closure signal
+
+6-event session with backdated timestamps → first extraction trigger at ~17 min idle, producing 1 episode record (rich structured situation/intent/assessment/turns) + 3 reflection records (title / use_cases / hints / confidence) with `polarity` correctly classified by the per-field LLM extraction instruction in `memoryRecordSchema`.
+
+External examples (Strands SDK, Gerardo Arroyo's blog) confirm: **episodic extraction waits for episode completion**. With an explicit closure cue in the payload, extraction triggers within minutes. Without one, idle-detection adds 15+ minutes.
+
+### Finding 3: Reflection content shape lines up with better-memory's existing model
+
+AgentCore-extracted reflections come back as `{title, use_cases, hints, confidence}` in `content.text` — essentially identical to better-memory's `Reflection` dataclass. Only structural delta: `hints` is a single prose string rather than a list. The retrieval layer parses and adapts.
+
+### Finding 4: Custom strategies (`customMemoryStrategy` with `episodicOverride`) are not worth it for v1
+
+A custom-override strategy with our own Bedrock model invocation failed with `CUSTOM_MODEL_BEDROCK_RESOURCE_NOT_FOUND` because the operator's account didn't have Bedrock model access enabled for the chosen Anthropic model. Built-in strategies sidestep this entirely. **Lock-in built-in for v1.** Custom override remains a deferred option if extraction quality requires us to override the prompt.
+
+### Finding 5: API quirks captured as defensive design rules
+
+- **Undeclared metadata is silently dropped** at create/update time. The backend validates payload metadata against the known schema before sending.
+- **`get-memory-record` returns 404 for BASE records** that exist. Use `list-memory-records` (with namespace filter) or `retrieve-memory-records` (with search) instead.
+- **A strategy is bound to exactly one namespace template.** Reflection namespace must be a prefix of (or equal to) the episodic namespace.
+- **Metadata merge-vs-replace semantics are undetermined.** Every update sends the full metadata snapshot — safe under both semantics.
+- **Memory creation takes ~90-115 seconds.** `agentcore init` must poll, not appear to hang.
 
 ### Verified safe
 
-- AgentCore Memory available in `eu-west-2` — verified via `list-memories` returning `[]`.
-- Records can move between namespaces via `batch-update-memory-records` — verified via CLI help.
-- Custom metadata (typed key-value, up to 20 keys) supported on records — verified via CLI help.
-- Five strategy types available, including `customMemoryStrategy` with `episodicOverride` exposing extraction + consolidation prompts — verified via CLI help.
-- IAM scoping by namespace and actor supported via context keys — verified in docs.
-- `start-memory-extraction-job` exists for manual triggering — verified via data plane help.
+- AgentCore Memory available in `eu-west-2`
+- Built-in `userPreferenceMemoryStrategy` and `episodicMemoryStrategy` both work without `memoryExecutionRoleArn` and without Bedrock model access opt-in
+- Records can move between namespaces via `batch-update-memory-records` (promote / retire pattern)
+- Metadata schema with `extractionConfig.llmExtractionConfig` on built-in strategies correctly populates classified fields (polarity verified)
+- Reflection content shape is compatible with better-memory's existing dataclass
 
 ### Minor / accepted
 
-- 20 metadata keys per record cap. Our schema needs 7; comfortable headroom.
-- String metadata charset restricted to `[a-zA-Z0-9\s._:/=+@-]`. Reflection prose lives in `content.text` (16K chars, unrestricted); only structured metadata is constrained.
-- A strategy is bound to exactly one namespace template. Worked around via polarity-as-metadata.
-- Custom strategy = Bedrock model invocations in your account. Expected and clearly billed.
+- 20 metadata keys / record cap (we declare 7; comfortable headroom)
+- String metadata charset restricted; reflection prose lives in `content.text` (16K, unrestricted)
+- One namespace template per strategy (worked around via metadata)
 
 ## Open questions (deferred to implementation)
 
-1. Bedrock model selection for the custom strategy (Haiku 4.5 vs Sonnet 4.6). Resolved by the Step 0 spike.
-2. Whether reinforcement decay is computed client-side over retrieved metadata, or pushed to a derived metadata field maintained on each credit call. Working assumption: client-side, mirroring sqlite-mode logic. Revisit if retrieval-heavy workloads show CPU pressure.
-3. Per-project IAM scoping. Working assumption: a single IAM role with broad `bedrock-agentcore:*` permissions on the two memory resources. Per-project scoping via `actorId` context-key conditions is a future refinement.
-4. Better-memory management UI affordances for AgentCore-mode admin (trigger extraction now, view recent extraction jobs, see record counts per namespace). Working assumption: out of scope for the first implementation; CLI is sufficient. A follow-up spec adds the UI panels.
-5. Migration of existing SQLite data into AgentCore. Out of scope; deferred to a separate spec.
+1. **`hints` parsing.** AgentCore returns reflection `hints` as one prose string; better-memory's `Reflection` has `hints: list[str]`. Working approach: split on `\n- ` or sentence boundaries. Refine if quality requires.
+2. **Reinforcement-decay computation.** Client-side over retrieved metadata (working assumption, mirrors sqlite-mode) vs derived metadata field maintained on each credit call. Revisit if retrieval workloads show CPU pressure.
+3. **Per-project IAM scoping.** Single broad role with `bedrock-agentcore:*` on the two memory resources for v1. Per-project scoping via `actorId` context-key conditions is a future refinement.
+4. **Management UI affordances for agentcore-mode admin.** CLI is sufficient for v1; UI panels follow up in a separate spec.
+5. **SQLite → AgentCore data migration.** Out of scope for this design; deferred to a separate spec.
+6. **Whether the closure event is fired for non-Ralph sessions.** Working assumption: always, when the Stop hook fires. Human dev sessions that exit abruptly (closed terminal) fall back to idle-detection. Revisit if that pattern surfaces real friction.
 
 ## Rollout
 
 - Default unchanged — no behaviour change for existing users.
-- New env var documented as opt-in alongside the AWS prerequisites.
-- New CLI commands install with the package; no separate distribution.
+- New env var documented as opt-in alongside AWS prerequisites.
+- New CLI commands install with the package.
 - Plan task ordering (rough — full plan in the writing-plans pass):
-  1. Step 0 — Bedrock model + prompt spike (gates the rest of the work)
-  2. Storage protocol + sqlite wrapper (no behaviour change; tests stay green)
-  3. AgentCore client adapter (boto3 wiring; mocked unit tests)
-  4. MCP server wiring (conditional tool registration; capability reporting)
-  5. CLI `agentcore init` / `status` / `prompt-test` / `extract --now`
-  6. Integration test against a real AWS account
-  7. Docs (README, configuration, agentcore-setup, troubleshooting, mcp-tools)
-  8. Smoke command for ops verification
+  1. Storage protocol + sqlite wrapper (no behaviour change; tests stay green)
+  2. AgentCore client adapter — read path (boto3 wiring; mocked unit tests; retrieve-memory-records with metadata filters)
+  3. AgentCore client adapter — write path (CreateEvent; closure event helper)
+  4. AgentCore client adapter — record lifecycle (batch-update for credit/promote/retire)
+  5. MCP server wiring (conditional tool registration; capability reporting)
+  6. Stop hook closure-event integration
+  7. CLI `agentcore init` / `status` / `smoke`
+  8. Integration test against a real AWS account
+  9. Docs (README, configuration, agentcore-setup, troubleshooting, mcp-tools)
