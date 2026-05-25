@@ -10,5 +10,6 @@ from better_memory.storage.protocol import (
     StorageBackend,
     UseOutcome,
 )
+from better_memory.storage.sqlite import SqliteBackend
 
-__all__ = ["Outcome", "StorageBackend", "UseOutcome"]
+__all__ = ["Outcome", "SqliteBackend", "StorageBackend", "UseOutcome"]
