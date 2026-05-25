@@ -22,6 +22,8 @@ from typing import Any
 
 from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import ObservationService
+from better_memory.services.reflection import ReflectionService
+from better_memory.services.semantic import SemanticMemoryService
 from better_memory.storage.protocol import Outcome, UseOutcome
 
 
@@ -49,6 +51,8 @@ class SqliteBackend:
             project_resolver=self._project_resolver,
             episodes=self._episodes,
         )
+        self._semantic = SemanticMemoryService(memory_conn)
+        self._reflection = ReflectionService(memory_conn)
 
     # ----- Capability flags -----
 
@@ -140,3 +144,117 @@ class SqliteBackend:
         outcome: UseOutcome | None = None,
     ) -> None:
         self._observations.record_use(observation_id, outcome=outcome)
+
+    # ----- Semantic memories -----
+
+    def semantic_observe(
+        self,
+        *,
+        content: str,
+        project: str | None = None,
+        scope: str = "project",
+    ) -> str:
+        return self._semantic.create(
+            content=content,
+            project=project or self._project,
+            scope=scope,
+        )
+
+    def semantic_list(
+        self,
+        *,
+        project: str | None = None,
+        scope_filter: str | None = None,
+        search: str | None = None,
+        track_exposure: bool = True,
+    ) -> list[Any]:
+        return self._semantic.list_for_project(
+            project=project or self._project,
+            scope_filter=scope_filter,
+            search=search,
+            track_exposure=track_exposure,
+        )
+
+    def semantic_update_text(self, *, id: str, content: str) -> None:
+        self._semantic.update_text(id=id, content=content)
+
+    def semantic_set_scope(self, *, id: str, scope: str) -> None:
+        self._semantic.set_scope(id=id, scope=scope)
+
+    def semantic_delete(self, *, id: str) -> None:
+        self._semantic.delete(id=id)
+
+    # ----- Episodes -----
+
+    def open_background_episode(
+        self,
+        *,
+        session_id: str,
+        project: str,
+    ) -> str:
+        return self._episodes.open_background(
+            session_id=session_id, project=project,
+        )
+
+    def start_foreground_episode(
+        self,
+        *,
+        session_id: str,
+        project: str,
+        goal: str,
+        tech: str | None = None,
+    ) -> str:
+        return self._episodes.start_foreground(
+            session_id=session_id, project=project, goal=goal, tech=tech,
+        )
+
+    def close_active_episode(
+        self,
+        *,
+        session_id: str,
+        outcome: str,
+        close_reason: str,
+        summary: str | None = None,
+    ) -> str:
+        return self._episodes.close_active(
+            session_id=session_id,
+            outcome=outcome,
+            close_reason=close_reason,
+            summary=summary,
+        )
+
+    def close_episode_by_id(
+        self,
+        *,
+        episode_id: str,
+        outcome: str,
+        close_reason: str,
+        summary: str | None = None,
+    ) -> str:
+        return self._episodes.close_by_id(
+            episode_id=episode_id,
+            outcome=outcome,
+            close_reason=close_reason,
+            summary=summary,
+        )
+
+    def list_episodes(
+        self,
+        *,
+        project: str | None = None,
+        outcome: str | None = None,
+        only_open: bool = False,
+    ) -> list[Any]:
+        return self._episodes.list_episodes(
+            project=project or self._project,
+            outcome=outcome,
+            only_open=only_open,
+        )
+
+    # ----- Reflection lifecycle -----
+
+    def promote_reflection(self, *, reflection_id: str) -> None:
+        self._reflection.promote_to_general(reflection_id=reflection_id)
+
+    def retire_reflection(self, *, reflection_id: str) -> None:
+        self._reflection.retire(reflection_id=reflection_id)

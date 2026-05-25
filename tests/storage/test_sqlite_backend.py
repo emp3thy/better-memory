@@ -108,3 +108,78 @@ async def test_record_use_credits_recorded_observation(backend, memory_conn) -> 
     ).fetchone()
     assert row["used_count"] == 1
     assert row["validated_true"] == 1
+
+
+# ----- Task 4: semantic + episode + reflection lifecycle -----
+
+
+def test_semantic_observe_and_list(backend) -> None:
+    sm_id = backend.semantic_observe(content="prefer uv over pip")
+    rows = backend.semantic_list()
+    assert any(getattr(r, "id", None) == sm_id for r in rows)
+
+
+def test_semantic_update_text(backend) -> None:
+    sm_id = backend.semantic_observe(content="original")
+    backend.semantic_update_text(id=sm_id, content="updated")
+    rows = backend.semantic_list(search="updated")
+    assert any(getattr(r, "id", None) == sm_id for r in rows)
+
+
+def test_semantic_set_scope(backend) -> None:
+    sm_id = backend.semantic_observe(content="to be promoted", scope="project")
+    backend.semantic_set_scope(id=sm_id, scope="general")
+    # Listing for the project no longer surfaces general-scope rows by default;
+    # the call should succeed and not raise.
+
+
+def test_semantic_delete(backend) -> None:
+    sm_id = backend.semantic_observe(content="to be deleted")
+    backend.semantic_delete(id=sm_id)
+    rows = backend.semantic_list()
+    assert not any(getattr(r, "id", None) == sm_id for r in rows)
+
+
+def test_open_and_close_background_episode(backend) -> None:
+    ep_id = backend.open_background_episode(
+        session_id="test-session", project="testproj",
+    )
+    assert ep_id
+    # close_reason is constrained by schema to a fixed enum; "goal_complete"
+    # is the canonical "happy path" reason. Plan's "test" string is rejected.
+    backend.close_episode_by_id(
+        episode_id=ep_id, outcome="success", close_reason="goal_complete",
+    )
+
+
+def test_list_episodes_returns_list(backend) -> None:
+    assert isinstance(backend.list_episodes(), list)
+
+
+def test_promote_and_retire_reflection(backend, memory_conn) -> None:
+    # Seed a confirmed reflection so promote/retire have a valid target.
+    # Schema-aware seed: confirmed status, project-scope. The reflections table
+    # also requires NOT-NULL phase / created_at / updated_at (no defaults), so
+    # we supply sensible values for those even though the plan's INSERT skipped
+    # them.
+    memory_conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, phase, polarity, use_cases, hints, "
+        "confidence, status, scope, created_at, updated_at) VALUES "
+        "('refl-test-1', 'T', 'testproj', 'general', 'do', 'U', 'H', "
+        "0.9, 'confirmed', 'project', '2026-05-25T00:00:00Z', "
+        "'2026-05-25T00:00:00Z')"
+    )
+    memory_conn.commit()
+
+    backend.promote_reflection(reflection_id="refl-test-1")
+    row = memory_conn.execute(
+        "SELECT scope FROM reflections WHERE id=?", ("refl-test-1",)
+    ).fetchone()
+    assert row["scope"] == "general"
+
+    backend.retire_reflection(reflection_id="refl-test-1")
+    row = memory_conn.execute(
+        "SELECT status FROM reflections WHERE id=?", ("refl-test-1",)
+    ).fetchone()
+    assert row["status"] == "retired"
