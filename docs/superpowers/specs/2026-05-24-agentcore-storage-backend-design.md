@@ -177,11 +177,13 @@ Better-memory already has the right primitive for this — the `Stop` hook (sess
 ```json
 {
   "conversational": {
-    "role": "USER",
+    "role": "OTHER",
     "content": {"text": "Session complete. All work for this session has been recorded."}
   }
 }
 ```
+
+The role enum is `ASSISTANT | USER | TOOL | OTHER` (boto3 surface verification, 2026-05-25). `OTHER` is the right semantic match for a system-emitted closure marker — it is neither a real user turn nor an assistant reply.
 
 The LLM's completion-detection picks this up. Extraction triggers within the typical 1-3 minute window for a complete episode instead of waiting out the 15-minute idle. The closure event is fire-and-forget — failure to deliver it just falls back to the idle-detection path.
 
@@ -202,6 +204,106 @@ Operator implication: Ralph executor sessions (`session_close` always fires) get
 | Embeddings | No-op in agentcore mode | AgentCore retrieval replaces hybrid_search |
 | Session closure | Stop hook fires a final closure CreateEvent | Triggers AgentCore's completion detection; bounds latency to ~1-3 min |
 | Custom strategies | Not in v1 | Built-in is sufficient and operationally simpler; revisit only if extraction quality forces it |
+
+## Verified API surface (boto3 introspection, 2026-05-25)
+
+Post-spec verification against `boto3 1.43.14` / `botocore 1.43.14` confirmed the overall shape but surfaced a handful of corrections. These supersede any conflicting statement earlier in the spec.
+
+### Operation locations
+
+| Operation | Boto3 method | Service (client) |
+|---|---|---|
+| `CreateEvent` | `create_event` | `bedrock-agentcore` (data) |
+| `RetrieveMemoryRecords` | `retrieve_memory_records` | `bedrock-agentcore` (data) |
+| `ListMemoryRecords` | `list_memory_records` | `bedrock-agentcore` (data) |
+| `GetMemoryRecord` | `get_memory_record` | `bedrock-agentcore` (data) |
+| `BatchCreateMemoryRecords` | `batch_create_memory_records` | `bedrock-agentcore` (data) |
+| `BatchUpdateMemoryRecords` | `batch_update_memory_records` | `bedrock-agentcore` (data) |
+| `BatchDeleteMemoryRecords` | `batch_delete_memory_records` | `bedrock-agentcore` (data) |
+| `ListMemoryExtractionJobs` | `list_memory_extraction_jobs` | **`bedrock-agentcore` (data)** — NOT control plane as stated in the prior draft |
+| `CreateMemory` | `create_memory` | `bedrock-agentcore-control` (control) |
+| `GetMemory` | `get_memory` | `bedrock-agentcore-control` (control) |
+| `DeleteMemory` | `delete_memory` | `bedrock-agentcore-control` (control) |
+
+### Per-call corrections vs prior draft
+
+1. **`BatchCreateMemoryRecords` requires `requestIdentifier` per record** (max 80 chars). Caller-supplied dedupe key — semantic_observe builds one from content hash or a UUID per call.
+
+2. **`Conversational.role` enum is `ASSISTANT | USER | TOOL | OTHER`.** Closure event uses `OTHER`. Spec example above corrected.
+
+3. **`CreateEvent.metadata` is `map<string, {stringValue: max256}>` only.** Memory record metadata is richer (`stringValue | stringListValue | numberValue | dateTimeValue`). For event-level metadata, anything non-string must be serialized to string before sending; richer typing lives on the record layer.
+
+4. **`memoryStrategyId` is OPTIONAL at the boto3 schema level** on `BatchCreateMemoryRecords`, `BatchUpdateMemoryRecords`, `RetrieveMemoryRecords.searchCriteria`, and `ListMemoryRecords`. We **always send it** for deterministic strategy routing, but code must not assume botocore will reject the call when it is omitted.
+
+5. **`BatchUpdateMemoryRecords` has no `clientToken`** (unlike `BatchCreateMemoryRecords`). Idempotency on update comes from natural overwrite of a specific `memoryRecordId`.
+
+6. **`BatchDeleteMemoryRecords` records take only `memoryRecordId`** — no metadata, no namespace.
+
+7. **`GetMemoryRecord` exists on the data plane.** Use it for single-record lookups (e.g. before `BatchUpdateMemoryRecords` on credit / promote / retire). `ListMemoryRecords` with filters is for collection scans. Spike Finding 3's "`get-memory-record` returns 404 for BASE records" warning is preserved — use it for non-BASE records only; for BASE records continue to use `list_memory_records` with `metadataFilters`.
+
+8. **`ListMemoryExtractionJobs.filter.status` only accepts `'FAILED'`** as a status value. There is no way to filter by `SUCCEEDED` or in-progress states. `agentcore status` can call without a filter to get total counts, or with `status=FAILED` for the failure subset.
+
+9. **`namespace` (single string, max 1024) and `namespacePath` are distinct optional kwargs on retrieve / list.** Semantics differ (`namespace` is exact-match; `namespacePath` is prefix-style). Plan 2 task should pin which one matches our intended hierarchy at implementation time — we use single-string namespaces (no per-record list), so `namespace` is the default; `namespacePath` is the escape hatch if AgentCore's prefix matching behaves differently than expected.
+
+### `MemoryRecordOutput` shape (partial-failure handling)
+
+`BatchCreateMemoryRecords` / `BatchUpdateMemoryRecords` / `BatchDeleteMemoryRecords` all return `{successfulRecords: list[MemoryRecordOutput], failedRecords: list[MemoryRecordOutput]}`. Each `MemoryRecordOutput` has `memoryRecordId`, `status` (`SUCCEEDED | FAILED`), optional `requestIdentifier`, `errorCode` (integer), `errorMessage`. Plan 2 must propagate per-record errors, not just check transport-level success.
+
+### Strategy ID discovery
+
+`create_memory` returns `response['memory']['strategies'][i]['strategyId']` synchronously. **No follow-up `get_memory` call is needed for IDs.** However:
+
+- `memory.status` starts at `CREATING` and each `strategies[i].status` likewise. The service rejects records until both transition to `ACTIVE` (spike Finding 5 noted 90-115s).
+- There is no `CreateMemoryStrategy` / `ListMemoryStrategies` / `GetMemoryStrategy` op. Strategy mutation only happens inline via `CreateMemory.memoryStrategies` or `UpdateMemory` with `ModifyMemoryStrategies`.
+- Recovery path if `agentcore.json` is lost: `ListMemories` (returns only `arn`/`id`/`status`) then `GetMemory` to repopulate `strategies` (match logical role back to entry by stable `name` constant, e.g. `"better-memory-semantic-preferences"`).
+
+### Persistence file shape — `$BETTER_MEMORY_HOME/agentcore.json`
+
+`agentcore init` writes this once. Runtime reads it on every server boot.
+
+```json
+{
+  "schema_version": 1,
+  "region": "eu-west-2",
+  "semantic": {
+    "memory_id": "better-memory-semantic-abc1234567",
+    "memory_arn": "arn:aws:bedrock-agentcore:eu-west-2:<acct>:memory/better-memory-semantic-abc1234567",
+    "memory_name": "better-memory-semantic",
+    "strategy_id": "userPreference-zXy1234567",
+    "strategy_name": "userPreference",
+    "event_expiry_duration_days": 365
+  },
+  "episodic": {
+    "memory_id": "better-memory-episodic-def4567890",
+    "memory_arn": "arn:aws:bedrock-agentcore:eu-west-2:<acct>:memory/better-memory-episodic-def4567890",
+    "memory_name": "better-memory-episodic",
+    "strategy_id": "episodicReflections-qPr9876543",
+    "strategy_name": "episodicReflections",
+    "event_expiry_duration_days": 90
+  }
+}
+```
+
+Naming conventions: strategy names are stable constants in code (e.g. `_SEMANTIC_STRATEGY_NAME = "userPreference"`), so recovery via name-match works.
+
+### AWS credentials
+
+The adapter relies on the **default boto3 credential chain** — env vars (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`), then `~/.aws/credentials`, then instance / SSO profiles. No better-memory-specific credential code. The README documents the IAM permissions needed; the operator wires credentials however they prefer.
+
+### Retry config
+
+Both clients are constructed with:
+
+```python
+from botocore.config import Config as BotoConfig
+
+BotoConfig(
+    region_name=config.agentcore_region,
+    retries={"mode": "standard", "max_attempts": 5},
+)
+```
+
+Standard mode (not adaptive) — predictable capped exponential backoff; 4 retries past the initial attempt. Exhausted retries surface as `RetryableStorageError` with the underlying botocore exception chained.
 
 ## Components
 
