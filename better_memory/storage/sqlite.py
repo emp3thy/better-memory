@@ -21,9 +21,14 @@ import sqlite3
 from typing import Any
 
 from better_memory.services.episode import EpisodeService
+from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.observation import ObservationService
-from better_memory.services.reflection import ReflectionService
+from better_memory.services.reflection import (
+    ReflectionService,
+    ReflectionSynthesisService,
+)
 from better_memory.services.semantic import SemanticMemoryService
+from better_memory.services.session_bootstrap import SessionBootstrapService
 from better_memory.storage.protocol import Outcome, UseOutcome
 
 
@@ -53,6 +58,9 @@ class SqliteBackend:
         )
         self._semantic = SemanticMemoryService(memory_conn)
         self._reflection = ReflectionService(memory_conn)
+        self._memory_rating = MemoryRatingService(memory_conn)
+        self._session_bootstrap = SessionBootstrapService(memory_conn)
+        self._synthesis = ReflectionSynthesisService(memory_conn)
 
     # ----- Capability flags -----
 
@@ -258,3 +266,63 @@ class SqliteBackend:
 
     def retire_reflection(self, *, reflection_id: str) -> None:
         self._reflection.retire(reflection_id=reflection_id)
+
+    # ----- Session lifecycle -----
+
+    def session_bootstrap(
+        self,
+        *,
+        session_id: str,
+        source: str | None = None,
+        cwd: Any | None = None,
+        project: str | None = None,
+    ) -> Any:
+        return self._session_bootstrap.bootstrap(
+            session_id=session_id,
+            source=source,
+            cwd=cwd,
+            project=project or self._project,
+        )
+
+    def list_session_exposures(self, *, session_id: str) -> dict[str, Any]:
+        return self._session_bootstrap.list_session_exposures(
+            session_id=session_id,
+        )
+
+    def apply_session_ratings(
+        self,
+        *,
+        session_id: str,
+        ratings: list[dict[str, str]],
+    ) -> Any:
+        return self._memory_rating.apply_session_ratings(
+            session_id=session_id, ratings=ratings,
+        )
+
+    def credit_one(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        id: str,
+        classification: str,
+    ) -> Any:
+        return self._memory_rating.credit_one(
+            session_id=session_id, kind=kind, id=id, classification=classification,
+        )
+
+    # ----- Synthesis -----
+
+    def synthesize_next_get_context(self, *, project: str) -> Any:
+        return self._synthesis.get_next_pending_context(project=project)
+
+    def synthesize_next_apply(
+        self,
+        *,
+        episode_id: str,
+        response: Any,
+        project: str,
+    ) -> Any:
+        return self._synthesis.apply_decision(
+            episode_id=episode_id, response=response, project=project,
+        )

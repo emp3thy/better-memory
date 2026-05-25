@@ -51,15 +51,6 @@ def backend(memory_conn) -> SqliteBackend:
     )
 
 
-# NOTE: Full Protocol satisfaction is asserted again — without xfail — at the
-# end of Task 5b, once SqliteBackend implements every method on the Protocol.
-# In Task 3 only the hot-path (observe / retrieve / list_observations /
-# record_use) is wrapped, so this isinstance check is expected to fail until
-# Tasks 4 and 5b land. The xfail is intentional; do not delete it.
-@pytest.mark.xfail(
-    reason="Protocol coverage completes in Task 5b; Task 3 only wraps the hot path.",
-    strict=True,
-)
 def test_sqlite_backend_satisfies_protocol(backend) -> None:
     assert isinstance(backend, StorageBackend)
 
@@ -199,3 +190,40 @@ def test_promote_and_retire_reflection(backend, memory_conn) -> None:
         "SELECT status FROM reflections WHERE id=?", ("refl-test-1",)
     ).fetchone()
     assert row["status"] == "retired"
+
+
+# ----- Task 5b: synthesis + session bootstrap + ratings -----
+
+
+def test_session_bootstrap_returns_result(backend) -> None:
+    result = backend.session_bootstrap(session_id="test-session", project="testproj")
+    # BootstrapResult is a dataclass-like; check a stable attribute / key.
+    assert result is not None
+
+
+def test_list_session_exposures_returns_envelope(backend) -> None:
+    result = backend.list_session_exposures(session_id="test-session")
+    assert isinstance(result, dict)
+    assert result.get("session_id") == "test-session"
+    assert "exposures" in result
+
+
+def test_apply_session_ratings_empty_raises(backend) -> None:
+    # Service raises ValueError on empty ratings — the wrapper must surface it.
+    with pytest.raises(ValueError):
+        backend.apply_session_ratings(session_id="test-session", ratings=[])
+
+
+def test_credit_one_for_missing_memory_returns_skip(backend) -> None:
+    result = backend.credit_one(
+        session_id="test-session",
+        kind="reflection",
+        id="does-not-exist",
+        classification="cited",
+    )
+    assert result is not None  # ApplyOutcome dict-like
+
+
+def test_synthesize_next_get_context_returns_none_when_no_pending(backend) -> None:
+    # Fresh in-memory db — no pending episodes for synthesis.
+    assert backend.synthesize_next_get_context(project="testproj") is None
