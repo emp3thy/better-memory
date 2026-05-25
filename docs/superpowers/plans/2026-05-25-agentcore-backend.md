@@ -58,6 +58,8 @@ See spec: `docs/superpowers/specs/2026-05-24-agentcore-storage-backend-design.md
 
 All tasks ≥ 90%. Plan now 14 tasks (Task 0 added: Plan 1 amendment rewiring Protocol.retrieve to mean reflection-bucketing instead of observation-bucketing, after investigator surfaced the Plan 1 contract drift; Task 7 rewritten end-to-end against the new contract).
 
+**Live-AWS smoke completed 2026-05-25** (`scripts/agentcore_smoke.py`) — exercised the full write/read/update/delete cycle against real bedrock-agentcore in eu-west-2. 5 spec drifts caught + landed in spec; Plan 2 helpers updated (`_full_metadata_snapshot` strips system keys; `_retry_on_transient_404` wraps batch_update). See spec § "Live-AWS smoke findings" for the full list. Confidence on AWS-side behaviour now ≥ 95%.
+
 ---
 
 ## Conventions used in this plan
@@ -1981,17 +1983,64 @@ def _get_record(self, record_id: str) -> dict[str, Any]:
     )["memoryRecord"]
 
 
+_AGENTCORE_SYSTEM_METADATA_PREFIX = "x-amz-agentcore-memory-"
+
+
+def _retry_on_transient_404(
+    self,
+    call: Callable[[], dict[str, Any]],
+    *,
+    max_attempts: int = 3,
+    backoff_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Retry a boto3 call on transient ResourceNotFoundException.
+
+    Live-AWS smoke (spec § "Live-AWS smoke findings") showed that
+    ``batch_update_memory_records`` issued immediately after
+    ``batch_create_memory_records`` can fail with ResourceNotFoundException
+    on the first attempt and succeed on the second. Lag is ~10s typical.
+
+    Permanent 404s (the record really doesn't exist) will still raise
+    after ``max_attempts``."""
+    from botocore.exceptions import ClientError
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return call()
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code != "ResourceNotFoundException" or attempt == max_attempts:
+                raise
+            time.sleep(backoff_seconds)
+    # Unreachable but satisfies type checker
+    raise RuntimeError("retry loop exited unexpectedly")
+
+
 def _full_metadata_snapshot(
     self, current: dict[str, Any], updates: dict[str, Any]
 ) -> dict[str, dict[str, Any]]:
     """Produce a full metadata snapshot for BatchUpdateMemoryRecords.
 
-    Merge-vs-replace semantics on AgentCore metadata updates are
-    undetermined (spike Finding 5); always send the FULL snapshot.
-    `current` is the existing metadata dict from MemoryRecord;
-    `updates` is the diff to apply (already in the wire-shape dict form
+    Two rules baked in here:
+
+    1. **Merge-vs-replace semantics are undetermined** (spike Finding 5);
+       always send the FULL snapshot.
+
+    2. **Strip system-managed keys** before sending. ``list_memory_records``
+       and ``get_memory_record`` responses include
+       ``x-amz-agentcore-memory-{createdAt,updatedAt,recordType}`` mixed
+       into the returned metadata dict. If echoed back via
+       ``batch_update_memory_records``, AWS rejects the call with
+       ``code 400 — Metadata keys cannot use reserved names or prefixes``.
+       Caught by the live-AWS smoke; see spec § "Live-AWS smoke findings".
+
+    ``current`` is the existing metadata dict from MemoryRecord;
+    ``updates`` is the diff to apply (already in the wire-shape dict form
     with stringValue/numberValue/etc.)."""
-    snapshot = dict(current)
+    snapshot = {
+        k: v for k, v in current.items()
+        if not k.startswith(_AGENTCORE_SYSTEM_METADATA_PREFIX)
+    }
     snapshot.update(updates)
     return snapshot
 

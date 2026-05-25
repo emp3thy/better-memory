@@ -243,9 +243,83 @@ Operator implication: Ralph executor sessions (`session_close` always fires) get
 | Session closure | Stop hook fires a final closure CreateEvent | Triggers AgentCore's completion detection; bounds latency to ~1-3 min |
 | Custom strategies | Not in v1 | Built-in is sufficient and operationally simpler; revisit only if extraction quality forces it |
 
+## Live-AWS smoke findings (2026-05-25, eu-west-2, after boto3 introspection)
+
+A pre-Plan-2 smoke (`scripts/agentcore_smoke.py`) created throwaway memory resources end-to-end and exercised the full write → read → update → delete cycle. It caught 5 quirks that boto3 introspection alone missed. **These supersede any conflicting statement below.** Every Plan 2 implementer must read this section.
+
+### 1. `LlmExtractionConfig` shape (was wrong in earlier draft)
+
+| Field | Required? | Notes |
+|---|---|---|
+| `definition` | **yes** | One-line description of what the field represents; surfaced to the extracting LLM. Spec previously omitted. |
+| `llmExtractionInstruction` | no | Optional classifier instruction. Spec previously called this `extractionInstruction` — that name is rejected. |
+| `validation` | no | `{stringValidation: {allowedValues: [...]} \| stringListValidation: {...} \| numberValidation: {...}}`. Spec previously declared `allowedValues` directly on the schema entry — that location is rejected. |
+
+Corrected polarity declaration:
+
+```python
+{
+    "key": "polarity",
+    "type": "STRING",
+    "extractionConfig": {
+        "llmExtractionConfig": {
+            "definition": "Whether this reflection prescribes a do, dont, or neutral practice.",
+            "llmExtractionInstruction": "Classify this reflection as 'do', 'dont', or 'neutral'.",
+            "validation": {
+                "stringValidation": {
+                    "allowedValues": ["do", "dont", "neutral"]
+                }
+            },
+        }
+    },
+}
+```
+
+### 2. Memory `name` regex: `[a-zA-Z][a-zA-Z0-9_]{0,47}`
+
+No dashes. Max 48 chars. `CreateMemory` rejects with `ValidationException` otherwise. `agentcore init` (Plan 3) names: `better_memory_semantic`, `better_memory_episodic` (or whatever — underscores only).
+
+### 3. System metadata keys leak into list/get responses; MUST strip before batch_update
+
+When `list_memory_records` or `get_memory_record` returns a record, the `metadata` dict includes system-managed keys mixed inline:
+
+- `x-amz-agentcore-memory-createdAt` (dateTimeValue)
+- `x-amz-agentcore-memory-updatedAt` (dateTimeValue)
+- `x-amz-agentcore-memory-recordType` (stringValue)
+
+If those keys are echoed back via `batch_update_memory_records.records[].metadata`, AWS rejects the call with:
+
+> `code 400 — Metadata keys cannot use reserved names or prefixes: x-amz-agentcore-memory-updatedAt, x-amz-agentcore-memory-createdAt, x-amz-agentcore-memory-recordType`
+
+**Implementation rule:** every `batch_update` call must strip the `x-amz-agentcore-memory-` prefix from the metadata snapshot before sending. Plan 2's `_full_metadata_snapshot` helper does this:
+
+```python
+def _full_metadata_snapshot(current: dict, updates: dict) -> dict:
+    SYSTEM_PREFIX = "x-amz-agentcore-memory-"
+    snapshot = {k: v for k, v in current.items() if not k.startswith(SYSTEM_PREFIX)}
+    snapshot.update(updates)
+    return snapshot
+```
+
+### 4. Eventual consistency observed at three boundaries
+
+| Boundary | Typical lag | Worst observed | Implementation strategy |
+|---|---|---|---|
+| `list_memory_records` after `batch_create_memory_records` | ~15s | ~75s | retry up to 25 × 5s; bypass via `get_memory_record` if list lags |
+| read after `batch_update_memory_records` (counter visible) | ~70s | ~70s | retry up to 24 × 5s |
+| `batch_update_memory_records` right after `batch_create_memory_records` | usually first call works | occasional `ResourceNotFoundException` on first attempt | retry once with 10s backoff before treating as fatal |
+
+Plan 2 wraps every write-update path with a `_retry_on_transient_404` helper and the read-after-update assertion with a polling loop. Mocked unit tests in Plan 2 don't see this — integration tests (Plan 3) will.
+
+### 5. `get_memory_record` works on BASE records (spike Finding 3 was wrong / strategy-specific)
+
+The earlier spec text said "never `get-memory-record` (spike Finding 3) — it returns 404 for BASE records." The smoke verified `get_memory_record` returns the BASE record correctly with full metadata. Use it freely for single-record lookups instead of `list_memory_records` + metadataFilters. The Plan 2 `_get_record` / `_get_semantic_record` helpers should use `get_memory_record` as their primary path.
+
+---
+
 ## Verified API surface (boto3 introspection, 2026-05-25)
 
-Post-spec verification against `boto3 1.43.14` / `botocore 1.43.14` confirmed the overall shape but surfaced a handful of corrections. These supersede any conflicting statement earlier in the spec.
+Post-spec verification against `boto3 1.43.14` / `botocore 1.43.14` confirmed the overall shape but surfaced a handful of corrections. These supersede any conflicting statement earlier in the spec. **Note the live-AWS smoke findings above ALSO supersede statements here.**
 
 ### Operation locations
 
