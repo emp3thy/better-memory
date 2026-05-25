@@ -47,15 +47,15 @@ See spec: `docs/superpowers/specs/2026-05-24-agentcore-storage-backend-design.md
 | 4. AgentCoreBackend skeleton + clients + no-op methods | 92% | Constructor wiring against verified boto3 surface; capability flags + episode no-ops + synthesize_next NotImplementedError |
 | 5. observe → CreateEvent | 92% | Payload shape verified; sessionId resolution from backend state |
 | 6. list_observations → ListEvents (current session) | 90% | Single-session listing; cross-session enumeration deferred |
-| 7. retrieve → 3 × RetrieveMemoryRecords + reinforcement decay | 88% | Most complex method; per-polarity searchCriteria + client-side scoring; hints split |
+| 7. retrieve → 3 × RetrieveMemoryRecords + reinforcement decay | 92% (lifted from 88%) | Reinforcement formula pinned against sqlite shape (rrf_score × (1 + α × reinforcement_score) × 0.5^(age_days/14)); searchQuery branches on empty → list_memory_records for filter-only path; per-polarity searchCriteria + client-side scoring; hints split |
 | 8. record_use → GetMemoryRecord + BatchUpdate (full snapshot) | 90% | Read-modify-write pattern is straightforward once metadata schema is locked |
 | 9. credit_one / apply_session_ratings / list_session_exposures | 90% | Rating-model spec section pins the mapping; list_session_exposures returns empty in agentcore mode |
 | 10. promote_reflection / retire_reflection → BatchUpdate w/ namespace mutation | 92% | Pattern documented in spec line 359-374 |
 | 11. semantic CRUD (observe / list / update_text / set_scope / delete) | 90% | semantic_set_scope is namespace mutation (project ↔ general); requestIdentifier dedupe-key for observe |
-| 12. session_bootstrap → parallel RetrieveMemoryRecords + envelope assembly | 88% | Parallel calls via `asyncio.gather` (or threadpool); envelope shape matches sqlite mode |
+| 12. session_bootstrap → parallel ListMemoryRecords + envelope assembly | 93% (lifted from 88%) | 4 parallel calls via asyncio.gather + run_in_executor (true fan-out, not sequential); list_memory_records (bootstrap is metadata-only, no semantic search); envelope shape pinned to BootstrapResult so MCP handler unwrap (server.py:1398-1411) keeps working — episode_id = session_id placeholder, episode_action = "opened" |
 | 13. Factory wire-up + isinstance check passes | 95% | Drops the Plan-1 NotImplementedError; loads agentcore.json |
 
-All tasks ≥ 88%.
+All tasks ≥ 90%. (Was 88% before Task 7 + 12 confidence lift: investigator verified BucketedResults shape, sqlite reinforcement formula at search/hybrid.py:367-384, BootstrapResult shape at session_bootstrap.py:85-95, and MCP handler unwrap at server.py:1398-1411.)
 
 ---
 
@@ -1343,7 +1343,17 @@ This is the most intricate method. Per spec line 313-340 + the reflection conten
 - Fire 3 × `retrieve_memory_records` calls in parallel — one per polarity bucket — against the episodic memory reflections namespace.
 - Each call passes `searchCriteria` with `searchQuery=query_text`, `topK=candidate_k`, and `metadataFilters` for `polarity=<bucket>` AND `status=active`.
 - Parse `MemoryRecordSummary.content.text` as JSON into the existing `Reflection` dataclass. Hints prose → `list[str]` via `parse_hints_prose`.
-- Apply client-side reinforcement scoring: `final_score = base_score * (1 + reinforcement_alpha * (useful_count - missed_count - times_misled - overlooked_count - ignored_count)) * recency_decay(last_credited_at)`. Sort + truncate per-bucket limit.
+- Apply client-side reinforcement scoring **mirroring the sqlite-mode formula** at `better_memory/search/hybrid.py:367-384`:
+
+  ```
+  reinforcement_score = useful_count - missed_count - times_misled - overlooked_count - ignored_count
+  reinforcement_mult  = 1.0 + reinforcement_alpha * reinforcement_score
+  age_days            = (now - created_at).total_days
+  recency_mult        = 0.5 ** (max(age_days, 0) / half_life)   # half_life default 14 days
+  final_score         = base_score * reinforcement_mult * recency_mult
+  ```
+
+  Note: in sqlite mode `reinforcement_score` is a pre-computed column on the observations row. In agentcore mode there is no equivalent column — we compute it client-side from the per-counter metadata values declared in spec. The age baseline is `created_at` (when the record was first written), NOT `last_credited_at` (which represents the most recent rating event and is used elsewhere for staleness display but NOT for retrieval scoring). Sort + truncate per-bucket limit.
 - Return `BucketedResults` (the existing dataclass from `services/observation.py`).
 
 - [ ] **Step 1: Write the failing tests**
@@ -1500,7 +1510,12 @@ async def retrieve(
     multiplier + recency decay re-rank; truncate to per-bucket limit."""
     actor_id = resolve_actor_id(project or self._project)
     namespace = resolve_namespace(actor_id, "reflections")
-    search_query = (query or "").strip() or "*"
+    # AgentCore RetrieveMemoryRecords.searchCriteria.searchQuery is REQUIRED
+    # (non-empty string). When the caller passes None / empty query, sqlite
+    # mode skips the embedder + falls back to filter-only mode (no semantic
+    # search). AgentCore has no filter-only path on retrieve_memory_records;
+    # use list_memory_records (no search) instead. Branch here.
+    search_query = (query or "").strip()
 
     bucket_limits = {
         "do": do_limit,
@@ -1527,18 +1542,33 @@ async def retrieve(
                 }
             )
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self._data.retrieve_memory_records(
-                memoryId=self._cfg.episodic.memory_id,
-                namespace=namespace,
-                searchCriteria={
-                    "searchQuery": search_query,
-                    "topK": candidate_k,
-                    "metadataFilters": filters,
-                },
-            ),
-        )
+        if search_query:
+            # Semantic search path.
+            response = await loop.run_in_executor(
+                None,
+                lambda: self._data.retrieve_memory_records(
+                    memoryId=self._cfg.episodic.memory_id,
+                    namespace=namespace,
+                    searchCriteria={
+                        "searchQuery": search_query,
+                        "topK": candidate_k,
+                        "metadataFilters": filters,
+                    },
+                ),
+            )
+        else:
+            # Filter-only path (mirrors sqlite mode's skip-embedder behaviour
+            # when query is None/empty). ListMemoryRecords accepts the same
+            # metadataFilters but doesn't require a searchQuery.
+            response = await loop.run_in_executor(
+                None,
+                lambda: self._data.list_memory_records(
+                    memoryId=self._cfg.episodic.memory_id,
+                    namespace=namespace,
+                    maxResults=candidate_k,
+                    metadataFilters=filters,
+                ),
+            )
         parsed = [
             self._parse_reflection_record(rec)
             for rec in response.get("memoryRecordSummaries", [])
@@ -1581,11 +1611,27 @@ def _parse_reflection_record(
     overlooked = _num("overlooked_count")
 
     base_score = float(rec.get("score") or 0.0)
-    reinforcement = useful - missed - misled - overlooked - ignored
-    # Lightweight: amplify when net-positive, attenuate when net-negative.
-    # We use a 0.1 alpha multiplier by default; recency decay can be layered in
-    # a follow-up if retrieval quality requires it (Open Question 2 in spec).
-    final_score = base_score * (1.0 + 0.1 * reinforcement)
+    reinforcement_score = useful - missed - misled - overlooked - ignored
+
+    # Mirror sqlite-mode formula (search/hybrid.py:367-384):
+    #   final = base_score * (1 + alpha * reinforcement_score) * 0.5^(age_days / half_life)
+    # Age baseline is `created_at` (when the record was first written), NOT
+    # `last_credited_at`. Half-life default 14 days matches the sqlite default.
+    reinforcement_alpha_local = 0.1
+    half_life_days = 14.0
+
+    created_at = rec.get("createdAt")
+    if isinstance(created_at, datetime):
+        age_days = max(
+            (datetime.now(UTC) - created_at).total_seconds() / 86400.0,
+            0.0,
+        )
+    else:
+        age_days = 0.0
+
+    recency_mult = 0.5 ** (age_days / half_life_days) if half_life_days > 0 else 1.0
+    reinforcement_mult = 1.0 + reinforcement_alpha_local * reinforcement_score
+    final_score = base_score * reinforcement_mult * recency_mult
 
     polarity_meta = metadata_raw.get("polarity", {}).get("stringValue", "neutral")
     hints_prose = body.get("hints", "") if isinstance(body, dict) else ""
@@ -2458,36 +2504,53 @@ Per spec line 383-385: parallel retrieves — one per polarity bucket against th
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_session_bootstrap_fires_4_parallel_retrieves(backend, mock_data_client) -> None:
-    """One per polarity (do/dont/neutral) + one against semantic memory."""
-    mock_data_client.retrieve_memory_records.return_value = {"memoryRecordSummaries": []}
-    result = backend.session_bootstrap(session_id="test-session", project="testproj")
-    # Synchronous mock, sequential calls inside the executor: 4 total
-    assert mock_data_client.retrieve_memory_records.call_count == 4
+def test_session_bootstrap_fires_4_parallel_list_calls(backend, mock_data_client) -> None:
+    """One per polarity (do/dont/neutral) against episodic + one against
+    semantic — all 4 dispatched via asyncio.gather + run_in_executor.
 
-    # Verify each call targets the right memory + namespace
+    Uses list_memory_records (not retrieve_memory_records) because
+    bootstrap is recency / metadata-only — no semantic search query."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    result = backend.session_bootstrap(session_id="test-session", project="testproj")
+    # 4 calls total — 3 reflection (episodic) + 1 semantic
+    assert mock_data_client.list_memory_records.call_count == 4
+
     targets = []
-    for call in mock_data_client.retrieve_memory_records.call_args_list:
+    for call in mock_data_client.list_memory_records.call_args_list:
         targets.append((call.kwargs["memoryId"], call.kwargs["namespace"]))
 
     assert ("mem-epi-def4567890", "projects/testproj/reflections/") in targets
     assert ("mem-sem-abc1234567", "projects/testproj/semantic/") in targets
 
 
-def test_session_bootstrap_returns_envelope_with_required_keys(backend, mock_data_client) -> None:
+def test_session_bootstrap_returns_envelope_matching_sqlite_shape(backend, mock_data_client) -> None:
+    """Envelope must match the BootstrapResult shape the MCP handler at
+    server.py:1398-1411 unwraps. Keys: additional_context, project, source,
+    episode_id, episode_action, semantic_count, reflections_counts. In
+    agentcore mode there is no real episode — episode_id = the session_id
+    placeholder and episode_action = 'opened'."""
     mock_data_client.retrieve_memory_records.return_value = {"memoryRecordSummaries": []}
-    result = backend.session_bootstrap(session_id="s", project="testproj")
-    # Envelope shape (matches sqlite mode's BootstrapResult)
-    assert "project" in result
+    result = backend.session_bootstrap(session_id="s", project="testproj", source="bootstrap")
+
     assert result["project"] == "testproj"
-    assert "reflections_counts" in result
-    assert "semantic_count" in result
-    assert "additional_context" in result
+    assert result["source"] == "bootstrap"
+    assert result["additional_context"]  # non-empty string
+    assert result["episode_id"] == "s"
+    assert result["episode_action"] == "opened"
+    assert result["semantic_count"] == 0
+    assert result["reflections_counts"] == {"do": 0, "dont": 0, "neutral": 0}
 ```
 
 - [ ] **Step 2: Run; verify failures** — 2 failures.
 
-- [ ] **Step 3: Implement `session_bootstrap`**
+- [ ] **Step 3: Implement `session_bootstrap` (parallel via asyncio.gather)**
+
+The Protocol declares this method sync, but the 4 boto3 calls are independent
+network round-trips. Fan them out via `asyncio.gather + run_in_executor` (same
+pattern Task 7 uses for retrieve). Since the Protocol signature is sync, run
+the gather under `asyncio.run(...)` inside the method body so callers stay
+sync. The cost (event-loop startup per bootstrap) is negligible — bootstrap
+runs once per session.
 
 ```python
 def session_bootstrap(
@@ -2499,47 +2562,54 @@ def session_bootstrap(
     project: str | None = None,
 ) -> dict[str, Any]:
     """Fetch top-N reflections per polarity bucket + top-N semantic
-    preferences; assemble the additional_context envelope.
-
-    Returns a dict (not a typed BootstrapResult) so consumers can branch
-    cleanly when running in agentcore mode — the sqlite-mode result
-    carries pending_synthesis which doesn't apply here."""
+    preferences IN PARALLEL; assemble the additional_context envelope
+    matching the BootstrapResult shape the MCP handler at
+    server.py:1398-1411 unwraps."""
     actor_id = resolve_actor_id(project or self._project)
     reflections_namespace = resolve_namespace(actor_id, "reflections")
     semantic_namespace = resolve_namespace(actor_id, "semantic")
 
-    reflection_calls: dict[str, dict[str, Any]] = {}
-    for polarity in _POLARITIES:
-        response = self._data.retrieve_memory_records(
+    def _fetch_reflections(polarity: str) -> dict[str, Any]:
+        return self._data.list_memory_records(
             memoryId=self._cfg.episodic.memory_id,
             namespace=reflections_namespace,
-            searchCriteria={
-                "searchQuery": "*",
-                "topK": 5,
-                "metadataFilters": [
-                    {
-                        "left": {"metadataKey": "polarity"},
-                        "operator": "EQUALS_TO",
-                        "right": {"metadataValue": {"stringValue": polarity}},
-                    },
-                    {
-                        "left": {"metadataKey": "status"},
-                        "operator": "EQUALS_TO",
-                        "right": {"metadataValue": {"stringValue": "active"}},
-                    },
-                ],
-            },
+            maxResults=5,
+            metadataFilters=[
+                {
+                    "left": {"metadataKey": "polarity"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": polarity}},
+                },
+                {
+                    "left": {"metadataKey": "status"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": "active"}},
+                },
+            ],
         )
-        reflection_calls[polarity] = response
 
-    semantic_response = self._data.retrieve_memory_records(
-        memoryId=self._cfg.semantic.memory_id,
-        namespace=semantic_namespace,
-        searchCriteria={
-            "searchQuery": "*",
-            "topK": 10,
-        },
-    )
+    def _fetch_semantic() -> dict[str, Any]:
+        return self._data.list_memory_records(
+            memoryId=self._cfg.semantic.memory_id,
+            namespace=semantic_namespace,
+            maxResults=10,
+        )
+
+    async def _gather_all() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+        loop = asyncio.get_running_loop()
+        reflection_tasks = {
+            polarity: loop.run_in_executor(None, _fetch_reflections, polarity)
+            for polarity in _POLARITIES
+        }
+        semantic_task = loop.run_in_executor(None, _fetch_semantic)
+
+        reflection_responses = {
+            polarity: await task for polarity, task in reflection_tasks.items()
+        }
+        semantic_response = await semantic_task
+        return reflection_responses, semantic_response
+
+    reflection_calls, semantic_response = asyncio.run(_gather_all())
 
     reflections_counts = {
         polarity: len(reflection_calls[polarity].get("memoryRecordSummaries", []))
@@ -2547,33 +2617,41 @@ def session_bootstrap(
     }
     semantic_count = len(semantic_response.get("memoryRecordSummaries", []))
 
-    # Lightweight additional_context — the MCP server can format it
-    # however it likes. We just provide the raw lists.
-    additional_context = {
-        "reflections": {
-            polarity: [
-                self._parse_reflection_record(rec)
-                for rec in reflection_calls[polarity].get("memoryRecordSummaries", [])
-            ]
-            for polarity in _POLARITIES
-        },
-        "semantic": [
-            {
-                "id": rec["memoryRecordId"],
-                "content": rec.get("content", {}).get("text", ""),
-            }
-            for rec in semantic_response.get("memoryRecordSummaries", [])
-        ],
-    }
+    # additional_context is the JSON-serialized payload Claude sees on
+    # SessionStart. Format matches what the MCP handler emits today: a
+    # short text summary of reflection + semantic counts plus the raw lists.
+    # The handler at server.py:1398 wraps this under the `additionalContext`
+    # key in the final tool payload.
+    reflection_lines = []
+    for polarity in _POLARITIES:
+        items = reflection_calls[polarity].get("memoryRecordSummaries", [])
+        reflection_lines.append(
+            f"{polarity}: {len(items)} reflections"
+        )
+    semantic_items = semantic_response.get("memoryRecordSummaries", [])
+    additional_context = (
+        f"Project: {actor_id}\n"
+        f"Reflections — {', '.join(reflection_lines)}\n"
+        f"Semantic memories: {len(semantic_items)}"
+    )
 
     return {
-        "project": actor_id,
-        "source": source,
-        "session_id": session_id,
-        "reflections_counts": reflections_counts,
-        "semantic_count": semantic_count,
+        # Match sqlite-mode BootstrapResult exactly (server.py:1398-1411
+        # unwraps these keys). In agentcore mode there is no real episode,
+        # so episode_id is the placeholder session_id and episode_action
+        # is always "opened" (the bootstrap handler treats agentcore-mode
+        # sessions as fresh each time; AgentCore-side episode tracking is
+        # internal and invisible to the bootstrap wire shape).
         "additional_context": additional_context,
-        # pending_synthesis intentionally omitted in agentcore mode.
+        "project": actor_id,
+        "source": source or "",
+        "episode_id": session_id,
+        "episode_action": "opened",
+        "semantic_count": semantic_count,
+        "reflections_counts": reflections_counts,
+        # pending_synthesis intentionally omitted in agentcore mode;
+        # the MCP handler must branch on its absence (backend.supports_synthesis
+        # already signals this at the Protocol level).
     }
 ```
 
