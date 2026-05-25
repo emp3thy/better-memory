@@ -286,6 +286,33 @@ def test_agentcore_mode_without_memory_ids_raises(monkeypatch: pytest.MonkeyPatc
         get_config()
 
 
+@pytest.mark.parametrize(
+    "set_var,unset_var",
+    [
+        (
+            "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID",
+            "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID",
+        ),
+        (
+            "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID",
+            "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID",
+        ),
+    ],
+)
+def test_agentcore_mode_with_only_one_memory_id_raises(
+    monkeypatch: pytest.MonkeyPatch, set_var: str, unset_var: str
+) -> None:
+    """Setting only one of the two memory IDs still trips the cross-field check.
+
+    The validation uses ``or``, so each side of the disjunction needs coverage.
+    """
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    monkeypatch.setenv(set_var, "mem-only-one-1234567")
+    monkeypatch.delenv(unset_var, raising=False)
+    with pytest.raises(ValueError, match="agentcore init"):
+        get_config()
+
+
 def test_agentcore_region_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
     monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_REGION", "us-west-2")

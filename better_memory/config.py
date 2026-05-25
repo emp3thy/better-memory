@@ -220,6 +220,16 @@ def _resolve_embeddings_backend() -> Literal["ollama", "tfidf"]:
     return raw  # type: ignore[return-value]
 
 
+def _resolve_storage_backend() -> Literal["sqlite", "agentcore"]:
+    raw = os.environ.get("BETTER_MEMORY_STORAGE_BACKEND", _DEFAULT_STORAGE_BACKEND)
+    if raw not in _VALID_STORAGE_BACKENDS:
+        raise ValueError(
+            f"BETTER_MEMORY_STORAGE_BACKEND={raw!r} is not one of "
+            f"{_VALID_STORAGE_BACKENDS}"
+        )
+    return raw  # type: ignore[return-value]
+
+
 def get_config() -> Config:
     """Resolve the current environment into a :class:`Config`.
 
@@ -227,14 +237,7 @@ def get_config() -> Config:
     """
     home = resolve_home()
 
-    storage_backend = _resolve_str(
-        "BETTER_MEMORY_STORAGE_BACKEND", _DEFAULT_STORAGE_BACKEND
-    )
-    if storage_backend not in _VALID_STORAGE_BACKENDS:
-        raise ValueError(
-            f"BETTER_MEMORY_STORAGE_BACKEND={storage_backend!r} is not one of "
-            f"{_VALID_STORAGE_BACKENDS}"
-        )
+    storage_backend = _resolve_storage_backend()
 
     agentcore_region = _resolve_str(
         "BETTER_MEMORY_AGENTCORE_REGION", _DEFAULT_AGENTCORE_REGION
@@ -268,7 +271,7 @@ def get_config() -> Config:
         auto_prune=_resolve_bool("BETTER_MEMORY_AUTO_PRUNE", default=False),
         diag_logging=_resolve_bool("BETTER_MEMORY_DIAG_LOGGING", default=False),
         embeddings_backend=_resolve_embeddings_backend(),
-        storage_backend=storage_backend,  # type: ignore[arg-type]
+        storage_backend=storage_backend,
         agentcore_region=agentcore_region,
         agentcore_semantic_memory_id=agentcore_semantic_memory_id,
         agentcore_episodic_memory_id=agentcore_episodic_memory_id,
