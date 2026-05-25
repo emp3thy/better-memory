@@ -28,7 +28,7 @@ def build_backend(
     memory_conn: sqlite3.Connection,
     embedder: Any = None,
     retriever: Any = None,
-    session_id: str,
+    session_id: str | None,
     project: str,
 ) -> StorageBackend:
     """Construct the StorageBackend implementation appropriate for the config."""

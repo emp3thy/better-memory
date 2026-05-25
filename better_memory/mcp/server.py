@@ -941,13 +941,15 @@ class ServerContext:
     (tests, future hooks) can introspect or reuse the wired-up backend
     without rebuilding it. ``backend`` is the live ``StorageBackend``;
     ``memory_conn`` is the underlying sqlite connection (None for non-sqlite
-    backends in future plans); ``embedder`` is whatever was passed to the
-    backend (may be None in the tfidf wiring).
+    backends in future plans); ``embedder`` and ``retriever`` are whatever
+    was passed to the backend — exactly one is non-None (embedder for the
+    ollama backend, retriever for the tfidf backend).
     """
 
     backend: StorageBackend
-    memory_conn: sqlite3.Connection
-    embedder: Any
+    memory_conn: sqlite3.Connection | None = None
+    embedder: Any = None
+    retriever: Any = None
 
 
 def create_server() -> tuple[
@@ -1013,11 +1015,14 @@ def create_server() -> tuple[
     # still override per-call (handlers continue to read args.get("project")
     # / call project_name() for backwards compatibility), but the backend
     # construction needs concrete defaults to lock in the SqliteBackend's
-    # write-path resolution. Falling back to "" for session_id mirrors the
-    # historical behaviour of the rating tools' _resolve_session_id helper
-    # — they raise their own ValueError when actually called with no id.
+    # write-path resolution. Pass ``None`` (not ``""``) when the session id
+    # can't be resolved at startup — ObservationService's session_id
+    # resolution (services/observation.py:147-155) only falls back to the
+    # env-var / marker file path when ``session_id is None``. An empty
+    # string silently writes observations with session_id='' and breaks
+    # the rating tools.
     startup_project = project_name()
-    startup_session_id = _resolve_session_id(config.home) or ""
+    startup_session_id: str | None = _resolve_session_id(config.home) or None
     backend: StorageBackend = build_backend(
         config=config,
         memory_conn=memory_conn,
@@ -1565,6 +1570,7 @@ def create_server() -> tuple[
         backend=backend,
         memory_conn=memory_conn,
         embedder=embedder,
+        retriever=retriever,
     )
 
 
