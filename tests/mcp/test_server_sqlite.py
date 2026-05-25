@@ -35,7 +35,7 @@ def test_create_server_in_sqlite_mode_without_ollama(
 
     from better_memory.mcp.server import _dispatch_for_tests, create_server
 
-    server, cleanup = create_server()
+    server, cleanup, _ = create_server()
     try:
         assert server is not None
     finally:

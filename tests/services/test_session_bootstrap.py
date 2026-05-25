@@ -238,3 +238,124 @@ def test_render_bucket_isolation(conn, git_repo: Path) -> None:
     assert "Reflections — do (prior wins)" in text
     assert "Reflections — dont (approaches to avoid)" not in text
     assert "Reflections — neutral (context)" not in text
+
+
+# ---------------------------------------------------------------------------
+# list_session_exposures (Task 5a) — extracted from inline MCP handler.
+# ---------------------------------------------------------------------------
+
+
+def test_list_session_exposures_returns_envelope(conn) -> None:
+    svc = SessionBootstrapService(conn)
+    result = svc.list_session_exposures(session_id="test-session-no-data")
+
+    assert isinstance(result, dict)
+    assert result.get("session_id") == "test-session-no-data"
+    assert "exposures" in result
+    assert result["exposures"] == []
+
+
+def test_list_session_exposures_returns_seeded_reflection_row(conn) -> None:
+    # Seed a reflection that the exposure row references, so the LEFT JOIN
+    # populates the display column (title) the handler returns.
+    rid = _seed_reflection(conn, project="proj-a", polarity="do", scope="project")
+    conn.execute(
+        "INSERT INTO session_memory_exposure "
+        "(session_id, memory_kind, memory_id, exposed_at, source) VALUES "
+        "('s1', 'reflection', ?, '2026-05-25T12:00:00Z', 'bootstrap')",
+        (rid,),
+    )
+    conn.commit()
+
+    svc = SessionBootstrapService(conn)
+    result = svc.list_session_exposures(session_id="s1")
+
+    assert result["session_id"] == "s1"
+    assert len(result["exposures"]) == 1
+    row = result["exposures"][0]
+    assert row["id"] == rid
+    assert row["kind"] == "reflection"
+    assert row["exposed_at"] == "2026-05-25T12:00:00Z"
+    assert row["source"] == "bootstrap"
+    # Reflection rows expose 'title' (not 'content').
+    assert "title" in row
+    assert "content" not in row
+
+
+def test_list_session_exposures_semantic_uses_content_key(conn) -> None:
+    sid = uuid.uuid4().hex
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO semantic_memories "
+        "(id, content, project, scope, created_at, updated_at) "
+        "VALUES (?, 'prefer short filenames', 'proj-b', 'project', ?, ?)",
+        (sid, now, now),
+    )
+    conn.execute(
+        "INSERT INTO session_memory_exposure "
+        "(session_id, memory_kind, memory_id, exposed_at, source) VALUES "
+        "('s-sem', 'semantic', ?, '2026-05-25T12:00:00Z', 'retrieve')",
+        (sid,),
+    )
+    conn.commit()
+
+    svc = SessionBootstrapService(conn)
+    result = svc.list_session_exposures(session_id="s-sem")
+
+    assert len(result["exposures"]) == 1
+    row = result["exposures"][0]
+    assert row["kind"] == "semantic"
+    assert row["id"] == sid
+    assert row["content"] == "prefer short filenames"
+    assert "title" not in row
+
+
+def test_list_session_exposures_dedupes_by_kind_id(conn) -> None:
+    """A memory can have two exposure rows (bootstrap + retrieve) in one
+    session. The handler dedupes by (memory_kind, memory_id); the apply path
+    stamps ALL unrated rows per (kind, id), so the LLM must see one entry
+    per unique memory or apply_session_ratings rejects the batch.
+    """
+    rid = _seed_reflection(conn, project="proj-d", polarity="do", scope="project")
+    conn.executemany(
+        "INSERT INTO session_memory_exposure "
+        "(session_id, memory_kind, memory_id, exposed_at, source) VALUES "
+        "(?, ?, ?, ?, ?)",
+        [
+            ("s-dup", "reflection", rid, "2026-05-25T12:00:00Z", "bootstrap"),
+            ("s-dup", "reflection", rid, "2026-05-25T13:00:00Z", "retrieve"),
+        ],
+    )
+    conn.commit()
+
+    svc = SessionBootstrapService(conn)
+    result = svc.list_session_exposures(session_id="s-dup")
+    assert len(result["exposures"]) == 1
+    # MIN(exposed_at) wins — the earlier timestamp.
+    assert result["exposures"][0]["exposed_at"] == "2026-05-25T12:00:00Z"
+
+
+def test_list_session_exposures_excludes_rated_rows(conn) -> None:
+    rid = _seed_reflection(conn, project="proj-e", polarity="do", scope="project")
+    conn.execute(
+        "INSERT INTO session_memory_exposure "
+        "(session_id, memory_kind, memory_id, exposed_at, source, "
+        " rated_at, classification) VALUES "
+        "('s-rated', 'reflection', ?, '2026-05-25T12:00:00Z', 'bootstrap', "
+        " '2026-05-25T13:00:00Z', 'cited')",
+        (rid,),
+    )
+    conn.commit()
+
+    svc = SessionBootstrapService(conn)
+    result = svc.list_session_exposures(session_id="s-rated")
+    assert result["exposures"] == []
+
+
+def test_list_session_exposures_empty_session_id_returns_none_envelope(conn) -> None:
+    """Preserves inline handler's `if not sid` short-circuit:
+    `{"session_id": None, "exposures": []}` when session_id is empty.
+    """
+    svc = SessionBootstrapService(conn)
+    result = svc.list_session_exposures(session_id="")
+    assert result == {"session_id": None, "exposures": []}

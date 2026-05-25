@@ -253,7 +253,7 @@ class TestSessionBootstrapToolWiring:
 
         from better_memory.mcp.server import create_server, _tool_definitions
 
-        server, cleanup = create_server()
+        server, cleanup, _ = create_server()
         try:
             assert server is not None
             names = {t.name for t in _tool_definitions()}
