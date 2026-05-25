@@ -197,8 +197,8 @@ def test_promote_and_retire_reflection(backend, memory_conn) -> None:
 
 def test_session_bootstrap_returns_result(backend) -> None:
     result = backend.session_bootstrap(session_id="test-session", project="testproj")
-    # BootstrapResult is a dataclass-like; check a stable attribute / key.
-    assert result is not None
+    assert result.project == "testproj"
+    assert result.episode_action in {"opened", "attached"}
 
 
 def test_list_session_exposures_returns_envelope(backend) -> None:
@@ -214,14 +214,23 @@ def test_apply_session_ratings_empty_raises(backend) -> None:
         backend.apply_session_ratings(session_id="test-session", ratings=[])
 
 
-def test_credit_one_for_missing_memory_returns_skip(backend) -> None:
+def test_credit_one_for_missing_memory_returns_skip(backend, memory_conn) -> None:
+    # Seed an exposure for a memory that doesn't actually exist anywhere.
+    memory_conn.execute(
+        "INSERT INTO session_memory_exposure "
+        "(session_id, memory_kind, memory_id, exposed_at, source) VALUES "
+        "('test-session', 'reflection', 'does-not-exist', '2026-05-25T00:00:00Z', 'bootstrap')"
+    )
+    memory_conn.commit()
+
     result = backend.credit_one(
         session_id="test-session",
         kind="reflection",
         id="does-not-exist",
         classification="cited",
     )
-    assert result is not None  # ApplyOutcome dict-like
+    assert result["applied"] is None
+    assert result["skipped"] == "memory_missing"
 
 
 def test_synthesize_next_get_context_returns_none_when_no_pending(backend) -> None:
