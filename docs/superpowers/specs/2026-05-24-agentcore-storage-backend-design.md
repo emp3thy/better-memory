@@ -137,21 +137,59 @@ Polarity (do / dont / neutral) is **not** in the namespace — it's a record met
 
 ### Memory record metadata schema (episodic memory)
 
-Declared in `episodicMemoryStrategy.reflectionConfiguration.memoryRecordSchema.metadataSchema`:
+Declared in `episodicMemoryStrategy.reflectionConfiguration.memoryRecordSchema.metadataSchema`. **Every key the backend will write must be declared here — undeclared keys are silently dropped at create/update (spike Finding 5).**
 
-| Key | Type | LLM extraction | Notes |
-|---|---|---|---|
-| `polarity` | `STRING` allowedValues `do` / `dont` / `neutral` | Per-field instruction telling the LLM to classify do/dont/neutral | Verified working in spike (3/3 reflections correctly classified) |
-| `useful_count` | `NUMBER` | — | App-managed via `batch-update-memory-records`. ++ on record_use success. |
-| `missed_count` | `NUMBER` | — | App-managed. ++ on record_use failure. |
-| `ignored_count` | `NUMBER` | — | App-managed. From session exposure rating loop. |
-| `times_misled` | `NUMBER` | — | App-managed. Mirrors the SQLite column name. |
-| `last_credited_at` | `dateTimeValue` | — | App-managed. Recency for client-side decay. |
-| `status` | `STRING` allowedValues `active` / `retired` / `promoted` | — | App-managed. Lifecycle state. |
+| Key | Type (declared) | Runtime value type | LLM extraction | Notes |
+|---|---|---|---|---|
+| `polarity` | `STRING` allowedValues `do` / `dont` / `neutral` | `stringValue` | Per-field instruction telling the LLM to classify do/dont/neutral | Verified working in spike (3/3 reflections correctly classified) |
+| `useful_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on `cited` / `shaped` rating, and on positive `record_use` |
+| `missed_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on negative `record_use` (reverse-credit) |
+| `ignored_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on `ignored` rating from session-end classification |
+| `times_misled` | `NUMBER` | `numberValue` | — | App-managed. ++ on `misled` rating |
+| `overlooked_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on `overlooked` rating (matches the 5-class sqlite system: cited / shaped / ignored / misled / overlooked) |
+| `last_credited_at` | `STRING` | `dateTimeValue` | — | App-managed. Recency for client-side decay. Declared as `STRING` because `MetadataSchemaEntry.type` enum is only `STRING / STRINGLIST / NUMBER`; the runtime value uses `dateTimeValue` (boto3 accepts a `datetime` object) |
+| `status` | `STRING` allowedValues `active` / `retired` / `promoted` | `stringValue` | — | App-managed. Lifecycle state. |
 
 System metadata (`x-amz-agentcore-memory-recordType`, `createdAt`, `updatedAt`) is always present without declaration.
 
-`indexedKeys` on the episodic memory: `polarity`, `status`, `last_credited_at` — so metadata-filtered retrieval skips full scans.
+`indexedKeys` on the episodic memory: `polarity`, `status`, `last_credited_at`, `overlooked_count` — so metadata-filtered retrieval skips full scans (including the "most overlooked" management-UI view).
+
+### Memory record metadata schema (semantic memory)
+
+Declared in `userPreferenceMemoryStrategy.memoryRecordSchema.metadataSchema`. Mirror of the episodic schema MINUS `polarity` (semantic preferences are not classified do/dont/neutral). Same app-managed counters so the same rating UX works against semantic records.
+
+| Key | Type (declared) | Runtime value type | LLM extraction | Notes |
+|---|---|---|---|---|
+| `useful_count` | `NUMBER` | `numberValue` | — | App-managed. Same semantics as episodic |
+| `missed_count` | `NUMBER` | `numberValue` | — | App-managed |
+| `ignored_count` | `NUMBER` | `numberValue` | — | App-managed |
+| `times_misled` | `NUMBER` | `numberValue` | — | App-managed |
+| `overlooked_count` | `NUMBER` | `numberValue` | — | App-managed |
+| `last_credited_at` | `STRING` | `dateTimeValue` | — | App-managed |
+| `status` | `STRING` allowedValues `active` / `retired` / `promoted` | `stringValue` | — | App-managed |
+
+`indexedKeys` on the semantic memory: `status`, `last_credited_at`, `overlooked_count`.
+
+### Rating model (cross-backend parity)
+
+Session-end classification produces 5 classes, identical to sqlite mode. The classes map onto metadata counters as follows; the per-record update is one `BatchUpdateMemoryRecords` call with the full metadata snapshot (read current → bump counter → write back).
+
+| Rating class | Counter incremented | Also updates |
+|---|---|---|
+| `cited` | `useful_count` | `last_credited_at` |
+| `shaped` | `useful_count` | `last_credited_at` |
+| `ignored` | `ignored_count` | `last_credited_at` |
+| `misled` | `times_misled` | `last_credited_at` |
+| `overlooked` | `overlooked_count` | `last_credited_at` |
+
+Rating works against both semantic and episodic records using the same metadata schema. In agentcore mode there is **no `session_memory_exposure` table** — the per-session exposure log + end-of-session classification loop is replaced by direct counter mutations issued from the rating UI / `record_use` MCP tool. The `list_session_exposures` / `apply_session_ratings` / `credit_one` MCP tools therefore behave as follows in agentcore mode:
+
+- `record_use(observation_id, outcome)` → look up the AgentCore record, bump `useful_count` / `missed_count`, write `last_credited_at`. Same wire shape as sqlite mode.
+- `list_session_exposures(session_id)` → returns an empty `exposures` list (the session-exposure model doesn't apply; the rating panel hides when empty).
+- `apply_session_ratings(session_id, ratings)` → for each rating entry, performs the per-record metadata update above. Behavior preserved; the source of "which records to rate" shifts from the exposure table to the rating UI's current selection.
+- `credit_one(session_id, kind, id, classification)` → equivalent to one of the per-record metadata updates above. Selects the counter from the class.
+
+The episode lifecycle methods (`open_background_episode` / `start_foreground_episode` / `close_active_episode` / `close_episode_by_id` / `list_episodes`) are no-ops in agentcore mode: AgentCore manages event grouping via `sessionId` internally and does not expose an episode-as-first-class-record concept that maps onto better-memory's episodes table. The MCP tools / management UI hide the Episodes tab when `backend.supports_episodes` reports False (a second capability flag on the Protocol, alongside `supports_synthesis`).
 
 ### Reflection content shape (returned by AgentCore)
 
