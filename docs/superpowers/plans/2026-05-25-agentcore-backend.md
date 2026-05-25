@@ -45,7 +45,7 @@ See spec: `docs/superpowers/specs/2026-05-24-agentcore-storage-backend-design.md
 | 1. Protocol: `supports_episodes` capability flag | 95% | Same pattern as `supports_synthesis` (Plan 1 Task 7) |
 | 2. session.py helpers | 95% | Pure-stdlib utilities; no AWS |
 | 3. agentcore_persistence.py | 95% | JSON load/save; shape pinned in spec |
-| 4. AgentCoreBackend skeleton + clients + no-op methods | 92% | Constructor wiring against verified boto3 surface; capability flags + episode no-ops + synthesize_next NotImplementedError |
+| 4. AgentCoreBackend skeleton + clients + no-op methods | 92% | Constructor wiring against verified boto3 surface; capability flags + episode no-ops + synthesize_next no-ops (return None / empty dict — matching list_session_exposures / list_episodes empty-shape pattern) |
 | 5. observe → CreateEvent | 92% | Payload shape verified; sessionId resolution from backend state |
 | 6. list_observations → ListEvents (current session) | 90% | Single-session listing; cross-session enumeration deferred |
 | 7. retrieve → 3 × ListMemoryRecords + sqlite ranking | 95% (lifted from 92%) | Rewritten against Plan-1-amended Protocol (Task 0): sync, returns dict[polarity, list[reflection_dict]] matching sqlite shape (`{id, title, phase, use_cases, hints, confidence, tech, evidence_count, useful_count}`); ranking uses sqlite formula `useful_count + 3*times_overlooked DESC, confidence DESC, updated_at DESC` (per `reflection.py:1235-1236` + `OVERLOOKED_RANKING_WEIGHT = 3` at `memory_rating.py:71`); parallel fan-out via `asyncio.run + gather + run_in_executor`; polarity kwarg restricts fan-out to a single bucket; tech/phase client-side post-filter |
@@ -813,7 +813,9 @@ git commit -m "feat(storage): agentcore.json load/save with schema version + err
 - Create: `better_memory/storage/agentcore.py`
 - Create: `tests/storage/test_agentcore_unit.py`
 
-This task lands the class shell — constructor wires boto3 clients, capability flags are set, episode-lifecycle methods return synthetic results / empty lists, synthesize_next_* raises `NotImplementedError`. Subsequent tasks fill in real implementations.
+This task lands the class shell — constructor wires boto3 clients, capability flags are set, episode-lifecycle methods return synthetic results / empty lists, synthesize_next_* are no-ops returning the empty equivalents (`None` for get_context, `{"applied": 0, "skipped": 0}` for apply). Subsequent tasks fill in real implementations for everything else.
+
+The no-op stance on synthesize_next_* matches the rest of the agentcore-mode contract (`list_session_exposures` returns empty envelope, `list_episodes` returns `[]`, episode close returns `""`). The `supports_synthesis = False` capability flag still gates the MCP tools out at registration — these methods exist only so that direct callers (tests, future hooks) get a quiet "nothing to do" rather than a crash.
 
 - [ ] **Step 1: Write the skeleton tests**
 
@@ -900,16 +902,19 @@ def test_supports_episodes_is_false(backend) -> None:
     assert backend.supports_episodes is False
 
 
-def test_synthesize_next_get_context_raises_not_implemented(backend) -> None:
-    with pytest.raises(NotImplementedError, match="agentcore"):
-        backend.synthesize_next_get_context(project="testproj")
+def test_synthesize_next_get_context_is_noop(backend) -> None:
+    """No-op returns None — matches sqlite mode's 'no pending episode' signal.
+    MCP gates the tool out via supports_synthesis=False; this method exists
+    only so direct callers don't crash."""
+    assert backend.synthesize_next_get_context(project="testproj") is None
 
 
-def test_synthesize_next_apply_raises_not_implemented(backend) -> None:
-    with pytest.raises(NotImplementedError, match="agentcore"):
-        backend.synthesize_next_apply(
-            episode_id="ep-x", response={}, project="testproj"
-        )
+def test_synthesize_next_apply_is_noop(backend) -> None:
+    """No-op returns empty dict — matches the 'no work done' signal."""
+    result = backend.synthesize_next_apply(
+        episode_id="ep-x", response={}, project="testproj"
+    )
+    assert result == {"applied": 0, "skipped": 0}
 
 
 def test_open_background_episode_returns_synthetic_id(backend) -> None:
@@ -1127,25 +1132,27 @@ class AgentCoreBackend:
     # ----- Synthesis: NEVER implemented (capability gate handles this) -----
 
     def synthesize_next_get_context(self, *, project: str) -> Any:
-        raise NotImplementedError(
-            "synthesize_next_get_context is not supported in agentcore mode. "
-            "AgentCore's built-in episodicMemoryStrategy performs extraction "
-            "internally. The MCP synthesize_next_* tools are not registered "
-            "when backend.supports_synthesis is False."
-        )
+        # No-op in agentcore mode: AgentCore's built-in episodicMemoryStrategy
+        # performs extraction internally, so there is never a "pending
+        # episode" to drain. Return None — sqlite mode also returns None when
+        # nothing is pending, so callers that don't check supports_synthesis
+        # see a quiet "nothing to do" signal instead of a crash.
+        return None
 
     def synthesize_next_apply(
         self, *, episode_id: str, response: Any, project: str
     ) -> Any:
-        raise NotImplementedError(
-            "synthesize_next_apply is not supported in agentcore mode."
-        )
+        # No-op in agentcore mode. Return the empty SynthesisStep-shaped dict
+        # ("nothing applied, nothing skipped") matching the rest of the
+        # agentcore-mode no-op contract (list_session_exposures empty
+        # envelope, list_episodes empty list, episode close empty string).
+        return {"applied": 0, "skipped": 0}
 ```
 
 - [ ] **Step 4: Run; verify pass**
 
 Run: `uv run pytest tests/storage/test_agentcore_unit.py -v`
-Expected: 10 passed (capability flags + episode no-ops + synthesize_next NotImplementedError + Protocol satisfaction).
+Expected: 10 passed (capability flags + episode no-ops + synthesize_next no-ops returning None / empty dict + Protocol satisfaction).
 
 - [ ] **Step 5: pyright clean**
 
