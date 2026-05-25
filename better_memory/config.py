@@ -28,7 +28,7 @@ _DEFAULT_HOME = "~/.better-memory"
 _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 _DEFAULT_EMBED_MODEL = "nomic-embed-text"
 _DEFAULT_EMBEDDINGS_BACKEND = "ollama"
-_VALID_EMBEDDINGS_BACKENDS = ("ollama", "tfidf")
+_VALID_EMBEDDINGS_BACKENDS = ("ollama", "sqlite")
 _DEFAULT_STORAGE_BACKEND = "sqlite"
 _VALID_STORAGE_BACKENDS = ("sqlite", "agentcore")
 _DEFAULT_AGENTCORE_REGION = "eu-west-2"
@@ -203,14 +203,14 @@ class Config:
     audit_log_retrieved: bool
     auto_prune: bool
     diag_logging: bool
-    embeddings_backend: Literal["ollama", "tfidf"]
+    embeddings_backend: Literal["ollama", "sqlite"]
     storage_backend: Literal["sqlite", "agentcore"]
     agentcore_region: str
     agentcore_semantic_memory_id: str | None
     agentcore_episodic_memory_id: str | None
 
 
-def _resolve_embeddings_backend() -> Literal["ollama", "tfidf"]:
+def _resolve_embeddings_backend() -> Literal["ollama", "sqlite"]:
     raw = os.environ.get("BETTER_MEMORY_EMBEDDINGS_BACKEND", _DEFAULT_EMBEDDINGS_BACKEND)
     if raw not in _VALID_EMBEDDINGS_BACKENDS:
         raise ValueError(

@@ -33,7 +33,7 @@ def test_create_server_returns_three_tuple_with_backend(
     home.mkdir()
     (home / "knowledge-base").mkdir()
     monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
-    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "tfidf")
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
     monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
 
     from better_memory.mcp.server import create_server

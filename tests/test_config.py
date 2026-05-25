@@ -243,14 +243,15 @@ def test_embeddings_backend_defaults_to_ollama(monkeypatch: pytest.MonkeyPatch) 
     assert cfg.embeddings_backend == "ollama"
 
 
-def test_embeddings_backend_tfidf_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "tfidf")
+def test_embeddings_backend_sqlite_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
     cfg = get_config()
-    assert cfg.embeddings_backend == "tfidf"
+    assert cfg.embeddings_backend == "sqlite"
 
 
 def test_embeddings_backend_unknown_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "nope")
+    # `tfidf` was valid in PR #65, no longer accepted after the rename.
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "tfidf")
     with pytest.raises(ValueError, match="BETTER_MEMORY_EMBEDDINGS_BACKEND"):
         get_config()
 

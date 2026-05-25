@@ -1,6 +1,6 @@
 # Architecture
 
-better-memory is a four-layer epistemic hierarchy backed by a single SQLite database, with embeddings supplied by one of two pluggable backends (Ollama, or an in-memory TF-IDF retriever).
+better-memory is a four-layer epistemic hierarchy backed by a single SQLite database, with embeddings supplied by one of two pluggable backends (Ollama, or an in-SQL trigram-FTS5 fusion).
 
 ## The four layers
 
@@ -37,18 +37,22 @@ server (model: `nomic-embed-text`, 768-dim). Vectors land in the
 sqlite-vec kNN via Reciprocal Rank Fusion. Same quality as previous
 versions; requires Ollama running on `OLLAMA_HOST`.
 
-**`tfidf`.** A hand-rolled TF-IDF retriever (`TfidfRetriever`) lives
-in-memory and refits after every observation write. The vector half of
-hybrid search runs in pure Python instead of sqlite-vec. No model
-downloads, no external service. Lower semantic quality than Ollama
-(lexical match plus character 4-grams) but works in environments that
-block Ollama or model file downloads.
+**`sqlite`.** A second FTS5 virtual table (`observation_trigram_fts`,
+tokenizer=`trigram`) is populated by triggers alongside the existing
+`observation_fts` (word tokenizer). Retrieval fuses both via RRF — no
+external service, no model downloads, no in-memory state. Lower
+recall on long paraphrased queries than Ollama embeddings, but
+substring and morphology bridging via trigrams works well for
+keyword-dense observations.
 
-Switching backends does not migrate existing data. Observations written
-under one backend remain searchable via FTS5 BM25 under the other; only
-the vector half degrades for cross-backend rows. A future
-`memory.reindex` MCP tool can backfill if the half-state becomes a
-problem.
+Both FTS5 tables are populated by triggers regardless of which backend
+is active, so backend switches require no data migration at runtime —
+the trigram table is always ready to serve `sqlite` queries, and the
+word-tokenized table always feeds the lexical half of the `ollama`
+path. Only the vec0 (sqlite-vec) half degrades for cross-backend rows
+that were written while `sqlite` was active (no embedding was computed
+for them); a future `memory.reindex` MCP tool can backfill if that
+half-state becomes a problem.
 
 ## Reinforcement
 

@@ -1,4 +1,4 @@
-"""Tests for ObservationService with the TF-IDF retriever backend."""
+"""Tests for ObservationService with the SQLite trigram backend."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.embeddings.tfidf import TfidfRetriever
 from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import ObservationService
 
@@ -34,13 +33,10 @@ def fixed_clock():
 
 @pytest.fixture
 def service(conn: sqlite3.Connection, fixed_clock) -> ObservationService:
-    retriever = TfidfRetriever(conn)
-    retriever.fit_from_db()
     episodes = EpisodeService(conn, clock=fixed_clock)
     return ObservationService(
         conn,
         embedder=None,
-        retriever=retriever,
         clock=fixed_clock,
         project_resolver=lambda: "p",
         scope_resolver=lambda: None,
@@ -49,7 +45,7 @@ def service(conn: sqlite3.Connection, fixed_clock) -> ObservationService:
     )
 
 
-async def test_create_skips_vec0_insert_in_tfidf_mode(
+async def test_create_skips_vec0_insert_in_sqlite_mode(
     service: ObservationService, conn: sqlite3.Connection
 ) -> None:
     obs_id = await service.create(content="hello tfidf world", outcome="success")
@@ -66,25 +62,18 @@ async def test_create_skips_vec0_insert_in_tfidf_mode(
     assert vec_count == 0
 
 
-async def test_create_indexes_into_retriever(
-    service: ObservationService,
+async def test_create_populates_trigram_index(
+    service: ObservationService, conn: sqlite3.Connection
 ) -> None:
-    obs_id = await service.create(content="unique-marker-xyz", outcome="neutral")
-    assert obs_id in service._retriever._doc_vectors  # type: ignore[union-attr]
+    await service.create(content="unique-marker-xyz", outcome="neutral")
+    row = conn.execute(
+        "SELECT rowid FROM observation_trigram_fts WHERE "
+        "observation_trigram_fts MATCH 'marker'"
+    ).fetchone()
+    assert row is not None
 
 
-async def test_create_requires_exactly_one_of_embedder_retriever(
-    conn: sqlite3.Connection, fixed_clock
-) -> None:
-    episodes = EpisodeService(conn, clock=fixed_clock)
-    with pytest.raises(ValueError, match="exactly one of embedder/retriever"):
-        ObservationService(
-            conn, embedder=None, retriever=None,
-            clock=fixed_clock, episodes=episodes,
-        )
-
-
-async def test_retrieve_returns_bucketed_results_in_tfidf_mode(
+async def test_retrieve_returns_bucketed_results_in_sqlite_mode(
     service: ObservationService,
 ) -> None:
     await service.create(content="windows pytest junit-xml output", outcome="success")
@@ -100,7 +89,7 @@ async def test_retrieve_returns_bucketed_results_in_tfidf_mode(
     assert buckets.do[0].content == "windows pytest junit-xml output"
 
 
-async def test_list_observations_query_mode_in_tfidf(
+async def test_list_observations_query_mode_in_sqlite(
     service: ObservationService,
 ) -> None:
     await service.create(content="alpha bravo charlie", outcome="success")

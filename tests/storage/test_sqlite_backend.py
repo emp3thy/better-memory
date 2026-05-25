@@ -238,15 +238,3 @@ def test_synthesize_next_get_context_returns_none_when_no_pending(backend) -> No
     assert backend.synthesize_next_get_context(project="testproj") is None
 
 
-def test_sqlite_backend_accepts_retriever_when_embedder_none(memory_conn) -> None:
-    """In tfidf mode the factory passes retriever instead of embedder."""
-    retriever = MagicMock()
-    backend = SqliteBackend(
-        memory_conn=memory_conn,
-        embedder=None,
-        retriever=retriever,
-        session_id="test-session",
-        project="testproj",
-    )
-    assert backend.supports_synthesis is True
-    # Construction must not raise: ObservationService enforces exactly-one.

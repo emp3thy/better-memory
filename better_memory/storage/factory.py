@@ -27,7 +27,6 @@ def build_backend(
     config: _ConfigLike,
     memory_conn: sqlite3.Connection,
     embedder: Any = None,
-    retriever: Any = None,
     session_id: str | None,
     project: str,
 ) -> StorageBackend:
@@ -36,7 +35,6 @@ def build_backend(
         return SqliteBackend(
             memory_conn=memory_conn,
             embedder=embedder,
-            retriever=retriever,
             session_id=session_id,
             project=project,
         )

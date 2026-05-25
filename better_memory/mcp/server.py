@@ -61,7 +61,6 @@ from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.embeddings.tfidf import TfidfRetriever
 from better_memory.runtime.session_marker import read_session_id
 from better_memory.services import ui_launcher
 from better_memory.services.episode import EpisodeService
@@ -941,15 +940,14 @@ class ServerContext:
     (tests, future hooks) can introspect or reuse the wired-up backend
     without rebuilding it. ``backend`` is the live ``StorageBackend``;
     ``memory_conn`` is the underlying sqlite connection (None for non-sqlite
-    backends in future plans); ``embedder`` and ``retriever`` are whatever
-    was passed to the backend — exactly one is non-None (embedder for the
-    ollama backend, retriever for the tfidf backend).
+    backends in future plans); ``embedder`` is whatever was passed to the
+    backend (None for the sqlite/FTS5 embeddings backend, which indexes via
+    DB triggers and needs no Python embedder).
     """
 
     backend: StorageBackend
     memory_conn: sqlite3.Connection | None = None
     embedder: Any = None
-    retriever: Any = None
 
 
 def create_server() -> tuple[
@@ -973,11 +971,10 @@ def create_server() -> tuple[
     knowledge_conn = connect(config.knowledge_db)
     apply_migrations(knowledge_conn, migrations_dir=_KNOWLEDGE_MIGRATIONS)
 
-    # Build embedder OR retriever depending on the configured backend.
-    # Exactly one is non-None and is passed to ObservationService — the
-    # service raises if both or neither are supplied.
+    # Embedder is only built for the ollama backend. For sqlite, FTS5
+    # triggers handle indexing automatically (see migration 0011) and no
+    # embedder is needed.
     embedder: OllamaEmbedder | None = None
-    retriever: TfidfRetriever | None = None
     if config.embeddings_backend == "ollama":
         # One embedder per server. Construction is cheap and does NOT contact
         # Ollama (see OllamaEmbedder.__init__); the first embed() call does.
@@ -987,12 +984,6 @@ def create_server() -> tuple[
         # without Ollama, and if Ollama comes up later, memory.observe /
         # memory.retrieve will succeed on their next call without a restart.
         _probe_ollama(config.ollama_host)
-    else:
-        # tfidf backend: load the corpus into the retriever's in-memory
-        # state. No Ollama probe, no HTTP client. fit_from_db() reads
-        # active observations + their tokens and is cheap on a fresh DB.
-        retriever = TfidfRetriever(memory_conn)
-        retriever.fit_from_db()
 
     # Concurrency invariant: the five memory-side services below
     # (EpisodeService, ObservationService, ReflectionSynthesisService,
@@ -1007,9 +998,7 @@ def create_server() -> tuple[
     # breaks and the services must be reworked to use per-task
     # connections (or a connection pool with explicit checkout).
     episodes = EpisodeService(memory_conn)
-    observations = ObservationService(
-        memory_conn, embedder=embedder, retriever=retriever, episodes=episodes
-    )
+    observations = ObservationService(memory_conn, embedder=embedder, episodes=episodes)
 
     # Resolve project + session id ONCE at startup. Per-handler code can
     # still override per-call (handlers continue to read args.get("project")
@@ -1027,7 +1016,6 @@ def create_server() -> tuple[
         config=config,
         memory_conn=memory_conn,
         embedder=embedder,
-        retriever=retriever,
         session_id=startup_session_id,
         project=startup_project,
     )
@@ -1557,9 +1545,9 @@ def create_server() -> tuple[
             knowledge_conn.close()
         except Exception:  # noqa: BLE001 — best-effort shutdown
             pass
-        # In tfidf mode there is no embedder to close — the retriever
-        # has no external resources. Guard against the None case so this
-        # cleanup stays idempotent across both backends.
+        # In the sqlite backend no embedder is built (FTS5 triggers handle
+        # indexing). Guard against the None case so this cleanup stays
+        # idempotent across both backends.
         if embedder is not None:
             try:
                 await embedder.aclose()
@@ -1570,7 +1558,6 @@ def create_server() -> tuple[
         backend=backend,
         memory_conn=memory_conn,
         embedder=embedder,
-        retriever=retriever,
     )
 
 

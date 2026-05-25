@@ -6,9 +6,9 @@ protocol delegation surface.
 
 Held state:
 - ``memory_conn`` — open sqlite3 Connection
-- ``embedder`` / ``retriever`` — forwarded to ObservationService; exactly
-  one must be non-None (ObservationService enforces this). ``embedder`` is
-  used in the ollama embeddings backend, ``retriever`` in the tfidf backend.
+- ``embedder`` — forwarded to ObservationService. May be ``None`` for the
+  sqlite (FTS5) embeddings backend, which indexes via DB triggers instead
+  of a Python embedder.
 - ``session_id`` — used for episode lookups, ratings, exposures. ``None``
   means "defer resolution to env-var fallback at first write"
   (ObservationService re-resolves from ``CLAUDE_SESSION_ID`` /
@@ -45,13 +45,11 @@ class SqliteBackend:
         *,
         memory_conn: sqlite3.Connection,
         embedder: Any = None,
-        retriever: Any = None,
         session_id: str | None,
         project: str,
     ) -> None:
         self._conn = memory_conn
         self._embedder = embedder
-        self._retriever = retriever
         self._session_id: str | None = session_id
         self._project = project
         self._project_resolver = lambda: self._project
@@ -59,7 +57,6 @@ class SqliteBackend:
         self._observations = ObservationService(
             memory_conn,
             embedder=embedder,
-            retriever=retriever,
             session_id=session_id,
             project_resolver=self._project_resolver,
             episodes=self._episodes,

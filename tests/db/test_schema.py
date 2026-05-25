@@ -225,7 +225,14 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         versions = [r["version"] for r in rows]
-        assert versions == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010"]
+        expected_initial = [
+            "0001", "0002", "0003", "0004", "0005",
+            "0006", "0007", "0008", "0009", "0010", "0011",
+        ]
+        assert versions[: len(expected_initial)] == expected_initial
+        # Subsequent migrations are appended; idempotency is the property
+        # under test, so assert no duplicates regardless of total count.
+        assert len(versions) == len(set(versions))
     finally:
         conn.close()
 
