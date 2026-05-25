@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from better_memory.config import project_name
 from better_memory.services.episode import EpisodeService
@@ -235,3 +235,55 @@ class SessionBootstrapService:
             semantic_count=semantic_count,
             reflections_counts=reflections_counts,
         )
+
+    def list_session_exposures(self, *, session_id: str) -> dict[str, Any]:
+        """List unrated memory exposures for the given session.
+
+        Extracted from the inline MCP ``memory.list_session_exposures`` handler
+        so ``StorageBackend.list_session_exposures`` can delegate. The return
+        shape is the MCP tool's wire payload — preserve verbatim.
+
+        Empty ``session_id`` returns ``{"session_id": None, "exposures": []}``
+        to preserve the inline handler's `if not sid` short-circuit (the MCP
+        handler resolves session_id from env/marker and may yield an empty
+        string when no session is active).
+        """
+        if not session_id:
+            return {"session_id": None, "exposures": []}
+        # Dedupe by (memory_kind, memory_id) — a memory can have two
+        # exposure rows (bootstrap + retrieve) in one session. The
+        # rating apply path stamps ALL unrated rows per (kind, id) in
+        # one UPDATE, so the LLM must see one entry per unique memory;
+        # otherwise apply_session_ratings rejects the batch for duplicate
+        # (kind, id) pairs.
+        rows = self._conn.execute(
+            """
+            SELECT e.memory_kind, e.memory_id,
+                   MIN(e.exposed_at) AS exposed_at,
+                   MIN(e.source) AS source,
+                   COALESCE(r.title, s.content) AS display
+              FROM session_memory_exposure e
+              LEFT JOIN reflections        r ON e.memory_kind='reflection'
+                                            AND e.memory_id = r.id
+              LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
+                                            AND e.memory_id = s.id
+             WHERE e.session_id = ? AND e.rated_at IS NULL
+             GROUP BY e.memory_kind, e.memory_id
+             ORDER BY exposed_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+        return {
+            "session_id": session_id,
+            "exposures": [
+                {
+                    "kind": r["memory_kind"],
+                    "id": r["memory_id"],
+                    **({"title": r["display"]} if r["memory_kind"] == "reflection"
+                       else {"content": r["display"]}),
+                    "exposed_at": r["exposed_at"],
+                    "source": r["source"],
+                }
+                for r in rows
+            ],
+        }

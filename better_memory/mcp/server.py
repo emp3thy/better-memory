@@ -1435,47 +1435,14 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             ]
 
         if name == "memory.list_session_exposures":
-            sid = _resolve_session_id(config.home)
-            if not sid:
-                payload = {"session_id": None, "exposures": []}
-            else:
-                # Dedupe by (memory_kind, memory_id) — a memory can have two
-                # exposure rows (bootstrap + retrieve) in one session. The
-                # rating apply path stamps ALL unrated rows per (kind, id)
-                # in one UPDATE, so the LLM must see one entry per unique
-                # memory; otherwise apply_session_ratings rejects the batch
-                # for duplicate (kind, id) pairs.
-                rows = memory_conn.execute(
-                    """
-                    SELECT e.memory_kind, e.memory_id,
-                           MIN(e.exposed_at) AS exposed_at,
-                           MIN(e.source) AS source,
-                           COALESCE(r.title, s.content) AS display
-                      FROM session_memory_exposure e
-                      LEFT JOIN reflections        r ON e.memory_kind='reflection'
-                                                    AND e.memory_id = r.id
-                      LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
-                                                    AND e.memory_id = s.id
-                     WHERE e.session_id = ? AND e.rated_at IS NULL
-                     GROUP BY e.memory_kind, e.memory_id
-                     ORDER BY exposed_at ASC
-                    """,
-                    (sid,),
-                ).fetchall()
-                payload = {
-                    "session_id": sid,
-                    "exposures": [
-                        {
-                            "kind": r["memory_kind"],
-                            "id": r["memory_id"],
-                            **({"title": r["display"]} if r["memory_kind"] == "reflection"
-                               else {"content": r["display"]}),
-                            "exposed_at": r["exposed_at"],
-                            "source": r["source"],
-                        }
-                        for r in rows
-                    ],
-                }
+            from better_memory.services.session_bootstrap import (
+                SessionBootstrapService,
+            )
+
+            sid = _resolve_session_id(config.home) or ""
+            payload = SessionBootstrapService(memory_conn).list_session_exposures(
+                session_id=sid,
+            )
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.apply_session_ratings":
