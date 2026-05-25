@@ -41,13 +41,14 @@ See spec: `docs/superpowers/specs/2026-05-24-agentcore-storage-backend-design.md
 
 | Task | Confidence | Lift applied |
 |---|---|---|
+| 0. Plan 1 amendment — Protocol.retrieve = reflections bucketed by polarity | 90% | Verified ReflectionSynthesisService.retrieve_reflections signature + return shape (`reflection.py:1175`); verified MCP handler unwraps the dict identically (`server.py:1173-1197`); 3 call sites identified for routing (memory.retrieve, memory.start_episode at server.py:1264, SessionBootstrapService.bootstrap stays direct). Signature is sync, no embedder, no recency decay — pure SQL ORDER BY. |
 | 1. Protocol: `supports_episodes` capability flag | 95% | Same pattern as `supports_synthesis` (Plan 1 Task 7) |
 | 2. session.py helpers | 95% | Pure-stdlib utilities; no AWS |
 | 3. agentcore_persistence.py | 95% | JSON load/save; shape pinned in spec |
 | 4. AgentCoreBackend skeleton + clients + no-op methods | 92% | Constructor wiring against verified boto3 surface; capability flags + episode no-ops + synthesize_next NotImplementedError |
 | 5. observe → CreateEvent | 92% | Payload shape verified; sessionId resolution from backend state |
 | 6. list_observations → ListEvents (current session) | 90% | Single-session listing; cross-session enumeration deferred |
-| 7. retrieve → 3 × RetrieveMemoryRecords + reinforcement decay | 92% (lifted from 88%) | Reinforcement formula pinned against sqlite shape (rrf_score × (1 + α × reinforcement_score) × 0.5^(age_days/14)); searchQuery branches on empty → list_memory_records for filter-only path; per-polarity searchCriteria + client-side scoring; hints split |
+| 7. retrieve → 3 × ListMemoryRecords + sqlite ranking | 95% (lifted from 92%) | Rewritten against Plan-1-amended Protocol (Task 0): sync, returns dict[polarity, list[reflection_dict]] matching sqlite shape (`{id, title, phase, use_cases, hints, confidence, tech, evidence_count, useful_count}`); ranking uses sqlite formula `useful_count + 3*times_overlooked DESC, confidence DESC, updated_at DESC` (per `reflection.py:1235-1236` + `OVERLOOKED_RANKING_WEIGHT = 3` at `memory_rating.py:71`); parallel fan-out via `asyncio.run + gather + run_in_executor`; polarity kwarg restricts fan-out to a single bucket; tech/phase client-side post-filter |
 | 8. record_use → GetMemoryRecord + BatchUpdate (full snapshot) | 90% | Read-modify-write pattern is straightforward once metadata schema is locked |
 | 9. credit_one / apply_session_ratings / list_session_exposures | 90% | Rating-model spec section pins the mapping; list_session_exposures returns empty in agentcore mode |
 | 10. promote_reflection / retire_reflection → BatchUpdate w/ namespace mutation | 92% | Pattern documented in spec line 359-374 |
@@ -55,7 +56,7 @@ See spec: `docs/superpowers/specs/2026-05-24-agentcore-storage-backend-design.md
 | 12. session_bootstrap → parallel ListMemoryRecords + envelope assembly | 93% (lifted from 88%) | 4 parallel calls via asyncio.gather + run_in_executor (true fan-out, not sequential); list_memory_records (bootstrap is metadata-only, no semantic search); envelope shape pinned to BootstrapResult so MCP handler unwrap (server.py:1398-1411) keeps working — episode_id = session_id placeholder, episode_action = "opened" |
 | 13. Factory wire-up + isinstance check passes | 95% | Drops the Plan-1 NotImplementedError; loads agentcore.json |
 
-All tasks ≥ 90%. (Was 88% before Task 7 + 12 confidence lift: investigator verified BucketedResults shape, sqlite reinforcement formula at search/hybrid.py:367-384, BootstrapResult shape at session_bootstrap.py:85-95, and MCP handler unwrap at server.py:1398-1411.)
+All tasks ≥ 90%. Plan now 14 tasks (Task 0 added: Plan 1 amendment rewiring Protocol.retrieve to mean reflection-bucketing instead of observation-bucketing, after investigator surfaced the Plan 1 contract drift; Task 7 rewritten end-to-end against the new contract).
 
 ---
 
@@ -69,6 +70,203 @@ All tasks ≥ 90%. (Was 88% before Task 7 + 12 confidence lift: investigator ver
 - Mocked-boto3 tests use `unittest.mock.MagicMock` for the client; assertions verify the call args (method name + kwargs) to lock in the wire shape. Per-method tests also assert the return mapping (parsed reflections, decoded metadata, etc.).
 - "Full metadata snapshot on update" is a hard rule: every `batch_update_memory_records` call sends `metadata` as the COMPLETE current state of the keys we manage, not a partial. Spike Finding 5 + spec line 355-356.
 - For `record_use` / `credit_one`: read current via `get_memory_record` first (single-record op exists on data plane). Use `list_memory_records` only when filtering a collection.
+
+---
+
+### Task 0: Plan 1 amendment — Protocol.retrieve = reflections bucketed by polarity
+
+> **Plan 1 amendment.** Plan 1 shipped `Protocol.retrieve` wrapping `ObservationService.retrieve` (observations bucketed by outcome → `BucketedResults[SearchResult]`). But the MCP `memory.retrieve` handler at `better_memory/mcp/server.py:1173-1197` calls `ReflectionSynthesisService.retrieve_reflections` (reflections bucketed by polarity → `dict[str, list[dict]]`). The Protocol method is therefore NOT load-bearing for the user-facing MCP tool today. This task rewires the Protocol so `backend.retrieve` becomes the canonical path for `memory.retrieve` — Task 7 (AgentCoreBackend.retrieve) can then mirror SqliteBackend's contract cleanly.
+
+**Files:**
+- Modify: `better_memory/storage/protocol.py`
+- Modify: `better_memory/storage/sqlite.py`
+- Modify: `better_memory/mcp/server.py` (handlers at lines 1128-1197 for `memory.retrieve`, and lines 1250-1276 for `memory.start_episode`)
+- Modify: `tests/storage/test_protocol.py`
+- Modify: `tests/storage/test_sqlite_backend.py`
+- Modify: `tests/mcp/...` — any test that currently mocks `ReflectionSynthesisService.retrieve_reflections` at the MCP handler boundary
+
+**Verified service surface:** `ReflectionSynthesisService.retrieve_reflections` (`better_memory/services/reflection.py:1175`):
+
+```python
+def retrieve_reflections(
+    self,
+    *,
+    project: str,
+    tech: str | None = None,
+    phase: str | None = None,
+    polarity: str | None = None,
+    limit_per_bucket: int | None = 20,
+    track_exposure: bool = True,
+) -> dict[str, list[dict]]:
+```
+
+Return shape: `dict[Literal["do","dont","neutral"], list[reflection_dict]]` where each `reflection_dict` has `{id, title, phase, use_cases, hints (list[str]), confidence (float), tech, evidence_count, useful_count}`. SYNC. No embedder call. SQL ordering: `useful_count + 3 * times_overlooked DESC, confidence DESC, updated_at DESC`. `OVERLOOKED_RANKING_WEIGHT = 3` constant lives in `better_memory/services/memory_rating.py:71`.
+
+- [ ] **Step 1: Amend the Protocol**
+
+Edit `better_memory/storage/protocol.py`. Replace the existing `async def retrieve(...)` declaration with:
+
+```python
+    def retrieve(
+        self,
+        *,
+        project: str | None = None,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        limit_per_bucket: int | None = 20,
+        track_exposure: bool = True,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Bucketed reflection retrieval, keyed by polarity (do / dont / neutral).
+
+        Each bucket is a list of reflection dicts: ``{id, title, phase,
+        use_cases, hints (list[str]), confidence (float), tech, evidence_count,
+        useful_count}``. Sync — no embedder call (reflections are pre-extracted
+        in both backends; sqlite mode ranks via SQL ORDER BY useful_count +
+        3*times_overlooked DESC, agentcore mode applies the same formula
+        client-side over metadata counters).
+
+        This method is the canonical path for the MCP ``memory.retrieve`` tool
+        (server.py:1173-1197) and the ``memory.start_episode`` handler
+        (server.py:1250-1276)."""
+        ...
+```
+
+Critical changes from Plan 1's declaration:
+- **Drop `async`** — service call is sync, no embedder.
+- **Drop kwargs**: `query`, `component`, `status`, `window_days`, `scope_path`, `do_limit`, `dont_limit`, `neutral_limit`, `candidate_k`, `reinforcement_alpha` — none of these are on `ReflectionSynthesisService.retrieve_reflections`.
+- **Add kwargs**: `tech`, `phase`, `polarity`, `limit_per_bucket`, `track_exposure` — match the service.
+- **Return type**: `dict[str, list[dict[str, Any]]]` (was `Any`, documented as `BucketedResults`).
+
+- [ ] **Step 2: Update Plan 1's protocol-shape test**
+
+Edit `tests/storage/test_protocol.py`:
+
+```python
+def test_protocol_retrieve_is_sync_with_reflection_kwargs() -> None:
+    """Protocol.retrieve is sync and wraps the bucketed reflection retrieval."""
+    import inspect
+
+    method = StorageBackend.retrieve
+    assert not inspect.iscoroutinefunction(method)
+    sig = inspect.signature(method)
+    kwargs = {p.name for p in sig.parameters.values() if p.name != "self"}
+    assert {"project", "tech", "phase", "polarity",
+            "limit_per_bucket", "track_exposure"} <= kwargs
+    # The old observation-bucketing kwargs are gone.
+    assert "candidate_k" not in kwargs
+    assert "reinforcement_alpha" not in kwargs
+    assert "do_limit" not in kwargs
+```
+
+Also REMOVE the old `test_protocol_declares_async_hot_path` reference to `retrieve` (keep `observe` + `list_observations` in the async check; drop `retrieve`).
+
+- [ ] **Step 3: Rewire SqliteBackend.retrieve**
+
+Edit `better_memory/storage/sqlite.py`. Replace the existing `async def retrieve(...)` with:
+
+```python
+def retrieve(
+    self,
+    *,
+    project: str | None = None,
+    tech: str | None = None,
+    phase: str | None = None,
+    polarity: str | None = None,
+    limit_per_bucket: int | None = 20,
+    track_exposure: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
+    return self._synthesis.retrieve_reflections(
+        project=project or self._project,
+        tech=tech,
+        phase=phase,
+        polarity=polarity,
+        limit_per_bucket=limit_per_bucket,
+        track_exposure=track_exposure,
+    )
+```
+
+(`self._synthesis` is already cached on `__init__` from Plan 1 Task 5b.)
+
+The old `_observations.retrieve(...)` call path goes away. The cached `_observations` instance is still used by `observe`, `list_observations`, and `record_use` — keep it.
+
+- [ ] **Step 4: Update Plan 1's SqliteBackend tests**
+
+Edit `tests/storage/test_sqlite_backend.py`:
+
+```python
+def test_retrieve_returns_polarity_bucketed_reflections(backend) -> None:
+    """Plan 1 amendment: retrieve now wraps ReflectionSynthesisService."""
+    result = backend.retrieve(project="testproj", limit_per_bucket=3)
+    assert isinstance(result, dict)
+    assert set(result.keys()) >= {"do", "dont", "neutral"}
+    for bucket in ("do", "dont", "neutral"):
+        assert isinstance(result[bucket], list)
+
+
+def test_retrieve_passes_through_polarity_filter(backend, memory_conn) -> None:
+    """polarity=do filters the result to only the do bucket (others empty)."""
+    # Seed one reflection per polarity
+    memory_conn.execute(
+        "INSERT INTO reflections (id, title, hints, use_cases, polarity, scope, "
+        "project, status, confidence, phase, created_at, updated_at) VALUES "
+        "('r-do', 'do-refl', '[]', 'u', 'do', 'project', 'testproj', 'confirmed', 0.9, 'general', '2026-05-25T00:00:00Z', '2026-05-25T00:00:00Z'),"
+        "('r-dont', 'dont-refl', '[]', 'u', 'dont', 'project', 'testproj', 'confirmed', 0.9, 'general', '2026-05-25T00:00:00Z', '2026-05-25T00:00:00Z')"
+    )
+    memory_conn.commit()
+    result = backend.retrieve(project="testproj", polarity="do", limit_per_bucket=10)
+    do_ids = [r["id"] for r in result["do"]]
+    assert "r-do" in do_ids
+    assert "r-dont" not in do_ids
+```
+
+DELETE the old `test_retrieve_returns_bucketed_results` test (the BucketedResults shape no longer applies). DELETE any `await backend.retrieve(...)` usages — `retrieve` is now sync.
+
+- [ ] **Step 5: Route MCP `memory.retrieve` handler through backend.retrieve**
+
+Edit `better_memory/mcp/server.py`. Locate the `memory.retrieve` handler (lines 1128-1197 per inventory). Replace the inline `reflections.retrieve_reflections(...)` call with a `ctx.backend.retrieve(...)` call:
+
+```python
+if name == "memory.retrieve":
+    buckets = ctx.backend.retrieve(
+        project=args.get("project"),
+        tech=args.get("tech"),
+        phase=args.get("phase"),
+        polarity=args.get("polarity"),
+        limit_per_bucket=args.get("limit_per_bucket", 20),
+        track_exposure=args.get("track_exposure", True),
+    )
+    return [TextContent(type="text", text=json.dumps(buckets))]
+```
+
+(Replace `ctx.backend` with however the handler currently has access to the backend instance — Plan 1 Task 7 already exposed it via `ServerContext`. Read the file before editing to confirm the local variable name.)
+
+Apply the same routing to `memory.start_episode`'s reflection fetch at `server.py:1264` if it also calls `reflections.retrieve_reflections(...)` — route through `ctx.backend.retrieve(...)` so agentcore mode picks up the agentcore implementation automatically.
+
+`SessionBootstrapService.bootstrap` (which calls `retrieve_reflections` at `services/session_bootstrap.py:187`) stays as a direct service call — it's only used by SqliteBackend.session_bootstrap; AgentCoreBackend.session_bootstrap (Task 12) implements its own retrieval.
+
+- [ ] **Step 6: Update Plan 1's MCP tests**
+
+`tests/mcp/test_server_backend_dispatch.py` and any other tests that exercise the `memory.retrieve` MCP handler may need adjustment — they previously mocked `ReflectionSynthesisService.retrieve_reflections` directly; now they should mock `backend.retrieve` (or accept that the inner service call disappears).
+
+Grep first: `grep -rn "retrieve_reflections" tests/` and audit each hit.
+
+- [ ] **Step 7: Run the full sqlite-mode suite; verify no regression**
+
+Run: `uv run pytest tests/storage/ tests/services/ tests/mcp/ tests/test_config.py -q --tb=line`
+Expected: all pass. Reflection-retrieval behaviour is preserved end-to-end (same service method called, same return shape) — only the call site has moved from the MCP handler into the backend wrapper.
+
+- [ ] **Step 8: pyright clean**
+
+Run: `uv run pyright better_memory tests`
+Expected: 0 errors.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add better_memory/storage/protocol.py better_memory/storage/sqlite.py better_memory/mcp/server.py tests/storage/test_protocol.py tests/storage/test_sqlite_backend.py tests/mcp/test_server_backend_dispatch.py
+git commit -m "refactor(storage): Protocol.retrieve wraps reflection-bucketing (Plan 1 amendment)"
+```
 
 ---
 
@@ -826,7 +1024,9 @@ class AgentCoreBackend:
     async def observe(self, **kwargs: Any) -> str:
         raise NotImplementedError("Implemented in Task 5")
 
-    async def retrieve(self, query: str | None = None, **kwargs: Any) -> Any:
+    def retrieve(self, **kwargs: Any) -> dict[str, list[dict[str, Any]]]:
+        # Signature matches the Plan-1-amended Protocol (Task 0): sync,
+        # returns dict[polarity, list[reflection_dict]].
         raise NotImplementedError("Implemented in Task 7")
 
     async def list_observations(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -1332,58 +1532,63 @@ git commit -m "feat(agentcore): list_observations via ListEvents (current sessio
 
 ---
 
-### Task 7: AgentCoreBackend.retrieve → bucketed RetrieveMemoryRecords + reinforcement decay
+### Task 7: AgentCoreBackend.retrieve → reflection-bucketing (matches new Protocol contract from Task 0)
 
 **Files:**
 - Modify: `better_memory/storage/agentcore.py`
 - Modify: `tests/storage/test_agentcore_unit.py`
 
-This is the most intricate method. Per spec line 313-340 + the reflection content shape (spec line 156-169):
+After Task 0, `Protocol.retrieve` is **sync** and returns `dict[str, list[dict[str, Any]]]` (reflections bucketed by polarity, matching `ReflectionSynthesisService.retrieve_reflections`). This task implements the agentcore equivalent: per-polarity `list_memory_records` against the reflections namespace, parse JSON content, rank via the sqlite ordering rule (`useful_count + 3*times_overlooked DESC, confidence DESC, updated_at DESC`), return the same dict shape.
 
-- Fire 3 × `retrieve_memory_records` calls in parallel — one per polarity bucket — against the episodic memory reflections namespace.
-- Each call passes `searchCriteria` with `searchQuery=query_text`, `topK=candidate_k`, and `metadataFilters` for `polarity=<bucket>` AND `status=active`.
-- Parse `MemoryRecordSummary.content.text` as JSON into the existing `Reflection` dataclass. Hints prose → `list[str]` via `parse_hints_prose`.
-- Apply client-side reinforcement scoring **mirroring the sqlite-mode formula** at `better_memory/search/hybrid.py:367-384`:
+**Sqlite parity points** (verified at `services/reflection.py:1175-1259` and `services/memory_rating.py:71`):
+- Return shape: `dict[Literal["do","dont","neutral"], list[reflection_dict]]`
+- Per-item shape: `{id, title, phase, use_cases, hints (list[str]), confidence (float), tech, evidence_count, useful_count}`
+- Ranking: `useful_count + 3 * times_overlooked DESC, confidence DESC, updated_at DESC` (no recency decay; sqlite uses pure SQL ORDER BY)
+- `OVERLOOKED_RANKING_WEIGHT = 3` constant — keep this same value in agentcore mode for parity
 
-  ```
-  reinforcement_score = useful_count - missed_count - times_misled - overlooked_count - ignored_count
-  reinforcement_mult  = 1.0 + reinforcement_alpha * reinforcement_score
-  age_days            = (now - created_at).total_days
-  recency_mult        = 0.5 ** (max(age_days, 0) / half_life)   # half_life default 14 days
-  final_score         = base_score * reinforcement_mult * recency_mult
-  ```
-
-  Note: in sqlite mode `reinforcement_score` is a pre-computed column on the observations row. In agentcore mode there is no equivalent column — we compute it client-side from the per-counter metadata values declared in spec. The age baseline is `created_at` (when the record was first written), NOT `last_credited_at` (which represents the most recent rating event and is used elsewhere for staleness display but NOT for retrieval scoring). Sort + truncate per-bucket limit.
-- Return `BucketedResults` (the existing dataclass from `services/observation.py`).
+**Parallel fan-out:** the Protocol method is sync, but the 3 boto3 calls (one per polarity) are independent. Use `asyncio.run + gather + run_in_executor` internally (same pattern Task 12 uses for `session_bootstrap`). If `polarity` kwarg is set, fetch only that bucket — empty for the others.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append:
+Append to `tests/storage/test_agentcore_unit.py`:
 
 ```python
-from better_memory.services.observation import BucketedResults
+def test_retrieve_returns_dict_with_polarity_buckets(backend, mock_data_client) -> None:
+    """retrieve returns dict[str, list[dict]] matching ReflectionSynthesisService."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    result = backend.retrieve(project="testproj")
+    assert isinstance(result, dict)
+    assert set(result.keys()) >= {"do", "dont", "neutral"}
+    for bucket in ("do", "dont", "neutral"):
+        assert isinstance(result[bucket], list)
 
 
-@pytest.mark.asyncio
-async def test_retrieve_fires_one_call_per_polarity_bucket(backend, mock_data_client) -> None:
-    """Three parallel RetrieveMemoryRecords calls: do, dont, neutral."""
-    mock_data_client.retrieve_memory_records.return_value = {"memoryRecordSummaries": []}
-    result = await backend.retrieve(query="how to handle migrations")
-    assert isinstance(result, BucketedResults)
-    assert mock_data_client.retrieve_memory_records.call_count == 3
+def test_retrieve_fires_one_list_call_per_polarity(backend, mock_data_client) -> None:
+    """Three list_memory_records calls (no semantic search): one per polarity."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.retrieve(project="testproj")
+    assert mock_data_client.list_memory_records.call_count == 3
 
     polarities_filtered = []
-    for call in mock_data_client.retrieve_memory_records.call_args_list:
-        criteria = call.kwargs["searchCriteria"]
-        for f in criteria["metadataFilters"]:
+    for call in mock_data_client.list_memory_records.call_args_list:
+        for f in call.kwargs["metadataFilters"]:
             if f["left"]["metadataKey"] == "polarity":
                 polarities_filtered.append(f["right"]["metadataValue"]["stringValue"])
     assert set(polarities_filtered) == {"do", "dont", "neutral"}
 
 
-@pytest.mark.asyncio
-async def test_retrieve_parses_reflection_json_content(backend, mock_data_client) -> None:
-    """content.text is a JSON blob with title/use_cases/hints/confidence."""
+def test_retrieve_with_polarity_kwarg_fetches_only_that_bucket(backend, mock_data_client) -> None:
+    """polarity='do' → only the do bucket gets fetched; others empty."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    result = backend.retrieve(project="testproj", polarity="do")
+    assert mock_data_client.list_memory_records.call_count == 1
+    assert result["dont"] == []
+    assert result["neutral"] == []
+
+
+def test_retrieve_parses_reflection_json_content(backend, mock_data_client) -> None:
+    """content.text is a JSON blob with title/use_cases/hints/confidence — map
+    to the sqlite-mode reflection dict shape."""
     import json
     record_json = json.dumps({
         "title": "Test reflection title",
@@ -1391,7 +1596,7 @@ async def test_retrieve_parses_reflection_json_content(backend, mock_data_client
         "hints": "First hint.\n- Second hint.\n- Third hint.",
         "confidence": "0.85",
     })
-    mock_data_client.retrieve_memory_records.return_value = {
+    mock_data_client.list_memory_records.return_value = {
         "memoryRecordSummaries": [
             {
                 "memoryRecordId": "rec-1",
@@ -1399,7 +1604,6 @@ async def test_retrieve_parses_reflection_json_content(backend, mock_data_client
                 "memoryStrategyId": "episodicReflections-qPr9876543",
                 "namespaces": ["projects/testproj/reflections/"],
                 "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
-                "score": 0.9,
                 "metadata": {
                     "polarity": {"stringValue": "do"},
                     "useful_count": {"numberValue": 3},
@@ -1412,23 +1616,24 @@ async def test_retrieve_parses_reflection_json_content(backend, mock_data_client
             }
         ]
     }
-    result = await backend.retrieve(query="anything")
-    do_bucket = result.do
-    assert len(do_bucket) >= 1
+    result = backend.retrieve(project="testproj")
+    do_bucket = result["do"]
+    assert len(do_bucket) == 1
     refl = do_bucket[0]
-    # Match the existing Reflection dataclass field set
+    # Match the sqlite-mode reflection dict shape
+    assert refl["id"] == "rec-1"
     assert refl["title"] == "Test reflection title"
     assert refl["use_cases"] == "Applies when X"
     assert refl["hints"] == ["First hint.", "Second hint.", "Third hint."]
-    assert float(refl["confidence"]) == 0.85
-    assert refl["id"] == "rec-1"
+    assert refl["confidence"] == 0.85  # float
+    assert refl["useful_count"] == 3
 
 
-@pytest.mark.asyncio
-async def test_retrieve_applies_reinforcement_to_score(backend, mock_data_client) -> None:
-    """Reinforcement multiplier: useful_count boosts; misled/overlooked penalize."""
+def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) -> None:
+    """Ranking matches sqlite: useful_count + 3*times_overlooked DESC,
+    confidence DESC, updated_at DESC."""
     import json
-    def make_record(rec_id: str, useful: int, misled: int) -> dict:
+    def make_record(rec_id: str, useful: int, overlooked: int) -> dict:
         return {
             "memoryRecordId": rec_id,
             "content": {"text": json.dumps({
@@ -1437,226 +1642,213 @@ async def test_retrieve_applies_reinforcement_to_score(backend, mock_data_client
             "memoryStrategyId": "x",
             "namespaces": ["projects/testproj/reflections/"],
             "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
-            "score": 0.5,
             "metadata": {
                 "polarity": {"stringValue": "do"},
                 "useful_count": {"numberValue": useful},
                 "missed_count": {"numberValue": 0},
                 "ignored_count": {"numberValue": 0},
-                "times_misled": {"numberValue": misled},
-                "overlooked_count": {"numberValue": 0},
+                "times_misled": {"numberValue": 0},
+                "overlooked_count": {"numberValue": overlooked},
                 "status": {"stringValue": "active"},
             },
         }
 
     def stub(**kwargs):
-        criteria = kwargs["searchCriteria"]
-        for f in criteria["metadataFilters"]:
+        for f in kwargs.get("metadataFilters", []):
             if f["left"]["metadataKey"] == "polarity":
                 pol = f["right"]["metadataValue"]["stringValue"]
                 if pol == "do":
+                    # high-rank: useful=10 → score 10
+                    # mid-rank:  useful=2, overlooked=3 → score 2 + 9 = 11
+                    # low-rank:  useful=0, overlooked=0 → score 0
                     return {"memoryRecordSummaries": [
-                        make_record("boosted", useful=5, misled=0),
-                        make_record("penalized", useful=0, misled=5),
+                        make_record("low", useful=0, overlooked=0),
+                        make_record("high-via-useful", useful=10, overlooked=0),
+                        make_record("highest-via-overlooked", useful=2, overlooked=3),
                     ]}
         return {"memoryRecordSummaries": []}
 
-    mock_data_client.retrieve_memory_records.side_effect = stub
-    result = await backend.retrieve(query="x", reinforcement_alpha=0.1)
-    do_titles = [r["title"] for r in result.do]
-    # Boosted should outrank penalized after reinforcement.
-    assert do_titles.index("boosted") < do_titles.index("penalized")
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    do_titles = [r["title"] for r in result["do"]]
+    # Score = useful_count + 3*times_overlooked
+    # highest-via-overlooked: 2 + 9 = 11
+    # high-via-useful:        10 + 0 = 10
+    # low:                    0 + 0 = 0
+    assert do_titles == ["highest-via-overlooked", "high-via-useful", "low"]
 ```
 
-- [ ] **Step 2: Run; verify failures** — 3 failures (retrieve raises NotImplementedError).
+- [ ] **Step 2: Run; verify failures** — 5 failures (retrieve raises NotImplementedError).
 
-- [ ] **Step 3: Implement `retrieve`**
+- [ ] **Step 3: Implement `retrieve` (sync, parallel fan-out internally)**
 
-Add imports:
+Add imports near top of `agentcore.py`:
 
 ```python
 import asyncio
 import json
-from typing import cast
 
-from better_memory.services.observation import BucketedResults
 from better_memory.storage.session import parse_hints_prose, resolve_namespace
 ```
 
-Replace stub:
+Add module-level constant if not already present (it's referenced by other tasks too):
 
 ```python
 _POLARITIES: tuple[str, str, str] = ("do", "dont", "neutral")
+_OVERLOOKED_RANKING_WEIGHT = 3  # mirrors better_memory/services/memory_rating.py:71
+```
 
+Replace the `retrieve` stub:
 
-async def retrieve(
+```python
+def retrieve(
     self,
-    query: str | None = None,
     *,
-    component: str | None = None,
-    status: str | None = "active",
-    window_days: int | None = 30,
-    scope_path: str | None = None,
     project: str | None = None,
-    do_limit: int = 10,
-    dont_limit: int = 10,
-    neutral_limit: int = 5,
-    candidate_k: int = 50,
-    reinforcement_alpha: float = 0.1,
-) -> BucketedResults:
-    """Three parallel retrieve_memory_records calls (one per polarity).
+    tech: str | None = None,
+    phase: str | None = None,
+    polarity: str | None = None,
+    limit_per_bucket: int | None = 20,
+    track_exposure: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
+    """Bucketed reflection retrieval matching ReflectionSynthesisService.retrieve_reflections.
 
-    Each returns up to candidate_k candidates; client-side reinforcement
-    multiplier + recency decay re-rank; truncate to per-bucket limit."""
+    Per-polarity list_memory_records against the reflections namespace,
+    parse JSON content, rank via the sqlite ordering rule
+    (useful_count + 3*times_overlooked DESC, confidence DESC, updated_at DESC).
+    Returns dict[polarity, list[reflection_dict]] in the same shape sqlite mode
+    returns; the MCP memory.retrieve handler json-dumps this directly to Claude.
+
+    track_exposure is accepted for parity but no-op in agentcore mode —
+    AgentCore has no session_memory_exposure table; exposure tracking is
+    not part of the agentcore-mode rating model.
+    """
     actor_id = resolve_actor_id(project or self._project)
     namespace = resolve_namespace(actor_id, "reflections")
-    # AgentCore RetrieveMemoryRecords.searchCriteria.searchQuery is REQUIRED
-    # (non-empty string). When the caller passes None / empty query, sqlite
-    # mode skips the embedder + falls back to filter-only mode (no semantic
-    # search). AgentCore has no filter-only path on retrieve_memory_records;
-    # use list_memory_records (no search) instead. Branch here.
-    search_query = (query or "").strip()
+    effective_limit = limit_per_bucket if limit_per_bucket is not None else 20
 
-    bucket_limits = {
-        "do": do_limit,
-        "dont": dont_limit,
-        "neutral": neutral_limit,
-    }
+    # Restrict fan-out to a single polarity if the caller specified one
+    polarities_to_fetch: tuple[str, ...] = (
+        (polarity,) if polarity in _POLARITIES else _POLARITIES
+    )
 
-    results: dict[str, list[dict[str, Any]]] = {}
-
-    async def fetch(polarity: str) -> tuple[str, list[dict[str, Any]]]:
+    def _fetch(p: str) -> list[dict[str, Any]]:
         filters: list[dict[str, Any]] = [
             {
                 "left": {"metadataKey": "polarity"},
                 "operator": "EQUALS_TO",
-                "right": {"metadataValue": {"stringValue": polarity}},
-            }
+                "right": {"metadataValue": {"stringValue": p}},
+            },
+            {
+                "left": {"metadataKey": "status"},
+                "operator": "EQUALS_TO",
+                "right": {"metadataValue": {"stringValue": "active"}},
+            },
         ]
-        if status is not None:
-            filters.append(
-                {
-                    "left": {"metadataKey": "status"},
-                    "operator": "EQUALS_TO",
-                    "right": {"metadataValue": {"stringValue": status}},
-                }
-            )
-        loop = asyncio.get_running_loop()
-        if search_query:
-            # Semantic search path.
-            response = await loop.run_in_executor(
-                None,
-                lambda: self._data.retrieve_memory_records(
-                    memoryId=self._cfg.episodic.memory_id,
-                    namespace=namespace,
-                    searchCriteria={
-                        "searchQuery": search_query,
-                        "topK": candidate_k,
-                        "metadataFilters": filters,
-                    },
-                ),
-            )
-        else:
-            # Filter-only path (mirrors sqlite mode's skip-embedder behaviour
-            # when query is None/empty). ListMemoryRecords accepts the same
-            # metadataFilters but doesn't require a searchQuery.
-            response = await loop.run_in_executor(
-                None,
-                lambda: self._data.list_memory_records(
-                    memoryId=self._cfg.episodic.memory_id,
-                    namespace=namespace,
-                    maxResults=candidate_k,
-                    metadataFilters=filters,
-                ),
-            )
+        response = self._data.list_memory_records(
+            memoryId=self._cfg.episodic.memory_id,
+            namespace=namespace,
+            maxResults=effective_limit * 2,  # fetch some slack for client-side ranking
+            metadataFilters=filters,
+        )
         parsed = [
-            self._parse_reflection_record(rec)
+            self._parse_reflection_record(rec, tech_filter=tech, phase_filter=phase)
             for rec in response.get("memoryRecordSummaries", [])
         ]
-        ranked = sorted(
-            parsed,
-            key=lambda r: r["_final_score"],
-            reverse=True,
-        )[: bucket_limits[polarity]]
-        return polarity, ranked
+        # Drop None entries (filtered out by tech/phase post-filter)
+        parsed = [r for r in parsed if r is not None]
+        # Sqlite ordering: (useful_count + 3*times_overlooked) DESC,
+        # confidence DESC, updated_at DESC.
+        parsed.sort(
+            key=lambda r: (
+                -(r["useful_count"] + _OVERLOOKED_RANKING_WEIGHT * r["_overlooked_count"]),
+                -r["confidence"],
+                -r["_updated_at_ts"],
+            )
+        )
+        return parsed[:effective_limit]
 
-    pairs = await asyncio.gather(*(fetch(p) for p in _POLARITIES))
-    for polarity, ranked in pairs:
-        results[polarity] = ranked
-    return BucketedResults(
-        do=results["do"], dont=results["dont"], neutral=results["neutral"]
-    )
+    async def _gather_all() -> dict[str, list[dict[str, Any]]]:
+        loop = asyncio.get_running_loop()
+        tasks = {p: loop.run_in_executor(None, _fetch, p) for p in polarities_to_fetch}
+        return {p: await task for p, task in tasks.items()}
+
+    fetched = asyncio.run(_gather_all())
+
+    # Always return all 3 keys for stable shape; unfetched buckets are [].
+    return {p: fetched.get(p, []) for p in _POLARITIES}
 
 
 def _parse_reflection_record(
-    self, rec: dict[str, Any]
-) -> dict[str, Any]:
-    """Map MemoryRecordSummary → better-memory Reflection-shaped dict."""
+    self,
+    rec: dict[str, Any],
+    *,
+    tech_filter: str | None = None,
+    phase_filter: str | None = None,
+) -> dict[str, Any] | None:
+    """Map MemoryRecordSummary → sqlite-shaped reflection dict.
+
+    Returns None if tech_filter / phase_filter excludes this record."""
     text = rec.get("content", {}).get("text", "")
     try:
-        body = json.loads(text)
+        body = json.loads(text) if isinstance(text, str) else {}
     except json.JSONDecodeError:
-        body = {"title": "", "use_cases": "", "hints": text, "confidence": "0"}
+        body = {}
 
     metadata_raw = rec.get("metadata", {})
 
     def _num(key: str) -> float:
-        entry = metadata_raw.get(key, {})
-        return float(entry.get("numberValue", 0))
+        return float(metadata_raw.get(key, {}).get("numberValue", 0))
 
-    useful = _num("useful_count")
-    missed = _num("missed_count")
-    ignored = _num("ignored_count")
-    misled = _num("times_misled")
-    overlooked = _num("overlooked_count")
+    def _str(key: str) -> str:
+        return metadata_raw.get(key, {}).get("stringValue", "")
 
-    base_score = float(rec.get("score") or 0.0)
-    reinforcement_score = useful - missed - misled - overlooked - ignored
+    tech_value: str | None = body.get("tech") if isinstance(body, dict) else None
+    if tech_filter is not None and tech_value != tech_filter:
+        return None
 
-    # Mirror sqlite-mode formula (search/hybrid.py:367-384):
-    #   final = base_score * (1 + alpha * reinforcement_score) * 0.5^(age_days / half_life)
-    # Age baseline is `created_at` (when the record was first written), NOT
-    # `last_credited_at`. Half-life default 14 days matches the sqlite default.
-    reinforcement_alpha_local = 0.1
-    half_life_days = 14.0
+    phase_value = body.get("phase", "general") if isinstance(body, dict) else "general"
+    if phase_filter is not None and phase_value != phase_filter:
+        return None
 
-    created_at = rec.get("createdAt")
-    if isinstance(created_at, datetime):
-        age_days = max(
-            (datetime.now(UTC) - created_at).total_seconds() / 86400.0,
-            0.0,
-        )
-    else:
-        age_days = 0.0
+    hints_value = body.get("hints", "") if isinstance(body, dict) else ""
+    hints_list = (
+        parse_hints_prose(hints_value) if isinstance(hints_value, str)
+        else list(hints_value) if isinstance(hints_value, list)
+        else []
+    )
 
-    recency_mult = 0.5 ** (age_days / half_life_days) if half_life_days > 0 else 1.0
-    reinforcement_mult = 1.0 + reinforcement_alpha_local * reinforcement_score
-    final_score = base_score * reinforcement_mult * recency_mult
+    try:
+        confidence = float(body.get("confidence", 0)) if isinstance(body, dict) else 0.0
+    except (TypeError, ValueError):
+        confidence = 0.0
 
-    polarity_meta = metadata_raw.get("polarity", {}).get("stringValue", "neutral")
-    hints_prose = body.get("hints", "") if isinstance(body, dict) else ""
+    updated_at = rec.get("updatedAt") or rec.get("createdAt")
+    updated_at_ts = updated_at.timestamp() if isinstance(updated_at, datetime) else 0.0
 
     return {
+        # Public shape — must match ReflectionSynthesisService.retrieve_reflections
+        # return: {id, title, phase, use_cases, hints (list), confidence (float),
+        #          tech, evidence_count, useful_count}
         "id": rec["memoryRecordId"],
         "title": body.get("title", "") if isinstance(body, dict) else "",
+        "phase": phase_value,
         "use_cases": body.get("use_cases", "") if isinstance(body, dict) else "",
-        "hints": parse_hints_prose(hints_prose if isinstance(hints_prose, str) else ""),
-        "confidence": body.get("confidence", "0") if isinstance(body, dict) else "0",
-        "polarity": polarity_meta,
-        "useful_count": useful,
-        "missed_count": missed,
-        "ignored_count": ignored,
-        "times_misled": misled,
-        "overlooked_count": overlooked,
-        "_final_score": final_score,
-        "namespaces": rec.get("namespaces", []),
+        "hints": hints_list,
+        "confidence": confidence,
+        "tech": tech_value,
+        "evidence_count": int(_num("useful_count")) + int(_num("missed_count")),
+        "useful_count": int(_num("useful_count")),
+        # Internal ranking helpers — leading underscore so callers ignore
+        "_overlooked_count": int(_num("overlooked_count")),
+        "_updated_at_ts": updated_at_ts,
     }
 ```
 
 - [ ] **Step 4: Run; verify pass**
 
 Run: `uv run pytest tests/storage/test_agentcore_unit.py -v -k retrieve`
-Expected: 3 passed.
+Expected: 5 passed.
 
 - [ ] **Step 5: pyright clean** — 0 errors.
 
@@ -1664,7 +1856,7 @@ Expected: 3 passed.
 
 ```bash
 git add better_memory/storage/agentcore.py tests/storage/test_agentcore_unit.py
-git commit -m "feat(agentcore): retrieve bucketed reflections + reinforcement scoring"
+git commit -m "feat(agentcore): retrieve bucketed reflections matching sqlite Protocol contract"
 ```
 
 ---
