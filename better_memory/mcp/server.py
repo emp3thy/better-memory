@@ -40,12 +40,14 @@ import contextlib
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable, Coroutine, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -79,6 +81,7 @@ from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.retention import RetentionService
 from better_memory.services.retention_scheduler import RetentionScheduler
 from better_memory.services.spool import SpoolService
+from better_memory.storage import StorageBackend, build_backend
 
 # Module-level migration directories. Packaged alongside the code so
 # ``python -m better_memory.mcp`` finds them without needing extra config.
@@ -254,9 +257,16 @@ def _probe_ollama(host: str) -> None:
 # --------------------------------------------------------------------------- tools
 
 
-def _tool_definitions() -> list[Tool]:
-    """Return the static list of tools exposed over MCP."""
-    return [
+def _tool_definitions(*, supports_synthesis: bool = True) -> list[Tool]:
+    """Return the list of tools exposed over MCP.
+
+    When ``supports_synthesis`` is False, the
+    ``memory.synthesize_next_get_context`` and ``memory.synthesize_next_apply``
+    tools are omitted. This gates the synthesis surface on the active
+    StorageBackend's capability flag — backends without a local episode
+    queue (e.g. AgentCoreBackend in Plan 2) do not expose these tools.
+    """
+    tools: list[Tool] = [
         Tool(
             name="memory.observe",
             description=(
@@ -567,70 +577,6 @@ def _tool_definitions() -> list[Tool]:
             },
         ),
         Tool(
-            name="memory.synthesize_next_get_context",
-            description=(
-                "Return the next pending episode's full context for "
-                "consolidation: episode metadata, all observations on it, "
-                "and tech-filtered existing reflections. The IDE-LLM "
-                "consumes this, decides what new/augment/merge/ignore "
-                "actions to take, and submits the decision via "
-                "memory.synthesize_next_apply. Returns "
-                '{"episode_id": null, "queue": {...}} when the queue is '
-                "empty. See the better-memory-synthesize skill for the "
-                "full workflow and decision schema."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "project": {
-                        "type": "string",
-                        "description": (
-                            "Optional project override; defaults to "
-                            "cwd-derived."
-                        ),
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="memory.synthesize_next_apply",
-            description=(
-                "Apply a synthesis decision for one episode. Atomically "
-                "creates new reflections, augments existing ones, merges "
-                "duplicates, and marks observations as consumed (or "
-                "ignored). Marks the episode synthesized. Returns a "
-                "step summary {episode_id, counts, queue, failure}. "
-                "decision shape: {new: [...], augment: [...], "
-                "merge: [...], ignore: [...]} — see the "
-                "better-memory-synthesize skill for the per-entry "
-                "field schema."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["episode_id", "decision"],
-                "additionalProperties": False,
-                "properties": {
-                    "episode_id": {"type": "string"},
-                    "decision": {
-                        "type": "object",
-                        "description": (
-                            "Decision JSON; validation errors are "
-                            "returned to the caller without stamping "
-                            "the episode failed (caller can retry)."
-                        ),
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": (
-                            "Optional project override; defaults to "
-                            "cwd-derived."
-                        ),
-                    },
-                },
-            },
-        ),
-        Tool(
             name="memory.session_bootstrap",
             description=(
                 "Open or reuse a session episode and inject all project + "
@@ -790,6 +736,76 @@ def _tool_definitions() -> list[Tool]:
         ),
     ]
 
+    if supports_synthesis:
+        tools.extend([
+            Tool(
+                name="memory.synthesize_next_get_context",
+                description=(
+                    "Return the next pending episode's full context for "
+                    "consolidation: episode metadata, all observations on it, "
+                    "and tech-filtered existing reflections. The IDE-LLM "
+                    "consumes this, decides what new/augment/merge/ignore "
+                    "actions to take, and submits the decision via "
+                    "memory.synthesize_next_apply. Returns "
+                    '{"episode_id": null, "queue": {...}} when the queue is '
+                    "empty. See the better-memory-synthesize skill for the "
+                    "full workflow and decision schema."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": (
+                                "Optional project override; defaults to "
+                                "cwd-derived."
+                            ),
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="memory.synthesize_next_apply",
+                description=(
+                    "Apply a synthesis decision for one episode. Atomically "
+                    "creates new reflections, augments existing ones, merges "
+                    "duplicates, and marks observations as consumed (or "
+                    "ignored). Marks the episode synthesized. Returns a "
+                    "step summary {episode_id, counts, queue, failure}. "
+                    "decision shape: {new: [...], augment: [...], "
+                    "merge: [...], ignore: [...]} — see the "
+                    "better-memory-synthesize skill for the per-entry "
+                    "field schema."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "required": ["episode_id", "decision"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "episode_id": {"type": "string"},
+                        "decision": {
+                            "type": "object",
+                            "description": (
+                                "Decision JSON; validation errors are "
+                                "returned to the caller without stamping "
+                                "the episode failed (caller can retry)."
+                            ),
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": (
+                                "Optional project override; defaults to "
+                                "cwd-derived."
+                            ),
+                        },
+                    },
+                },
+            ),
+        ])
+
+    return tools
+
 
 # --------------------------------------------------------------------------- helpers
 
@@ -917,13 +933,36 @@ def _serialize_synth_apply_state_error(message: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- factory
 
 
-def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
+@dataclass
+class ServerContext:
+    """Bundle of long-lived runtime objects exposed by ``create_server``.
+
+    Returned alongside the ``Server`` and ``cleanup`` callable so callers
+    (tests, future hooks) can introspect or reuse the wired-up backend
+    without rebuilding it. ``backend`` is the live ``StorageBackend``;
+    ``memory_conn`` is the underlying sqlite connection (None for non-sqlite
+    backends in future plans); ``embedder`` is whatever was passed to the
+    backend (may be None in the tfidf wiring).
+    """
+
+    backend: StorageBackend
+    memory_conn: sqlite3.Connection
+    embedder: Any
+
+
+def create_server() -> tuple[
+    Server,
+    Callable[[], Coroutine[Any, Any, None]],
+    ServerContext,
+]:
     """Wire services and register tools.
 
-    Returns a ``(server, cleanup)`` tuple where ``cleanup`` is an idempotent
-    async function that closes the two SQLite connections and the embedder's
-    HTTP client. Callers must await ``cleanup`` on shutdown (typically in a
-    ``finally`` around ``server.run``).
+    Returns a ``(server, cleanup, ctx)`` triple where ``cleanup`` is an
+    idempotent async function that closes the two SQLite connections and
+    the embedder's HTTP client, and ``ctx`` is a :class:`ServerContext`
+    bundling the live :class:`StorageBackend`, its underlying memory
+    connection, and the embedder (if any). Callers must await ``cleanup``
+    on shutdown (typically in a ``finally`` around ``server.run``).
     """
     config = get_config()
 
@@ -970,6 +1009,24 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
         memory_conn, embedder=embedder, retriever=retriever, episodes=episodes
     )
 
+    # Resolve project + session id ONCE at startup. Per-handler code can
+    # still override per-call (handlers continue to read args.get("project")
+    # / call project_name() for backwards compatibility), but the backend
+    # construction needs concrete defaults to lock in the SqliteBackend's
+    # write-path resolution. Falling back to "" for session_id mirrors the
+    # historical behaviour of the rating tools' _resolve_session_id helper
+    # — they raise their own ValueError when actually called with no id.
+    startup_project = project_name()
+    startup_session_id = _resolve_session_id(config.home) or ""
+    backend: StorageBackend = build_backend(
+        config=config,
+        memory_conn=memory_conn,
+        embedder=embedder,
+        retriever=retriever,
+        session_id=startup_session_id,
+        project=startup_project,
+    )
+
     # Reflection synthesis is driven by the IDE-LLM via two MCP tools
     # (memory.synthesize_next_get_context / _apply). The service no
     # longer holds a chat client.
@@ -997,7 +1054,7 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:
-        return _tool_definitions()
+        return _tool_definitions(supports_synthesis=backend.supports_synthesis)
 
     @server.call_tool()
     async def _call_tool(
@@ -1504,7 +1561,11 @@ def create_server() -> tuple[Server, Callable[[], Coroutine[Any, Any, None]]]:
             except Exception:  # noqa: BLE001 — best-effort shutdown
                 pass
 
-    return server, cleanup
+    return server, cleanup, ServerContext(
+        backend=backend,
+        memory_conn=memory_conn,
+        embedder=embedder,
+    )
 
 
 async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
@@ -1519,7 +1580,7 @@ async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
     """
     from mcp.types import CallToolRequest, CallToolRequestParams
 
-    server, cleanup = create_server()
+    server, cleanup, _ = create_server()
     try:
         handler = server.request_handlers[CallToolRequest]
         req = CallToolRequest(
@@ -1551,7 +1612,7 @@ async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
 
 async def run() -> None:
     """Start the server on stdio and run until the client disconnects."""
-    server, cleanup = create_server()
+    server, cleanup, _ = create_server()
     try:
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
