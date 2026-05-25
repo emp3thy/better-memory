@@ -122,15 +122,19 @@ def test_semantic_observe_and_list(backend) -> None:
 def test_semantic_update_text(backend) -> None:
     sm_id = backend.semantic_observe(content="original")
     backend.semantic_update_text(id=sm_id, content="updated")
-    rows = backend.semantic_list(search="updated")
-    assert any(getattr(r, "id", None) == sm_id for r in rows)
+    rows = backend.semantic_list()
+    matching = [r for r in rows if getattr(r, "id", None) == sm_id]
+    assert len(matching) == 1
+    assert getattr(matching[0], "content", None) == "updated"
 
 
-def test_semantic_set_scope(backend) -> None:
+def test_semantic_set_scope(backend, memory_conn) -> None:
     sm_id = backend.semantic_observe(content="to be promoted", scope="project")
     backend.semantic_set_scope(id=sm_id, scope="general")
-    # Listing for the project no longer surfaces general-scope rows by default;
-    # the call should succeed and not raise.
+    row = memory_conn.execute(
+        "SELECT scope FROM semantic_memories WHERE id = ?", (sm_id,),
+    ).fetchone()
+    assert row["scope"] == "general"
 
 
 def test_semantic_delete(backend) -> None:
@@ -140,7 +144,7 @@ def test_semantic_delete(backend) -> None:
     assert not any(getattr(r, "id", None) == sm_id for r in rows)
 
 
-def test_open_and_close_background_episode(backend) -> None:
+def test_open_and_close_background_episode(backend, memory_conn) -> None:
     ep_id = backend.open_background_episode(
         session_id="test-session", project="testproj",
     )
@@ -150,10 +154,22 @@ def test_open_and_close_background_episode(backend) -> None:
     backend.close_episode_by_id(
         episode_id=ep_id, outcome="success", close_reason="goal_complete",
     )
+    row = memory_conn.execute(
+        "SELECT ended_at, outcome, close_reason FROM episodes WHERE id = ?",
+        (ep_id,),
+    ).fetchone()
+    assert row["ended_at"] is not None
+    assert row["outcome"] == "success"
+    assert row["close_reason"] == "goal_complete"
 
 
 def test_list_episodes_returns_list(backend) -> None:
-    assert isinstance(backend.list_episodes(), list)
+    ep_id = backend.open_background_episode(
+        session_id="list-test-session", project="testproj",
+    )
+    result = backend.list_episodes(project="testproj")
+    assert isinstance(result, list)
+    assert any(getattr(ep, "id", None) == ep_id for ep in result)
 
 
 def test_promote_and_retire_reflection(backend, memory_conn) -> None:

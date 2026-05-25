@@ -246,7 +246,7 @@ class SqliteBackend:
         only_open: bool = False,
     ) -> list[Any]:
         return self._episodes.list_episodes(
-            project=project or self._project,
+            project=project,
             outcome=outcome,
             only_open=only_open,
         )

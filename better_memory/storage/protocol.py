@@ -14,8 +14,11 @@ session_id and project are held on the implementation (e.g. as constructor
 state on SqliteBackend) rather than passed per-call, since one backend
 instance serves exactly one MCP session.
 
-Where a method declares `project: str | None = None`, the backend MUST
-resolve `None` to a concrete project from its own state before persisting.
+Where a write method declares `project: str | None = None`, the backend
+MUST resolve `None` to a concrete project from its own state before
+persisting. Read methods (e.g. `list_episodes`) pass `project=None`
+through to the underlying service so callers can query across all
+projects when desired.
 Where a method declares `session_id: str` as a required kwarg, that is
 because the underlying service (e.g. EpisodeService, MemoryRatingService)
 is process-global and the kwarg is forwarded to the service unchanged —
