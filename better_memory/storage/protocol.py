@@ -1,0 +1,257 @@
+"""StorageBackend Protocol.
+
+Fat protocol with high-level operations. Both SqliteBackend (Plan 1) and
+AgentCoreBackend (Plan 2) implement it. Synthesis methods are sqlite-only —
+the MCP server reads `supports_synthesis` to gate their tool registration.
+
+Method shapes mirror the existing service surface verified at HEAD bff6506:
+- observe / retrieve / list_observations are async (ObservationService is async)
+- record_use is sync
+- semantic / episode / reflection lifecycle methods are sync
+- synthesis methods are sync
+
+session_id and project are held on the implementation (e.g. as constructor
+state on SqliteBackend) rather than passed per-call, since one backend
+instance serves exactly one MCP session.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal, Protocol, runtime_checkable
+
+
+# Re-export the Outcome aliases so storage callers don't need to import from services.
+# These mirror the literal sets in better_memory/services/observation.py.
+Outcome = Literal["success", "failure", "neutral"]
+UseOutcome = Literal["success", "failure"]
+
+
+@runtime_checkable
+class StorageBackend(Protocol):
+    """High-level storage operations consumed by the MCP layer."""
+
+    # ----- Capability flags -----
+
+    @property
+    def supports_synthesis(self) -> bool:
+        """True when the synthesize_next_* MCP tools should be registered."""
+        ...
+
+    # ----- Observations -----
+
+    async def observe(
+        self,
+        *,
+        content: str,
+        component: str | None = None,
+        theme: str | None = None,
+        trigger_type: str | None = None,
+        outcome: Outcome = "neutral",
+        scope_path: str | None = None,
+        project: str | None = None,
+        tech: str | None = None,
+        scope: str = "project",
+    ) -> str:
+        """Record an observation. Returns the new observation id."""
+        ...
+
+    async def retrieve(
+        self,
+        query: str | None = None,
+        *,
+        component: str | None = None,
+        status: str | None = "active",
+        window_days: int | None = 30,
+        scope_path: str | None = None,
+        project: str | None = None,
+        do_limit: int = 10,
+        dont_limit: int = 10,
+        neutral_limit: int = 5,
+        candidate_k: int = 50,
+        reinforcement_alpha: float = 0.1,
+    ) -> Any:
+        """Bucketed retrieval. Returns BucketedResults from the observation service."""
+        ...
+
+    async def list_observations(
+        self,
+        *,
+        project: str | None = None,
+        episode_id: str | None = None,
+        component: str | None = None,
+        theme: str | None = None,
+        outcome: Outcome | None = None,
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Drill-down list of raw observations."""
+        ...
+
+    def record_use(
+        self,
+        observation_id: str,
+        *,
+        outcome: UseOutcome | None = None,
+    ) -> None:
+        """Credit an observation's reinforcement counter. Raises ValueError if missing."""
+        ...
+
+    # ----- Semantic memories -----
+
+    def semantic_observe(
+        self,
+        *,
+        content: str,
+        project: str | None = None,
+        scope: str = "project",
+    ) -> str:
+        """Create a semantic memory. Returns its id."""
+        ...
+
+    def semantic_list(
+        self,
+        *,
+        project: str | None = None,
+        scope_filter: str | None = None,
+        search: str | None = None,
+        track_exposure: bool = True,
+    ) -> list[Any]:
+        """List semantic memories for the project. Returns list[SemanticMemory]."""
+        ...
+
+    def semantic_update_text(self, *, id: str, content: str) -> None:
+        """Update the text of a semantic memory."""
+        ...
+
+    def semantic_set_scope(self, *, id: str, scope: str) -> None:
+        """Change the scope (project/general) of a semantic memory."""
+        ...
+
+    def semantic_delete(self, *, id: str) -> None:
+        """Permanently delete a semantic memory (idempotent)."""
+        ...
+
+    # ----- Episodes -----
+
+    def open_background_episode(
+        self,
+        *,
+        session_id: str,
+        project: str,
+    ) -> str:
+        """Open a background episode for the given session. Returns episode id."""
+        ...
+
+    def start_foreground_episode(
+        self,
+        *,
+        session_id: str,
+        project: str,
+        goal: str,
+        tech: str | None = None,
+    ) -> str:
+        """Start a foreground episode. Returns episode id."""
+        ...
+
+    def close_active_episode(
+        self,
+        *,
+        session_id: str,
+        outcome: str,
+        close_reason: str,
+        summary: str | None = None,
+    ) -> str:
+        """Close the active episode for this session."""
+        ...
+
+    def close_episode_by_id(
+        self,
+        *,
+        episode_id: str,
+        outcome: str,
+        close_reason: str,
+        summary: str | None = None,
+    ) -> str:
+        """Close a specific episode by id."""
+        ...
+
+    def list_episodes(
+        self,
+        *,
+        project: str | None = None,
+        outcome: str | None = None,
+        only_open: bool = False,
+    ) -> list[Any]:
+        """List episodes. Returns list[Episode]."""
+        ...
+
+    # ----- Reflection lifecycle -----
+
+    def promote_reflection(self, *, reflection_id: str) -> None:
+        """Promote a project-scope reflection to general scope."""
+        ...
+
+    def retire_reflection(self, *, reflection_id: str) -> None:
+        """Retire a reflection (exclude from default retrieval)."""
+        ...
+
+    # ----- Session lifecycle -----
+
+    def session_bootstrap(
+        self,
+        *,
+        session_id: str,
+        source: str | None = None,
+        cwd: Any | None = None,
+        project: str | None = None,
+    ) -> Any:
+        """Build the SessionStart additionalContext envelope. Returns BootstrapResult."""
+        ...
+
+    def list_session_exposures(
+        self,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """List unrated memory exposures for the given session."""
+        ...
+
+    def apply_session_ratings(
+        self,
+        *,
+        session_id: str,
+        ratings: list[dict[str, str]],
+    ) -> Any:
+        """Atomically apply per-exposure ratings. Returns ApplySessionRatingsResult."""
+        ...
+
+    def credit_one(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        id: str,
+        classification: str,
+    ) -> Any:
+        """Apply a single rating for an exposed memory. Returns ApplyOutcome."""
+        ...
+
+    # ----- Synthesis (sqlite-only — guarded by supports_synthesis) -----
+
+    def synthesize_next_get_context(
+        self,
+        *,
+        project: str,
+    ) -> Any:
+        """Pop the next pending episode context. Returns EpisodeContext | None. Sqlite-only."""
+        ...
+
+    def synthesize_next_apply(
+        self,
+        *,
+        episode_id: str,
+        response: Any,
+        project: str,
+    ) -> Any:
+        """Apply a SynthesisResponse. Returns SynthesisStep. Sqlite-only."""
+        ...
