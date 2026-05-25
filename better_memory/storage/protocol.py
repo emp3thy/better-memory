@@ -13,6 +13,13 @@ Method shapes mirror the existing service surface verified at HEAD bff6506:
 session_id and project are held on the implementation (e.g. as constructor
 state on SqliteBackend) rather than passed per-call, since one backend
 instance serves exactly one MCP session.
+
+Where a method declares `project: str | None = None`, the backend MUST
+resolve `None` to a concrete project from its own state before persisting.
+Where a method declares `session_id: str` as a required kwarg, that is
+because the underlying service (e.g. EpisodeService, MemoryRatingService)
+is process-global and the kwarg is forwarded to the service unchanged —
+the Protocol is not declaring per-call session reconfiguration.
 """
 
 from __future__ import annotations
@@ -20,9 +27,14 @@ from __future__ import annotations
 from typing import Any, Literal, Protocol, runtime_checkable
 
 
-# Re-export the Outcome aliases so storage callers don't need to import from services.
-# These mirror the literal sets in better_memory/services/observation.py.
+# Outcome aliases are DEFINED here (not imported from services) to avoid a
+# `better_memory.storage → services` import edge in the public surface. The same
+# literal set also exists in `services/observation.py:76` and `search/hybrid.py:33`;
+# consolidating into a single canonical source is tracked for a later cleanup.
 Outcome = Literal["success", "failure", "neutral"]
+# UseOutcome omits "neutral" because ObservationService.record_use
+# (services/observation.py:445) only branches on success / failure — passing
+# "neutral" would silently no-op.
 UseOutcome = Literal["success", "failure"]
 
 
