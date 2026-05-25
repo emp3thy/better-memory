@@ -10,9 +10,9 @@ Held state:
 - ``session_id`` — used for episode lookups, ratings, exposures
 - ``project`` — default project for any method whose project kwarg is omitted
 
-Services are constructed per call. They are light objects over the same
-connection; re-instantiating avoids holding cyclic references and keeps
-tests simple.
+Services are cached on ``__init__``. They are light objects over the same
+connection; caching avoids duplicate connection-ownership claims and
+N×-multiplied allocations on hot paths.
 """
 
 from __future__ import annotations
@@ -40,24 +40,21 @@ class SqliteBackend:
         self._embedder = embedder
         self._session_id = session_id
         self._project = project
+        self._project_resolver = lambda: self._project
+        self._episodes = EpisodeService(memory_conn)
+        self._observations = ObservationService(
+            memory_conn,
+            embedder,
+            session_id=session_id,
+            project_resolver=self._project_resolver,
+            episodes=self._episodes,
+        )
 
     # ----- Capability flags -----
 
     @property
     def supports_synthesis(self) -> bool:
         return True
-
-    # ----- Internal helpers -----
-
-    def _observations(self) -> ObservationService:
-        episodes = EpisodeService(self._conn)
-        return ObservationService(
-            self._conn,
-            self._embedder,
-            session_id=self._session_id,
-            project_resolver=lambda: self._project,
-            episodes=episodes,
-        )
 
     # ----- Observations -----
 
@@ -74,7 +71,7 @@ class SqliteBackend:
         tech: str | None = None,
         scope: str = "project",
     ) -> str:
-        return await self._observations().create(
+        return await self._observations.create(
             content=content,
             component=component,
             theme=theme,
@@ -101,7 +98,7 @@ class SqliteBackend:
         candidate_k: int = 50,
         reinforcement_alpha: float = 0.1,
     ) -> Any:
-        return await self._observations().retrieve(
+        return await self._observations.retrieve(
             query,
             component=component,
             status=status,
@@ -126,7 +123,7 @@ class SqliteBackend:
         query: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        return await self._observations().list_observations(
+        return await self._observations.list_observations(
             project=project or self._project,
             episode_id=episode_id,
             component=component,
@@ -142,4 +139,4 @@ class SqliteBackend:
         *,
         outcome: UseOutcome | None = None,
     ) -> None:
-        self._observations().record_use(observation_id, outcome=outcome)
+        self._observations.record_use(observation_id, outcome=outcome)
