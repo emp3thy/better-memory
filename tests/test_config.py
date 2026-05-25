@@ -255,6 +255,46 @@ def test_embeddings_backend_unknown_value_raises(monkeypatch: pytest.MonkeyPatch
         get_config()
 
 
+def test_storage_backend_defaults_to_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    cfg = get_config()
+    assert cfg.storage_backend == "sqlite"
+
+
+def test_storage_backend_agentcore_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", "mem-sem-abc1234567")
+    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", "mem-epi-xyz1234567")
+    cfg = get_config()
+    assert cfg.storage_backend == "agentcore"
+    assert cfg.agentcore_region == "eu-west-2"
+    assert cfg.agentcore_semantic_memory_id == "mem-sem-abc1234567"
+    assert cfg.agentcore_episodic_memory_id == "mem-epi-xyz1234567"
+
+
+def test_storage_backend_unknown_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "nope")
+    with pytest.raises(ValueError, match="BETTER_MEMORY_STORAGE_BACKEND"):
+        get_config()
+
+
+def test_agentcore_mode_without_memory_ids_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    monkeypatch.delenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", raising=False)
+    monkeypatch.delenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", raising=False)
+    with pytest.raises(ValueError, match="agentcore init"):
+        get_config()
+
+
+def test_agentcore_region_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_REGION", "us-west-2")
+    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", "mem-sem-abc1234567")
+    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", "mem-epi-xyz1234567")
+    cfg = get_config()
+    assert cfg.agentcore_region == "us-west-2"
+
+
 def test_project_name_caches_negative_lookup(tmp_path: Path) -> None:
     """A 'no git tree' result is cached so repeat lookups don't re-walk.
 

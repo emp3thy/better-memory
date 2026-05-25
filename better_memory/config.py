@@ -29,6 +29,9 @@ _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 _DEFAULT_EMBED_MODEL = "nomic-embed-text"
 _DEFAULT_EMBEDDINGS_BACKEND = "ollama"
 _VALID_EMBEDDINGS_BACKENDS = ("ollama", "tfidf")
+_DEFAULT_STORAGE_BACKEND = "sqlite"
+_VALID_STORAGE_BACKENDS = ("sqlite", "agentcore")
+_DEFAULT_AGENTCORE_REGION = "eu-west-2"
 
 
 def resolve_home() -> Path:
@@ -201,6 +204,10 @@ class Config:
     auto_prune: bool
     diag_logging: bool
     embeddings_backend: Literal["ollama", "tfidf"]
+    storage_backend: Literal["sqlite", "agentcore"]
+    agentcore_region: str
+    agentcore_semantic_memory_id: str | None
+    agentcore_episodic_memory_id: str | None
 
 
 def _resolve_embeddings_backend() -> Literal["ollama", "tfidf"]:
@@ -219,6 +226,36 @@ def get_config() -> Config:
     Called each time so tests can override env vars between calls.
     """
     home = resolve_home()
+
+    storage_backend = _resolve_str(
+        "BETTER_MEMORY_STORAGE_BACKEND", _DEFAULT_STORAGE_BACKEND
+    )
+    if storage_backend not in _VALID_STORAGE_BACKENDS:
+        raise ValueError(
+            f"BETTER_MEMORY_STORAGE_BACKEND={storage_backend!r} is not one of "
+            f"{_VALID_STORAGE_BACKENDS}"
+        )
+
+    agentcore_region = _resolve_str(
+        "BETTER_MEMORY_AGENTCORE_REGION", _DEFAULT_AGENTCORE_REGION
+    )
+    agentcore_semantic_memory_id = _resolve_str(
+        "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", ""
+    ) or None
+    agentcore_episodic_memory_id = _resolve_str(
+        "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", ""
+    ) or None
+
+    if storage_backend == "agentcore" and (
+        agentcore_semantic_memory_id is None or agentcore_episodic_memory_id is None
+    ):
+        raise ValueError(
+            "BETTER_MEMORY_STORAGE_BACKEND=agentcore requires both "
+            "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID and "
+            "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID to be set. "
+            "Run `better-memory agentcore init` to create the memory resources."
+        )
+
     return Config(
         home=home,
         memory_db=home / "memory.db",
@@ -231,4 +268,8 @@ def get_config() -> Config:
         auto_prune=_resolve_bool("BETTER_MEMORY_AUTO_PRUNE", default=False),
         diag_logging=_resolve_bool("BETTER_MEMORY_DIAG_LOGGING", default=False),
         embeddings_backend=_resolve_embeddings_backend(),
+        storage_backend=storage_backend,  # type: ignore[arg-type]
+        agentcore_region=agentcore_region,
+        agentcore_semantic_memory_id=agentcore_semantic_memory_id,
+        agentcore_episodic_memory_id=agentcore_episodic_memory_id,
     )
