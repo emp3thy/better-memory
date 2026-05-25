@@ -6,7 +6,9 @@ protocol delegation surface.
 
 Held state:
 - ``memory_conn`` — open sqlite3 Connection
-- ``embedder`` — passed to ObservationService
+- ``embedder`` / ``retriever`` — forwarded to ObservationService; exactly
+  one must be non-None (ObservationService enforces this). ``embedder`` is
+  used in the ollama embeddings backend, ``retriever`` in the tfidf backend.
 - ``session_id`` — used for episode lookups, ratings, exposures
 - ``project`` — default project for any method whose project kwarg is omitted
 
@@ -39,19 +41,22 @@ class SqliteBackend:
         self,
         *,
         memory_conn: sqlite3.Connection,
-        embedder: Any,
+        embedder: Any = None,
+        retriever: Any = None,
         session_id: str,
         project: str,
     ) -> None:
         self._conn = memory_conn
         self._embedder = embedder
+        self._retriever = retriever
         self._session_id = session_id
         self._project = project
         self._project_resolver = lambda: self._project
         self._episodes = EpisodeService(memory_conn)
         self._observations = ObservationService(
             memory_conn,
-            embedder,
+            embedder=embedder,
+            retriever=retriever,
             session_id=session_id,
             project_resolver=self._project_resolver,
             episodes=self._episodes,

@@ -69,6 +69,20 @@ def test_build_backend_raises_for_unknown(memory_conn) -> None:
         )
 
 
+def test_build_backend_forwards_retriever_for_tfidf_mode(memory_conn) -> None:
+    cfg = _config()  # sqlite backend; embedder kwarg None, retriever kwarg used
+    retriever = MagicMock()
+    backend = build_backend(
+        config=cfg,
+        memory_conn=memory_conn,
+        embedder=None,
+        retriever=retriever,
+        session_id="s",
+        project="p",
+    )
+    assert isinstance(backend, SqliteBackend)
+
+
 def test_build_backend_agentcore_raises_until_plan2(memory_conn) -> None:
     cfg = _config(
         storage_backend="agentcore",
