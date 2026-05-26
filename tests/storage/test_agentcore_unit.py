@@ -803,6 +803,22 @@ def test_semantic_delete_calls_batch_delete(backend, mock_data_client) -> None:
     assert call["records"] == [{"memoryRecordId": "sm-x"}]
 
 
+def test_semantic_delete_propagates_failed_records(backend, mock_data_client) -> None:
+    """semantic_delete must surface batch_delete failures rather than silently
+    swallow them — consistent with every other mutation method on the class."""
+    mock_data_client.batch_delete_memory_records.return_value = {
+        "successfulRecords": [],
+        "failedRecords": [{
+            "memoryRecordId": "sm-bad",
+            "status": "FAILED",
+            "errorCode": 404,
+            "errorMessage": "record not found",
+        }],
+    }
+    with pytest.raises(RuntimeError, match="sm-bad"):
+        backend.semantic_delete(id="sm-bad")
+
+
 def test_session_bootstrap_fires_4_parallel_list_calls(backend, mock_data_client) -> None:
     """One per polarity (do/dont/neutral) against episodic + one against
     semantic — all 4 dispatched via asyncio.gather + run_in_executor.

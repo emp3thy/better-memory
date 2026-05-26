@@ -659,10 +659,16 @@ class AgentCoreBackend:
 
     def semantic_delete(self, *, id: str) -> None:
         """Permanently delete a semantic record."""
-        self._data.batch_delete_memory_records(
+        response = self._data.batch_delete_memory_records(
             memoryId=self._cfg.semantic.memory_id,
             records=[{"memoryRecordId": id}],
         )
+        failed = response.get("failedRecords", [])
+        if failed:
+            raise RuntimeError(
+                f"AgentCore semantic_delete failed for {id}: "
+                f"{failed[0].get('errorMessage', 'unknown')}"
+            )
 
     # ----- Episodes: no-ops in agentcore mode (this task) -----
 
