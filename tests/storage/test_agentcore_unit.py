@@ -491,3 +491,76 @@ def test_record_use_propagates_failed_records(backend, mock_data_client) -> None
     }
     with pytest.raises(RuntimeError, match="rec-fail"):
         backend.record_use("rec-fail", outcome="success")
+
+
+_RATING_TO_COUNTER = {
+    "cited": "useful_count",
+    "shaped": "useful_count",
+    "ignored": "ignored_count",
+    "misled": "times_misled",
+    "overlooked": "overlooked_count",
+}
+
+
+def test_list_session_exposures_returns_empty_envelope(backend) -> None:
+    result = backend.list_session_exposures(session_id="test-session-xyz")
+    assert result == {"session_id": "test-session-xyz", "exposures": []}
+
+
+@pytest.mark.parametrize(
+    "classification,counter_key",
+    list(_RATING_TO_COUNTER.items()),
+)
+def test_credit_one_bumps_correct_counter(
+    backend, mock_data_client, classification, counter_key
+) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response("rec-c")
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "rec-c", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    result = backend.credit_one(
+        session_id="test-session-xyz",
+        kind="reflection",
+        id="rec-c",
+        classification=classification,
+    )
+    assert result["applied"] == "rec-c"
+    rec = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
+    assert rec["metadata"][counter_key]["numberValue"] == 1
+
+
+def test_credit_one_rejects_unknown_classification(backend) -> None:
+    with pytest.raises(ValueError, match="classification"):
+        backend.credit_one(
+            session_id="s",
+            kind="reflection",
+            id="rec-c",
+            classification="bogus",
+        )
+
+
+def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.side_effect = [
+        _make_record_response("rec-1"),
+        _make_record_response("rec-2"),
+    ]
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "x", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    result = backend.apply_session_ratings(
+        session_id="test-session-xyz",
+        ratings=[
+            {"kind": "reflection", "id": "rec-1", "classification": "cited"},
+            {"kind": "reflection", "id": "rec-2", "classification": "overlooked"},
+        ],
+    )
+    assert mock_data_client.batch_update_memory_records.call_count == 2
+    assert result["applied"] == 2
+    assert result["failed"] == 0
+
+
+def test_apply_session_ratings_empty_returns_zero_summary(backend) -> None:
+    result = backend.apply_session_ratings(session_id="x", ratings=[])
+    assert result == {"applied": 0, "failed": 0}

@@ -36,6 +36,13 @@ from better_memory.storage.session import (
 _POLARITIES: tuple[str, str, str] = ("do", "dont", "neutral")
 _OVERLOOKED_RANKING_WEIGHT = 3  # mirrors better_memory/services/memory_rating.py:71
 _AGENTCORE_SYSTEM_METADATA_PREFIX = "x-amz-agentcore-memory-"
+_RATING_TO_COUNTER: dict[str, str] = {
+    "cited": "useful_count",
+    "shaped": "useful_count",
+    "ignored": "ignored_count",
+    "misled": "times_misled",
+    "overlooked": "overlooked_count",
+}
 
 
 class AgentCoreBackend:
@@ -521,14 +528,84 @@ class AgentCoreBackend:
     def session_bootstrap(self, **kwargs: Any) -> Any:
         raise NotImplementedError("Implemented in Task 12")
 
-    def list_session_exposures(self, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError("Implemented in Task 9")
+    def list_session_exposures(self, *, session_id: str) -> dict[str, Any]:
+        """Per spec Rating model section: no exposure log in agentcore mode.
+        Returns the standard envelope shape with an empty exposures list."""
+        return {"session_id": session_id, "exposures": []}
 
-    def apply_session_ratings(self, **kwargs: Any) -> Any:
-        raise NotImplementedError("Implemented in Task 9")
+    def credit_one(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        id: str,
+        classification: str,
+    ) -> dict[str, Any]:
+        """Apply one classification → counter increment on a record.
 
-    def credit_one(self, **kwargs: Any) -> Any:
-        raise NotImplementedError("Implemented in Task 9")
+        Counter mapping (spec Rating model section):
+            cited / shaped → useful_count
+            ignored        → ignored_count
+            misled         → times_misled
+            overlooked     → overlooked_count"""
+        counter_key = _RATING_TO_COUNTER.get(classification)
+        if counter_key is None:
+            raise ValueError(
+                f"classification={classification!r} is not one of "
+                f"{sorted(_RATING_TO_COUNTER)}"
+            )
+
+        record = self._get_record(id)
+        metadata = record.get("metadata", {})
+        current = float(metadata.get(counter_key, {}).get("numberValue", 0))
+
+        updates: dict[str, dict[str, Any]] = {
+            counter_key: {"numberValue": current + 1},
+            "last_credited_at": {"dateTimeValue": datetime.now(UTC)},
+        }
+        snapshot = self._full_metadata_snapshot(metadata, updates)
+
+        response = self._data.batch_update_memory_records(
+            memoryId=self._cfg.episodic.memory_id,
+            records=[
+                {
+                    "memoryRecordId": id,
+                    "timestamp": datetime.now(UTC),
+                    "metadata": snapshot,
+                }
+            ],
+        )
+        failed = response.get("failedRecords", [])
+        if failed:
+            return {
+                "applied": None,
+                "skipped": failed[0].get("errorMessage", "unknown"),
+            }
+        return {"applied": id, "skipped": None}
+
+    def apply_session_ratings(
+        self,
+        *,
+        session_id: str,
+        ratings: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Iterate ratings, call credit_one per entry. Return summary dict
+        with `applied` (count of successful credits) and `failed` (count of
+        skip / error results)."""
+        applied = 0
+        failed = 0
+        for r in ratings:
+            result = self.credit_one(
+                session_id=session_id,
+                kind=r["kind"],
+                id=r["id"],
+                classification=r["classification"],
+            )
+            if result["applied"] is not None:
+                applied += 1
+            else:
+                failed += 1
+        return {"applied": applied, "failed": failed}
 
     # ----- Synthesis: no-ops in agentcore mode -----
 
