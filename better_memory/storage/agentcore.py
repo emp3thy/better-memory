@@ -122,8 +122,71 @@ class AgentCoreBackend:
         # returns dict[polarity, list[reflection_dict]].
         raise NotImplementedError("Implemented in Task 7")
 
-    async def list_observations(self, **kwargs: Any) -> list[dict[str, Any]]:
-        raise NotImplementedError("Implemented in Task 6")
+    async def list_observations(
+        self,
+        *,
+        project: str | None = None,
+        episode_id: str | None = None,
+        component: str | None = None,
+        theme: str | None = None,
+        outcome: Outcome | None = None,
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List raw events from the CURRENT session as observations. Cross-
+        session enumeration is deferred (ListEvents requires sessionId)."""
+        if self._session_id is None:
+            raise ValueError(
+                "AgentCoreBackend.list_observations requires session_id at "
+                "construction time."
+            )
+        actor_id = resolve_actor_id(project or self._project)
+
+        response = self._data.list_events(
+            memoryId=self._cfg.episodic.memory_id,
+            actorId=actor_id,
+            sessionId=self._session_id,
+            maxResults=limit,
+            includePayloads=True,
+        )
+
+        results: list[dict[str, Any]] = []
+        for event in response.get("events", []):
+            payload_text = ""
+            for block in event.get("payload", []):
+                conv = block.get("conversational")
+                if conv:
+                    payload_text = conv.get("content", {}).get("text", "")
+                    break
+
+            flat_metadata = {
+                k: v.get("stringValue") for k, v in event.get("metadata", {}).items()
+            }
+
+            results.append(
+                {
+                    "id": event["eventId"],
+                    "content": payload_text,
+                    "session_id": event.get("sessionId"),
+                    "actor_id": event.get("actorId"),
+                    "event_timestamp": event.get("eventTimestamp"),
+                    **flat_metadata,
+                }
+            )
+
+        # Apply post-filter for theme/component/outcome since ListEvents.filter
+        # surface is limited to branch/eventType — not the per-event metadata
+        # keys we set. Filter client-side.
+        if theme is not None:
+            results = [r for r in results if r.get("theme") == theme]
+        if component is not None:
+            results = [r for r in results if r.get("component") == component]
+        if outcome is not None:
+            results = [r for r in results if r.get("outcome") == outcome]
+        if query is not None and query.strip():
+            q = query.lower()
+            results = [r for r in results if q in r.get("content", "").lower()]
+        return results
 
     def record_use(
         self, observation_id: str, *, outcome: UseOutcome | None = None

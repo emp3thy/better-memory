@@ -217,3 +217,73 @@ async def test_observe_raises_value_error_when_session_id_is_none(ac_config, moc
     )
     with pytest.raises(ValueError, match="session_id"):
         await backend.observe(content="x")
+
+
+@pytest.mark.asyncio
+async def test_list_observations_returns_current_session_events(backend, mock_data_client) -> None:
+    mock_data_client.list_events.return_value = {
+        "events": [
+            {
+                "eventId": "evt-1",
+                "memoryId": "mem-epi-def4567890",
+                "actorId": "testproj",
+                "sessionId": "test-session-xyz",
+                "eventTimestamp": datetime(2026, 5, 25, 12, tzinfo=UTC),
+                "payload": [
+                    {"conversational": {"role": "USER", "content": {"text": "obs one"}}}
+                ],
+                "metadata": {
+                    "outcome": {"stringValue": "success"},
+                    "theme": {"stringValue": "test"},
+                },
+            },
+            {
+                "eventId": "evt-2",
+                "memoryId": "mem-epi-def4567890",
+                "actorId": "testproj",
+                "sessionId": "test-session-xyz",
+                "eventTimestamp": datetime(2026, 5, 25, 12, 30, tzinfo=UTC),
+                "payload": [
+                    {"conversational": {"role": "USER", "content": {"text": "obs two"}}}
+                ],
+                "metadata": {"outcome": {"stringValue": "failure"}},
+            },
+        ],
+    }
+
+    result = await backend.list_observations(limit=10)
+    assert isinstance(result, list) and len(result) == 2
+
+    # Mapping: eventId -> id, content extracted from payload, metadata
+    # flattened (stringValue unwrapped).
+    assert result[0]["id"] == "evt-1"
+    assert result[0]["content"] == "obs one"
+    assert result[0]["outcome"] == "success"
+    assert result[0]["theme"] == "test"
+
+    # ListEvents call shape
+    call_kwargs = mock_data_client.list_events.call_args.kwargs
+    assert call_kwargs["memoryId"] == "mem-epi-def4567890"
+    assert call_kwargs["actorId"] == "testproj"
+    assert call_kwargs["sessionId"] == "test-session-xyz"
+    assert call_kwargs["maxResults"] == 10
+    assert call_kwargs["includePayloads"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_observations_returns_empty_when_no_events(backend, mock_data_client) -> None:
+    mock_data_client.list_events.return_value = {"events": []}
+    assert await backend.list_observations(limit=5) == []
+
+
+@pytest.mark.asyncio
+async def test_list_observations_raises_when_session_id_is_none(ac_config, mock_data_client, mock_control_client) -> None:
+    backend = AgentCoreBackend(
+        config=ac_config,
+        data_client=mock_data_client,
+        control_client=mock_control_client,
+        session_id=None,
+        project="testproj",
+    )
+    with pytest.raises(ValueError, match="session_id"):
+        await backend.list_observations(limit=5)
