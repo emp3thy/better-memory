@@ -24,14 +24,17 @@ import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-try:
+if TYPE_CHECKING:
     from botocore.exceptions import ClientError as _ClientError
-except ImportError:  # pragma: no cover - botocore absent in unit-test env
-    class _ClientError(Exception):  # type: ignore[no-redef]
-        response: dict[str, Any]
+else:
+    try:
+        from botocore.exceptions import ClientError as _ClientError
+    except ImportError:  # pragma: no cover - botocore absent in unit-test env
+        class _ClientError(Exception):
+            response: dict[str, Any]
 
 from better_memory.storage.agentcore_persistence import AgentCoreConfig
 from better_memory.storage.protocol import Outcome, UseOutcome
