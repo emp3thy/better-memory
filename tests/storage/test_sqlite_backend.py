@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import sqlite_vec
 
-from better_memory.services.observation import BucketedResults
 from better_memory.storage import StorageBackend
 from better_memory.storage.sqlite import SqliteBackend
 
@@ -75,11 +74,35 @@ async def test_observe_returns_string_id(backend) -> None:
     assert isinstance(obs_id, str) and obs_id
 
 
-@pytest.mark.asyncio
-async def test_retrieve_returns_bucketed_results(backend) -> None:
-    result = await backend.retrieve(query="anything", do_limit=3, dont_limit=3, neutral_limit=3)
-    assert isinstance(result, BucketedResults)
-    assert isinstance(result.do, list)
+def test_retrieve_returns_polarity_bucketed_reflections(backend) -> None:
+    """Plan 2 Task 0 amendment: retrieve now wraps ReflectionSynthesisService."""
+    result = backend.retrieve(project="testproj", limit_per_bucket=3)
+    assert isinstance(result, dict)
+    assert set(result.keys()) >= {"do", "dont", "neutral"}
+    for bucket in ("do", "dont", "neutral"):
+        assert isinstance(result[bucket], list)
+
+
+def test_retrieve_passes_through_polarity_filter(backend, memory_conn) -> None:
+    """polarity=do filters the result to only the do bucket (others empty)."""
+    # Seed one reflection per polarity. Required NOT-NULL columns mirror the
+    # promote/retire test's seed: phase + use_cases + hints + created_at + updated_at.
+    memory_conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, phase, polarity, use_cases, hints, "
+        " confidence, status, scope, created_at, updated_at) VALUES "
+        "('r-do', 'do-refl', 'testproj', 'general', 'do', 'uc', '[]', "
+        " 0.9, 'confirmed', 'project', "
+        " '2026-05-25T00:00:00Z', '2026-05-25T00:00:00Z'),"
+        "('r-dont', 'dont-refl', 'testproj', 'general', 'dont', 'uc', '[]', "
+        " 0.9, 'confirmed', 'project', "
+        " '2026-05-25T00:00:00Z', '2026-05-25T00:00:00Z')"
+    )
+    memory_conn.commit()
+    result = backend.retrieve(project="testproj", polarity="do", limit_per_bucket=10)
+    do_ids = [r["id"] for r in result["do"]]
+    assert "r-do" in do_ids
+    assert "r-dont" not in do_ids
 
 
 @pytest.mark.asyncio

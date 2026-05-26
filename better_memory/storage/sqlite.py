@@ -100,33 +100,23 @@ class SqliteBackend:
             scope=scope,
         )
 
-    async def retrieve(
+    def retrieve(
         self,
-        query: str | None = None,
         *,
-        component: str | None = None,
-        status: str | None = "active",
-        window_days: int | None = 30,
-        scope_path: str | None = None,
         project: str | None = None,
-        do_limit: int = 10,
-        dont_limit: int = 10,
-        neutral_limit: int = 5,
-        candidate_k: int = 50,
-        reinforcement_alpha: float = 0.1,
-    ) -> Any:
-        return await self._observations.retrieve(
-            query,
-            component=component,
-            status=status,
-            window_days=window_days,
-            scope_path=scope_path,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        limit_per_bucket: int | None = 20,
+        track_exposure: bool = True,
+    ) -> dict[str, list[dict[str, Any]]]:
+        return self._synthesis.retrieve_reflections(
             project=project or self._project,
-            do_limit=do_limit,
-            dont_limit=dont_limit,
-            neutral_limit=neutral_limit,
-            candidate_k=candidate_k,
-            reinforcement_alpha=reinforcement_alpha,
+            tech=tech,
+            phase=phase,
+            polarity=polarity,
+            limit_per_bucket=limit_per_bucket,
+            track_exposure=track_exposure,
         )
 
     async def list_observations(
