@@ -287,3 +287,128 @@ async def test_list_observations_raises_when_session_id_is_none(ac_config, mock_
     )
     with pytest.raises(ValueError, match="session_id"):
         await backend.list_observations(limit=5)
+
+
+def test_retrieve_returns_dict_with_polarity_buckets(backend, mock_data_client) -> None:
+    """retrieve returns dict[str, list[dict]] matching ReflectionSynthesisService."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    result = backend.retrieve(project="testproj")
+    assert isinstance(result, dict)
+    assert set(result.keys()) >= {"do", "dont", "neutral"}
+    for bucket in ("do", "dont", "neutral"):
+        assert isinstance(result[bucket], list)
+
+
+def test_retrieve_fires_one_list_call_per_polarity(backend, mock_data_client) -> None:
+    """Three list_memory_records calls (no semantic search): one per polarity."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.retrieve(project="testproj")
+    assert mock_data_client.list_memory_records.call_count == 3
+
+    polarities_filtered = []
+    for call in mock_data_client.list_memory_records.call_args_list:
+        for f in call.kwargs["metadataFilters"]:
+            if f["left"]["metadataKey"] == "polarity":
+                polarities_filtered.append(f["right"]["metadataValue"]["stringValue"])
+    assert set(polarities_filtered) == {"do", "dont", "neutral"}
+
+
+def test_retrieve_with_polarity_kwarg_fetches_only_that_bucket(backend, mock_data_client) -> None:
+    """polarity='do' -> only the do bucket gets fetched; others empty."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    result = backend.retrieve(project="testproj", polarity="do")
+    assert mock_data_client.list_memory_records.call_count == 1
+    assert result["dont"] == []
+    assert result["neutral"] == []
+
+
+def test_retrieve_parses_reflection_json_content(backend, mock_data_client) -> None:
+    """content.text is a JSON blob with title/use_cases/hints/confidence — map
+    to the sqlite-mode reflection dict shape."""
+    import json
+    record_json = json.dumps({
+        "title": "Test reflection title",
+        "use_cases": "Applies when X",
+        "hints": "First hint.\n- Second hint.\n- Third hint.",
+        "confidence": "0.85",
+    })
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "rec-1",
+                "content": {"text": record_json},
+                "memoryStrategyId": "episodicReflections-qPr9876543",
+                "namespaces": ["projects/testproj/reflections/"],
+                "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+                "metadata": {
+                    "polarity": {"stringValue": "do"},
+                    "useful_count": {"numberValue": 3},
+                    "missed_count": {"numberValue": 0},
+                    "ignored_count": {"numberValue": 1},
+                    "times_misled": {"numberValue": 0},
+                    "overlooked_count": {"numberValue": 0},
+                    "status": {"stringValue": "active"},
+                },
+            }
+        ]
+    }
+    result = backend.retrieve(project="testproj")
+    do_bucket = result["do"]
+    assert len(do_bucket) == 1
+    refl = do_bucket[0]
+    # Match the sqlite-mode reflection dict shape
+    assert refl["id"] == "rec-1"
+    assert refl["title"] == "Test reflection title"
+    assert refl["use_cases"] == "Applies when X"
+    assert refl["hints"] == ["First hint.", "Second hint.", "Third hint."]
+    assert refl["confidence"] == 0.85  # float
+    assert refl["useful_count"] == 3
+
+
+def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) -> None:
+    """Ranking matches sqlite: useful_count + 3*times_overlooked DESC,
+    confidence DESC, updated_at DESC."""
+    import json
+    def make_record(rec_id: str, useful: int, overlooked: int) -> dict:
+        return {
+            "memoryRecordId": rec_id,
+            "content": {"text": json.dumps({
+                "title": rec_id, "use_cases": "u", "hints": "h", "confidence": "0.9",
+            })},
+            "memoryStrategyId": "x",
+            "namespaces": ["projects/testproj/reflections/"],
+            "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+            "metadata": {
+                "polarity": {"stringValue": "do"},
+                "useful_count": {"numberValue": useful},
+                "missed_count": {"numberValue": 0},
+                "ignored_count": {"numberValue": 0},
+                "times_misled": {"numberValue": 0},
+                "overlooked_count": {"numberValue": overlooked},
+                "status": {"stringValue": "active"},
+            },
+        }
+
+    def stub(**kwargs):
+        for f in kwargs.get("metadataFilters", []):
+            if f["left"]["metadataKey"] == "polarity":
+                pol = f["right"]["metadataValue"]["stringValue"]
+                if pol == "do":
+                    # high-rank: useful=10 -> score 10
+                    # mid-rank:  useful=2, overlooked=3 -> score 2 + 9 = 11
+                    # low-rank:  useful=0, overlooked=0 -> score 0
+                    return {"memoryRecordSummaries": [
+                        make_record("low", useful=0, overlooked=0),
+                        make_record("high-via-useful", useful=10, overlooked=0),
+                        make_record("highest-via-overlooked", useful=2, overlooked=3),
+                    ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    do_titles = [r["title"] for r in result["do"]]
+    # Score = useful_count + 3*times_overlooked
+    # highest-via-overlooked: 2 + 9 = 11
+    # high-via-useful:        10 + 0 = 10
+    # low:                    0 + 0 = 0
+    assert do_titles == ["highest-via-overlooked", "high-via-useful", "low"]

@@ -17,13 +17,22 @@ Capability flags:
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from better_memory.storage.agentcore_persistence import AgentCoreConfig
 from better_memory.storage.protocol import Outcome, UseOutcome
-from better_memory.storage.session import resolve_actor_id
+from better_memory.storage.session import (
+    parse_hints_prose,
+    resolve_actor_id,
+    resolve_namespace,
+)
+
+_POLARITIES: tuple[str, str, str] = ("do", "dont", "neutral")
+_OVERLOOKED_RANKING_WEIGHT = 3  # mirrors better_memory/services/memory_rating.py:71
 
 
 class AgentCoreBackend:
@@ -117,10 +126,144 @@ class AgentCoreBackend:
         )
         return response["event"]["eventId"]
 
-    def retrieve(self, **kwargs: Any) -> dict[str, list[dict[str, Any]]]:
-        # Signature matches the Plan-1-amended Protocol (Task 0): sync,
-        # returns dict[polarity, list[reflection_dict]].
-        raise NotImplementedError("Implemented in Task 7")
+    def retrieve(
+        self,
+        *,
+        project: str | None = None,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        limit_per_bucket: int | None = 20,
+        track_exposure: bool = True,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Bucketed reflection retrieval matching ReflectionSynthesisService.retrieve_reflections.
+
+        Per-polarity list_memory_records against the reflections namespace,
+        parse JSON content, rank via the sqlite ordering rule
+        (useful_count + 3*times_overlooked DESC, confidence DESC, updated_at DESC).
+        Returns dict[polarity, list[reflection_dict]] in the same shape sqlite mode
+        returns; the MCP memory.retrieve handler json-dumps this directly to Claude.
+
+        track_exposure is accepted for parity but no-op in agentcore mode —
+        AgentCore has no session_memory_exposure table; exposure tracking is
+        not part of the agentcore-mode rating model.
+        """
+        actor_id = resolve_actor_id(project or self._project)
+        namespace = resolve_namespace(actor_id, "reflections")
+        effective_limit = limit_per_bucket if limit_per_bucket is not None else 20
+
+        # Restrict fan-out to a single polarity if the caller specified one
+        polarities_to_fetch: tuple[str, ...] = (
+            (polarity,) if polarity in _POLARITIES else _POLARITIES
+        )
+
+        def _fetch(p: str) -> list[dict[str, Any]]:
+            filters: list[dict[str, Any]] = [
+                {
+                    "left": {"metadataKey": "polarity"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": p}},
+                },
+                {
+                    "left": {"metadataKey": "status"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": "active"}},
+                },
+            ]
+            response = self._data.list_memory_records(
+                memoryId=self._cfg.episodic.memory_id,
+                namespace=namespace,
+                maxResults=effective_limit * 2,  # fetch some slack for client-side ranking
+                metadataFilters=filters,
+            )
+            parsed_raw = [
+                self._parse_reflection_record(rec, tech_filter=tech, phase_filter=phase)
+                for rec in response.get("memoryRecordSummaries", [])
+            ]
+            # Drop None entries (filtered out by tech/phase post-filter)
+            parsed: list[dict[str, Any]] = [r for r in parsed_raw if r is not None]
+            # Sqlite ordering: (useful_count + 3*times_overlooked) DESC,
+            # confidence DESC, updated_at DESC.
+            parsed.sort(
+                key=lambda r: (
+                    -(r["useful_count"] + _OVERLOOKED_RANKING_WEIGHT * r["_overlooked_count"]),
+                    -r["confidence"],
+                    -r["_updated_at_ts"],
+                )
+            )
+            return parsed[:effective_limit]
+
+        async def _gather_all() -> dict[str, list[dict[str, Any]]]:
+            loop = asyncio.get_running_loop()
+            tasks = {p: loop.run_in_executor(None, _fetch, p) for p in polarities_to_fetch}
+            return {p: await task for p, task in tasks.items()}
+
+        fetched = asyncio.run(_gather_all())
+
+        # Always return all 3 keys for stable shape; unfetched buckets are [].
+        return {p: fetched.get(p, []) for p in _POLARITIES}
+
+    def _parse_reflection_record(
+        self,
+        rec: dict[str, Any],
+        *,
+        tech_filter: str | None = None,
+        phase_filter: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Map MemoryRecordSummary -> sqlite-shaped reflection dict.
+
+        Returns None if tech_filter / phase_filter excludes this record."""
+        text = rec.get("content", {}).get("text", "")
+        try:
+            body = json.loads(text) if isinstance(text, str) else {}
+        except json.JSONDecodeError:
+            body = {}
+
+        metadata_raw = rec.get("metadata", {})
+
+        def _num(key: str) -> float:
+            return float(metadata_raw.get(key, {}).get("numberValue", 0))
+
+        tech_value: str | None = body.get("tech") if isinstance(body, dict) else None
+        if tech_filter is not None and tech_value != tech_filter:
+            return None
+
+        phase_value = body.get("phase", "general") if isinstance(body, dict) else "general"
+        if phase_filter is not None and phase_value != phase_filter:
+            return None
+
+        hints_value = body.get("hints", "") if isinstance(body, dict) else ""
+        hints_list = (
+            parse_hints_prose(hints_value) if isinstance(hints_value, str)
+            else list(hints_value) if isinstance(hints_value, list)
+            else []
+        )
+
+        try:
+            confidence = float(body.get("confidence", 0)) if isinstance(body, dict) else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        updated_at = rec.get("updatedAt") or rec.get("createdAt")
+        updated_at_ts = updated_at.timestamp() if isinstance(updated_at, datetime) else 0.0
+
+        return {
+            # Public shape — must match ReflectionSynthesisService.retrieve_reflections
+            # return: {id, title, phase, use_cases, hints (list), confidence (float),
+            #          tech, evidence_count, useful_count}
+            "id": rec["memoryRecordId"],
+            "title": body.get("title", "") if isinstance(body, dict) else "",
+            "phase": phase_value,
+            "use_cases": body.get("use_cases", "") if isinstance(body, dict) else "",
+            "hints": hints_list,
+            "confidence": confidence,
+            "tech": tech_value,
+            "evidence_count": int(_num("useful_count")) + int(_num("missed_count")),
+            "useful_count": int(_num("useful_count")),
+            # Internal ranking helpers — leading underscore so callers ignore
+            "_overlooked_count": int(_num("overlooked_count")),
+            "_updated_at_ts": updated_at_ts,
+        }
 
     async def list_observations(
         self,
