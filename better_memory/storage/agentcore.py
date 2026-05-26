@@ -867,7 +867,16 @@ class AgentCoreBackend:
                 f"{sorted(_RATING_TO_COUNTER)}"
             )
 
-        record = self._get_record(id)
+        # Route the lookup + update to the right memory based on kind.
+        # Semantic records live in self._cfg.semantic.memory_id; looking
+        # them up against episodic raises ResourceNotFoundException.
+        if kind == "semantic":
+            record = self._get_semantic_record(id)
+            memory_id = self._cfg.semantic.memory_id
+        else:
+            record = self._get_record(id)
+            memory_id = self._cfg.episodic.memory_id
+
         metadata = record.get("metadata", {})
         current = float(metadata.get(counter_key, {}).get("numberValue", 0))
 
@@ -878,7 +887,7 @@ class AgentCoreBackend:
         snapshot = self._full_metadata_snapshot(metadata, updates)
 
         response = self._data.batch_update_memory_records(
-            memoryId=self._cfg.episodic.memory_id,
+            memoryId=memory_id,
             records=[
                 {
                     "memoryRecordId": id,
@@ -911,7 +920,7 @@ class AgentCoreBackend:
                 session_id=session_id,
                 kind=r["kind"],
                 id=r["id"],
-                classification=r["classification"],
+                classification=r["class"],
             )
             if result["applied"] is not None:
                 applied += 1

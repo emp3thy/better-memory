@@ -540,6 +540,45 @@ def test_credit_one_rejects_unknown_classification(backend) -> None:
         )
 
 
+def test_credit_one_routes_semantic_kind_to_semantic_memory(backend, mock_data_client) -> None:
+    """kind='semantic' must target the semantic memory, not episodic."""
+    semantic_record = {
+        "memoryRecord": {
+            "memoryRecordId": "sm-rec",
+            "content": {"text": "x"},
+            "memoryStrategyId": "userPreference-zXy1234567",
+            "namespaces": ["projects/testproj/semantic/"],
+            "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+            "metadata": {
+                "status": {"stringValue": "active"},
+                "useful_count": {"numberValue": 0},
+                "missed_count": {"numberValue": 0},
+                "ignored_count": {"numberValue": 0},
+                "times_misled": {"numberValue": 0},
+                "overlooked_count": {"numberValue": 0},
+            },
+        }
+    }
+    mock_data_client.get_memory_record.return_value = semantic_record
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "sm-rec", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    result = backend.credit_one(
+        session_id="test-session",
+        kind="semantic",
+        id="sm-rec",
+        classification="cited",
+    )
+    assert result["applied"] == "sm-rec"
+
+    # Verify both calls targeted SEMANTIC memory, not episodic
+    get_call = mock_data_client.get_memory_record.call_args.kwargs
+    assert get_call["memoryId"] == "mem-sem-abc1234567"
+    update_call = mock_data_client.batch_update_memory_records.call_args.kwargs
+    assert update_call["memoryId"] == "mem-sem-abc1234567"
+
+
 def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) -> None:
     mock_data_client.get_memory_record.side_effect = [
         _make_record_response("rec-1"),
@@ -552,8 +591,8 @@ def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) ->
     result = backend.apply_session_ratings(
         session_id="test-session-xyz",
         ratings=[
-            {"kind": "reflection", "id": "rec-1", "classification": "cited"},
-            {"kind": "reflection", "id": "rec-2", "classification": "overlooked"},
+            {"kind": "reflection", "id": "rec-1", "class": "cited"},
+            {"kind": "reflection", "id": "rec-2", "class": "overlooked"},
         ],
     )
     assert mock_data_client.batch_update_memory_records.call_count == 2
