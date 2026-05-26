@@ -605,6 +605,25 @@ def test_apply_session_ratings_empty_returns_zero_summary(backend) -> None:
     assert result == {"applied": 0, "failed": 0}
 
 
+def test_apply_session_ratings_skips_malformed_entries(backend, mock_data_client) -> None:
+    """Malformed entries (missing key, unknown class) increment `failed` instead of crashing the loop."""
+    mock_data_client.get_memory_record.return_value = _make_record_response("rec-ok")
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "rec-ok", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    result = backend.apply_session_ratings(
+        session_id="test-session-xyz",
+        ratings=[
+            {"kind": "reflection", "id": "rec-ok", "class": "cited"},  # OK
+            {"kind": "reflection", "id": "rec-missing-class"},  # KeyError
+            {"kind": "reflection", "id": "rec-bad", "class": "bogus"},  # ValueError
+        ],
+    )
+    assert result["applied"] == 1
+    assert result["failed"] == 2
+
+
 def test_promote_reflection_moves_to_general_namespace(backend, mock_data_client) -> None:
     mock_data_client.get_memory_record.return_value = _make_record_response("rec-p")
     mock_data_client.batch_update_memory_records.return_value = {

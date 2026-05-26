@@ -17,6 +17,7 @@ Capability flags:
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import hashlib
 import json
@@ -120,20 +121,28 @@ class AgentCoreBackend:
                 continue
             metadata[key] = {"stringValue": str(value)}
 
-        response = self._data.create_event(
-            memoryId=self._cfg.episodic.memory_id,
-            actorId=actor_id,
-            sessionId=self._session_id,
-            eventTimestamp=datetime.now(UTC),
-            payload=[
-                {
-                    "conversational": {
-                        "role": "USER",
-                        "content": {"text": content},
+        # boto3 create_event is synchronous I/O; offload to a thread so the
+        # MCP server's asyncio event loop is not blocked during the HTTP
+        # round-trip. Without this, every await observe(...) freezes the
+        # loop for the duration of the AWS call.
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: self._data.create_event(
+                memoryId=self._cfg.episodic.memory_id,
+                actorId=actor_id,
+                sessionId=self._session_id,
+                eventTimestamp=datetime.now(UTC),
+                payload=[
+                    {
+                        "conversational": {
+                            "role": "USER",
+                            "content": {"text": content},
+                        }
                     }
-                }
-            ],
-            metadata=metadata,
+                ],
+                metadata=metadata,
+            ),
         )
         return response["event"]["eventId"]
 
@@ -303,12 +312,20 @@ class AgentCoreBackend:
             )
         actor_id = resolve_actor_id(project or self._project)
 
-        response = self._data.list_events(
-            memoryId=self._cfg.episodic.memory_id,
-            actorId=actor_id,
-            sessionId=self._session_id,
-            maxResults=limit,
-            includePayloads=True,
+        # boto3 list_events is synchronous I/O; offload to a thread so the
+        # MCP server's asyncio event loop is not blocked during the HTTP
+        # round-trip. Post-filter / mapping below is pure dict work and
+        # stays inline.
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: self._data.list_events(
+                memoryId=self._cfg.episodic.memory_id,
+                actorId=actor_id,
+                sessionId=self._session_id,
+                maxResults=limit,
+                includePayloads=True,
+            ),
         )
 
         results: list[dict[str, Any]] = []
@@ -916,12 +933,20 @@ class AgentCoreBackend:
         applied = 0
         failed = 0
         for r in ratings:
-            result = self.credit_one(
-                session_id=session_id,
-                kind=r["kind"],
-                id=r["id"],
-                classification=r["class"],
-            )
+            # Guard each iteration: a single malformed entry (missing key or
+            # unknown classification raising ValueError inside credit_one)
+            # must not abort the remainder of the list or drop the
+            # accumulated counts.
+            try:
+                result = self.credit_one(
+                    session_id=session_id,
+                    kind=r["kind"],
+                    id=r["id"],
+                    classification=r["class"],
+                )
+            except (KeyError, ValueError):
+                failed += 1
+                continue
             if result["applied"] is not None:
                 applied += 1
             else:
