@@ -517,11 +517,55 @@ class AgentCoreBackend:
 
     # ----- Reflection lifecycle: Task 10 -----
 
-    def promote_reflection(self, **kwargs: Any) -> None:
-        raise NotImplementedError("Implemented in Task 10")
+    def _mutate_namespace_and_status(
+        self,
+        *,
+        reflection_id: str,
+        new_namespaces: list[str],
+        new_status: str,
+    ) -> None:
+        """Shared helper: read current metadata, mutate namespace + status,
+        write back with full metadata snapshot."""
+        record = self._get_record(reflection_id)
+        metadata = record.get("metadata", {})
 
-    def retire_reflection(self, **kwargs: Any) -> None:
-        raise NotImplementedError("Implemented in Task 10")
+        updates: dict[str, dict[str, Any]] = {
+            "status": {"stringValue": new_status},
+        }
+        snapshot = self._full_metadata_snapshot(metadata, updates)
+
+        response = self._data.batch_update_memory_records(
+            memoryId=self._cfg.episodic.memory_id,
+            records=[
+                {
+                    "memoryRecordId": reflection_id,
+                    "timestamp": datetime.now(UTC),
+                    "namespaces": new_namespaces,
+                    "metadata": snapshot,
+                }
+            ],
+        )
+        failed = response.get("failedRecords", [])
+        if failed:
+            raise RuntimeError(
+                f"AgentCore reflection mutation failed for {reflection_id}: "
+                f"{failed[0].get('errorMessage', 'unknown')}"
+            )
+
+    def promote_reflection(self, *, reflection_id: str) -> None:
+        self._mutate_namespace_and_status(
+            reflection_id=reflection_id,
+            new_namespaces=[resolve_namespace("general", "reflections")],
+            new_status="promoted",
+        )
+
+    def retire_reflection(self, *, reflection_id: str) -> None:
+        actor_id = resolve_actor_id(self._project)
+        self._mutate_namespace_and_status(
+            reflection_id=reflection_id,
+            new_namespaces=[resolve_namespace(actor_id, "retired")],
+            new_status="retired",
+        )
 
     # ----- Session lifecycle: Tasks 9, 12 -----
 

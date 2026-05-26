@@ -564,3 +564,37 @@ def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) ->
 def test_apply_session_ratings_empty_returns_zero_summary(backend) -> None:
     result = backend.apply_session_ratings(session_id="x", ratings=[])
     assert result == {"applied": 0, "failed": 0}
+
+
+def test_promote_reflection_moves_to_general_namespace(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response("rec-p")
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "rec-p", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.promote_reflection(reflection_id="rec-p")
+    rec = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
+    assert rec["namespaces"] == ["general/reflections/"]
+    assert rec["metadata"]["status"]["stringValue"] == "promoted"
+
+
+def test_retire_reflection_moves_to_retired_namespace(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response("rec-r")
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "rec-r", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.retire_reflection(reflection_id="rec-r")
+    rec = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
+    assert rec["namespaces"] == ["projects/testproj/retired/"]
+    assert rec["metadata"]["status"]["stringValue"] == "retired"
+
+
+def test_promote_reflection_raises_when_batch_fails(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response("rec-fail")
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [],
+        "failedRecords": [{"memoryRecordId": "rec-fail", "status": "FAILED", "errorMessage": "boom"}],
+    }
+    with pytest.raises(RuntimeError, match="rec-fail"):
+        backend.promote_reflection(reflection_id="rec-fail")
