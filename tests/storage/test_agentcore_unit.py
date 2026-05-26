@@ -709,3 +709,40 @@ def test_semantic_delete_calls_batch_delete(backend, mock_data_client) -> None:
     call = mock_data_client.batch_delete_memory_records.call_args.kwargs
     assert call["memoryId"] == "mem-sem-abc1234567"
     assert call["records"] == [{"memoryRecordId": "sm-x"}]
+
+
+def test_session_bootstrap_fires_4_parallel_list_calls(backend, mock_data_client) -> None:
+    """One per polarity (do/dont/neutral) against episodic + one against
+    semantic — all 4 dispatched via asyncio.gather + run_in_executor.
+
+    Uses list_memory_records (not retrieve_memory_records) because
+    bootstrap is recency / metadata-only — no semantic search query."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.session_bootstrap(session_id="test-session", project="testproj")
+    # 4 calls total — 3 reflection (episodic) + 1 semantic
+    assert mock_data_client.list_memory_records.call_count == 4
+
+    targets = []
+    for call in mock_data_client.list_memory_records.call_args_list:
+        targets.append((call.kwargs["memoryId"], call.kwargs["namespace"]))
+
+    assert ("mem-epi-def4567890", "projects/testproj/reflections/") in targets
+    assert ("mem-sem-abc1234567", "projects/testproj/semantic/") in targets
+
+
+def test_session_bootstrap_returns_envelope_matching_sqlite_shape(backend, mock_data_client) -> None:
+    """Envelope must match the BootstrapResult shape the MCP handler at
+    server.py:1398-1411 unwraps. Keys: additional_context, project, source,
+    episode_id, episode_action, semantic_count, reflections_counts. In
+    agentcore mode there is no real episode — episode_id = the session_id
+    placeholder and episode_action = 'opened'."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    result = backend.session_bootstrap(session_id="s", project="testproj", source="bootstrap")
+
+    assert result["project"] == "testproj"
+    assert result["source"] == "bootstrap"
+    assert result["additional_context"]  # non-empty string
+    assert result["episode_id"] == "s"
+    assert result["episode_action"] == "opened"
+    assert result["semantic_count"] == 0
+    assert result["reflections_counts"] == {"do": 0, "dont": 0, "neutral": 0}

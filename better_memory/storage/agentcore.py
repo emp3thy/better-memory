@@ -720,8 +720,111 @@ class AgentCoreBackend:
 
     # ----- Session lifecycle: Tasks 9, 12 -----
 
-    def session_bootstrap(self, **kwargs: Any) -> Any:
-        raise NotImplementedError("Implemented in Task 12")
+    def session_bootstrap(
+        self,
+        *,
+        session_id: str,
+        source: str | None = None,
+        cwd: Any | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch top-N reflections per polarity bucket + top-N semantic
+        preferences IN PARALLEL; assemble the additional_context envelope
+        matching the BootstrapResult shape the MCP handler at
+        server.py:1398-1411 unwraps.
+
+        Uses list_memory_records (not retrieve_memory_records) — bootstrap is
+        metadata-only, no semantic search query. 4 boto3 calls are independent
+        network round-trips, so we fan out via asyncio.gather + run_in_executor
+        under asyncio.run(...) — the Protocol signature is sync, but the cost
+        of spinning an event loop once per bootstrap is negligible (bootstrap
+        runs once per session)."""
+        actor_id = resolve_actor_id(project or self._project)
+        reflections_namespace = resolve_namespace(actor_id, "reflections")
+        semantic_namespace = resolve_namespace(actor_id, "semantic")
+
+        def _fetch_reflections(polarity: str) -> dict[str, Any]:
+            return self._data.list_memory_records(
+                memoryId=self._cfg.episodic.memory_id,
+                namespace=reflections_namespace,
+                maxResults=5,
+                metadataFilters=[
+                    {
+                        "left": {"metadataKey": "polarity"},
+                        "operator": "EQUALS_TO",
+                        "right": {"metadataValue": {"stringValue": polarity}},
+                    },
+                    {
+                        "left": {"metadataKey": "status"},
+                        "operator": "EQUALS_TO",
+                        "right": {"metadataValue": {"stringValue": "active"}},
+                    },
+                ],
+            )
+
+        def _fetch_semantic() -> dict[str, Any]:
+            return self._data.list_memory_records(
+                memoryId=self._cfg.semantic.memory_id,
+                namespace=semantic_namespace,
+                maxResults=10,
+            )
+
+        async def _gather_all() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+            loop = asyncio.get_running_loop()
+            reflection_tasks = {
+                polarity: loop.run_in_executor(None, _fetch_reflections, polarity)
+                for polarity in _POLARITIES
+            }
+            semantic_task = loop.run_in_executor(None, _fetch_semantic)
+
+            reflection_responses = {
+                polarity: await task for polarity, task in reflection_tasks.items()
+            }
+            semantic_response = await semantic_task
+            return reflection_responses, semantic_response
+
+        reflection_calls, semantic_response = asyncio.run(_gather_all())
+
+        reflections_counts = {
+            polarity: len(reflection_calls[polarity].get("memoryRecordSummaries", []))
+            for polarity in _POLARITIES
+        }
+        semantic_items = semantic_response.get("memoryRecordSummaries", [])
+        semantic_count = len(semantic_items)
+
+        # additional_context is the JSON-serialized payload Claude sees on
+        # SessionStart. Format matches what the MCP handler emits today: a
+        # short text summary of reflection + semantic counts. The handler at
+        # server.py:1398 wraps this under the `additionalContext` key in the
+        # final tool payload.
+        reflection_lines = [
+            f"{polarity}: {reflections_counts[polarity]} reflections"
+            for polarity in _POLARITIES
+        ]
+        additional_context = (
+            f"Project: {actor_id}\n"
+            f"Reflections — {', '.join(reflection_lines)}\n"
+            f"Semantic memories: {semantic_count}"
+        )
+
+        return {
+            # Match sqlite-mode BootstrapResult exactly (server.py:1398-1411
+            # unwraps these keys). In agentcore mode there is no real episode,
+            # so episode_id is the placeholder session_id and episode_action
+            # is always "opened" (the bootstrap handler treats agentcore-mode
+            # sessions as fresh each time; AgentCore-side episode tracking is
+            # internal and invisible to the bootstrap wire shape).
+            "additional_context": additional_context,
+            "project": actor_id,
+            "source": source or "",
+            "episode_id": session_id,
+            "episode_action": "opened",
+            "semantic_count": semantic_count,
+            "reflections_counts": reflections_counts,
+            # pending_synthesis intentionally omitted in agentcore mode;
+            # the MCP handler must branch on its absence (backend.supports_synthesis
+            # already signals this at the Protocol level).
+        }
 
     def list_session_exposures(self, *, session_id: str) -> dict[str, Any]:
         """Per spec Rating model section: no exposure log in agentcore mode.
