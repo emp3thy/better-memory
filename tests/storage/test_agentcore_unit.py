@@ -133,3 +133,87 @@ def test_close_episode_by_id_returns_empty_string(backend) -> None:
 def test_list_episodes_returns_empty_list(backend) -> None:
     """No episodes in agentcore mode; UI hides the tab via supports_episodes."""
     assert backend.list_episodes() == []
+
+
+from datetime import datetime, UTC
+
+
+@pytest.mark.asyncio
+async def test_observe_calls_create_event_with_correct_kwargs(backend, mock_data_client) -> None:
+    """observe builds a CreateEvent against the EPISODIC memory with
+    actorId=project, sessionId=backend session, and a conversational
+    payload carrying the observation content."""
+    mock_data_client.create_event.return_value = {
+        "event": {"eventId": "evt-abc123", "memoryId": "mem-epi-def4567890"}
+    }
+
+    result = await backend.observe(
+        content="Test observation.",
+        outcome="success",
+        component="parser",
+        theme="bug",
+    )
+
+    assert result == "evt-abc123"
+    mock_data_client.create_event.assert_called_once()
+    call_kwargs = mock_data_client.create_event.call_args.kwargs
+
+    assert call_kwargs["memoryId"] == "mem-epi-def4567890"
+    assert call_kwargs["actorId"] == "testproj"
+    assert call_kwargs["sessionId"] == "test-session-xyz"
+    assert isinstance(call_kwargs["eventTimestamp"], datetime)
+    assert call_kwargs["eventTimestamp"].tzinfo is UTC
+
+    # Payload shape: list[{conversational: {role, content: {text}}}]
+    payload = call_kwargs["payload"]
+    assert isinstance(payload, list) and len(payload) == 1
+    block = payload[0]["conversational"]
+    assert block["role"] == "USER"  # observations are model-side inputs
+    assert block["content"]["text"] == "Test observation."
+
+    # Metadata: outcome / component / theme as stringValue only.
+    metadata = call_kwargs["metadata"]
+    assert metadata["outcome"]["stringValue"] == "success"
+    assert metadata["component"]["stringValue"] == "parser"
+    assert metadata["theme"]["stringValue"] == "bug"
+
+
+@pytest.mark.asyncio
+async def test_observe_resolves_project_when_kwarg_is_none(backend, mock_data_client) -> None:
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    await backend.observe(content="x", project=None)
+    assert mock_data_client.create_event.call_args.kwargs["actorId"] == "testproj"
+
+
+@pytest.mark.asyncio
+async def test_observe_general_project_uses_general_actor(backend, mock_data_client) -> None:
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    await backend.observe(content="x", project="general")
+    assert mock_data_client.create_event.call_args.kwargs["actorId"] == "general"
+
+
+@pytest.mark.asyncio
+async def test_observe_drops_none_metadata_keys(backend, mock_data_client) -> None:
+    """Don't send `{"key": {"stringValue": None}}` — None-valued metadata
+    keys are omitted entirely so the payload validates."""
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    await backend.observe(content="x", component=None, theme="bug")
+    metadata = mock_data_client.create_event.call_args.kwargs["metadata"]
+    assert "component" not in metadata
+    assert metadata["theme"]["stringValue"] == "bug"
+
+
+@pytest.mark.asyncio
+async def test_observe_raises_value_error_when_session_id_is_none(ac_config, mock_data_client, mock_control_client) -> None:
+    """CreateEvent on the episodic memory requires sessionId (per the
+    output schema and our usage pattern). A backend with session_id=None
+    cannot fire events — raise so the operator sees the misconfiguration."""
+    backend = AgentCoreBackend(
+        config=ac_config,
+        data_client=mock_data_client,
+        control_client=mock_control_client,
+        session_id=None,
+        project="testproj",
+    )
+    with pytest.raises(ValueError, match="session_id"):
+        await backend.observe(content="x")

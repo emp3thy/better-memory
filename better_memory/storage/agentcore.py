@@ -17,11 +17,13 @@ Capability flags:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from better_memory.storage.agentcore_persistence import AgentCoreConfig
 from better_memory.storage.protocol import Outcome, UseOutcome
+from better_memory.storage.session import resolve_actor_id
 
 
 class AgentCoreBackend:
@@ -54,8 +56,66 @@ class AgentCoreBackend:
 
     # ----- Observations: filled in by Tasks 5-6 -----
 
-    async def observe(self, **kwargs: Any) -> str:
-        raise NotImplementedError("Implemented in Task 5")
+    async def observe(
+        self,
+        *,
+        content: str,
+        component: str | None = None,
+        theme: str | None = None,
+        trigger_type: str | None = None,
+        outcome: Outcome = "neutral",
+        scope_path: str | None = None,
+        project: str | None = None,
+        tech: str | None = None,
+        scope: str = "project",
+    ) -> str:
+        """Write an observation as a CreateEvent against the episodic memory.
+
+        sessionId is the backend's held session id (raised if None — events
+        require a real session). actorId is resolved from project (or
+        "general" when no project is in scope). Returns the AgentCore
+        eventId."""
+        if self._session_id is None:
+            raise ValueError(
+                "AgentCoreBackend.observe requires session_id at construction "
+                "time. The MCP server populates it from CLAUDE_SESSION_ID at "
+                "startup; if you see this in production, the env var is missing."
+            )
+        actor_id = resolve_actor_id(project or self._project)
+
+        # Event-level metadata is stringValue-only (verified API surface);
+        # richer typing only on memory record metadata. Drop None values.
+        metadata: dict[str, dict[str, Any]] = {}
+        raw = {
+            "outcome": outcome,
+            "component": component,
+            "theme": theme,
+            "trigger_type": trigger_type,
+            "tech": tech,
+            "scope": scope,
+            "scope_path": scope_path,
+        }
+        for key, value in raw.items():
+            if value is None:
+                continue
+            metadata[key] = {"stringValue": str(value)}
+
+        response = self._data.create_event(
+            memoryId=self._cfg.episodic.memory_id,
+            actorId=actor_id,
+            sessionId=self._session_id,
+            eventTimestamp=datetime.now(UTC),
+            payload=[
+                {
+                    "conversational": {
+                        "role": "USER",
+                        "content": {"text": content},
+                    }
+                }
+            ],
+            metadata=metadata,
+        )
+        return response["event"]["eventId"]
 
     def retrieve(self, **kwargs: Any) -> dict[str, list[dict[str, Any]]]:
         # Signature matches the Plan-1-amended Protocol (Task 0): sync,
