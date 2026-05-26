@@ -17,7 +17,7 @@ Capability flags:
 
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import hashlib
 import json
 import time
@@ -204,12 +204,19 @@ class AgentCoreBackend:
             )
             return parsed[:effective_limit]
 
-        async def _gather_all() -> dict[str, list[dict[str, Any]]]:
-            loop = asyncio.get_running_loop()
-            tasks = {p: loop.run_in_executor(None, _fetch, p) for p in polarities_to_fetch}
-            return {p: await task for p, task in tasks.items()}
+        # Parallel fan-out via a thread pool. `retrieve` is sync but is called
+        # from inside the MCP server's async `_call_tool`, so we cannot use
+        # asyncio.run here (would raise "event loop is already running").
+        # ThreadPoolExecutor gives the same wire-level parallelism without
+        # touching the outer event loop.
+        def _gather_all() -> dict[str, list[dict[str, Any]]]:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(polarities_to_fetch) or 1
+            ) as pool:
+                futures = {p: pool.submit(_fetch, p) for p in polarities_to_fetch}
+                return {p: f.result() for p, f in futures.items()}
 
-        fetched = asyncio.run(_gather_all())
+        fetched = _gather_all()
 
         # Always return all 3 keys for stable shape; unfetched buckets are [].
         return {p: fetched.get(p, []) for p in _POLARITIES}
@@ -509,7 +516,13 @@ class AgentCoreBackend:
                 f"AgentCore semantic_observe failed: "
                 f"{failed[0].get('errorMessage', 'unknown')}"
             )
-        return response["successfulRecords"][0]["memoryRecordId"]
+        successful = response.get("successfulRecords", [])
+        if not successful:
+            raise RuntimeError(
+                f"AgentCore batch_create_memory_records returned no successful "
+                f"records; response: {response}"
+            )
+        return successful[0]["memoryRecordId"]
 
     def semantic_list(
         self,
@@ -548,8 +561,11 @@ class AgentCoreBackend:
                 "id": rec["memoryRecordId"],
                 "content": rec.get("content", {}).get("text", ""),
                 "namespaces": rec.get("namespaces", []),
-                "scope": "general" if rec.get("namespaces", [""])[0].startswith("general/")
-                         else "project",
+                "scope": (
+                    "general"
+                    if (next(iter(rec.get("namespaces") or [""]), "")).startswith("general/")
+                    else "project"
+                ),
             }
             for rec in response.get("memoryRecordSummaries", [])
         ]
@@ -735,10 +751,11 @@ class AgentCoreBackend:
 
         Uses list_memory_records (not retrieve_memory_records) — bootstrap is
         metadata-only, no semantic search query. 4 boto3 calls are independent
-        network round-trips, so we fan out via asyncio.gather + run_in_executor
-        under asyncio.run(...) — the Protocol signature is sync, but the cost
-        of spinning an event loop once per bootstrap is negligible (bootstrap
-        runs once per session)."""
+        network round-trips, so we fan out via concurrent.futures.ThreadPoolExecutor.
+        The Protocol signature is sync, but session_bootstrap is reached via
+        the MCP server's async `_call_tool` — meaning an event loop is already
+        running; asyncio.run() would raise. ThreadPoolExecutor provides the
+        same parallelism without touching the outer loop."""
         actor_id = resolve_actor_id(project or self._project)
         reflections_namespace = resolve_namespace(actor_id, "reflections")
         semantic_namespace = resolve_namespace(actor_id, "semantic")
@@ -769,21 +786,18 @@ class AgentCoreBackend:
                 maxResults=10,
             )
 
-        async def _gather_all() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-            loop = asyncio.get_running_loop()
-            reflection_tasks = {
-                polarity: loop.run_in_executor(None, _fetch_reflections, polarity)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            reflection_futures = {
+                polarity: pool.submit(_fetch_reflections, polarity)
                 for polarity in _POLARITIES
             }
-            semantic_task = loop.run_in_executor(None, _fetch_semantic)
+            semantic_future = pool.submit(_fetch_semantic)
 
-            reflection_responses = {
-                polarity: await task for polarity, task in reflection_tasks.items()
+            reflection_calls = {
+                polarity: future.result()
+                for polarity, future in reflection_futures.items()
             }
-            semantic_response = await semantic_task
-            return reflection_responses, semantic_response
-
-        reflection_calls, semantic_response = asyncio.run(_gather_all())
+            semantic_response = semantic_future.result()
 
         reflections_counts = {
             polarity: len(reflection_calls[polarity].get("memoryRecordSummaries", []))
