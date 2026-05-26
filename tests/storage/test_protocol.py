@@ -19,14 +19,42 @@ def test_protocol_declares_capability_flag() -> None:
     assert hasattr(StorageBackend, "supports_synthesis")
 
 
+def test_protocol_declares_supports_episodes_flag() -> None:
+    """supports_episodes is the capability used by management UI to hide the Episodes tab in agentcore mode."""
+    assert hasattr(StorageBackend, "supports_episodes")
+
+
 def test_protocol_declares_async_hot_path() -> None:
-    """observe / retrieve / list_observations are async to match the existing service surface."""
-    for name in ("observe", "retrieve", "list_observations"):
+    """observe / list_observations are async to match the existing service surface.
+
+    retrieve is intentionally excluded here — Plan 2 Task 0 amendment made it
+    sync because it wraps ReflectionSynthesisService.retrieve_reflections
+    (no embedder call). See test_protocol_retrieve_is_sync_with_reflection_kwargs."""
+    for name in ("observe", "list_observations"):
         method = getattr(StorageBackend, name, None)
         assert method is not None, f"Protocol missing {name}"
         assert inspect.iscoroutinefunction(method), (
             f"Protocol method {name!r} must be async"
         )
+
+
+def test_protocol_retrieve_is_sync_with_reflection_kwargs() -> None:
+    """Protocol.retrieve is sync and wraps the bucketed reflection retrieval."""
+    method = StorageBackend.retrieve
+    assert not inspect.iscoroutinefunction(method)
+    sig = inspect.signature(method)
+    kwargs = {p.name for p in sig.parameters.values() if p.name != "self"}
+    assert {
+        "project", "tech", "phase", "polarity",
+        "limit_per_bucket", "track_exposure",
+    } <= kwargs
+    # The old observation-bucketing kwargs are gone.
+    assert "candidate_k" not in kwargs
+    assert "reinforcement_alpha" not in kwargs
+    assert "do_limit" not in kwargs
+    assert "dont_limit" not in kwargs
+    assert "neutral_limit" not in kwargs
+    assert "window_days" not in kwargs
 
 
 def test_protocol_declares_sync_record_use() -> None:

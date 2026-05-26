@@ -69,17 +69,65 @@ def test_build_backend_raises_for_unknown(memory_conn) -> None:
         )
 
 
-def test_build_backend_agentcore_raises_until_plan2(memory_conn) -> None:
+def test_build_backend_returns_agentcore_when_config_loaded(tmp_path, monkeypatch) -> None:
+    """With agentcore.json present + valid memory IDs, factory returns AgentCoreBackend."""
+    import json
+    home = tmp_path
+    (home / "agentcore.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "region": "eu-west-2",
+            "semantic": {
+                "memory_id": "mem-sem-abc1234567",
+                "memory_arn": "arn:aws:bedrock-agentcore:eu-west-2:123:memory/mem-sem-abc1234567",
+                "memory_name": "better-memory-semantic",
+                "strategy_id": "userPreference-zXy1234567",
+                "strategy_name": "userPreference",
+                "event_expiry_duration_days": 365,
+            },
+            "episodic": {
+                "memory_id": "mem-epi-def4567890",
+                "memory_arn": "arn:aws:bedrock-agentcore:eu-west-2:123:memory/mem-epi-def4567890",
+                "memory_name": "better-memory-episodic",
+                "strategy_id": "episodicReflections-qPr9876543",
+                "strategy_name": "episodicReflections",
+                "event_expiry_duration_days": 90,
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+
     cfg = _config(
         storage_backend="agentcore",
         agentcore_semantic_memory_id="mem-sem-abc1234567",
-        agentcore_episodic_memory_id="mem-epi-xyz1234567",
+        agentcore_episodic_memory_id="mem-epi-def4567890",
     )
-    with pytest.raises(NotImplementedError, match="AgentCoreBackend"):
+
+    from better_memory.storage.agentcore import AgentCoreBackend
+    backend = build_backend(
+        config=cfg,
+        memory_conn=None,  # not used in agentcore mode
+        embedder=None,
+        session_id="s",
+        project="p",
+    )
+    assert isinstance(backend, AgentCoreBackend)
+
+
+def test_build_backend_agentcore_raises_when_config_missing(tmp_path, monkeypatch) -> None:
+    """Without agentcore.json, factory raises — operator must run `agentcore init`."""
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_path))
+    cfg = _config(
+        storage_backend="agentcore",
+        agentcore_semantic_memory_id="mem-sem-abc1234567",
+        agentcore_episodic_memory_id="mem-epi-def4567890",
+    )
+    with pytest.raises(FileNotFoundError, match="agentcore.json"):
         build_backend(
             config=cfg,
-            memory_conn=memory_conn,
-            embedder=MagicMock(),
+            memory_conn=None,
+            embedder=None,
             session_id="s",
             project="p",
         )

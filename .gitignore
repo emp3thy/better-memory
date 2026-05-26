@@ -45,3 +45,6 @@ spool/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code per-machine settings (personal overrides; never commit)
+.claude/settings.local.json

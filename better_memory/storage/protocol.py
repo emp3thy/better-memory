@@ -5,7 +5,9 @@ AgentCoreBackend (Plan 2) implement it. Synthesis methods are sqlite-only —
 the MCP server reads `supports_synthesis` to gate their tool registration.
 
 Method shapes mirror the existing service surface verified at HEAD bff6506:
-- observe / retrieve / list_observations are async (ObservationService is async)
+- observe / list_observations are async (ObservationService is async)
+- retrieve is sync — wraps ReflectionSynthesisService.retrieve_reflections,
+  which is sync with no embedder call (Plan 2 Task 0 amendment)
 - record_use is sync
 - semantic / episode / reflection lifecycle methods are sync
 - synthesis methods are sync
@@ -52,6 +54,15 @@ class StorageBackend(Protocol):
         """True when the synthesize_next_* MCP tools should be registered."""
         ...
 
+    @property
+    def supports_episodes(self) -> bool:
+        """True when the backend exposes the episode-lifecycle methods as
+        first-class operations. False when episodes are an internal
+        implementation detail (e.g. agentcore mode, where AgentCore manages
+        event grouping via sessionId). The management UI hides the Episodes
+        tab when this is False."""
+        ...
+
     # ----- Observations -----
 
     async def observe(
@@ -70,22 +81,28 @@ class StorageBackend(Protocol):
         """Record an observation. Returns the new observation id."""
         ...
 
-    async def retrieve(
+    def retrieve(
         self,
-        query: str | None = None,
         *,
-        component: str | None = None,
-        status: str | None = "active",
-        window_days: int | None = 30,
-        scope_path: str | None = None,
         project: str | None = None,
-        do_limit: int = 10,
-        dont_limit: int = 10,
-        neutral_limit: int = 5,
-        candidate_k: int = 50,
-        reinforcement_alpha: float = 0.1,
-    ) -> Any:
-        """Bucketed retrieval. Returns BucketedResults from the observation service."""
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        limit_per_bucket: int | None = 20,
+        track_exposure: bool = True,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Bucketed reflection retrieval, keyed by polarity (do / dont / neutral).
+
+        Each bucket is a list of reflection dicts: ``{id, title, phase,
+        use_cases, hints (list[str]), confidence (float), tech,
+        evidence_count, useful_count}``. Sync — no embedder call (reflections
+        are pre-extracted in both backends; sqlite mode ranks via SQL
+        ORDER BY ``useful_count + 3 * times_overlooked DESC``, agentcore
+        mode applies the same formula client-side over metadata counters).
+
+        This method is the canonical path for the MCP ``memory.retrieve``
+        tool handler and the ``memory.start_episode`` handler in
+        ``better_memory/mcp/server.py``."""
         ...
 
     async def list_observations(

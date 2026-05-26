@@ -1170,7 +1170,7 @@ def create_server() -> tuple[
                     "before_retrieve_reflections",
                     project=project,
                 )
-                buckets = reflections.retrieve_reflections(
+                buckets = backend.retrieve(
                     project=project,
                     tech=args.get("tech"),
                     phase=args.get("phase"),
@@ -1261,7 +1261,7 @@ def create_server() -> tuple[
             # synthesis (typically before treating retrieved reflections as
             # canonical).
             queue = reflections._read_queue_counts(project=project)
-            buckets = reflections.retrieve_reflections(
+            buckets = backend.retrieve(
                 project=project, tech=args.get("tech"),
             )
             return [

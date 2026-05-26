@@ -25,6 +25,8 @@ dev = [
     "pytest-playwright",
     "ruff",
     "pyright",
+    "boto3>=1.43.14",
+    "botocore>=1.43.14",
 ]
 docs = [
     "mkdocs-material",

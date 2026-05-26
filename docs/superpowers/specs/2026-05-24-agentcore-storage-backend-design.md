@@ -137,21 +137,59 @@ Polarity (do / dont / neutral) is **not** in the namespace — it's a record met
 
 ### Memory record metadata schema (episodic memory)
 
-Declared in `episodicMemoryStrategy.reflectionConfiguration.memoryRecordSchema.metadataSchema`:
+Declared in `episodicMemoryStrategy.reflectionConfiguration.memoryRecordSchema.metadataSchema`. **Every key the backend will write must be declared here — undeclared keys are silently dropped at create/update (spike Finding 5).**
 
-| Key | Type | LLM extraction | Notes |
-|---|---|---|---|
-| `polarity` | `STRING` allowedValues `do` / `dont` / `neutral` | Per-field instruction telling the LLM to classify do/dont/neutral | Verified working in spike (3/3 reflections correctly classified) |
-| `useful_count` | `NUMBER` | — | App-managed via `batch-update-memory-records`. ++ on record_use success. |
-| `missed_count` | `NUMBER` | — | App-managed. ++ on record_use failure. |
-| `ignored_count` | `NUMBER` | — | App-managed. From session exposure rating loop. |
-| `times_misled` | `NUMBER` | — | App-managed. Mirrors the SQLite column name. |
-| `last_credited_at` | `dateTimeValue` | — | App-managed. Recency for client-side decay. |
-| `status` | `STRING` allowedValues `active` / `retired` / `promoted` | — | App-managed. Lifecycle state. |
+| Key | Type (declared) | Runtime value type | LLM extraction | Notes |
+|---|---|---|---|---|
+| `polarity` | `STRING` allowedValues `do` / `dont` / `neutral` | `stringValue` | Per-field instruction telling the LLM to classify do/dont/neutral | Verified working in spike (3/3 reflections correctly classified) |
+| `useful_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on `cited` / `shaped` rating, and on positive `record_use` |
+| `missed_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on negative `record_use` (reverse-credit) |
+| `ignored_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on `ignored` rating from session-end classification |
+| `times_misled` | `NUMBER` | `numberValue` | — | App-managed. ++ on `misled` rating |
+| `overlooked_count` | `NUMBER` | `numberValue` | — | App-managed. ++ on `overlooked` rating (matches the 5-class sqlite system: cited / shaped / ignored / misled / overlooked) |
+| `last_credited_at` | `STRING` | `dateTimeValue` | — | App-managed. Recency for client-side decay. Declared as `STRING` because `MetadataSchemaEntry.type` enum is only `STRING / STRINGLIST / NUMBER`; the runtime value uses `dateTimeValue` (boto3 accepts a `datetime` object) |
+| `status` | `STRING` allowedValues `active` / `retired` / `promoted` | `stringValue` | — | App-managed. Lifecycle state. |
 
 System metadata (`x-amz-agentcore-memory-recordType`, `createdAt`, `updatedAt`) is always present without declaration.
 
-`indexedKeys` on the episodic memory: `polarity`, `status`, `last_credited_at` — so metadata-filtered retrieval skips full scans.
+`indexedKeys` on the episodic memory: `polarity`, `status`, `last_credited_at`, `overlooked_count` — so metadata-filtered retrieval skips full scans (including the "most overlooked" management-UI view).
+
+### Memory record metadata schema (semantic memory)
+
+Declared in `userPreferenceMemoryStrategy.memoryRecordSchema.metadataSchema`. Mirror of the episodic schema MINUS `polarity` (semantic preferences are not classified do/dont/neutral). Same app-managed counters so the same rating UX works against semantic records.
+
+| Key | Type (declared) | Runtime value type | LLM extraction | Notes |
+|---|---|---|---|---|
+| `useful_count` | `NUMBER` | `numberValue` | — | App-managed. Same semantics as episodic |
+| `missed_count` | `NUMBER` | `numberValue` | — | App-managed |
+| `ignored_count` | `NUMBER` | `numberValue` | — | App-managed |
+| `times_misled` | `NUMBER` | `numberValue` | — | App-managed |
+| `overlooked_count` | `NUMBER` | `numberValue` | — | App-managed |
+| `last_credited_at` | `STRING` | `dateTimeValue` | — | App-managed |
+| `status` | `STRING` allowedValues `active` / `retired` / `promoted` | `stringValue` | — | App-managed |
+
+`indexedKeys` on the semantic memory: `status`, `last_credited_at`, `overlooked_count`.
+
+### Rating model (cross-backend parity)
+
+Session-end classification produces 5 classes, identical to sqlite mode. The classes map onto metadata counters as follows; the per-record update is one `BatchUpdateMemoryRecords` call with the full metadata snapshot (read current → bump counter → write back).
+
+| Rating class | Counter incremented | Also updates |
+|---|---|---|
+| `cited` | `useful_count` | `last_credited_at` |
+| `shaped` | `useful_count` | `last_credited_at` |
+| `ignored` | `ignored_count` | `last_credited_at` |
+| `misled` | `times_misled` | `last_credited_at` |
+| `overlooked` | `overlooked_count` | `last_credited_at` |
+
+Rating works against both semantic and episodic records using the same metadata schema. In agentcore mode there is **no `session_memory_exposure` table** — the per-session exposure log + end-of-session classification loop is replaced by direct counter mutations issued from the rating UI / `record_use` MCP tool. The `list_session_exposures` / `apply_session_ratings` / `credit_one` MCP tools therefore behave as follows in agentcore mode:
+
+- `record_use(observation_id, outcome)` → look up the AgentCore record, bump `useful_count` / `missed_count`, write `last_credited_at`. Same wire shape as sqlite mode.
+- `list_session_exposures(session_id)` → returns an empty `exposures` list (the session-exposure model doesn't apply; the rating panel hides when empty).
+- `apply_session_ratings(session_id, ratings)` → for each rating entry, performs the per-record metadata update above. Behavior preserved; the source of "which records to rate" shifts from the exposure table to the rating UI's current selection.
+- `credit_one(session_id, kind, id, classification)` → equivalent to one of the per-record metadata updates above. Selects the counter from the class.
+
+The episode lifecycle methods (`open_background_episode` / `start_foreground_episode` / `close_active_episode` / `close_episode_by_id` / `list_episodes`) are no-ops in agentcore mode: AgentCore manages event grouping via `sessionId` internally and does not expose an episode-as-first-class-record concept that maps onto better-memory's episodes table. The MCP tools / management UI hide the Episodes tab when `backend.supports_episodes` reports False (a second capability flag on the Protocol, alongside `supports_synthesis`).
 
 ### Reflection content shape (returned by AgentCore)
 
@@ -177,11 +215,13 @@ Better-memory already has the right primitive for this — the `Stop` hook (sess
 ```json
 {
   "conversational": {
-    "role": "USER",
+    "role": "OTHER",
     "content": {"text": "Session complete. All work for this session has been recorded."}
   }
 }
 ```
+
+The role enum is `ASSISTANT | USER | TOOL | OTHER` (boto3 surface verification, 2026-05-25). `OTHER` is the right semantic match for a system-emitted closure marker — it is neither a real user turn nor an assistant reply.
 
 The LLM's completion-detection picks this up. Extraction triggers within the typical 1-3 minute window for a complete episode instead of waiting out the 15-minute idle. The closure event is fire-and-forget — failure to deliver it just falls back to the idle-detection path.
 
@@ -202,6 +242,180 @@ Operator implication: Ralph executor sessions (`session_close` always fires) get
 | Embeddings | No-op in agentcore mode | AgentCore retrieval replaces hybrid_search |
 | Session closure | Stop hook fires a final closure CreateEvent | Triggers AgentCore's completion detection; bounds latency to ~1-3 min |
 | Custom strategies | Not in v1 | Built-in is sufficient and operationally simpler; revisit only if extraction quality forces it |
+
+## Live-AWS smoke findings (2026-05-25, eu-west-2, after boto3 introspection)
+
+A pre-Plan-2 smoke (`scripts/agentcore_smoke.py`) created throwaway memory resources end-to-end and exercised the full write → read → update → delete cycle. It caught 5 quirks that boto3 introspection alone missed. **These supersede any conflicting statement below.** Every Plan 2 implementer must read this section.
+
+### 1. `LlmExtractionConfig` shape (was wrong in earlier draft)
+
+| Field | Required? | Notes |
+|---|---|---|
+| `definition` | **yes** | One-line description of what the field represents; surfaced to the extracting LLM. Spec previously omitted. |
+| `llmExtractionInstruction` | no | Optional classifier instruction. Spec previously called this `extractionInstruction` — that name is rejected. |
+| `validation` | no | `{stringValidation: {allowedValues: [...]} \| stringListValidation: {...} \| numberValidation: {...}}`. Spec previously declared `allowedValues` directly on the schema entry — that location is rejected. |
+
+Corrected polarity declaration:
+
+```python
+{
+    "key": "polarity",
+    "type": "STRING",
+    "extractionConfig": {
+        "llmExtractionConfig": {
+            "definition": "Whether this reflection prescribes a do, dont, or neutral practice.",
+            "llmExtractionInstruction": "Classify this reflection as 'do', 'dont', or 'neutral'.",
+            "validation": {
+                "stringValidation": {
+                    "allowedValues": ["do", "dont", "neutral"]
+                }
+            },
+        }
+    },
+}
+```
+
+### 2. Memory `name` regex: `[a-zA-Z][a-zA-Z0-9_]{0,47}`
+
+No dashes. Max 48 chars. `CreateMemory` rejects with `ValidationException` otherwise. `agentcore init` (Plan 3) names: `better_memory_semantic`, `better_memory_episodic` (or whatever — underscores only).
+
+### 3. System metadata keys leak into list/get responses; MUST strip before batch_update
+
+When `list_memory_records` or `get_memory_record` returns a record, the `metadata` dict includes system-managed keys mixed inline:
+
+- `x-amz-agentcore-memory-createdAt` (dateTimeValue)
+- `x-amz-agentcore-memory-updatedAt` (dateTimeValue)
+- `x-amz-agentcore-memory-recordType` (stringValue)
+
+If those keys are echoed back via `batch_update_memory_records.records[].metadata`, AWS rejects the call with:
+
+> `code 400 — Metadata keys cannot use reserved names or prefixes: x-amz-agentcore-memory-updatedAt, x-amz-agentcore-memory-createdAt, x-amz-agentcore-memory-recordType`
+
+**Implementation rule:** every `batch_update` call must strip the `x-amz-agentcore-memory-` prefix from the metadata snapshot before sending. Plan 2's `_full_metadata_snapshot` helper does this:
+
+```python
+def _full_metadata_snapshot(current: dict, updates: dict) -> dict:
+    SYSTEM_PREFIX = "x-amz-agentcore-memory-"
+    snapshot = {k: v for k, v in current.items() if not k.startswith(SYSTEM_PREFIX)}
+    snapshot.update(updates)
+    return snapshot
+```
+
+### 4. Eventual consistency observed at three boundaries
+
+| Boundary | Typical lag | Worst observed | Implementation strategy |
+|---|---|---|---|
+| `list_memory_records` after `batch_create_memory_records` | ~15s | ~75s | retry up to 25 × 5s; bypass via `get_memory_record` if list lags |
+| read after `batch_update_memory_records` (counter visible) | ~70s | ~70s | retry up to 24 × 5s |
+| `batch_update_memory_records` right after `batch_create_memory_records` | usually first call works | occasional `ResourceNotFoundException` on first attempt | retry once with 10s backoff before treating as fatal |
+
+Plan 2 wraps every write-update path with a `_retry_on_transient_404` helper and the read-after-update assertion with a polling loop. Mocked unit tests in Plan 2 don't see this — integration tests (Plan 3) will.
+
+### 5. `get_memory_record` works on BASE records (spike Finding 3 was wrong / strategy-specific)
+
+The earlier spec text said "never `get-memory-record` (spike Finding 3) — it returns 404 for BASE records." The smoke verified `get_memory_record` returns the BASE record correctly with full metadata. Use it freely for single-record lookups instead of `list_memory_records` + metadataFilters. The Plan 2 `_get_record` / `_get_semantic_record` helpers should use `get_memory_record` as their primary path.
+
+---
+
+## Verified API surface (boto3 introspection, 2026-05-25)
+
+Post-spec verification against `boto3 1.43.14` / `botocore 1.43.14` confirmed the overall shape but surfaced a handful of corrections. These supersede any conflicting statement earlier in the spec. **Note the live-AWS smoke findings above ALSO supersede statements here.**
+
+### Operation locations
+
+| Operation | Boto3 method | Service (client) |
+|---|---|---|
+| `CreateEvent` | `create_event` | `bedrock-agentcore` (data) |
+| `RetrieveMemoryRecords` | `retrieve_memory_records` | `bedrock-agentcore` (data) |
+| `ListMemoryRecords` | `list_memory_records` | `bedrock-agentcore` (data) |
+| `GetMemoryRecord` | `get_memory_record` | `bedrock-agentcore` (data) |
+| `BatchCreateMemoryRecords` | `batch_create_memory_records` | `bedrock-agentcore` (data) |
+| `BatchUpdateMemoryRecords` | `batch_update_memory_records` | `bedrock-agentcore` (data) |
+| `BatchDeleteMemoryRecords` | `batch_delete_memory_records` | `bedrock-agentcore` (data) |
+| `ListMemoryExtractionJobs` | `list_memory_extraction_jobs` | **`bedrock-agentcore` (data)** — NOT control plane as stated in the prior draft |
+| `CreateMemory` | `create_memory` | `bedrock-agentcore-control` (control) |
+| `GetMemory` | `get_memory` | `bedrock-agentcore-control` (control) |
+| `DeleteMemory` | `delete_memory` | `bedrock-agentcore-control` (control) |
+
+### Per-call corrections vs prior draft
+
+1. **`BatchCreateMemoryRecords` requires `requestIdentifier` per record** (max 80 chars). Caller-supplied dedupe key — semantic_observe builds one from content hash or a UUID per call.
+
+2. **`Conversational.role` enum is `ASSISTANT | USER | TOOL | OTHER`.** Closure event uses `OTHER`. Spec example above corrected.
+
+3. **`CreateEvent.metadata` is `map<string, {stringValue: max256}>` only.** Memory record metadata is richer (`stringValue | stringListValue | numberValue | dateTimeValue`). For event-level metadata, anything non-string must be serialized to string before sending; richer typing lives on the record layer.
+
+4. **`memoryStrategyId` is OPTIONAL at the boto3 schema level** on `BatchCreateMemoryRecords`, `BatchUpdateMemoryRecords`, `RetrieveMemoryRecords.searchCriteria`, and `ListMemoryRecords`. We **always send it** for deterministic strategy routing, but code must not assume botocore will reject the call when it is omitted.
+
+5. **`BatchUpdateMemoryRecords` has no `clientToken`** (unlike `BatchCreateMemoryRecords`). Idempotency on update comes from natural overwrite of a specific `memoryRecordId`.
+
+6. **`BatchDeleteMemoryRecords` records take only `memoryRecordId`** — no metadata, no namespace.
+
+7. **`GetMemoryRecord` exists on the data plane.** Use it for single-record lookups (e.g. before `BatchUpdateMemoryRecords` on credit / promote / retire). `ListMemoryRecords` with filters is for collection scans. Spike Finding 3's "`get-memory-record` returns 404 for BASE records" warning is preserved — use it for non-BASE records only; for BASE records continue to use `list_memory_records` with `metadataFilters`.
+
+8. **`ListMemoryExtractionJobs.filter.status` only accepts `'FAILED'`** as a status value. There is no way to filter by `SUCCEEDED` or in-progress states. `agentcore status` can call without a filter to get total counts, or with `status=FAILED` for the failure subset.
+
+9. **`namespace` (single string, max 1024) and `namespacePath` are distinct optional kwargs on retrieve / list.** Semantics differ (`namespace` is exact-match; `namespacePath` is prefix-style). Plan 2 task should pin which one matches our intended hierarchy at implementation time — we use single-string namespaces (no per-record list), so `namespace` is the default; `namespacePath` is the escape hatch if AgentCore's prefix matching behaves differently than expected.
+
+### `MemoryRecordOutput` shape (partial-failure handling)
+
+`BatchCreateMemoryRecords` / `BatchUpdateMemoryRecords` / `BatchDeleteMemoryRecords` all return `{successfulRecords: list[MemoryRecordOutput], failedRecords: list[MemoryRecordOutput]}`. Each `MemoryRecordOutput` has `memoryRecordId`, `status` (`SUCCEEDED | FAILED`), optional `requestIdentifier`, `errorCode` (integer), `errorMessage`. Plan 2 must propagate per-record errors, not just check transport-level success.
+
+### Strategy ID discovery
+
+`create_memory` returns `response['memory']['strategies'][i]['strategyId']` synchronously. **No follow-up `get_memory` call is needed for IDs.** However:
+
+- `memory.status` starts at `CREATING` and each `strategies[i].status` likewise. The service rejects records until both transition to `ACTIVE` (spike Finding 5 noted 90-115s).
+- There is no `CreateMemoryStrategy` / `ListMemoryStrategies` / `GetMemoryStrategy` op. Strategy mutation only happens inline via `CreateMemory.memoryStrategies` or `UpdateMemory` with `ModifyMemoryStrategies`.
+- Recovery path if `agentcore.json` is lost: `ListMemories` (returns only `arn`/`id`/`status`) then `GetMemory` to repopulate `strategies` (match logical role back to entry by stable `name` constant, e.g. `"better-memory-semantic-preferences"`).
+
+### Persistence file shape — `$BETTER_MEMORY_HOME/agentcore.json`
+
+`agentcore init` writes this once. Runtime reads it on every server boot.
+
+```json
+{
+  "schema_version": 1,
+  "region": "eu-west-2",
+  "semantic": {
+    "memory_id": "better-memory-semantic-abc1234567",
+    "memory_arn": "arn:aws:bedrock-agentcore:eu-west-2:<acct>:memory/better-memory-semantic-abc1234567",
+    "memory_name": "better-memory-semantic",
+    "strategy_id": "userPreference-zXy1234567",
+    "strategy_name": "userPreference",
+    "event_expiry_duration_days": 365
+  },
+  "episodic": {
+    "memory_id": "better-memory-episodic-def4567890",
+    "memory_arn": "arn:aws:bedrock-agentcore:eu-west-2:<acct>:memory/better-memory-episodic-def4567890",
+    "memory_name": "better-memory-episodic",
+    "strategy_id": "episodicReflections-qPr9876543",
+    "strategy_name": "episodicReflections",
+    "event_expiry_duration_days": 90
+  }
+}
+```
+
+Naming conventions: strategy names are stable constants in code (e.g. `_SEMANTIC_STRATEGY_NAME = "userPreference"`), so recovery via name-match works.
+
+### AWS credentials
+
+The adapter relies on the **default boto3 credential chain** — env vars (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`), then `~/.aws/credentials`, then instance / SSO profiles. No better-memory-specific credential code. The README documents the IAM permissions needed; the operator wires credentials however they prefer.
+
+### Retry config
+
+Both clients are constructed with:
+
+```python
+from botocore.config import Config as BotoConfig
+
+BotoConfig(
+    region_name=config.agentcore_region,
+    retries={"mode": "standard", "max_attempts": 5},
+)
+```
+
+Standard mode (not adaptive) — predictable capped exponential backoff; 4 retries past the initial attempt. Exhausted retries surface as `RetryableStorageError` with the underlying botocore exception chained.
 
 ## Components
 
