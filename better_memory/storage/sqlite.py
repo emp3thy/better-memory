@@ -73,6 +73,10 @@ class SqliteBackend:
     def supports_synthesis(self) -> bool:
         return True
 
+    @property
+    def supports_episodes(self) -> bool:
+        return True
+
     # ----- Observations -----
 
     async def observe(

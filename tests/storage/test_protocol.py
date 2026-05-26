@@ -19,6 +19,11 @@ def test_protocol_declares_capability_flag() -> None:
     assert hasattr(StorageBackend, "supports_synthesis")
 
 
+def test_protocol_declares_supports_episodes_flag() -> None:
+    """supports_episodes is the capability used by management UI to hide the Episodes tab in agentcore mode."""
+    assert hasattr(StorageBackend, "supports_episodes")
+
+
 def test_protocol_declares_async_hot_path() -> None:
     """observe / list_observations are async to match the existing service surface.
 

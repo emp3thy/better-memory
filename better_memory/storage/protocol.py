@@ -54,6 +54,15 @@ class StorageBackend(Protocol):
         """True when the synthesize_next_* MCP tools should be registered."""
         ...
 
+    @property
+    def supports_episodes(self) -> bool:
+        """True when the backend exposes the episode-lifecycle methods as
+        first-class operations. False when episodes are an internal
+        implementation detail (e.g. agentcore mode, where AgentCore manages
+        event grouping via sessionId). The management UI hides the Episodes
+        tab when this is False."""
+        ...
+
     # ----- Observations -----
 
     async def observe(

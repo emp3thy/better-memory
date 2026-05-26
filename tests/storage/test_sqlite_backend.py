@@ -64,6 +64,11 @@ def test_supports_synthesis_is_true(backend) -> None:
     assert backend.supports_synthesis is True
 
 
+def test_supports_episodes_is_true(backend) -> None:
+    """SqliteBackend exposes episode lifecycle; UI shows the Episodes tab."""
+    assert backend.supports_episodes is True
+
+
 @pytest.mark.asyncio
 async def test_observe_returns_string_id(backend) -> None:
     obs_id = await backend.observe(
