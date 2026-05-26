@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -33,6 +35,7 @@ from better_memory.storage.session import (
 
 _POLARITIES: tuple[str, str, str] = ("do", "dont", "neutral")
 _OVERLOOKED_RANKING_WEIGHT = 3  # mirrors better_memory/services/memory_rating.py:71
+_AGENTCORE_SYSTEM_METADATA_PREFIX = "x-amz-agentcore-memory-"
 
 
 class AgentCoreBackend:
@@ -331,10 +334,114 @@ class AgentCoreBackend:
             results = [r for r in results if q in r.get("content", "").lower()]
         return results
 
+    def _get_record(self, record_id: str) -> dict[str, Any]:
+        """Fetch a single memory record from the EPISODIC memory.
+
+        Tries get_memory_record first; falls back to list_memory_records
+        with metadataFilters if the record is a BASE record (spike Finding 3:
+        get-memory-record returns 404 for BASE records). For our use
+        (record_use against extracted reflections), get_memory_record is
+        the right call — BASE records aren't ratable."""
+        return self._data.get_memory_record(
+            memoryId=self._cfg.episodic.memory_id,
+            memoryRecordId=record_id,
+        )["memoryRecord"]
+
+    def _retry_on_transient_404(
+        self,
+        call: Callable[[], dict[str, Any]],
+        *,
+        max_attempts: int = 3,
+        backoff_seconds: float = 10.0,
+    ) -> dict[str, Any]:
+        """Retry a boto3 call on transient ResourceNotFoundException.
+
+        Live-AWS smoke (spec § "Live-AWS smoke findings") showed that
+        ``batch_update_memory_records`` issued immediately after
+        ``batch_create_memory_records`` can fail with ResourceNotFoundException
+        on the first attempt and succeed on the second. Lag is ~10s typical.
+
+        Permanent 404s (the record really doesn't exist) will still raise
+        after ``max_attempts``."""
+        from botocore.exceptions import ClientError
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return call()
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code != "ResourceNotFoundException" or attempt == max_attempts:
+                    raise
+                time.sleep(backoff_seconds)
+        # Unreachable but satisfies type checker
+        raise RuntimeError("retry loop exited unexpectedly")
+
+    def _full_metadata_snapshot(
+        self, current: dict[str, Any], updates: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """Produce a full metadata snapshot for BatchUpdateMemoryRecords.
+
+        Two rules baked in here:
+
+        1. **Merge-vs-replace semantics are undetermined** (spike Finding 5);
+           always send the FULL snapshot.
+
+        2. **Strip system-managed keys** before sending. ``list_memory_records``
+           and ``get_memory_record`` responses include
+           ``x-amz-agentcore-memory-{createdAt,updatedAt,recordType}`` mixed
+           into the returned metadata dict. If echoed back via
+           ``batch_update_memory_records``, AWS rejects the call with
+           ``code 400 — Metadata keys cannot use reserved names or prefixes``.
+           Caught by the live-AWS smoke; see spec § "Live-AWS smoke findings".
+
+        ``current`` is the existing metadata dict from MemoryRecord;
+        ``updates`` is the diff to apply (already in the wire-shape dict form
+        with stringValue/numberValue/etc.)."""
+        snapshot = {
+            k: v for k, v in current.items()
+            if not k.startswith(_AGENTCORE_SYSTEM_METADATA_PREFIX)
+        }
+        snapshot.update(updates)
+        return snapshot
+
     def record_use(
         self, observation_id: str, *, outcome: UseOutcome | None = None
     ) -> None:
-        raise NotImplementedError("Implemented in Task 8")
+        """Credit a record's reinforcement counter. outcome=None is a no-op
+        (no classification, no counter change)."""
+        if outcome is None:
+            return
+
+        record = self._get_record(observation_id)
+        metadata = record.get("metadata", {})
+
+        counter_key = "useful_count" if outcome == "success" else "missed_count"
+        current_count = float(
+            metadata.get(counter_key, {}).get("numberValue", 0)
+        )
+
+        updates: dict[str, dict[str, Any]] = {
+            counter_key: {"numberValue": current_count + 1},
+            "last_credited_at": {"dateTimeValue": datetime.now(UTC)},
+        }
+        snapshot = self._full_metadata_snapshot(metadata, updates)
+
+        response = self._data.batch_update_memory_records(
+            memoryId=self._cfg.episodic.memory_id,
+            records=[
+                {
+                    "memoryRecordId": observation_id,
+                    "timestamp": datetime.now(UTC),
+                    "metadata": snapshot,
+                }
+            ],
+        )
+        failed = response.get("failedRecords", [])
+        if failed:
+            raise RuntimeError(
+                f"AgentCore record_use failed for {observation_id}: "
+                f"{failed[0].get('errorMessage', 'unknown')}"
+            )
 
     # ----- Semantic memories: Task 11 -----
 

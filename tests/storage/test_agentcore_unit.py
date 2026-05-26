@@ -412,3 +412,82 @@ def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) 
     # high-via-useful:        10 + 0 = 10
     # low:                    0 + 0 = 0
     assert do_titles == ["highest-via-overlooked", "high-via-useful", "low"]
+
+
+def _make_record_response(rec_id: str, **counters) -> dict:
+    """Helper: build a MemoryRecord response with the standard metadata."""
+    base = {
+        "useful_count": 0, "missed_count": 0, "ignored_count": 0,
+        "times_misled": 0, "overlooked_count": 0,
+    }
+    base.update(counters)
+    return {
+        "memoryRecord": {
+            "memoryRecordId": rec_id,
+            "content": {"text": "{}"},
+            "memoryStrategyId": "episodicReflections-qPr9876543",
+            "namespaces": ["projects/testproj/reflections/"],
+            "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+            "metadata": {
+                **{k: {"numberValue": v} for k, v in base.items()},
+                "status": {"stringValue": "active"},
+                "polarity": {"stringValue": "do"},
+            },
+        }
+    }
+
+
+def test_record_use_success_bumps_useful_count(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response(
+        "rec-x", useful_count=2,
+    )
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "rec-x", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.record_use("rec-x", outcome="success")
+    call = mock_data_client.batch_update_memory_records.call_args.kwargs
+    rec = call["records"][0]
+    assert rec["memoryRecordId"] == "rec-x"
+    assert rec["metadata"]["useful_count"]["numberValue"] == 3
+    assert rec["metadata"]["missed_count"]["numberValue"] == 0
+    # last_credited_at refreshed
+    assert "last_credited_at" in rec["metadata"]
+
+
+def test_record_use_failure_bumps_missed_count(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response(
+        "rec-y", missed_count=4,
+    )
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "rec-y", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.record_use("rec-y", outcome="failure")
+    call = mock_data_client.batch_update_memory_records.call_args.kwargs
+    rec = call["records"][0]
+    assert rec["metadata"]["missed_count"]["numberValue"] == 5
+    assert rec["metadata"]["useful_count"]["numberValue"] == 0
+
+
+def test_record_use_none_outcome_is_noop(backend, mock_data_client) -> None:
+    """record_use(id) without outcome should not touch the record (no
+    classification, no counter change)."""
+    backend.record_use("rec-z", outcome=None)
+    mock_data_client.get_memory_record.assert_not_called()
+    mock_data_client.batch_update_memory_records.assert_not_called()
+
+
+def test_record_use_propagates_failed_records(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response("rec-fail")
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [],
+        "failedRecords": [{
+            "memoryRecordId": "rec-fail",
+            "status": "FAILED",
+            "errorCode": 500,
+            "errorMessage": "internal error",
+        }],
+    }
+    with pytest.raises(RuntimeError, match="rec-fail"):
+        backend.record_use("rec-fail", outcome="success")
