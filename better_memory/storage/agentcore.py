@@ -27,6 +27,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+try:
+    from botocore.exceptions import ClientError as _ClientError
+except ImportError:  # pragma: no cover - botocore absent in unit-test env
+    class _ClientError(Exception):  # type: ignore[no-redef]
+        response: dict[str, Any]
+
 from better_memory.storage.agentcore_persistence import AgentCoreConfig
 from better_memory.storage.protocol import Outcome, UseOutcome
 from better_memory.storage.session import (
@@ -125,7 +131,7 @@ class AgentCoreBackend:
         # MCP server's asyncio event loop is not blocked during the HTTP
         # round-trip. Without this, every await observe(...) freezes the
         # loop for the duration of the AWS call.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: self._data.create_event(
@@ -316,7 +322,7 @@ class AgentCoreBackend:
         # MCP server's asyncio event loop is not blocked during the HTTP
         # round-trip. Post-filter / mapping below is pure dict work and
         # stays inline.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: self._data.list_events(
@@ -395,12 +401,10 @@ class AgentCoreBackend:
 
         Permanent 404s (the record really doesn't exist) will still raise
         after ``max_attempts``."""
-        from botocore.exceptions import ClientError
-
         for attempt in range(1, max_attempts + 1):
             try:
                 return call()
-            except ClientError as exc:
+            except _ClientError as exc:
                 code = exc.response.get("Error", {}).get("Code", "")
                 if code != "ResourceNotFoundException" or attempt == max_attempts:
                     raise
@@ -458,15 +462,17 @@ class AgentCoreBackend:
         }
         snapshot = self._full_metadata_snapshot(metadata, updates)
 
-        response = self._data.batch_update_memory_records(
-            memoryId=self._cfg.episodic.memory_id,
-            records=[
-                {
-                    "memoryRecordId": observation_id,
-                    "timestamp": datetime.now(UTC),
-                    "metadata": snapshot,
-                }
-            ],
+        response = self._retry_on_transient_404(
+            lambda: self._data.batch_update_memory_records(
+                memoryId=self._cfg.episodic.memory_id,
+                records=[
+                    {
+                        "memoryRecordId": observation_id,
+                        "timestamp": datetime.now(UTC),
+                        "metadata": snapshot,
+                    }
+                ],
+            )
         )
         failed = response.get("failedRecords", [])
         if failed:
@@ -594,16 +600,18 @@ class AgentCoreBackend:
         metadata = record.get("metadata", {})
         snapshot = self._full_metadata_snapshot(metadata, {})
 
-        response = self._data.batch_update_memory_records(
-            memoryId=self._cfg.semantic.memory_id,
-            records=[
-                {
-                    "memoryRecordId": id,
-                    "timestamp": datetime.now(UTC),
-                    "content": {"text": content},
-                    "metadata": snapshot,
-                }
-            ],
+        response = self._retry_on_transient_404(
+            lambda: self._data.batch_update_memory_records(
+                memoryId=self._cfg.semantic.memory_id,
+                records=[
+                    {
+                        "memoryRecordId": id,
+                        "timestamp": datetime.now(UTC),
+                        "content": {"text": content},
+                        "metadata": snapshot,
+                    }
+                ],
+            )
         )
         failed = response.get("failedRecords", [])
         if failed:
@@ -626,16 +634,18 @@ class AgentCoreBackend:
             else resolve_namespace(resolve_actor_id(self._project), "semantic")
         )
 
-        response = self._data.batch_update_memory_records(
-            memoryId=self._cfg.semantic.memory_id,
-            records=[
-                {
-                    "memoryRecordId": id,
-                    "timestamp": datetime.now(UTC),
-                    "namespaces": [target_namespace],
-                    "metadata": snapshot,
-                }
-            ],
+        response = self._retry_on_transient_404(
+            lambda: self._data.batch_update_memory_records(
+                memoryId=self._cfg.semantic.memory_id,
+                records=[
+                    {
+                        "memoryRecordId": id,
+                        "timestamp": datetime.now(UTC),
+                        "namespaces": [target_namespace],
+                        "metadata": snapshot,
+                    }
+                ],
+            )
         )
         failed = response.get("failedRecords", [])
         if failed:
@@ -718,16 +728,18 @@ class AgentCoreBackend:
         }
         snapshot = self._full_metadata_snapshot(metadata, updates)
 
-        response = self._data.batch_update_memory_records(
-            memoryId=self._cfg.episodic.memory_id,
-            records=[
-                {
-                    "memoryRecordId": reflection_id,
-                    "timestamp": datetime.now(UTC),
-                    "namespaces": new_namespaces,
-                    "metadata": snapshot,
-                }
-            ],
+        response = self._retry_on_transient_404(
+            lambda: self._data.batch_update_memory_records(
+                memoryId=self._cfg.episodic.memory_id,
+                records=[
+                    {
+                        "memoryRecordId": reflection_id,
+                        "timestamp": datetime.now(UTC),
+                        "namespaces": new_namespaces,
+                        "metadata": snapshot,
+                    }
+                ],
+            )
         )
         failed = response.get("failedRecords", [])
         if failed:
@@ -903,15 +915,17 @@ class AgentCoreBackend:
         }
         snapshot = self._full_metadata_snapshot(metadata, updates)
 
-        response = self._data.batch_update_memory_records(
-            memoryId=memory_id,
-            records=[
-                {
-                    "memoryRecordId": id,
-                    "timestamp": datetime.now(UTC),
-                    "metadata": snapshot,
-                }
-            ],
+        response = self._retry_on_transient_404(
+            lambda: self._data.batch_update_memory_records(
+                memoryId=memory_id,
+                records=[
+                    {
+                        "memoryRecordId": id,
+                        "timestamp": datetime.now(UTC),
+                        "metadata": snapshot,
+                    }
+                ],
+            )
         )
         failed = response.get("failedRecords", [])
         if failed:

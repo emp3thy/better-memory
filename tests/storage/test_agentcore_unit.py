@@ -493,6 +493,40 @@ def test_record_use_propagates_failed_records(backend, mock_data_client) -> None
         backend.record_use("rec-fail", outcome="success")
 
 
+def test_record_use_retries_on_transient_404(
+    backend, mock_data_client, monkeypatch
+) -> None:
+    """batch_update_memory_records issued immediately after
+    batch_create_memory_records can raise ResourceNotFoundException
+    transiently. The _retry_on_transient_404 wrapper must retry once
+    and succeed on the second attempt."""
+    from better_memory.storage import agentcore as ac_module
+
+    class _FakeClientError(Exception):
+        def __init__(self) -> None:
+            super().__init__("rec-x not found")
+            self.response = {"Error": {"Code": "ResourceNotFoundException"}}
+
+    monkeypatch.setattr(ac_module, "_ClientError", _FakeClientError)
+    monkeypatch.setattr(ac_module.time, "sleep", lambda _s: None)
+
+    mock_data_client.get_memory_record.return_value = _make_record_response(
+        "rec-x", useful_count=0,
+    )
+    success_resp = {
+        "successfulRecords": [{"memoryRecordId": "rec-x", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    mock_data_client.batch_update_memory_records.side_effect = [
+        _FakeClientError(),
+        success_resp,
+    ]
+
+    backend.record_use("rec-x", outcome="success")
+
+    assert mock_data_client.batch_update_memory_records.call_count == 2
+
+
 _RATING_TO_COUNTER = {
     "cited": "useful_count",
     "shaped": "useful_count",
