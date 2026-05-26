@@ -598,3 +598,114 @@ def test_promote_reflection_raises_when_batch_fails(backend, mock_data_client) -
     }
     with pytest.raises(RuntimeError, match="rec-fail"):
         backend.promote_reflection(reflection_id="rec-fail")
+
+
+# ===== Task 11: semantic CRUD =====
+import hashlib
+
+
+def test_semantic_observe_calls_batch_create_against_semantic_memory(backend, mock_data_client) -> None:
+    mock_data_client.batch_create_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "sm-1", "status": "SUCCEEDED", "requestIdentifier": "any"}],
+        "failedRecords": [],
+    }
+    sm_id = backend.semantic_observe(content="prefer uv over pip")
+    assert sm_id == "sm-1"
+    call = mock_data_client.batch_create_memory_records.call_args.kwargs
+    assert call["memoryId"] == "mem-sem-abc1234567"
+    rec = call["records"][0]
+    assert rec["memoryStrategyId"] == "userPreference-zXy1234567"
+    assert rec["namespaces"] == ["projects/testproj/semantic/"]
+    assert rec["content"]["text"] == "prefer uv over pip"
+    assert len(rec["requestIdentifier"]) <= 80
+    # Initial metadata
+    assert rec["metadata"]["status"]["stringValue"] == "active"
+    assert rec["metadata"]["useful_count"]["numberValue"] == 0
+    assert rec["metadata"]["overlooked_count"]["numberValue"] == 0
+
+
+def test_semantic_observe_general_scope_uses_general_namespace(backend, mock_data_client) -> None:
+    mock_data_client.batch_create_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "sm-2", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.semantic_observe(content="x", scope="general")
+    rec = mock_data_client.batch_create_memory_records.call_args.kwargs["records"][0]
+    assert rec["namespaces"] == ["general/semantic/"]
+
+
+def test_semantic_list_with_search_uses_retrieve_memory_records(backend, mock_data_client) -> None:
+    mock_data_client.retrieve_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "sm-1",
+                "content": {"text": "prefer uv"},
+                "memoryStrategyId": "userPreference-zXy1234567",
+                "namespaces": ["projects/testproj/semantic/"],
+                "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+                "metadata": {"status": {"stringValue": "active"}},
+            }
+        ]
+    }
+    result = backend.semantic_list(search="uv")
+    assert len(result) == 1
+    assert result[0]["id"] == "sm-1"
+    assert result[0]["content"] == "prefer uv"
+
+
+def test_semantic_list_without_search_uses_list_memory_records(backend, mock_data_client) -> None:
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.semantic_list()
+    mock_data_client.list_memory_records.assert_called_once()
+    mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_semantic_update_text_calls_batch_update(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = {
+        "memoryRecord": {
+            "memoryRecordId": "sm-1",
+            "content": {"text": "original"},
+            "memoryStrategyId": "userPreference-zXy1234567",
+            "namespaces": ["projects/testproj/semantic/"],
+            "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+            "metadata": {"status": {"stringValue": "active"}},
+        }
+    }
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "sm-1", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.semantic_update_text(id="sm-1", content="updated")
+    rec = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
+    assert rec["content"]["text"] == "updated"
+
+
+def test_semantic_set_scope_swaps_namespace(backend, mock_data_client) -> None:
+    mock_data_client.get_memory_record.return_value = {
+        "memoryRecord": {
+            "memoryRecordId": "sm-1",
+            "content": {"text": "x"},
+            "memoryStrategyId": "userPreference-zXy1234567",
+            "namespaces": ["projects/testproj/semantic/"],
+            "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+            "metadata": {"status": {"stringValue": "active"}},
+        }
+    }
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "sm-1", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.semantic_set_scope(id="sm-1", scope="general")
+    rec = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
+    assert rec["namespaces"] == ["general/semantic/"]
+
+
+def test_semantic_delete_calls_batch_delete(backend, mock_data_client) -> None:
+    mock_data_client.batch_delete_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "sm-x", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.semantic_delete(id="sm-x")
+    call = mock_data_client.batch_delete_memory_records.call_args.kwargs
+    assert call["memoryId"] == "mem-sem-abc1234567"
+    assert call["records"] == [{"memoryRecordId": "sm-x"}]

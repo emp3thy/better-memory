@@ -18,6 +18,7 @@ Capability flags:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from collections.abc import Callable
@@ -452,20 +453,170 @@ class AgentCoreBackend:
 
     # ----- Semantic memories: Task 11 -----
 
-    def semantic_observe(self, **kwargs: Any) -> str:
-        raise NotImplementedError("Implemented in Task 11")
+    def _semantic_initial_metadata(self) -> dict[str, dict[str, Any]]:
+        """Initial metadata snapshot for a newly-created semantic record."""
+        return {
+            "useful_count": {"numberValue": 0},
+            "missed_count": {"numberValue": 0},
+            "ignored_count": {"numberValue": 0},
+            "times_misled": {"numberValue": 0},
+            "overlooked_count": {"numberValue": 0},
+            "status": {"stringValue": "active"},
+        }
 
-    def semantic_list(self, **kwargs: Any) -> list[Any]:
-        raise NotImplementedError("Implemented in Task 11")
+    def _get_semantic_record(self, record_id: str) -> dict[str, Any]:
+        return self._data.get_memory_record(
+            memoryId=self._cfg.semantic.memory_id,
+            memoryRecordId=record_id,
+        )["memoryRecord"]
 
-    def semantic_update_text(self, **kwargs: Any) -> None:
-        raise NotImplementedError("Implemented in Task 11")
+    def semantic_observe(
+        self,
+        *,
+        content: str,
+        project: str | None = None,
+        scope: str = "project",
+    ) -> str:
+        """Create a semantic memory record. Bypasses LLM extraction —
+        the content is the preference text directly, written under the
+        userPreferenceMemoryStrategy so AWS applies its schema validation."""
+        actor_id = resolve_actor_id(project or self._project)
+        if scope == "general":
+            namespace = resolve_namespace("general", "semantic")
+        else:
+            namespace = resolve_namespace(actor_id, "semantic")
 
-    def semantic_set_scope(self, **kwargs: Any) -> None:
-        raise NotImplementedError("Implemented in Task 11")
+        # requestIdentifier: max 80 chars, content-hash for natural dedup
+        # if the same preference is observed twice in quick succession.
+        req_id = hashlib.sha256(content.encode("utf-8")).hexdigest()[:80]
 
-    def semantic_delete(self, **kwargs: Any) -> None:
-        raise NotImplementedError("Implemented in Task 11")
+        response = self._data.batch_create_memory_records(
+            memoryId=self._cfg.semantic.memory_id,
+            records=[
+                {
+                    "requestIdentifier": req_id,
+                    "namespaces": [namespace],
+                    "content": {"text": content},
+                    "timestamp": datetime.now(UTC),
+                    "memoryStrategyId": self._cfg.semantic.strategy_id,
+                    "metadata": self._semantic_initial_metadata(),
+                }
+            ],
+        )
+        failed = response.get("failedRecords", [])
+        if failed:
+            raise RuntimeError(
+                f"AgentCore semantic_observe failed: "
+                f"{failed[0].get('errorMessage', 'unknown')}"
+            )
+        return response["successfulRecords"][0]["memoryRecordId"]
+
+    def semantic_list(
+        self,
+        *,
+        project: str | None = None,
+        scope_filter: str | None = None,
+        search: str | None = None,
+        track_exposure: bool = True,
+    ) -> list[Any]:
+        """List semantic records. With search → retrieve_memory_records;
+        without → list_memory_records."""
+        actor_id = resolve_actor_id(project or self._project)
+        if scope_filter == "general":
+            namespace = resolve_namespace("general", "semantic")
+        else:
+            namespace = resolve_namespace(actor_id, "semantic")
+
+        if search and search.strip():
+            response = self._data.retrieve_memory_records(
+                memoryId=self._cfg.semantic.memory_id,
+                namespace=namespace,
+                searchCriteria={
+                    "searchQuery": search.strip(),
+                    "topK": 50,
+                },
+            )
+        else:
+            response = self._data.list_memory_records(
+                memoryId=self._cfg.semantic.memory_id,
+                namespace=namespace,
+                maxResults=100,
+            )
+
+        return [
+            {
+                "id": rec["memoryRecordId"],
+                "content": rec.get("content", {}).get("text", ""),
+                "namespaces": rec.get("namespaces", []),
+                "scope": "general" if rec.get("namespaces", [""])[0].startswith("general/")
+                         else "project",
+            }
+            for rec in response.get("memoryRecordSummaries", [])
+        ]
+
+    def semantic_update_text(self, *, id: str, content: str) -> None:
+        """Update the text of a semantic record. Metadata snapshot unchanged
+        (but full — system keys stripped via _full_metadata_snapshot)."""
+        record = self._get_semantic_record(id)
+        metadata = record.get("metadata", {})
+        snapshot = self._full_metadata_snapshot(metadata, {})
+
+        response = self._data.batch_update_memory_records(
+            memoryId=self._cfg.semantic.memory_id,
+            records=[
+                {
+                    "memoryRecordId": id,
+                    "timestamp": datetime.now(UTC),
+                    "content": {"text": content},
+                    "metadata": snapshot,
+                }
+            ],
+        )
+        failed = response.get("failedRecords", [])
+        if failed:
+            raise RuntimeError(
+                f"AgentCore semantic_update_text failed for {id}: "
+                f"{failed[0].get('errorMessage', 'unknown')}"
+            )
+
+    def semantic_set_scope(self, *, id: str, scope: str) -> None:
+        """Move a semantic record between project and general namespaces."""
+        if scope not in ("project", "general"):
+            raise ValueError(f"scope must be 'project' or 'general', got {scope!r}")
+        record = self._get_semantic_record(id)
+        metadata = record.get("metadata", {})
+        snapshot = self._full_metadata_snapshot(metadata, {})
+
+        target_namespace = (
+            resolve_namespace("general", "semantic")
+            if scope == "general"
+            else resolve_namespace(resolve_actor_id(self._project), "semantic")
+        )
+
+        response = self._data.batch_update_memory_records(
+            memoryId=self._cfg.semantic.memory_id,
+            records=[
+                {
+                    "memoryRecordId": id,
+                    "timestamp": datetime.now(UTC),
+                    "namespaces": [target_namespace],
+                    "metadata": snapshot,
+                }
+            ],
+        )
+        failed = response.get("failedRecords", [])
+        if failed:
+            raise RuntimeError(
+                f"AgentCore semantic_set_scope failed for {id}: "
+                f"{failed[0].get('errorMessage', 'unknown')}"
+            )
+
+    def semantic_delete(self, *, id: str) -> None:
+        """Permanently delete a semantic record."""
+        self._data.batch_delete_memory_records(
+            memoryId=self._cfg.semantic.memory_id,
+            records=[{"memoryRecordId": id}],
+        )
 
     # ----- Episodes: no-ops in agentcore mode (this task) -----
 
