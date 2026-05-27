@@ -340,7 +340,114 @@ def _handle_status(args: argparse.Namespace) -> int:
 
 
 def _handle_smoke(args: argparse.Namespace) -> int:
-    raise NotImplementedError("smoke lands in Task 4")
+    """Minimal observe + closure + retrieve cycle for ops verification."""
+    home = _resolve_home(args.home)
+    cfg = load_agentcore_config(home)
+    if cfg is None:
+        print(
+            f"No agentcore.json found at {home / 'agentcore.json'}. "
+            f"Run `better-memory agentcore init` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    region = args.region or cfg.region
+    data = _build_data_client(region)
+    actor_id = "smoke"
+    session_id = f"smoke-{int(time.time())}"
+    from datetime import UTC, datetime
+
+    try:
+        print(">> 1. CreateEvent — observation")
+        data.create_event(
+            memoryId=cfg.episodic.memory_id,
+            actorId=actor_id,
+            sessionId=session_id,
+            eventTimestamp=datetime.now(UTC),
+            payload=[{"conversational": {
+                "role": "USER",
+                "content": {"text": "smoke test observation"},
+            }}],
+            metadata={"theme": {"stringValue": "smoke"}},
+        )
+        print("   ok")
+
+        print(">> 2. CreateEvent — closure marker (role=OTHER)")
+        data.create_event(
+            memoryId=cfg.episodic.memory_id,
+            actorId=actor_id,
+            sessionId=session_id,
+            eventTimestamp=datetime.now(UTC),
+            payload=[{"conversational": {
+                "role": "OTHER",
+                "content": {"text": "session closed"},
+            }}],
+        )
+        print("   ok")
+
+        print(">> 3. ListEvents — confirm events readable")
+        response = data.list_events(
+            memoryId=cfg.episodic.memory_id,
+            actorId=actor_id,
+            sessionId=session_id,
+            maxResults=10,
+            includePayloads=True,
+        )
+        events = response.get("events", [])
+        if len(events) < 2:
+            raise RuntimeError(
+                f"list_events returned {len(events)} events; expected >= 2"
+            )
+        print(f"   ok ({len(events)} events)")
+
+        print(">> 4. BatchCreateMemoryRecords — semantic write")
+        record_id = f"smoke-rec-{int(time.time())}"
+        create_resp = data.batch_create_memory_records(
+            memoryId=cfg.semantic.memory_id,
+            records=[{
+                "memoryRecordId": record_id,
+                "namespaces": [f"projects/{actor_id}/semantic/"],
+                "content": {"text": "smoke test semantic record"},
+                "metadata": {
+                    "useful_count": {"numberValue": 0},
+                    "status": {"stringValue": "active"},
+                },
+            }],
+        )
+        failed = create_resp.get("failedRecords", [])
+        if failed:
+            raise RuntimeError(f"batch_create failed: {failed!r}")
+        real_id = create_resp["successfulRecords"][0]["memoryRecordId"]
+        print(f"   ok (id={real_id})")
+
+        print(">> 5. ListMemoryRecords — readback")
+        list_resp = data.list_memory_records(
+            memoryId=cfg.semantic.memory_id,
+            namespace=f"projects/{actor_id}/semantic/",
+            maxResults=10,
+        )
+        summaries = list_resp.get("memoryRecordSummaries", [])
+        if not summaries:
+            raise RuntimeError("list_memory_records returned no summaries")
+        print(f"   ok ({len(summaries)} records)")
+
+        print(">> 6. BatchDeleteMemoryRecords — cleanup")
+        del_resp = data.batch_delete_memory_records(
+            memoryId=cfg.semantic.memory_id,
+            records=[{"memoryRecordId": real_id}],
+        )
+        if del_resp.get("failedRecords"):
+            raise RuntimeError(
+                f"batch_delete failed: {del_resp['failedRecords']!r}"
+            )
+        print("   ok")
+
+        print()
+        print("AgentCore smoke PASSED")
+        return 0
+    except Exception as exc:
+        print(f"AgentCore smoke FAILED: {exc!r}", file=sys.stderr)
+        return 1
 
 
 def _handle_migrate(args: argparse.Namespace) -> int:
