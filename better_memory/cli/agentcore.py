@@ -454,4 +454,10 @@ def _handle_smoke(args: argparse.Namespace) -> int:
 
 
 def _handle_migrate(args: argparse.Namespace) -> int:
-    raise NotImplementedError("migrate-from-sqlite lands in Task 5")
+    raise NotImplementedError(
+        "Bulk migration of sqlite data to AgentCore is deferred to a future "
+        "spec. See docs/superpowers/specs/2026-05-24-agentcore-storage-backend-"
+        "design.md § 'Open questions (deferred to implementation)' item 5. "
+        "Workaround for now: start fresh in agentcore mode; observations from "
+        "sqlite-mode sessions remain queryable in sqlite mode."
+    )
