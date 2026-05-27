@@ -352,12 +352,15 @@ def _handle_smoke(args: argparse.Namespace) -> int:
         return 1
 
     region = args.region or cfg.region
-    data = _build_data_client(region)
     actor_id = "smoke"
     session_id = f"smoke-{int(time.time())}"
     from datetime import UTC, datetime
 
     try:
+        # Build client INSIDE try so import / region / credential failures
+        # land in the same "smoke FAILED -> rc=1" path as wire errors,
+        # rather than escaping as an unhandled traceback.
+        data = _build_data_client(region)
         print(">> 1. CreateEvent — observation")
         data.create_event(
             memoryId=cfg.episodic.memory_id,
