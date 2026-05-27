@@ -27,6 +27,19 @@ It's a memory layer for Claude Code that runs entirely on your machine. Your obs
 
 SQLite ships with Python; `sqlite-vec` is installed as a pip dependency — nothing else to set up.
 
+## Storage backends
+
+better-memory has two storage backends. Pick one:
+
+| Backend | When to pick | Setup |
+|---|---|---|
+| **`sqlite`** (default) | Single-machine usage; full offline operation; no cloud cost. | None — works out of the box. |
+| **`agentcore`** | Multi-machine syncing; managed extraction by AWS; team-shared memory bucket. | Requires AWS account with Bedrock AgentCore Memory enabled in `eu-west-2`. See [AgentCore setup](website/agentcore-setup.md). |
+
+Switch backends via `BETTER_MEMORY_STORAGE_BACKEND=agentcore` (default: `sqlite`). The MCP server reads the env var at startup and dispatches accordingly. Switching is one-way today — there is no bulk migration tool (deferred; clean start in agentcore mode is the supported path).
+
+`agentcore` mode needs the optional dependency group: `pip install 'better-memory[agentcore]'` (or `uv pip install '.[agentcore]'`). Sqlite-only installs skip boto3 entirely.
+
 ## Quick start
 
 ```bash
