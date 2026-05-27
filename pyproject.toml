@@ -18,6 +18,15 @@ dependencies = [
     "markupsafe>=2",
 ]
 
+[project.scripts]
+better-memory = "better_memory.cli.main:main"
+
+[project.optional-dependencies]
+agentcore = [
+    "boto3>=1.43.14",
+    "botocore>=1.43.14",
+]
+
 [dependency-groups]
 dev = [
     "pytest",
