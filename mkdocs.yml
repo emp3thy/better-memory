@@ -79,6 +79,7 @@ plugins:
 nav:
   - Home: index.md
   - Configuration: configuration.md
+  - AgentCore setup: agentcore-setup.md
   - Architecture: architecture.md
   - MCP tools: mcp-tools.md
   - Observation lifecycle: observation-lifecycle.md
