@@ -17,6 +17,31 @@ better-memory is a four-layer epistemic hierarchy backed by a single SQLite data
 - **`knowledge.db`** — FTS5 index over the contents of `~/.better-memory/knowledge-base/`. Rebuilt on mtime change.
 - **`spool/`** — JSON payloads written by Claude Code hooks, drained lazily by the next `memory.retrieve` call. Bad files quarantine to `spool/.quarantine/` rather than blocking the drain.
 
+## Storage backends
+
+better-memory abstracts persistence behind the `StorageBackend` protocol (`better_memory/storage/protocol.py`). At server startup, the factory (`better_memory/storage/factory.py`) selects an implementation based on `BETTER_MEMORY_STORAGE_BACKEND`:
+
+```mermaid
+flowchart LR
+  ENV["BETTER_MEMORY_STORAGE_BACKEND"]
+  ENV -->|sqlite| SQLITE["SqliteBackend<br/>(local memory.db + sqlite-vec)"]
+  ENV -->|agentcore| AGENTCORE["AgentCoreBackend<br/>(AWS Bedrock AgentCore Memory)"]
+  SQLITE -->|sync I/O| DB[("memory.db")]
+  AGENTCORE -->|boto3| AWS[("eu-west-2<br/>bedrock-agentcore")]
+```
+
+| Aspect | `sqlite` | `agentcore` |
+|---|---|---|
+| Data location | Local file (`memory.db`) | AWS-managed (`eu-west-2`) |
+| Extraction | Local Claude (synthesize_next_* tools) | Cloud (built-in strategies) |
+| Latency | Single-digit ms | 100-500 ms per AWS call |
+| Cost | Free | Per-API-call + per-record pricing |
+| Multi-machine sync | No | Yes (shared memory resources) |
+| Closure events | N/A | `CreateEvent(role=OTHER)` from Stop hook |
+| Episode tracking | Local `episodes` table | Internal to AgentCore (sessionId) |
+
+See [Configuration](configuration.md) for env vars and [AgentCore setup](agentcore-setup.md) for the agentcore path.
+
 ## Retrieval
 
 `memory.retrieve` returns three buckets — `do`, `dont`, `neutral` — built from a hybrid search:
