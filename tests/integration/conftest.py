@@ -142,30 +142,34 @@ def agentcore_throwaway_memories(agentcore_region: str):
             time.sleep(interval)
         raise TimeoutError(f"memory {memory_id} did not become ACTIVE in {timeout}s")
 
-    epi_initial = _create(
-        epi_name, episodic_strategy_block(), DEFAULT_EPISODIC_EVENT_EXPIRY_DAYS
-    )
-    sem_initial = _create(
-        sem_name, semantic_strategy_block(), DEFAULT_SEMANTIC_EVENT_EXPIRY_DAYS
-    )
-
-    # Register atexit teardown IMMEDIATELY after create — so any abnormal
-    # termination (Ctrl-C, SIGTERM, pytest hard-kill) still triggers cleanup.
-    # `_cleanup` is idempotent — pytest fixture teardown runs it too on the
-    # happy path; the second call is a no-op since the memories are gone.
+    # Track memory IDs as we create them and register atexit BEFORE the
+    # second create — so if create #2 raises, create #1's memory still
+    # gets cleaned up. Without this, a mid-flow AWS throttle leaves one
+    # orphan memory per failed run.
+    created_ids: list[str] = []
     cleaned_up: list[bool] = []
 
     def _cleanup() -> None:
         if cleaned_up or _keep_after_test():
             return
         cleaned_up.append(True)
-        for mid in (epi_initial["id"], sem_initial["id"]):
+        for mid in created_ids:
             try:
                 control.delete_memory(memoryId=mid)
             except Exception as exc:
                 print(f"WARN: atexit failed to delete {mid}: {exc!r}")
 
     atexit.register(_cleanup)
+
+    epi_initial = _create(
+        epi_name, episodic_strategy_block(), DEFAULT_EPISODIC_EVENT_EXPIRY_DAYS
+    )
+    created_ids.append(epi_initial["id"])
+
+    sem_initial = _create(
+        sem_name, semantic_strategy_block(), DEFAULT_SEMANTIC_EVENT_EXPIRY_DAYS
+    )
+    created_ids.append(sem_initial["id"])
 
     epi_active = _poll_active(epi_initial["id"])
     sem_active = _poll_active(sem_initial["id"])
