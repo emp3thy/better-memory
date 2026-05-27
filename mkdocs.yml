@@ -83,6 +83,8 @@ nav:
   - Architecture: architecture.md
   - MCP tools: mcp-tools.md
   - Observation lifecycle: observation-lifecycle.md
+  - Troubleshooting:
+    - AgentCore: troubleshooting/agentcore.md
   - Contributing: contributing.md
 
 extra_css:
