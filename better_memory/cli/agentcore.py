@@ -22,6 +22,7 @@ from better_memory.cli._agentcore_strategies import (
 from better_memory.storage.agentcore_persistence import (
     AgentCoreConfig,
     MemoryRecord,
+    load_agentcore_config,
     save_agentcore_config,
 )
 
@@ -297,7 +298,45 @@ def _handle_init(args: argparse.Namespace) -> int:
 
 
 def _handle_status(args: argparse.Namespace) -> int:
-    raise NotImplementedError("status lands in Task 3")
+    home = _resolve_home(args.home)
+    cfg = load_agentcore_config(home)
+    if cfg is None:
+        print(
+            f"No agentcore.json found at {home / 'agentcore.json'}. "
+            f"Run `better-memory agentcore init` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    region = args.region or cfg.region
+    control = _build_control_client(region)
+
+    all_active = True
+    for label, record in (("episodic", cfg.episodic), ("semantic", cfg.semantic)):
+        response = control.get_memory(memoryId=record.memory_id)
+        memory = response["memory"]
+        status = memory.get("status", "UNKNOWN")
+        strategies = memory.get("strategies") or []
+        strategy_summary = ", ".join(
+            f"{s.get('name','?')}={s.get('status','?')}"
+            for s in strategies
+        ) or "(none)"
+        expiry = memory.get("eventExpiryDuration", "?")
+        is_active = (
+            status == "ACTIVE"
+            and strategies
+            and all(s.get("status") == "ACTIVE" for s in strategies)
+        )
+        if not is_active:
+            all_active = False
+        print(f"{label}:")
+        print(f"  memory_id:   {record.memory_id}")
+        print(f"  name:        {memory.get('name', '?')}")
+        print(f"  status:      {status}")
+        print(f"  strategies:  {strategy_summary}")
+        print(f"  expiry_days: {expiry}")
+
+    return 0 if all_active else 1
 
 
 def _handle_smoke(args: argparse.Namespace) -> int:
