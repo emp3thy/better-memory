@@ -237,6 +237,58 @@ def test_project_name_override_file_beats_git(tmp_path: Path) -> None:
     assert project_name(repo) == "override-name"
 
 
+def test_project_name_env_var_wins_over_file_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BETTER_MEMORY_PROJECT env var takes precedence over .better-memory file."""
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    (cwd / ".better-memory").write_text("from-file\n", encoding="utf-8")
+    monkeypatch.setenv("BETTER_MEMORY_PROJECT", "from-env")
+    assert project_name(cwd) == "from-env"
+
+
+def test_project_name_env_var_wins_over_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BETTER_MEMORY_PROJECT env var takes precedence over git resolution."""
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git_init(repo)
+    monkeypatch.setenv("BETTER_MEMORY_PROJECT", "from-env")
+    assert project_name(repo) == "from-env"
+
+
+def test_project_name_empty_env_var_falls_through_to_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty BETTER_MEMORY_PROJECT is treated as unset; file override still wins."""
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    (cwd / ".better-memory").write_text("from-file\n", encoding="utf-8")
+    monkeypatch.setenv("BETTER_MEMORY_PROJECT", "")
+    assert project_name(cwd) == "from-file"
+
+
+def test_project_name_whitespace_only_env_var_falls_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace-only BETTER_MEMORY_PROJECT is treated as unset."""
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    (cwd / ".better-memory").write_text("from-file\n", encoding="utf-8")
+    monkeypatch.setenv("BETTER_MEMORY_PROJECT", "   \t\n  ")
+    assert project_name(cwd) == "from-file"
+
+
+def test_project_name_env_var_stripped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Surrounding whitespace in BETTER_MEMORY_PROJECT is stripped."""
+    monkeypatch.setenv("BETTER_MEMORY_PROJECT", "  scoped-name  \n")
+    assert project_name(tmp_path) == "scoped-name"
+
+
 def test_embeddings_backend_defaults_to_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", raising=False)
     cfg = get_config()

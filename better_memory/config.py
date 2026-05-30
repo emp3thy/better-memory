@@ -137,24 +137,34 @@ def project_name(cwd: Path | None = None) -> str:
     """Return the canonical project name for ``cwd`` (defaults to ``Path.cwd()``).
 
     Resolution order:
-    1. ``<cwd>/.better-memory`` override file: first non-empty stripped line.
+    1. ``BETTER_MEMORY_PROJECT`` environment variable, stripped. Empty/whitespace-only
+       values fall through to the next branch. This is the subprocess-scoping signal
+       — e.g. ralph's executor sets it per-iteration so subagent observations land
+       in the PBI's target_repo regardless of the worktree's cwd.
+    2. ``<cwd>/.better-memory`` override file: first non-empty stripped line.
        The ``.better-memory`` override is checked only at ``cwd``, not at
        ancestors — the override is a deliberate per-directory signal.
-    2. ``git rev-parse --git-common-dir`` (handles worktrees: returns the main
+    3. ``git rev-parse --git-common-dir`` (handles worktrees: returns the main
        repo's .git directory). Project name = parent dir's ``.name``.
-    3. ``"general"`` if no git tree is found or git is unavailable.
+    4. ``"general"`` if no git tree is found or git is unavailable.
 
     Used uniformly by knowledge search, observation writes/reads, episode
     scoping, the UI panel filter, and hook payloads — every subsystem that
     buckets state by project must call this helper, never construct the
     name inline.
 
-    The override-file branch is intentionally **not** memoized so editing
-    ``.better-memory`` mid-session takes effect immediately. The git
-    resolution is memoized by absolute path via :func:`_resolve_git_project`.
+    The env-var and override-file branches are intentionally **not** memoized
+    so editing them mid-session takes effect immediately. The git resolution
+    is memoized by absolute path via :func:`_resolve_git_project`.
     """
     fn = "project_name"
     with _diag.trace(fn):
+        _diag.step(fn, "check_env_var")
+        env_value = os.environ.get("BETTER_MEMORY_PROJECT", "").strip()
+        if env_value:
+            _diag.step(fn, "env_var_returned", value=env_value)
+            return env_value
+
         _diag.step(fn, "resolve_cwd")
         cwd = cwd if cwd is not None else Path.cwd()
         _diag.step(fn, "cwd_resolved", cwd=str(cwd))
