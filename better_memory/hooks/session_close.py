@@ -58,6 +58,79 @@ def _synthesise_marker() -> dict[str, str]:
     }
 
 
+def _build_agentcore_data_client(region: str):
+    """Construct the bedrock-agentcore (data plane) boto3 client.
+
+    Defined as a module-level function so tests can patch it without needing
+    boto3 installed. boto3 is imported lazily so sqlite-mode hooks never pay
+    for the import."""
+    import boto3
+    from botocore.config import Config as BotoConfig
+    return boto3.client(
+        "bedrock-agentcore",
+        config=BotoConfig(
+            region_name=region, retries={"mode": "standard", "max_attempts": 5}
+        ),
+    )
+
+
+def _fire_agentcore_closure(*, session_id: str, project: str) -> bool:
+    """In agentcore mode, fire one CreateEvent(role=OTHER) against the
+    current session. Returns True if a closure event was fired, False if
+    we short-circuited (sqlite mode, missing config, or any failure).
+
+    NEVER raises. AgentCore-side failure is logged via _error_log and
+    the spool-marker write proceeds anyway (idle-detection fallback).
+
+    Reuses Plan 2's `closure_event_payload()` + `resolve_actor_id()` from
+    `better_memory/storage/session.py` so there's a single source of truth
+    for the payload shape and actor-id resolution — AgentCoreBackend.observe
+    uses the same helpers."""
+    # Env-var guard BEFORE any import so sqlite-mode pays nothing.
+    if os.environ.get("BETTER_MEMORY_STORAGE_BACKEND", "sqlite") != "agentcore":
+        return False
+
+    try:
+        # Lazy imports — sqlite mode short-circuited above and never reaches
+        # this block.
+        from datetime import UTC, datetime
+
+        from better_memory.storage.agentcore_persistence import (
+            load_agentcore_config,
+        )
+        from better_memory.storage.session import (
+            closure_event_payload,
+            resolve_actor_id,
+        )
+
+        home_env = os.environ.get("BETTER_MEMORY_HOME")
+        home = (
+            Path(home_env).expanduser()
+            if home_env
+            else Path.home() / ".better-memory"
+        )
+        cfg = load_agentcore_config(home)
+        if cfg is None:
+            return False
+
+        client = _build_agentcore_data_client(cfg.region)
+        client.create_event(
+            memoryId=cfg.episodic.memory_id,
+            actorId=resolve_actor_id(project),
+            sessionId=session_id,
+            eventTimestamp=datetime.now(UTC),
+            payload=closure_event_payload(),
+        )
+        return True
+    except BaseException as _exc:
+        try:
+            from better_memory.hooks._error_log import record_hook_error
+            record_hook_error(hook_name="session_close_agentcore", exc=_exc)
+        except BaseException:
+            pass
+        return False
+
+
 def _emit_rating_directive_if_unrated(session_id: str) -> bool:
     """Best-effort: if the current session has any unrated exposures,
     emit a decision:block directive on stdout asking the LLM to rate
@@ -216,6 +289,23 @@ def main() -> None:
             # sees session_end exactly once (on the final fire) and
             # downstream synthesis runs AFTER ratings land.
             sys.exit(0)
+
+        # Agentcore mode: fire a closure-marker event so the episodic
+        # strategy triggers extraction within minutes rather than waiting
+        # ~15-20m for idle detection (spec § "Spike findings" Finding 2).
+        # Non-fatal: failure is logged but does not block the spool marker.
+        project_for_closure = (
+            data.get("cwd", "general") or "general"
+        )
+        if isinstance(project_for_closure, str):
+            # Use git-derived project name when possible; fall back to "general"
+            project_for_closure = os.path.basename(
+                project_for_closure.rstrip("/\\")
+            ) or "general"
+        _fire_agentcore_closure(
+            session_id=str(session_id_str or ""),
+            project=str(project_for_closure),
+        )
 
         spool_dir = _default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)

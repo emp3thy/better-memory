@@ -69,6 +69,12 @@ Start a foreground episode for a specific goal. Triggers synthesis on the prior 
 
 Returns `{"episode_id": "<uuid>", "reflections": {...}}`.
 
+!!! note "No-op in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
+
+!!! note "Response shape differs in agentcore mode"
+    `pending_synthesis` is omitted from the response — AgentCore has no local pending queue. UI consumers should check whether the field is present rather than assuming it always is.
+
 ### `memory.close_episode`
 
 Close the active episode.
@@ -82,13 +88,22 @@ Close the active episode.
 !!! note "Outcome enum differs from observations"
     Episode outcomes do **not** include `failure`. The valid set is `success` / `partial` / `abandoned` / `no_outcome`. `failure` is valid for `memory.observe` and `memory.record_use`, not for episodes.
 
+!!! note "No-op in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
+
 ### `memory.list_episodes`
 
 List recent episodes with their open/closed state.
 
+!!! note "No-op in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
+
 ### `memory.reconcile_episodes`
 
 Surface and resolve inconsistencies in episode state.
+
+!!! note "No-op in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
 
 ### `memory.run_retention`
 
@@ -158,6 +173,9 @@ Return the next pending episode's full context: episode metadata, all observatio
 |---|---|---|---|
 | `project` | string | optional | Defaults to cwd-derived. |
 
+!!! note "Not available in agentcore mode"
+    These tools are NOT registered when `BETTER_MEMORY_STORAGE_BACKEND=agentcore`. AgentCore's built-in episodic strategy performs extraction in the cloud; there is no local pending queue to drain.
+
 ### `memory.synthesize_next_apply`
 
 Apply a synthesis decision for one episode. Atomically creates new reflections, augments existing ones, merges near-duplicates (combining their evidence and rating counters onto the survivor), marks observations consumed (or ignored), and stamps the episode synthesized.
@@ -169,6 +187,9 @@ Apply a synthesis decision for one episode. Atomically creates new reflections, 
 | `project` | string | optional | Defaults to cwd-derived. |
 
 Returns a step summary: `{episode_id, counts, queue, failure}`.
+
+!!! note "Not available in agentcore mode"
+    These tools are NOT registered when `BETTER_MEMORY_STORAGE_BACKEND=agentcore`. AgentCore's built-in episodic strategy performs extraction in the cloud; there is no local pending queue to drain.
 
 ## Rating tools
 
