@@ -192,6 +192,49 @@ def test_init_polls_until_active(tmp_path, monkeypatch) -> None:
     assert control.get_memory.call_count == 5
 
 
+def test_init_deletes_orphan_when_poll_raises_after_create(
+    tmp_path, monkeypatch
+) -> None:
+    """CreateMemory succeeds, _poll_until_active hits FAILED state ->
+    init must still delete the AWS resource even though no MemoryRecord
+    was ever returned. Without the created_ids list this leak would slip
+    past the orphan cleanup (which previously only ran when episodic was
+    not None)."""
+    control = MagicMock(name="bedrock-agentcore-control")
+    paginator = MagicMock()
+    paginator.paginate.return_value = iter([{"memories": []}])
+    control.get_paginator.return_value = paginator
+
+    control.create_memory.side_effect = [
+        _create_memory_response("epi-poll-fail", "epi-strat"),
+    ]
+    # First poll returns FAILED -> _poll_until_active raises RuntimeError
+    control.get_memory.side_effect = [{
+        "memory": {
+            "id": "epi-poll-fail",
+            "arn": "arn:aws:bedrock-agentcore:eu-west-2:123:memory/epi-poll-fail",
+            "name": "better_memory_episodic",
+            "status": "FAILED",
+            "strategies": [
+                {"strategyId": "epi-strat", "status": "FAILED", "name": "x"}
+            ],
+        }
+    }]
+
+    monkeypatch.setattr(
+        "better_memory.cli.agentcore._build_control_client",
+        lambda region: control,
+    )
+    monkeypatch.setattr("better_memory.cli.agentcore.time.sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="FAILED state"):
+        _handle_init(_make_args(tmp_path))
+
+    # Even though episodic MemoryRecord was never returned, the raw id
+    # tracked via created_ids must be deleted.
+    control.delete_memory.assert_called_once_with(memoryId="epi-poll-fail")
+
+
 def test_init_deletes_orphan_when_second_create_fails(
     tmp_path, monkeypatch
 ) -> None:

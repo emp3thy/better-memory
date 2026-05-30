@@ -159,7 +159,15 @@ def _create_one_memory(
     strategy_name: str,
     event_expiry_days: int,
     label: str,
+    created_ids: list[str],
 ) -> MemoryRecord:
+    """Create one AgentCore memory and wait for ACTIVE.
+
+    Appends the raw memory_id to ``created_ids`` immediately after
+    CreateMemory returns — BEFORE the polling loop — so the caller can
+    clean up even if `_poll_until_active` raises (FAILED state, 240s
+    timeout, network blip). Without this, polling failures would leak
+    the AWS resource because the helper never returns a MemoryRecord."""
     print(f">> Creating {label} memory ({name!r})...")
     response = control.create_memory(
         name=name,
@@ -169,6 +177,7 @@ def _create_one_memory(
     )
     initial = response["memory"]
     memory_id = initial["id"]
+    created_ids.append(memory_id)
     print(f"   created: memory_id={memory_id}")
 
     final = _poll_until_active(control, memory_id, label=label)
@@ -215,7 +224,13 @@ def _handle_init(args: argparse.Namespace) -> int:
             )
             return 1
 
-    episodic: MemoryRecord | None = None
+    # Mutable list of raw memory_ids appended by _create_one_memory
+    # immediately after each CreateMemory returns. On exception we iterate
+    # this list and delete every memory we created — covers both the
+    # "create #2 raised" case AND the "create #1 succeeded but its
+    # _poll_until_active timed out / hit FAILED" case (which a return-value-
+    # based cleanup would miss).
+    created_ids: list[str] = []
     try:
         episodic = _create_one_memory(
             control,
@@ -224,6 +239,7 @@ def _handle_init(args: argparse.Namespace) -> int:
             strategy_name=DEFAULT_EPISODIC_STRATEGY_NAME,
             event_expiry_days=DEFAULT_EPISODIC_EVENT_EXPIRY_DAYS,
             label="episodic",
+            created_ids=created_ids,
         )
 
         semantic = _create_one_memory(
@@ -233,6 +249,7 @@ def _handle_init(args: argparse.Namespace) -> int:
             strategy_name=DEFAULT_SEMANTIC_STRATEGY_NAME,
             event_expiry_days=DEFAULT_SEMANTIC_EVENT_EXPIRY_DAYS,
             label="semantic",
+            created_ids=created_ids,
         )
     except Exception as exc:
         # ValidationException on the name regex is the most common
@@ -246,25 +263,27 @@ def _handle_init(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
-        # Orphan cleanup: if episodic was created but semantic failed,
-        # delete the episodic memory so a re-run of `init` starts clean.
-        if episodic is not None:
+        # Orphan cleanup: every memory_id appended to created_ids gets
+        # deleted, including any whose _poll_until_active raised.
+        if created_ids:
             print(
-                f"\n!! Second memory create failed ({exc!r}). "
-                f"Deleting orphan episodic memory {episodic.memory_id} "
-                f"so a re-run starts clean...",
+                f"\n!! Memory create / poll failed ({exc!r}). "
+                f"Deleting {len(created_ids)} orphan "
+                f"memor{'y' if len(created_ids) == 1 else 'ies'} "
+                f"so a re-run of init starts clean...",
                 file=sys.stderr,
             )
-            try:
-                control.delete_memory(memoryId=episodic.memory_id)
-                print(f"   deleted {episodic.memory_id}", file=sys.stderr)
-            except Exception as del_exc:
-                print(
-                    f"   WARN: failed to delete orphan {episodic.memory_id}: "
-                    f"{del_exc!r}. Delete it manually via the AWS console "
-                    f"before re-running init.",
-                    file=sys.stderr,
-                )
+            for orphan_id in created_ids:
+                try:
+                    control.delete_memory(memoryId=orphan_id)
+                    print(f"   deleted {orphan_id}", file=sys.stderr)
+                except Exception as del_exc:
+                    print(
+                        f"   WARN: failed to delete orphan {orphan_id}: "
+                        f"{del_exc!r}. Delete it manually via the AWS console "
+                        f"before re-running init.",
+                        file=sys.stderr,
+                    )
 
         if code == "ValidationException":
             print(
@@ -420,7 +439,12 @@ def _handle_smoke(args: argparse.Namespace) -> int:
         failed = create_resp.get("failedRecords", [])
         if failed:
             raise RuntimeError(f"batch_create failed: {failed!r}")
-        real_id = create_resp["successfulRecords"][0]["memoryRecordId"]
+        successful = create_resp.get("successfulRecords") or []
+        if not successful:
+            raise RuntimeError(
+                f"batch_create returned no successful records: {create_resp!r}"
+            )
+        real_id = successful[0]["memoryRecordId"]
         print(f"   ok (id={real_id})")
 
         print(">> 5. ListMemoryRecords — readback")
