@@ -145,20 +145,25 @@ One env var roots the runtime filesystem layout:
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
 | `BETTER_MEMORY_EMBEDDINGS_BACKEND` | `ollama` | `ollama` (default) — local Ollama at `OLLAMA_HOST`; `sqlite` — pure-SQL trigram-FTS5 fusion, no model downloads and no in-memory state. |
 | `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
+| `BETTER_MEMORY_PROJECT` | unset | Force the project name for all calls in this process. Highest-priority project-resolution signal — overrides both the `.better-memory` file and the git-derived name. Designed for subprocess scoping (e.g. ralph's executor sets it per-iteration so subagent observations land in the PBI's target_repo regardless of the worktree's cwd). Empty/whitespace-only values are treated as unset. |
 
 ### Project-name override
 
-Memory is bucketed by project name, resolved in this order:
+Memory is bucketed by project name, resolved in this order (highest priority first):
 
-1. **`.better-memory` override file** — if a `.better-memory` file
+1. **`BETTER_MEMORY_PROJECT` env var** — if set to a non-empty (after
+   stripping) value, it is used verbatim for every call in the process.
+   Empty/whitespace-only values fall through. Designed for subprocess
+   scoping rather than interactive use.
+2. **`.better-memory` override file** — if a `.better-memory` file
    exists in the cwd, its first non-empty stripped line is used
-   verbatim. Use this only for the rare case where the git-derived
-   name isn't right.
-2. **Git common dir** — `git rev-parse --git-common-dir` resolves to
+   verbatim. Checked only at the cwd, not at ancestors. Use this only
+   for the rare case where the git-derived name isn't right.
+3. **Git common dir** — `git rev-parse --git-common-dir` resolves to
    the main repo's `.git` directory even from inside a worktree, so
    all worktrees of the same repo share one project bucket
    automatically. The project name is the parent directory's name.
-3. **`general`** — fallback when the cwd isn't inside a git tree (or
+4. **`general`** — fallback when the cwd isn't inside a git tree (or
    git is unavailable).
 
 If you need an override (renamed repo, multi-repo monolith, etc.):
