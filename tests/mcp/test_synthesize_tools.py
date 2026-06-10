@@ -32,13 +32,19 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.mcp.server import (
-    _serialize_synth_apply_ok,
-    _serialize_synth_apply_state_error,
-    _serialize_synth_apply_validation_error,
-    _serialize_synth_get_context,
-    _tool_definitions,
+from better_memory.mcp.serializers import (
+    serialize_synth_apply_ok as _serialize_synth_apply_ok,
 )
+from better_memory.mcp.serializers import (
+    serialize_synth_apply_state_error as _serialize_synth_apply_state_error,
+)
+from better_memory.mcp.serializers import (
+    serialize_synth_apply_validation_error as _serialize_synth_apply_validation_error,
+)
+from better_memory.mcp.serializers import (
+    serialize_synth_get_context as _serialize_synth_get_context,
+)
+from better_memory.mcp.server import _tool_definitions
 from better_memory.services.reflection import (
     EpisodeContext,
     EpisodeForPrompt,

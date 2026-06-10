@@ -14,7 +14,7 @@ import logging
 
 import pytest
 
-from better_memory.mcp.server import _run_best_effort
+from better_memory.mcp._util import run_best_effort as _run_best_effort
 
 
 def test_run_best_effort_swallows_exception(caplog: pytest.LogCaptureFixture) -> None:
@@ -23,7 +23,7 @@ def test_run_best_effort_swallows_exception(caplog: pytest.LogCaptureFixture) ->
     def boom() -> None:
         raise RuntimeError("kaboom")
 
-    with caplog.at_level(logging.ERROR, logger="better_memory.mcp.server"):
+    with caplog.at_level(logging.ERROR, logger="better_memory.mcp._util"):
         _run_best_effort("spool.drain", boom)  # must not raise
 
 
@@ -35,12 +35,12 @@ def test_run_best_effort_logs_exception_with_traceback(
     def boom() -> None:
         raise RuntimeError("kaboom")
 
-    with caplog.at_level(logging.ERROR, logger="better_memory.mcp.server"):
+    with caplog.at_level(logging.ERROR, logger="better_memory.mcp._util"):
         _run_best_effort("spool.drain", boom)
 
     matching = [
         r for r in caplog.records
-        if r.name == "better_memory.mcp.server"
+        if r.name == "better_memory.mcp._util"
         and r.levelno == logging.ERROR
         and "spool.drain" in r.getMessage()
     ]

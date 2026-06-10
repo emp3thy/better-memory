@@ -181,7 +181,7 @@ despite the shared name.
 
 ## MCP tools
 
-The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/server.py`.
+The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/tools.py`.
 
 **Episodic memory** — observations the AI writes during a session.
 
