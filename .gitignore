@@ -52,3 +52,6 @@ Thumbs.db
 
 # Claude Code per-machine settings (personal overrides; never commit)
 .claude/settings.local.json
+
+# tech-debt-scan artefacts
+.tech-debt/
