@@ -2,6 +2,10 @@
 
 # Worktrees
 .worktrees/
+.claude/worktrees/
+
+# Graphify analysis output (regenerated on demand)
+graphify-out/
 
 # Python
 __pycache__/

@@ -81,6 +81,12 @@ dependencies = [
     { name = "sqlite-vec" },
 ]
 
+[package.optional-dependencies]
+agentcore = [
+    { name = "boto3" },
+    { name = "botocore" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "boto3" },
@@ -98,6 +104,8 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", marker = "extra == 'agentcore'", specifier = ">=1.43.14" },
+    { name = "botocore", marker = "extra == 'agentcore'", specifier = ">=1.43.14" },
     { name = "flask", specifier = ">=3" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "markupsafe", specifier = ">=2" },
@@ -105,6 +113,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2" },
     { name = "sqlite-vec", specifier = ">=0.1" },
 ]
+provides-extras = ["agentcore"]
 
 [package.metadata.requires-dev]
 dev = [
