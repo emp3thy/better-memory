@@ -819,6 +819,165 @@ def test_semantic_delete_propagates_failed_records(backend, mock_data_client) ->
         backend.semantic_delete(id="sm-bad")
 
 
+# ===== Error paths: observe / retrieve / _parse_reflection_record =====
+
+
+class _FakeClientError(Exception):
+    """Stand-in for botocore.exceptions.ClientError (botocore is absent in
+    the unit-test env). Carries the .response dict boto3 errors expose."""
+
+    def __init__(self, code: str = "ValidationException", message: str = "bad request") -> None:
+        super().__init__(message)
+        self.response = {"Error": {"Code": code, "Message": message}}
+
+
+async def test_observe_propagates_client_error_from_create_event(backend, mock_data_client) -> None:
+    """observe has no try/except around create_event — a ClientError from
+    AWS (e.g. invalid session id, validation failure) must surface to the
+    caller, not be swallowed."""
+    mock_data_client.create_event.side_effect = _FakeClientError(
+        code="ValidationException", message="Invalid sessionId"
+    )
+    with pytest.raises(_FakeClientError, match="Invalid sessionId"):
+        await backend.observe(content="x")
+
+
+async def test_observe_propagates_transport_timeout(backend, mock_data_client) -> None:
+    """A transport-level timeout raised inside the executor thread must
+    propagate through run_in_executor to the awaiting caller."""
+    mock_data_client.create_event.side_effect = TimeoutError("read timed out")
+    with pytest.raises(TimeoutError, match="read timed out"):
+        await backend.observe(content="x")
+
+
+def test_retrieve_propagates_when_one_polarity_fetch_fails(backend, mock_data_client) -> None:
+    """One polarity's list_memory_records raising must propagate out of
+    retrieve via Future.result() — no silent partial result."""
+    good = {"memoryRecordSummaries": []}
+
+    def stub(**kwargs):
+        for f in kwargs.get("metadataFilters", []):
+            if (
+                f["left"]["metadataKey"] == "polarity"
+                and f["right"]["metadataValue"]["stringValue"] == "dont"
+            ):
+                raise _FakeClientError(code="ThrottlingException", message="rate exceeded")
+        return good
+
+    mock_data_client.list_memory_records.side_effect = stub
+    with pytest.raises(_FakeClientError, match="rate exceeded"):
+        backend.retrieve(project="testproj")
+
+
+def test_retrieve_propagates_when_all_polarity_fetches_fail(backend, mock_data_client) -> None:
+    mock_data_client.list_memory_records.side_effect = _FakeClientError(
+        code="AccessDeniedException", message="not authorized"
+    )
+    with pytest.raises(_FakeClientError, match="not authorized"):
+        backend.retrieve(project="testproj")
+
+
+def test_retrieve_propagates_worker_timeout(backend, mock_data_client) -> None:
+    """A timeout inside a ThreadPoolExecutor worker surfaces from
+    Future.result() as the original exception."""
+    mock_data_client.list_memory_records.side_effect = TimeoutError("read timed out")
+    with pytest.raises(TimeoutError, match="read timed out"):
+        backend.retrieve(project="testproj")
+
+
+def test_retrieve_malformed_json_content_falls_back_to_valid_shape(backend, mock_data_client) -> None:
+    """_parse_reflection_record swallows json.JSONDecodeError and degrades to
+    an empty body — the record still comes back in the public reflection
+    shape with defaulted body fields and metadata-derived counters intact."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "rec-malformed",
+                "content": {"text": "{not valid json"},
+                "memoryStrategyId": "episodicReflections-qPr9876543",
+                "namespaces": ["projects/testproj/reflections/"],
+                "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+                "metadata": {
+                    "polarity": {"stringValue": "do"},
+                    "useful_count": {"numberValue": 2},
+                    "missed_count": {"numberValue": 1},
+                    "overlooked_count": {"numberValue": 0},
+                    "status": {"stringValue": "active"},
+                },
+            }
+        ]
+    }
+    result = backend.retrieve(project="testproj", polarity="do")
+    assert len(result["do"]) == 1
+    refl = result["do"][0]
+    # Body-derived fields default; metadata-derived counters survive.
+    assert refl["id"] == "rec-malformed"
+    assert refl["title"] == ""
+    assert refl["use_cases"] == ""
+    assert refl["hints"] == []
+    assert refl["confidence"] == 0.0
+    assert refl["tech"] is None
+    assert refl["phase"] == "general"
+    assert refl["useful_count"] == 2
+    assert refl["evidence_count"] == 3  # useful_count + missed_count
+
+
+def test_retrieve_missing_content_key_falls_back_to_valid_shape(backend, mock_data_client) -> None:
+    """A record with no content key at all parses as empty text -> empty
+    body, same graceful degradation as malformed JSON."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "rec-no-content",
+                "namespaces": ["projects/testproj/reflections/"],
+                "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+                "metadata": {
+                    "polarity": {"stringValue": "do"},
+                    "useful_count": {"numberValue": 0},
+                    "status": {"stringValue": "active"},
+                },
+            }
+        ]
+    }
+    result = backend.retrieve(project="testproj", polarity="do")
+    assert len(result["do"]) == 1
+    refl = result["do"][0]
+    assert refl["id"] == "rec-no-content"
+    assert refl["title"] == ""
+    assert refl["hints"] == []
+    assert refl["confidence"] == 0.0
+
+
+def test_retrieve_non_dict_json_content_falls_back_to_valid_shape(backend, mock_data_client) -> None:
+    """Valid JSON that is not an object (e.g. a list) exercises the
+    isinstance(body, dict) guards — every body-derived field defaults."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "rec-list-body",
+                "content": {"text": "[1, 2, 3]"},
+                "namespaces": ["projects/testproj/reflections/"],
+                "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+                "metadata": {
+                    "polarity": {"stringValue": "do"},
+                    "useful_count": {"numberValue": 0},
+                    "status": {"stringValue": "active"},
+                },
+            }
+        ]
+    }
+    result = backend.retrieve(project="testproj", polarity="do")
+    assert len(result["do"]) == 1
+    refl = result["do"][0]
+    assert refl["id"] == "rec-list-body"
+    assert refl["title"] == ""
+    assert refl["use_cases"] == ""
+    assert refl["hints"] == []
+    assert refl["confidence"] == 0.0
+    assert refl["tech"] is None
+    assert refl["phase"] == "general"
+
+
 def test_session_bootstrap_fires_4_parallel_list_calls(backend, mock_data_client) -> None:
     """One per polarity (do/dont/neutral) against episodic + one against
     semantic — all 4 dispatched via asyncio.gather + run_in_executor.
