@@ -3,16 +3,19 @@
 These drive the real MCP stdio server as a subprocess via the ``mcp``
 client SDK. They use per-test tmpfs for all paths (memory DB, knowledge
 DB, spool, knowledge base) and talk to the local Ollama instance on
-``http://localhost:11434`` — Phase 8 is explicit about running against
-the real embedder on this dev machine.
+``http://localhost:11434`` for embeddings (the default
+``BETTER_MEMORY_EMBEDDINGS_BACKEND=ollama``).
 
-Why not mark them ``integration``?
-----------------------------------
-The task brief states these should run in the default test suite so the
-``memory.observe`` → ``memory.retrieve`` round-trip is part of the
-default verify. Ollama is expected to be reachable on this machine.
-If you run this suite on a machine without Ollama, use the
-``OLLAMA_HOST`` env var to point at one before invoking pytest.
+``tests/mcp/conftest.py`` auto-skips this module when Ollama is not
+reachable, so contributors without a running Ollama can still run the
+default suite. If you run on a machine where Ollama listens elsewhere,
+point ``OLLAMA_HOST`` at it before invoking pytest.
+
+Beyond the happy-path round-trips, this module covers the tool-handler
+error paths that are only reachable through the real dispatch layer:
+missing required arguments, invalid enum values, DB CHECK-constraint
+violations, malformed synthesis decision dicts, and stale / already
+synthesized episode ids.
 """
 
 from __future__ import annotations
@@ -26,15 +29,21 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
-)
-
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from better_memory.mcp.server import _tool_definitions
+
 # Allow plenty of room for Ollama's first-call warm-up on a cold model.
 _CLIENT_TIMEOUT = timedelta(seconds=60)
+
+# A structurally valid synthesize_next_apply decision that takes no action.
+_EMPTY_DECISION: dict[str, list[Any]] = {
+    "new": [],
+    "augment": [],
+    "merge": [],
+    "ignore": [],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -49,11 +58,14 @@ def server_params(tmp_path: Path) -> StdioServerParameters:
     Each test gets its own memory DB, knowledge DB, spool directory and
     knowledge-base root. The server is spawned by the SDK's ``stdio_client``
     using these params; this prevents cross-test contamination of the
-    shared ``~/.better-memory`` location.
+    shared ``~/.better-memory`` location. ``CLAUDE_SESSION_ID`` is pinned
+    so episode/session binding is deterministic regardless of the
+    invoking environment.
     """
     env = {
         **os.environ,
         "BETTER_MEMORY_HOME": str(tmp_path),
+        "CLAUDE_SESSION_ID": "itest-session",
     }
     # Ensure knowledge-base exists so the startup reindex has something to
     # walk; otherwise the reindex path would silently no-op.
@@ -79,14 +91,33 @@ def seed_knowledge(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Happy-path tests
 # ---------------------------------------------------------------------------
 
 
 async def test_initialize_then_tools_list(
     server_params: StdioServerParameters,
 ) -> None:
-    """The server boots, exposes all 6 tools, and advertises capabilities."""
+    """The server boots and advertises exactly the factory's tool list.
+
+    The default sqlite backend supports synthesis, so the wire-visible
+    set must match ``_tool_definitions(supports_synthesis=True)``.
+    """
+    expected = {
+        t.name for t in _tool_definitions(supports_synthesis=True)
+    }
+    # Spot-check the core surface so a bug in _tool_definitions itself
+    # can't make this test vacuously true.
+    assert {
+        "memory.observe",
+        "memory.retrieve",
+        "memory.record_use",
+        "knowledge.search",
+        "knowledge.list",
+        "memory.start_ui",
+        "memory.synthesize_next_apply",
+    } <= expected
+
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(
             read, write, read_timeout_seconds=_CLIENT_TIMEOUT
@@ -95,20 +126,13 @@ async def test_initialize_then_tools_list(
 
             listed = await session.list_tools()
             names = {tool.name for tool in listed.tools}
-            assert names == {
-                "memory.observe",
-                "memory.retrieve",
-                "memory.record_use",
-                "knowledge.search",
-                "knowledge.list",
-                "memory.start_ui",
-            }
+            assert names == expected
 
 
-async def test_memory_observe_and_retrieve_roundtrip(
+async def test_memory_observe_then_retrieve_observations_roundtrip(
     server_params: StdioServerParameters,
 ) -> None:
-    """Observe success + failure, then retrieve — assert bucket routing."""
+    """Observe success + failure, then drill down via retrieve_observations."""
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(
             read, write, read_timeout_seconds=_CLIENT_TIMEOUT
@@ -133,27 +157,35 @@ async def test_memory_observe_and_retrieve_roundtrip(
             )
             success_id = _single_json_dict(success_resp)["id"]
 
-            retrieve_resp = await session.call_tool(
-                "memory.retrieve",
+            drill_resp = await session.call_tool(
+                "memory.retrieve_observations",
                 {"query": "probemarker"},
             )
-            payload = _single_json_dict(retrieve_resp)
+            rows = _single_json_list(drill_resp)
+            by_id = {row["id"]: row for row in rows}
+            assert fail_id in by_id, f"failure id {fail_id} missing: {rows}"
+            assert success_id in by_id, (
+                f"success id {success_id} missing: {rows}"
+            )
+            assert by_id[fail_id]["outcome"] == "failure"
+            assert by_id[success_id]["outcome"] == "success"
 
-            # All three buckets + insights + knowledge present as lists.
+
+async def test_memory_retrieve_returns_reflection_buckets(
+    server_params: StdioServerParameters,
+) -> None:
+    """``memory.retrieve`` returns the do/dont/neutral reflection buckets."""
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            retrieve_resp = await session.call_tool("memory.retrieve", {})
+            payload = _single_json_dict(retrieve_resp)
             assert isinstance(payload["do"], list)
             assert isinstance(payload["dont"], list)
             assert isinstance(payload["neutral"], list)
-            assert isinstance(payload["insights"], list)
-            assert isinstance(payload["knowledge"], list)
-
-            dont_ids = {row["id"] for row in payload["dont"]}
-            do_ids = {row["id"] for row in payload["do"]}
-            assert fail_id in dont_ids, (
-                f"failure id {fail_id} missing from 'dont': {payload['dont']}"
-            )
-            assert success_id in do_ids, (
-                f"success id {success_id} missing from 'do': {payload['do']}"
-            )
 
 
 async def test_memory_record_use_returns_ok(
@@ -202,22 +234,6 @@ async def test_knowledge_search_and_list_return_arrays(
             assert any(h["path"] == "standards/testing.md" for h in hits)
 
 
-async def test_memory_start_ui_returns_stub_error(
-    server_params: StdioServerParameters,
-) -> None:
-    """``memory.start_ui`` is a stub until Plan 2 lands."""
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(
-            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
-        ) as session:
-            await session.initialize()
-
-            resp = await session.call_tool("memory.start_ui", {})
-            payload = _single_json_dict(resp)
-            assert "error" in payload
-            assert "UI not yet implemented" in payload["error"]
-
-
 async def test_spool_drain_on_retrieve(
     server_params: StdioServerParameters,
     tmp_path: Path,
@@ -248,13 +264,214 @@ async def test_spool_drain_on_retrieve(
             read, write, read_timeout_seconds=_CLIENT_TIMEOUT
         ) as session:
             await session.initialize()
-            await session.call_tool("memory.retrieve", {"query": "unused"})
+            await session.call_tool("memory.retrieve", {})
 
     # After retrieve, the spool file must no longer sit at the top level of
     # the spool directory — either drained into hook_events or quarantined.
     assert not spool_file.exists(), (
         f"Spool file was not consumed: {spool_file}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Handler error paths
+# ---------------------------------------------------------------------------
+
+
+async def test_observe_missing_required_content_is_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """``memory.observe`` without ``content`` surfaces an MCP tool error."""
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            resp = await session.call_tool("memory.observe", {})
+            text = _error_text(resp)
+            assert "content" in text
+
+
+async def test_observe_invalid_scope_is_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """``memory.observe`` with an invalid ``scope`` enum value errors.
+
+    The MCP SDK validates arguments against the tool's inputSchema before
+    dispatch, so this surfaces as an "Input validation error" rather than
+    the handler's own ValueError — either way the caller sees isError.
+    """
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            resp = await session.call_tool(
+                "memory.observe",
+                {"content": "bad scope probe", "scope": "bogus"},
+            )
+            text = _error_text(resp)
+            assert "'bogus' is not one of" in text
+
+
+async def test_record_use_unknown_observation_id_is_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """``memory.record_use`` with a nonexistent id errors with 'not found'."""
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            resp = await session.call_tool(
+                "memory.record_use",
+                {"id": "does-not-exist", "outcome": "success"},
+            )
+            text = _error_text(resp)
+            assert "not found" in text.lower()
+
+
+async def test_record_use_invalid_outcome_is_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """``memory.record_use`` rejects an outcome outside its enum."""
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            observe_resp = await session.call_tool(
+                "memory.observe",
+                {"content": "invalid outcome probe", "outcome": "neutral"},
+            )
+            obs_id = _single_json_dict(observe_resp)["id"]
+
+            resp = await session.call_tool(
+                "memory.record_use",
+                {"id": obs_id, "outcome": "bogus"},
+            )
+            text = _error_text(resp)
+            assert "'bogus' is not one of" in text
+
+
+async def test_close_episode_constraint_violation_is_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """An outcome that violates the episodes CHECK constraint errors.
+
+    ``close_reason`` is passed explicitly so the handler's
+    ``default_reasons[outcome]`` lookup doesn't mask the DB-level
+    constraint path.
+    """
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            start_resp = await session.call_tool(
+                "memory.start_episode", {"goal": "constraint probe"}
+            )
+            assert _single_json_dict(start_resp)["episode_id"]
+
+            resp = await session.call_tool(
+                "memory.close_episode",
+                {"outcome": "bogus", "close_reason": "goal_complete"},
+            )
+            _error_text(resp)
+
+
+async def test_synthesize_apply_malformed_decision_is_validation_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """A decision dict missing required top-level keys → structured error.
+
+    Validation failures must come back as ``{"ok": false, "error":
+    "validation"}`` (not the MCP isError surface) so the calling LLM can
+    retry with a corrected payload.
+    """
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            resp = await session.call_tool(
+                "memory.synthesize_next_apply",
+                {
+                    "episode_id": "irrelevant",
+                    "decision": {"garbage": True},
+                },
+            )
+            payload = _single_json_dict(resp)
+            assert payload["ok"] is False
+            assert payload["error"] == "validation"
+            assert "missing required top-level key" in payload["message"]
+
+
+async def test_synthesize_apply_stale_episode_id_is_state_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """A well-formed decision against a nonexistent episode → state error."""
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            resp = await session.call_tool(
+                "memory.synthesize_next_apply",
+                {
+                    "episode_id": "no-such-episode",
+                    "decision": _EMPTY_DECISION,
+                },
+            )
+            payload = _single_json_dict(resp)
+            assert payload["ok"] is False
+            assert payload["error"] == "state"
+            assert "not found" in payload["message"]
+
+
+async def test_synthesize_apply_already_synthesized_is_state_error(
+    server_params: StdioServerParameters,
+) -> None:
+    """Applying twice against the same episode → state error on the retry."""
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=_CLIENT_TIMEOUT
+        ) as session:
+            await session.initialize()
+
+            start_resp = await session.call_tool(
+                "memory.start_episode", {"goal": "double-apply probe"}
+            )
+            episode_id = _single_json_dict(start_resp)["episode_id"]
+
+            close_resp = await session.call_tool(
+                "memory.close_episode", {"outcome": "success"}
+            )
+            closed = _single_json_dict(close_resp)
+            assert closed["closed_episode_id"] == episode_id
+
+            first = await session.call_tool(
+                "memory.synthesize_next_apply",
+                {"episode_id": episode_id, "decision": _EMPTY_DECISION},
+            )
+            first_payload = _single_json_dict(first)
+            assert first_payload["ok"] is True, first_payload
+
+            second = await session.call_tool(
+                "memory.synthesize_next_apply",
+                {"episode_id": episode_id, "decision": _EMPTY_DECISION},
+            )
+            second_payload = _single_json_dict(second)
+            assert second_payload["ok"] is False
+            assert second_payload["error"] == "state"
+            assert "already synthesized" in second_payload["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -296,3 +513,14 @@ def _single_json_list(result: object) -> list[Any]:
         f"expected JSON array, got {type(parsed).__name__}"
     )
     return parsed
+
+
+def _error_text(result: object) -> str:
+    """Assert the call failed at the MCP layer and return the error text."""
+    content = result.content  # type: ignore[attr-defined]
+    is_error = getattr(result, "isError", False)
+    assert is_error, f"expected isError result, got success: {content!r}"
+    assert len(content) >= 1, "error result carried no content blocks"
+    block = content[0]
+    assert getattr(block, "type", None) == "text", f"not a text block: {block!r}"
+    return block.text
