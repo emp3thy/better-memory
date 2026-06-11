@@ -9,18 +9,14 @@ See docs/superpowers/specs/2026-05-04-semantic-memories-design.md.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import uuid4
 
+from better_memory._common import default_clock, env_session_id
 from better_memory.services.memory_rating import OVERLOOKED_RANKING_WEIGHT
-
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -58,7 +54,7 @@ class SemanticMemoryService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
 
     def create(
         self, *, content: str, project: str, scope: str = "project"
@@ -266,10 +262,7 @@ class SemanticMemoryService:
         # Best-effort exposure tracking — see spec §5.2.1.
         # track_exposure=False is used by SessionBootstrapService.bootstrap,
         # which manages its own exposure write via _record_exposure.
-        sid = (
-            os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-        )
+        sid = env_session_id()
         if track_exposure:
             if not sid:
                 # Best-effort: bump diagnostics counter. Swallow any error so

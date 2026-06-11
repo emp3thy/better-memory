@@ -23,8 +23,8 @@ from pathlib import Path
 from typing import Literal
 
 from better_memory import _diag
+from better_memory._common import resolve_home
 
-_DEFAULT_HOME = "~/.better-memory"
 _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 _DEFAULT_EMBED_MODEL = "nomic-embed-text"
 _DEFAULT_EMBEDDINGS_BACKEND = "ollama"
@@ -32,12 +32,6 @@ _VALID_EMBEDDINGS_BACKENDS = ("ollama", "sqlite")
 _DEFAULT_STORAGE_BACKEND = "sqlite"
 _VALID_STORAGE_BACKENDS = ("sqlite", "agentcore")
 _DEFAULT_AGENTCORE_REGION = "eu-west-2"
-
-
-def resolve_home() -> Path:
-    """Return ``BETTER_MEMORY_HOME`` (or its default) with ``~`` expanded."""
-    raw = os.environ.get("BETTER_MEMORY_HOME", _DEFAULT_HOME)
-    return Path(raw).expanduser()
 
 
 # Maps absolute cwd string → resolved project name (or None when no git tree

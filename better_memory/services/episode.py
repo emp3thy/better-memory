@@ -18,14 +18,11 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import uuid4
 
 from better_memory import _diag
-
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
+from better_memory._common import default_clock
 
 
 @dataclass(frozen=True)
@@ -74,7 +71,7 @@ class EpisodeService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
 
     def open_background(self, *, session_id: str, project: str) -> str:
         """Create a background episode (goal=NULL) for ``session_id``.

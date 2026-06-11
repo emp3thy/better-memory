@@ -10,10 +10,10 @@ actually firing an agentcore-mode closure event).
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Literal
-from uuid import uuid4
+
+from better_memory._common import get_session_id
 
 _NamespaceKind = Literal["reflections", "episodes", "semantic", "retired"]
 _VALID_NAMESPACE_KINDS: tuple[_NamespaceKind, ...] = (
@@ -34,13 +34,9 @@ def resolve_actor_id(project: str | None) -> str:
 
 def resolve_session_id() -> str:
     """Return the current Claude session id, generating one if no env var
-    is set. Reads CLAUDE_SESSION_ID first, then CLAUDE_CODE_SESSION_ID,
-    then generates a uuid4 hex (32 chars)."""
-    return (
-        os.environ.get("CLAUDE_SESSION_ID")
-        or os.environ.get("CLAUDE_CODE_SESSION_ID")
-        or uuid4().hex
-    )
+    is set. Delegates to :func:`better_memory._common.get_session_id`
+    (CLAUDE_SESSION_ID, then CLAUDE_CODE_SESSION_ID, then uuid4 hex)."""
+    return get_session_id()
 
 
 def resolve_namespace(actor_id: str, kind: _NamespaceKind) -> str:

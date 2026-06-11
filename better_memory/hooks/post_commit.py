@@ -29,9 +29,13 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
 
-from better_memory.config import project_name, resolve_home
+from better_memory._common import (
+    default_spool_dir,
+    get_session_id,
+    safe_timestamp,
+)
+from better_memory.config import project_name
 
 _MAX_STDIN_BYTES = 1_048_576
 
@@ -40,17 +44,6 @@ _TRUTHY_VALUES = {"true", "yes", "1"}
 
 # The trailer key we look for (matched case-insensitively).
 _TRAILER_KEY = "closes-episode"
-
-
-def _default_spool_dir() -> Path:
-    """Return ``$BETTER_MEMORY_HOME/spool``, defaulting to ``~/.better-memory``."""
-    return resolve_home() / "spool"
-
-
-def _safe_timestamp(raw: str | None) -> str:
-    if not raw:
-        raw = datetime.now(UTC).isoformat()
-    return raw.replace(":", "-")
 
 
 def _read_head_commit_message() -> tuple[str, str]:
@@ -146,11 +139,7 @@ def main() -> None:
             sys.exit(0)
 
         now_iso = datetime.now(UTC).isoformat()
-        session_id = (
-            os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or uuid4().hex
-        )
+        session_id = get_session_id()
         cwd = _resolve_cwd()
 
         data: dict[str, object] = {
@@ -162,10 +151,10 @@ def main() -> None:
             "commit_sha": commit_sha,
         }
 
-        spool_dir = _default_spool_dir()
+        spool_dir = default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)
 
-        ts_component = _safe_timestamp(now_iso)
+        ts_component = safe_timestamp(now_iso)
         serialised = json.dumps(data, sort_keys=True).encode("utf-8")
         salt = f"{time.time_ns()}:{os.getpid()}".encode()
         hash_hex = hashlib.sha256(serialised + salt).hexdigest()[:12]

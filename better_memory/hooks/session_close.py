@@ -16,32 +16,19 @@ import os
 import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
-from uuid import uuid4
 
+from better_memory._common import (
+    default_spool_dir,
+    env_session_id,
+    get_session_id,
+    resolve_home,
+    safe_timestamp,
+)
 from better_memory.config import get_config
 
 # Mirror the observer cap: reject any stdin payload above 1 MiB without
 # raising. Hooks must never fail.
 _MAX_STDIN_BYTES = 1_048_576
-
-
-def _default_spool_dir() -> Path:
-    """Return ``$BETTER_MEMORY_HOME/spool``, defaulting to ``~/.better-memory``.
-
-    Mirrors the observer hook. Kept duplicated to avoid a cross-module import
-    that would slow hook startup.
-    """
-    home = os.environ.get("BETTER_MEMORY_HOME")
-    if home:
-        return Path(home).expanduser() / "spool"
-    return Path.home() / ".better-memory" / "spool"
-
-
-def _safe_timestamp(raw: str | None) -> str:
-    if not raw:
-        raw = datetime.now(UTC).isoformat()
-    return raw.replace(":", "-")
 
 
 def _synthesise_marker() -> dict[str, str]:
@@ -50,11 +37,7 @@ def _synthesise_marker() -> dict[str, str]:
         "event_type": "session_end",
         "timestamp": datetime.now(UTC).isoformat(),
         "cwd": os.environ.get("PWD") or os.getcwd(),
-        "session_id": (
-            os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or uuid4().hex
-        ),
+        "session_id": get_session_id(),
     }
 
 
@@ -103,12 +86,7 @@ def _fire_agentcore_closure(*, session_id: str, project: str) -> bool:
             resolve_actor_id,
         )
 
-        home_env = os.environ.get("BETTER_MEMORY_HOME")
-        home = (
-            Path(home_env).expanduser()
-            if home_env
-            else Path.home() / ".better-memory"
-        )
+        home = resolve_home()
         cfg = load_agentcore_config(home)
         if cfg is None:
             return False
@@ -267,19 +245,12 @@ def main() -> None:
         if "timestamp" not in data or not data["timestamp"]:
             data["timestamp"] = datetime.now(UTC).isoformat()
         if "session_id" not in data or not data["session_id"]:
-            data["session_id"] = (
-                os.environ.get("CLAUDE_SESSION_ID")
-                or os.environ.get("CLAUDE_CODE_SESSION_ID")
-                or uuid4().hex
-            )
+            data["session_id"] = get_session_id()
         if "cwd" not in data or not data["cwd"]:
             data["cwd"] = os.environ.get("PWD") or os.getcwd()
 
         session_id_str = (
-            os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or data.get("session_id")
-            or ""
+            env_session_id() or data.get("session_id") or ""
         )
         if session_id_str and _emit_rating_directive_if_unrated(
             str(session_id_str)
@@ -307,10 +278,10 @@ def main() -> None:
             project=str(project_for_closure),
         )
 
-        spool_dir = _default_spool_dir()
+        spool_dir = default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)
 
-        ts_component = _safe_timestamp(str(data.get("timestamp")))
+        ts_component = safe_timestamp(str(data.get("timestamp")))
         # Salt the hash with monotonic-nanosecond clock + PID so two
         # byte-identical payloads in the same second can't collide on
         # filename. The salt does NOT appear in the written body.

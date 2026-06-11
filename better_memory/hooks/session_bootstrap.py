@@ -13,8 +13,8 @@ import os
 import sys
 from contextlib import closing
 from pathlib import Path
-from uuid import uuid4
 
+from better_memory._common import get_session_id
 from better_memory.config import get_config
 from better_memory.db.connection import connect
 from better_memory.hooks._error_log import record_hook_error
@@ -62,11 +62,7 @@ def main() -> None:
     session_id = (
         str(payload.get("session_id"))
         if payload.get("session_id")
-        else (
-            os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or uuid4().hex
-        )
+        else get_session_id()
     )
     cwd_str = str(payload.get("cwd")) if payload.get("cwd") else os.getcwd()
 

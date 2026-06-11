@@ -104,7 +104,7 @@ def test_spool_marker_written_even_when_closure_event_raises(
     )
     # Force the hook to read from agentcore_config_present's tmp_path
     monkeypatch.setattr(
-        "better_memory.hooks.session_close._default_spool_dir",
+        "better_memory.hooks.session_close.default_spool_dir",
         lambda: Path(agentcore_config_present) / "spool",
     )
     # Feed an empty stdin so the hook synthesises the marker
