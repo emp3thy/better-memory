@@ -15,7 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from better_memory.mcp.server import _append_synth_audit, _audit_synth_call
+from better_memory.mcp.synth_audit import (
+    append_synth_audit as _append_synth_audit,
+)
+from better_memory.mcp.synth_audit import (
+    audit_synth_call as _audit_synth_call,
+)
 
 
 def _read_jsonl(home: Path) -> list[dict]:
@@ -53,7 +58,7 @@ class TestAppendSynthAudit:
         not_a_dir = tmp_path / "blocker"
         not_a_dir.write_text("blocker", encoding="utf-8")
 
-        with caplog.at_level(logging.ERROR, logger="better_memory.mcp.server"):
+        with caplog.at_level(logging.ERROR, logger="better_memory.mcp.synth_audit"):
             _append_synth_audit(not_a_dir, {"phase": "start"})  # must not raise
 
         assert any(
@@ -152,7 +157,7 @@ class TestAuditSynthCall:
         not_a_dir.write_text("blocker", encoding="utf-8")
         ran: list[int] = []
 
-        with caplog.at_level(logging.ERROR, logger="better_memory.mcp.server"):
+        with caplog.at_level(logging.ERROR, logger="better_memory.mcp.synth_audit"):
             with _audit_synth_call(
                 not_a_dir, tool="apply", project="p1", episode_id="ep-1",
             ) as state:
