@@ -8,6 +8,7 @@ domain's contribution.
 from __future__ import annotations
 
 from better_memory.mcp.dispatcher import Handler
+from better_memory.mcp.handlers.observations import ObservationHandlers
 
 
 def all_handlers() -> list[Handler]:
@@ -15,4 +16,6 @@ def all_handlers() -> list[Handler]:
 
     Filled in as handler modules land (Tasks 7-14).
     """
-    return []
+    return [
+        *ObservationHandlers().handlers(),
+    ]
