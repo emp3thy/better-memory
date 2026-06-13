@@ -1758,7 +1758,7 @@ class TestReadQueueCounts:
         svc = ReflectionSynthesisService(
             conn, clock=fixed_clock,
         )
-        counts = svc._read_queue_counts(project="empty")
+        counts = svc.read_queue_counts(project="empty")
         assert counts.done == 0
         assert counts.pending == 0
         assert counts.in_cooldown == 0
@@ -1791,7 +1791,7 @@ class TestReadQueueCounts:
         svc = ReflectionSynthesisService(
             conn, clock=fixed_clock,
         )
-        counts = svc._read_queue_counts(project="p1")
+        counts = svc.read_queue_counts(project="p1")
         assert counts.done == 2
         assert counts.pending == 3
         assert counts.in_cooldown == 1
@@ -1806,7 +1806,7 @@ class TestReadQueueCounts:
         svc = ReflectionSynthesisService(
             conn, clock=fixed_clock,
         )
-        counts = svc._read_queue_counts(project="p1")
+        counts = svc.read_queue_counts(project="p1")
         assert counts.total == 0
 
 

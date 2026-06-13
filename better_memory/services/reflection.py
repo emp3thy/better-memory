@@ -606,8 +606,8 @@ class ReflectionSynthesisService:
             (self._clock().isoformat(), episode_id),
         )
 
-    # ------------------------------------------------------- _read_queue_counts
-    def _read_queue_counts(self, project: str) -> EpisodeQueueCounts:
+    # -------------------------------------------------------- read_queue_counts
+    def read_queue_counts(self, project: str) -> EpisodeQueueCounts:
         """Snapshot the per-project queue state in one statement.
 
         Single-source-of-truth for the route's banner — eliminates the race
@@ -1167,7 +1167,7 @@ class ReflectionSynthesisService:
         return SynthesisStep(
             processed=True, episode_id=episode_id,
             counts=counts,
-            queue=self._read_queue_counts(project),
+            queue=self.read_queue_counts(project),
             failure=None,
         )
 

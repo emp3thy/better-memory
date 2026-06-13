@@ -337,7 +337,7 @@ class TestEndToEndGetContext:
     ):
         svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         ctx = svc.get_next_pending_context(project="p1")
-        queue = svc._read_queue_counts(project="p1")
+        queue = svc.read_queue_counts(project="p1")
         payload = _serialize_synth_get_context(ctx, queue)
         assert payload == {
             "episode_id": None,
@@ -351,7 +351,7 @@ class TestEndToEndGetContext:
 
         svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         ctx = svc.get_next_pending_context(project="p1")
-        queue = svc._read_queue_counts(project="p1")
+        queue = svc.read_queue_counts(project="p1")
         assert ctx is not None
         payload = _serialize_synth_get_context(ctx, queue)
 
@@ -374,7 +374,7 @@ class TestEndToEndGetContext:
         conn.commit()
         svc = ReflectionSynthesisService(conn, clock=fixed_clock)
         ctx = svc.get_next_pending_context(project="p1")
-        queue = svc._read_queue_counts(project="p1")
+        queue = svc.read_queue_counts(project="p1")
         payload = _serialize_synth_get_context(ctx, queue)
         assert payload["episode_id"] == "older"
 

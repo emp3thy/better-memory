@@ -1165,7 +1165,7 @@ def create_server() -> tuple[
             # current pending count so the LLM knows whether it should run
             # synthesis (typically before treating retrieved reflections as
             # canonical).
-            queue = reflections._read_queue_counts(project=project)
+            queue = reflections.read_queue_counts(project=project)
             buckets = backend.retrieve(
                 project=project, tech=args.get("tech"),
             )
@@ -1324,7 +1324,7 @@ def create_server() -> tuple[
                 episode_id=None,
             ) as audit:
                 ctx = reflections.get_next_pending_context(project=project)
-                queue = reflections._read_queue_counts(project=project)
+                queue = reflections.read_queue_counts(project=project)
                 payload = _serialize_synth_get_context(ctx, queue)
                 if ctx is None:
                     audit["result_kind"] = "empty"
