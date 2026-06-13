@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from better_memory.mcp.server import _append_synth_audit, _audit_synth_call
+from better_memory.mcp.handlers._audit import _append_synth_audit, _audit_synth_call
 
 
 def _read_jsonl(home: Path) -> list[dict]:
