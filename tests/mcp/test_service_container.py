@@ -73,7 +73,7 @@ def test_build_services_constructs_each_service_exactly_once(
         def _init(self, *a, **kw):
             counts[cls.__name__] += 1
             original_init(self, *a, **kw)
-        cls.__init__ = _init  # type: ignore[method-assign]
+        monkeypatch.setattr(cls, "__init__", _init)
 
     _wrap(_sem_mod.SemanticMemoryService)
     _wrap(_sb_mod.SessionBootstrapService)
@@ -102,9 +102,9 @@ def test_build_services_constructs_each_service_exactly_once(
     # container level. SqliteBackend (built inside build_backend) keeps its
     # own internal SemanticMemoryService + SessionBootstrapService for
     # protocol compliance — that accounts for the second construction of
-    # each. Total of 2 still kills the 4×/2× inline regressions; any
-    # future drift back to per-call construction will push these well
-    # above 2 and re-trip this test.
+    # each. Total of 2 still kills the 4×/2× inline regressions; drift back
+    # to per-call construction inside `_build_services` will push these
+    # well above 2 and re-trip this test.
     assert counts["SemanticMemoryService"] == 2
     assert counts["SessionBootstrapService"] == 2
     assert container.semantic is not None
