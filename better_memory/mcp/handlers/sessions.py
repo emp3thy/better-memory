@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from pathlib import Path
 from typing import Any
 
 from mcp.types import TextContent
 
+from better_memory._common import get_session_id
 from better_memory.mcp._util import resolve_session_id
 from better_memory.services import ui_launcher
 from better_memory.services.memory_rating import MemoryRatingService
@@ -45,12 +45,7 @@ class SessionToolHandlers:
 
     async def session_bootstrap(self, args: dict[str, Any]) -> list[TextContent]:
         cwd_arg = args.get("cwd") or os.getcwd()
-        session_id_arg = (
-            args.get("session_id")
-            or os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or uuid.uuid4().hex
-        )
+        session_id_arg = args.get("session_id") or get_session_id()
         result = self._session_bootstrap.bootstrap(
             source=args.get("source"),
             session_id=session_id_arg,

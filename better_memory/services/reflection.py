@@ -25,19 +25,15 @@ Design notes:
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from better_memory import _diag
+from better_memory._common import default_clock, env_session_id
 from better_memory.services.memory_rating import OVERLOOKED_RANKING_WEIGHT
-
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
 
 
 def _later_ts(a: str | None, b: str | None) -> str | None:
@@ -307,7 +303,7 @@ class ReflectionSynthesisService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
         # Mirror EpisodeService.start_foreground / ObservationService.create
@@ -1267,10 +1263,7 @@ class ReflectionSynthesisService:
             # (e.g., test or non-Claude context) — see spec §5.2.1.
             # track_exposure=False is used by SessionBootstrapService.bootstrap,
             # which manages its own exposure write via _record_exposure.
-            sid = (
-                os.environ.get("CLAUDE_SESSION_ID")
-                or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            )
+            sid = env_session_id()
             if track_exposure:
                 _diag.step(fn, "exposure_track_begin", sid=bool(sid))
                 if not sid:
@@ -1335,7 +1328,7 @@ class ReflectionService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
 
     def confirm(self, *, reflection_id: str) -> None:
         """pending_review → confirmed; no-op on confirmed; raise on retired/superseded."""

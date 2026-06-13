@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from better_memory._common import default_clock
 from better_memory.config import project_name
 from better_memory.search.query import sanitize_fts5_query
 
@@ -75,10 +76,6 @@ class ReindexReport:
     updated: int
     unchanged: int
     removed: int
-
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
 
 
 def _doc_id(relative_path: str) -> str:
@@ -181,7 +178,7 @@ class KnowledgeService:
     ) -> None:
         self._conn = conn
         self._knowledge_base = Path(knowledge_base) if knowledge_base else None
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
 
     # ------------------------------------------------------------------ public
 

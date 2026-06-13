@@ -30,6 +30,8 @@ from typing import Any, Literal
 
 import sqlite_vec
 
+from better_memory._common import default_clock
+
 Outcome = Literal["success", "failure", "neutral"]
 
 
@@ -108,7 +110,7 @@ def hybrid_search(
     if second_source == "trigram" and (query_text is None or not query_text.strip()):
         return []
 
-    now = (clock or _default_clock)()
+    now = (clock or default_clock)()
     where_sql, where_params = _build_where(filters, now=now)
 
     # Gather candidate rowids from each active source.
@@ -416,5 +418,3 @@ def _parse_sqlite_datetime(value: str) -> datetime:
     return datetime.fromisoformat(normalized)
 
 
-def _default_clock() -> datetime:
-    return datetime.now(UTC)

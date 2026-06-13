@@ -10,11 +10,9 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
+from better_memory._common import default_clock
 
 
 @dataclass(frozen=True)
@@ -54,7 +52,7 @@ class RetentionService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
 
     # --------------------------------------------------------- public
 

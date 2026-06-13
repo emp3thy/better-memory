@@ -16,35 +16,13 @@ import os
 import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+
+from better_memory._common import default_spool_dir, safe_timestamp
 
 # Cap stdin reads so a malicious or accidentally huge payload can't starve the
 # hook process of memory. 1 MiB is far larger than anything Claude Code emits
 # in practice but small enough to be trivially bounded.
 _MAX_STDIN_BYTES = 1_048_576
-
-
-def _default_spool_dir() -> Path:
-    """Return ``$BETTER_MEMORY_HOME/spool``, defaulting to ``~/.better-memory``.
-
-    Kept separate from :func:`better_memory.config.get_config` so hooks do not
-    import SQLite / sqlite-vec / anything heavyweight at invocation time.
-    """
-    home = os.environ.get("BETTER_MEMORY_HOME")
-    if home:
-        return Path(home).expanduser() / "spool"
-    return Path.home() / ".better-memory" / "spool"
-
-
-def _safe_timestamp(raw: str | None) -> str:
-    """Return a filesystem-safe timestamp component.
-
-    Replaces ``:`` (illegal on NTFS) with ``-``. Falls back to current UTC
-    time if ``raw`` is missing or empty.
-    """
-    if not raw:
-        raw = datetime.now(UTC).isoformat()
-    return raw.replace(":", "-")
 
 
 def _safe_tool(raw: object) -> str:
@@ -75,10 +53,10 @@ def main() -> None:
         if "timestamp" not in data or not data["timestamp"]:
             data["timestamp"] = datetime.now(UTC).isoformat()
 
-        spool_dir = _default_spool_dir()
+        spool_dir = default_spool_dir()
         spool_dir.mkdir(parents=True, exist_ok=True)
 
-        ts_component = _safe_timestamp(data.get("timestamp"))
+        ts_component = safe_timestamp(data.get("timestamp"))
         tool_component = _safe_tool(data.get("tool"))
         # SHA-256 prefix of the serialised payload — cheap collision avoidance
         # for two events that happen in the same second on the same tool. The

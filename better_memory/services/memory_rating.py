@@ -13,13 +13,10 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal, TypedDict
 
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
-
+from better_memory._common import default_clock
 
 Kind = Literal["reflection", "semantic"]
 Classification = Literal["cited", "shaped", "ignored", "misled", "overlooked"]
@@ -83,7 +80,7 @@ class MemoryRatingService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._conn = conn
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
 
     # --------------------------------------------------------------- credit_one
     def credit_one(

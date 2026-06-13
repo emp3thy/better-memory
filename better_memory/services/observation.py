@@ -52,17 +52,17 @@ hand, is NOT trigger-populated and must be written manually.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 
 import sqlite_vec
 
 from better_memory import _diag
+from better_memory._common import default_clock, get_session_id
 from better_memory.config import get_config, project_name
 from better_memory.search.hybrid import (
     SearchFilters,
@@ -84,11 +84,6 @@ class BucketedResults:
     do: list[SearchResult]
     dont: list[SearchResult]
     neutral: list[SearchResult]
-
-
-def _default_clock() -> datetime:
-    """UTC-aware ``now``. Kept as a module-level function for clarity."""
-    return datetime.now(UTC)
 
 
 class ObservationService:
@@ -126,26 +121,17 @@ class ObservationService:
     ) -> None:
         self._conn = conn
         self._embedder = embedder
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
         self._project_resolver: Callable[[], str] = (
             project_resolver if project_resolver is not None else project_name
         )
         self._scope_resolver: Callable[[], str | None] = (
             scope_resolver if scope_resolver is not None else (lambda: None)
         )
-        # Resolution order: explicit kwarg > CLAUDE_SESSION_ID env var >
-        # CLAUDE_CODE_SESSION_ID env var > uuid4(). The env vars make
-        # hook-written events and MCP-written observations share the same
-        # session id (Claude Code exports CLAUDE_CODE_SESSION_ID; the older
-        # CLAUDE_SESSION_ID is kept as the primary name for back-compat).
+        # Resolution order: explicit kwarg > env vars > uuid4() — see
+        # better_memory._common.get_session_id for the env-var order.
         self.session_id: str = (
-            session_id
-            if session_id is not None
-            else (
-                os.environ.get("CLAUDE_SESSION_ID")
-                or os.environ.get("CLAUDE_CODE_SESSION_ID")
-                or uuid4().hex
-            )
+            session_id if session_id is not None else get_session_id()
         )
         # ``None`` defers to the resolved config value so tests can inject
         # ``False`` without having to monkeypatch the environment.

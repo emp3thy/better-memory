@@ -10,18 +10,15 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from better_memory import _diag
+from better_memory._common import default_clock
 from better_memory.services.retention import RetentionReport, RetentionService
 
 _RETENTION_DAYS = 90
 _PRUNE_AGE_DAYS = 365
 _GUARD_HOURS = 24
-
-
-def _default_clock() -> datetime:
-    return datetime.now(UTC)
 
 
 class RetentionScheduler:
@@ -36,7 +33,7 @@ class RetentionScheduler:
     ) -> None:
         self._conn = conn
         self._auto_prune = auto_prune
-        self._clock: Callable[[], datetime] = clock or _default_clock
+        self._clock: Callable[[], datetime] = clock or default_clock
 
     def maybe_run(self, *, triggered_by: str) -> None:
         """Run retention IF >24h since last run. Records to retention_runs.

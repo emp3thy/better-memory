@@ -8,13 +8,13 @@ without creating a cycle.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from better_memory import _diag
+from better_memory._common import env_session_id
 from better_memory.runtime.session_marker import read_session_id
 
 logger = logging.getLogger(__name__)
@@ -64,8 +64,4 @@ def resolve_session_id(home: Path) -> str | None:
     propagate the session id into the spawned stdio MCP server's env, so
     the marker file is the fallback for every rating call.
     """
-    return (
-        os.environ.get("CLAUDE_SESSION_ID")
-        or os.environ.get("CLAUDE_CODE_SESSION_ID")
-        or read_session_id(home)
-    )
+    return env_session_id() or read_session_id(home)
