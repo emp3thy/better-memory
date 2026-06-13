@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from better_memory.mcp.dispatcher import Handler
 from better_memory.mcp.handlers.observations import ObservationHandlers
+from better_memory.mcp.handlers.semantics import SemanticHandlers
 
 
 def all_handlers() -> list[Handler]:
@@ -18,4 +19,5 @@ def all_handlers() -> list[Handler]:
     """
     return [
         *ObservationHandlers().handlers(),
+        *SemanticHandlers().handlers(),
     ]
