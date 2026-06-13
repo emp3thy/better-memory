@@ -15,6 +15,7 @@ from better_memory.mcp.handlers.ratings import RatingHandlers
 from better_memory.mcp.handlers.reflections import ReflectionHandlers
 from better_memory.mcp.handlers.retention import RetentionHandlers
 from better_memory.mcp.handlers.semantics import SemanticHandlers
+from better_memory.mcp.handlers.session import SessionHandlers
 
 
 def all_handlers() -> list[Handler]:
@@ -30,4 +31,5 @@ def all_handlers() -> list[Handler]:
         *RetentionHandlers().handlers(),
         *KnowledgeHandlers().handlers(),
         *RatingHandlers().handlers(),
+        *SessionHandlers().handlers(),
     ]
