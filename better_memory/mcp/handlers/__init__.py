@@ -11,6 +11,7 @@ from better_memory.mcp.dispatcher import Handler
 from better_memory.mcp.handlers.episodes import EpisodeHandlers
 from better_memory.mcp.handlers.knowledge import KnowledgeHandlers
 from better_memory.mcp.handlers.observations import ObservationHandlers
+from better_memory.mcp.handlers.ratings import RatingHandlers
 from better_memory.mcp.handlers.reflections import ReflectionHandlers
 from better_memory.mcp.handlers.retention import RetentionHandlers
 from better_memory.mcp.handlers.semantics import SemanticHandlers
@@ -28,4 +29,5 @@ def all_handlers() -> list[Handler]:
         *ReflectionHandlers().handlers(),
         *RetentionHandlers().handlers(),
         *KnowledgeHandlers().handlers(),
+        *RatingHandlers().handlers(),
     ]
