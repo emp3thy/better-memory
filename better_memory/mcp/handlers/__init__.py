@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from better_memory.mcp.dispatcher import Handler
 from better_memory.mcp.handlers.episodes import EpisodeHandlers
+from better_memory.mcp.handlers.knowledge import KnowledgeHandlers
 from better_memory.mcp.handlers.observations import ObservationHandlers
 from better_memory.mcp.handlers.reflections import ReflectionHandlers
 from better_memory.mcp.handlers.retention import RetentionHandlers
@@ -26,4 +27,5 @@ def all_handlers() -> list[Handler]:
         *EpisodeHandlers().handlers(),
         *ReflectionHandlers().handlers(),
         *RetentionHandlers().handlers(),
+        *KnowledgeHandlers().handlers(),
     ]
