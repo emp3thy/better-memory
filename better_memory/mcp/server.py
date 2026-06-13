@@ -60,6 +60,7 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.mcp._session import resolve_session_id
+from better_memory.mcp.container import ServiceContainer
 from better_memory.mcp.handlers._audit import _audit_synth_call
 from better_memory.services import ui_launcher
 from better_memory.services.episode import EpisodeService
@@ -855,6 +856,61 @@ class ServerContext:
     embedder: Any = None
 
 
+def _build_services(
+    config: Any,  # better_memory.config.Config
+    memory_conn: sqlite3.Connection,
+    knowledge_conn: sqlite3.Connection,
+    embedder: OllamaEmbedder | None,
+    *,
+    startup_project: str,
+    startup_session_id: str | None,
+) -> ServiceContainer:
+    """Construct every service exactly once.
+
+    Replaces the inline 4x ``SemanticMemoryService(memory_conn)`` and the
+    inline 2x ``SessionBootstrapService(...)`` smells in the legacy
+    ``_call_tool`` body.
+    """
+    from better_memory.services.semantic import SemanticMemoryService
+    from better_memory.services.session_bootstrap import SessionBootstrapService
+
+    episodes = EpisodeService(memory_conn)
+    observations = ObservationService(
+        memory_conn, embedder=embedder, episodes=episodes,
+    )
+    backend = build_backend(
+        config=config,
+        memory_conn=memory_conn,
+        embedder=embedder,
+        session_id=startup_session_id,
+        project=startup_project,
+    )
+    reflections = ReflectionSynthesisService(memory_conn)
+    retention = RetentionService(conn=memory_conn)
+    memory_rating = MemoryRatingService(memory_conn)
+    knowledge = KnowledgeService(
+        knowledge_conn, knowledge_base=config.knowledge_base,
+    )
+    spool = SpoolService(memory_conn, config.spool_dir, episodes=episodes)
+    semantic = SemanticMemoryService(memory_conn)
+    session_bootstrap = SessionBootstrapService(memory_conn)
+
+    return ServiceContainer(
+        config=config,
+        memory_conn=memory_conn,
+        backend=backend,
+        episodes=episodes,
+        observations=observations,
+        reflections=reflections,
+        retention=retention,
+        memory_rating=memory_rating,
+        knowledge=knowledge,
+        spool=spool,
+        semantic=semantic,
+        session_bootstrap=session_bootstrap,
+    )
+
+
 def create_server() -> tuple[
     Server,
     Callable[[], Coroutine[Any, Any, None]],
@@ -902,9 +958,7 @@ def create_server() -> tuple[
     # or a worker thread that writes to ``memory_conn``, this assumption
     # breaks and the services must be reworked to use per-task
     # connections (or a connection pool with explicit checkout).
-    episodes = EpisodeService(memory_conn)
-    observations = ObservationService(memory_conn, embedder=embedder, episodes=episodes)
-
+    #
     # Resolve project + session id ONCE at startup. Per-handler code can
     # still override per-call (handlers continue to read args.get("project")
     # / call project_name() for backwards compatibility), but the backend
@@ -915,28 +969,20 @@ def create_server() -> tuple[
     # env-var / marker file path when ``session_id is None``. An empty
     # string silently writes observations with session_id='' and breaks
     # the rating tools.
-    startup_project = project_name()
-    startup_session_id: str | None = resolve_session_id(config.home) or None
-    backend: StorageBackend = build_backend(
-        config=config,
-        memory_conn=memory_conn,
-        embedder=embedder,
-        session_id=startup_session_id,
-        project=startup_project,
+    services = _build_services(
+        config, memory_conn, knowledge_conn, embedder,
+        startup_project=project_name(),
+        startup_session_id=resolve_session_id(config.home) or None,
     )
-
-    # Reflection synthesis is driven by the IDE-LLM via two MCP tools
-    # (memory.synthesize_next_get_context / _apply). The service no
-    # longer holds a chat client.
-    reflections = ReflectionSynthesisService(memory_conn)
-    retention = RetentionService(conn=memory_conn)
-    memory_rating = MemoryRatingService(memory_conn)
-
-    knowledge = KnowledgeService(
-        knowledge_conn,
-        knowledge_base=config.knowledge_base,
-    )
-    spool = SpoolService(memory_conn, config.spool_dir, episodes=episodes)
+    # Existing local names that the legacy if-chain still uses:
+    episodes = services.episodes
+    observations = services.observations
+    backend = services.backend
+    reflections = services.reflections
+    retention = services.retention
+    memory_rating = services.memory_rating
+    knowledge = services.knowledge
+    spool = services.spool
 
     # Session-start behaviour: reindex knowledge at startup. mtime-only, so
     # the cost is O(files) stat calls on an already-indexed corpus. We
