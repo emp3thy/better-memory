@@ -61,7 +61,7 @@ from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.runtime.session_marker import read_session_id
+from better_memory.mcp._session import resolve_session_id
 from better_memory.services import ui_launcher
 from better_memory.services.episode import EpisodeService
 from better_memory.services.knowledge import (
@@ -69,6 +69,7 @@ from better_memory.services.knowledge import (
     KnowledgeSearchResult,
     KnowledgeService,
 )
+from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.observation import ObservationService
 from better_memory.services.reflection import (
     EpisodeContext,
@@ -76,7 +77,6 @@ from better_memory.services.reflection import (
     ReflectionSynthesisService,
     SynthesisStep,
 )
-from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.retention import RetentionService
 from better_memory.services.retention_scheduler import RetentionScheduler
 from better_memory.services.spool import SpoolService
@@ -142,22 +142,6 @@ def _run_best_effort(
 # Paired by call_id. A start row with no matching complete row points
 # to the call that hung. Best-effort: any IO error is swallowed so the
 # audit log can never block or fail the synthesize tool itself.
-
-
-def _resolve_session_id(home: Path) -> str | None:
-    """Resolve the current Claude Code session id.
-
-    Order: ``CLAUDE_SESSION_ID`` env, ``CLAUDE_CODE_SESSION_ID`` env, then
-    the marker file written by the SessionStart hook (see
-    :mod:`better_memory.runtime.session_marker`). Claude Code does not
-    propagate the session id into the spawned stdio MCP server's env, so
-    the marker file is the fallback for every rating call.
-    """
-    return (
-        os.environ.get("CLAUDE_SESSION_ID")
-        or os.environ.get("CLAUDE_CODE_SESSION_ID")
-        or read_session_id(home)
-    )
 
 
 def _append_synth_audit(home: Path, payload: dict[str, Any]) -> None:
@@ -1011,7 +995,7 @@ def create_server() -> tuple[
     # string silently writes observations with session_id='' and breaks
     # the rating tools.
     startup_project = project_name()
-    startup_session_id: str | None = _resolve_session_id(config.home) or None
+    startup_session_id: str | None = resolve_session_id(config.home) or None
     backend: StorageBackend = build_backend(
         config=config,
         memory_conn=memory_conn,
@@ -1489,14 +1473,14 @@ def create_server() -> tuple[
                 SessionBootstrapService,
             )
 
-            sid = _resolve_session_id(config.home) or ""
+            sid = resolve_session_id(config.home) or ""
             payload = SessionBootstrapService(memory_conn).list_session_exposures(
                 session_id=sid,
             )
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.apply_session_ratings":
-            sid = _resolve_session_id(config.home)
+            sid = resolve_session_id(config.home)
             if not sid:
                 raise ValueError(
                     "No active session: CLAUDE_SESSION_ID / "
@@ -1510,7 +1494,7 @@ def create_server() -> tuple[
             return [TextContent(type="text", text=json.dumps(payload))]
 
         if name == "memory.credit":
-            sid = _resolve_session_id(config.home)
+            sid = resolve_session_id(config.home)
             if not sid:
                 payload = {"applied": None, "skipped": "no_session"}
             else:
