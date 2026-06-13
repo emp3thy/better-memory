@@ -35,7 +35,7 @@ import urllib.request
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -348,43 +348,17 @@ def create_server() -> tuple[
 
 
 async def _dispatch_for_tests(name: str, arguments: dict) -> list[TextContent]:
-    """Test-only entry point that runs one tool invocation against a fresh
-    server instance. NOT used by production code.
+    """Test-only entry point. Routes through ToolDispatcher.
 
-    The MCP SDK catches exceptions inside handlers and surfaces them as
-    CallToolResult(isError=True). To make tests ergonomic, this helper
-    re-raises any error as ValueError so callers can use
-    `pytest.raises(ValueError, match="...")` instead of inspecting
-    result text manually.
+    Builds a server (with its standard ServiceContainer + every registered
+    handler) and dispatches one tool call. Preserved as a shim so
+    ``tests/mcp/test_server_sqlite.py`` and ``tests/mcp/test_rating_tools.py``
+    continue to work without modification.
     """
-    from mcp.types import CallToolRequest, CallToolRequestParams
-
-    server, cleanup, _ = create_server()
+    _server, cleanup, ctx = create_server()
     try:
-        handler = server.request_handlers[CallToolRequest]
-        req = CallToolRequest(
-            method="tools/call",
-            params=CallToolRequestParams(name=name, arguments=arguments),
-        )
-        result = await handler(req)
-        # The SDK's ServerResult is a discriminated union; we know this
-        # handler is wired to CallTool and returns CallToolResult.
-        from mcp.types import CallToolResult
-        assert isinstance(result.root, CallToolResult), (
-            f"Expected CallToolResult, got {type(result.root).__name__}"
-        )
-        if getattr(result.root, "isError", False):
-            # Re-raise as ValueError; preserve the framework's error text.
-            text = ""
-            if result.root.content:
-                first = result.root.content[0]
-                text = getattr(first, "text", "") or ""
-            raise ValueError(text)
-        # Tests inspect .text on TextContent entries — runtime is correct;
-        # cast through Any to satisfy Pyright's list invariance (the SDK
-        # types .content as list[ContentBlock]; our tools only emit
-        # TextContent so the cast is sound).
-        return cast(list[TextContent], result.root.content)
+        assert ctx.dispatcher is not None
+        return await ctx.dispatcher.call(name, arguments)
     finally:
         await cleanup()
 
