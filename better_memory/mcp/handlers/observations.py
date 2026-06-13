@@ -17,9 +17,9 @@ from mcp.types import TextContent
 
 from better_memory import _diag
 from better_memory.config import get_config, project_name
+from better_memory.mcp._best_effort import _run_best_effort
 from better_memory.mcp.container import ServiceContainer
 from better_memory.mcp.dispatcher import Handler
-from better_memory.mcp.server import _run_best_effort
 from better_memory.services.retention_scheduler import RetentionScheduler
 
 _OBSERVE_SCHEMA: dict[str, Any] = {

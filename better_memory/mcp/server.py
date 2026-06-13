@@ -4,21 +4,12 @@ The server wires together the existing service classes and presents them
 as MCP tools over stdio. On startup, the knowledge-base is reindexed
 (mtime-only, so this is cheap and idempotent) as a session-start step.
 
-Tools
------
-* ``memory.observe``                      — create an observation.
-* ``memory.retrieve``                     — reflections bucketed by polarity.
-* ``memory.retrieve_observations``        — raw observation drill-down.
-* ``memory.record_use``                   — record re-use of a memory.
-* ``memory.semantic_observe`` / _retrieve / _update / _delete — user-stated facts.
-* ``memory.start_ui``                     — spawn or reuse the management UI.
-* ``memory.start_episode`` / _close_episode / _list_episodes / _reconcile_episodes
-                                          — episode lifecycle.
-* ``memory.synthesize_next_get_context``  — episode-context fetch for synthesis.
-* ``memory.synthesize_next_apply``        — apply IDE-LLM's decision JSON.
-* ``memory.session_bootstrap``            — open/reuse a session episode + inject memories.
-* ``memory.run_retention``                — apply spec §9 retention rules.
-* ``knowledge.search`` / ``knowledge.list`` — knowledge-base introspection.
+Tool registration and dispatch are owned by
+:class:`better_memory.mcp.dispatcher.ToolDispatcher`. Each tool's schema,
+description, and async handler live in the per-domain modules under
+``better_memory.mcp.handlers``. ``create_server`` is now a thin wiring
+seam: build services, build the dispatcher, register two MCP callbacks
+that delegate to it.
 
 Connection ownership
 --------------------
@@ -36,15 +27,11 @@ inside a handler are caught by the MCP framework and re-surfaced as a
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import sqlite3
 import sys
-import time
 import urllib.error
 import urllib.request
-import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,26 +46,34 @@ from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
+
+# Re-exported for tests that still import ``_run_best_effort`` from
+# ``better_memory.mcp.server`` (test_best_effort_logging). The canonical
+# definition lives in ``_best_effort`` so handler modules can import it
+# without creating a server <-> handlers import cycle.
+from better_memory.mcp._best_effort import _run_best_effort  # noqa: F401
 from better_memory.mcp._session import resolve_session_id
 from better_memory.mcp.container import ServiceContainer
-from better_memory.mcp.handlers._audit import _audit_synth_call
-from better_memory.services import ui_launcher
-from better_memory.services.episode import EpisodeService
-from better_memory.services.knowledge import (
-    KnowledgeDocument,
-    KnowledgeSearchResult,
-    KnowledgeService,
+from better_memory.mcp.dispatcher import ToolDispatcher
+from better_memory.mcp.handlers import all_handlers
+
+# Re-exported for tests that import the synth serializers from server.py
+# (test_synthesize_tools). The canonical definitions live alongside the
+# ReflectionHandlers; we re-export here only to keep the existing test
+# import paths working.
+from better_memory.mcp.handlers.reflections import (  # noqa: F401
+    _serialize_queue,
+    _serialize_synth_apply_ok,
+    _serialize_synth_apply_state_error,
+    _serialize_synth_apply_validation_error,
+    _serialize_synth_get_context,
 )
+from better_memory.services.episode import EpisodeService
+from better_memory.services.knowledge import KnowledgeService
 from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.observation import ObservationService
-from better_memory.services.reflection import (
-    EpisodeContext,
-    EpisodeQueueCounts,
-    ReflectionSynthesisService,
-    SynthesisStep,
-)
+from better_memory.services.reflection import ReflectionSynthesisService
 from better_memory.services.retention import RetentionService
-from better_memory.services.retention_scheduler import RetentionScheduler
 from better_memory.services.spool import SpoolService
 from better_memory.storage import StorageBackend, build_backend
 
@@ -90,41 +85,6 @@ _KNOWLEDGE_MIGRATIONS = Path(__file__).parent.parent / "db" / "knowledge_migrati
 _OLLAMA_PROBE_TIMEOUT_SEC = 2.0
 
 logger = logging.getLogger(__name__)
-
-
-def _run_best_effort(
-    operation: str,
-    fn: Callable[[], Any],
-    *,
-    diag_cid: str | None = None,
-) -> None:
-    """Run ``fn`` swallowing any ``Exception`` but logging it via the module logger.
-
-    Used by best-effort hooks inside ``memory.retrieve`` (spool drain,
-    retention scheduler) where a failure must NEVER block the call but
-    must still produce a discoverable diagnostic. The previous behaviour
-    silently dropped the exception, so a broken background path could
-    fail invisibly for weeks.
-
-    When ``diag_cid`` is provided and ``BETTER_MEMORY_EMBED_LOG=1`` is on,
-    emits a ``[bm-retrieve step=<operation> cid=... ms=N status=ok|error]``
-    line through the shared diagnostic logger so callers can localize
-    which step is slow.
-    """
-    t0 = time.monotonic()
-    status = "ok"
-    try:
-        fn()
-    except Exception:  # noqa: BLE001 — best-effort wrapper
-        status = "error"
-        logger.exception("best-effort %s failed", operation)
-    finally:
-        if diag_cid is not None and _diag.enabled():
-            ms = int((time.monotonic() - t0) * 1000)
-            _diag.log(
-                f"[bm-retrieve step={operation} cid={diag_cid} "
-                f"ms={ms} status={status}]"
-            )
 
 
 def _probe_ollama(host: str) -> None:
@@ -159,683 +119,20 @@ def _probe_ollama(host: str) -> None:
         )
 
 
-# --------------------------------------------------------------------------- tools
-
-
 def _tool_definitions(*, supports_synthesis: bool = True) -> list[Tool]:
-    """Return the list of tools exposed over MCP.
+    """Return the static list of tools exposed over MCP, gated by capability.
 
-    When ``supports_synthesis`` is False, the
-    ``memory.synthesize_next_get_context`` and ``memory.synthesize_next_apply``
-    tools are omitted. This gates the synthesis surface on the active
-    StorageBackend's capability flag — backends without a local episode
-    queue (e.g. AgentCoreBackend in Plan 2) do not expose these tools.
+    Used by tests that want to assert tool registration without standing
+    up a full :class:`ToolDispatcher`. In production, ``create_server``
+    builds a dispatcher and calls its own ``tool_definitions()`` against
+    the live backend's capability flag — this helper is the same list,
+    derived from the same ``all_handlers()`` source.
     """
-    tools: list[Tool] = [
-        Tool(
-            name="memory.observe",
-            description=(
-                "Record an observation about the current session (a fact, "
-                "decision, bug fix, or outcome). Returns the new observation id."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["content"],
-                "additionalProperties": False,
-                "properties": {
-                    "content": {"type": "string"},
-                    "component": {"type": "string"},
-                    "theme": {"type": "string"},
-                    "trigger_type": {"type": "string"},
-                    "outcome": {
-                        "type": "string",
-                        "enum": ["success", "failure", "neutral"],
-                    },
-                    "tech": {"type": "string"},
-                    "scope": {
-                        "type": "string",
-                        "enum": ["project", "general"],
-                        "description": (
-                            "'project' (default) for project-scoped observations; "
-                            "'general' for cross-project workflow rules that should "
-                            "surface in every project's memory_retrieve."
-                        ),
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="memory.semantic_observe",
-            description=(
-                "Record a user-stated fact or preference. Distinct from "
-                "memory.observe (episodic): semantic memories are "
-                "user-asserted current truths, retrieved at session "
-                "startup. Set scope='general' for cross-project rules."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["content"],
-                "additionalProperties": False,
-                "properties": {
-                    "content": {"type": "string"},
-                    "scope": {
-                        "type": "string",
-                        "enum": ["project", "general"],
-                        "description": (
-                            "'project' (default) for project-scoped rules; "
-                            "'general' for cross-project workflow rules."
-                        ),
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="memory.semantic_retrieve",
-            description=(
-                "Return user-stated facts/preferences for the current "
-                "project, merged with all general-scope semantic memories. "
-                "Flat list ordered newest-first."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "project": {
-                        "type": "string",
-                        "description": (
-                            "Optional project override; "
-                            "defaults to cwd-derived."
-                        ),
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="memory.semantic_update",
-            description=(
-                "Edit a semantic memory's content in place. Bumps updated_at."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["id", "content"],
-                "additionalProperties": False,
-                "properties": {
-                    "id": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.semantic_delete",
-            description=(
-                "Remove a semantic memory. Idempotent — no error if id absent."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["id"],
-                "additionalProperties": False,
-                "properties": {
-                    "id": {"type": "string"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.retrieve",
-            description=(
-                "Retrieve reflections (do / dont / neutral lessons distilled "
-                "from prior observations) bucketed by polarity. Filter by "
-                "project, tech, phase, and polarity. For raw observation "
-                "lookup, use memory.retrieve_observations."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "project": {"type": "string"},
-                    "tech": {"type": "string"},
-                    "phase": {
-                        "type": "string",
-                        "enum": ["planning", "implementation", "general"],
-                    },
-                    "polarity": {
-                        "type": "string",
-                        "enum": ["do", "dont", "neutral"],
-                    },
-                    "limit_per_bucket": {"type": "integer"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.retrieve_observations",
-            description=(
-                "Retrieve raw observations matching given filters. Drill-down "
-                "tool — use memory.retrieve for the distilled-reflections "
-                "default. With ``query``, results are ranked by hybrid "
-                "FTS5 + sqlite-vec relevance; without, ordered created_at "
-                "DESC. ``episode_id`` and ``theme`` filters are ignored "
-                "in query mode."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "project": {"type": "string"},
-                    "episode_id": {"type": "string"},
-                    "component": {"type": "string"},
-                    "theme": {"type": "string"},
-                    "outcome": {
-                        "type": "string",
-                        "enum": ["success", "failure", "neutral"],
-                    },
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.record_use",
-            description=(
-                "Record that an observation was used; optionally mark the "
-                "outcome as success or failure to reinforce the memory."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["id"],
-                "additionalProperties": False,
-                "properties": {
-                    "id": {"type": "string"},
-                    "outcome": {
-                        "type": "string",
-                        "enum": ["success", "failure"],
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="knowledge.search",
-            description=(
-                "BM25 search against the knowledge-base markdown corpus. "
-                "Returns document paths and rank."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["query"],
-                "additionalProperties": False,
-                "properties": {
-                    "query": {"type": "string"},
-                    "project": {"type": "string"},
-                },
-            },
-        ),
-        Tool(
-            name="knowledge.list",
-            description=(
-                "List indexed knowledge documents. When ``project`` is "
-                "supplied, project-scoped rows are filtered to that project."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "project": {"type": "string"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.start_ui",
-            description=(
-                "Spawn or reuse the better-memory management UI. Returns "
-                '{"url": str, "reused": bool}. Reuses an existing live UI '
-                "when one is already running on /healthz."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="memory.start_episode",
-            description=(
-                "Declare a goal for the current session. Opens a new "
-                "foreground episode or hardens the existing background "
-                "episode. Returns the active episode id."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["goal"],
-                "additionalProperties": False,
-                "properties": {
-                    "goal": {"type": "string"},
-                    "tech": {"type": "string"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.close_episode",
-            description=(
-                "Close the current session's active episode. outcome is one "
-                "of success / partial / abandoned / no_outcome."
-            ),
-            inputSchema={
-                "type": "object",
-                "required": ["outcome"],
-                "additionalProperties": False,
-                "properties": {
-                    "outcome": {
-                        "type": "string",
-                        "enum": [
-                            "success",
-                            "partial",
-                            "abandoned",
-                            "no_outcome",
-                        ],
-                    },
-                    "close_reason": {
-                        "type": "string",
-                        "enum": [
-                            "goal_complete",
-                            "plan_complete",
-                            "abandoned",
-                            "superseded",
-                            "session_end_reconciled",
-                        ],
-                    },
-                    "summary": {"type": "string"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.reconcile_episodes",
-            description=(
-                "List episodes that are still open from prior sessions, "
-                "for the LLM to prompt the user about."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="memory.list_episodes",
-            description=(
-                "List episodes with optional filters. For UI and LLM "
-                "introspection."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "project": {"type": "string"},
-                    "outcome": {
-                        "type": "string",
-                        "enum": [
-                            "success",
-                            "partial",
-                            "abandoned",
-                            "no_outcome",
-                        ],
-                    },
-                    "only_open": {"type": "boolean"},
-                },
-            },
-        ),
-        Tool(
-            name="memory.session_bootstrap",
-            description=(
-                "Open or reuse a session episode and inject all project + "
-                "general semantic memories and reflections as "
-                "additionalContext markdown. Mirrors what the SessionStart "
-                "hook does; callable manually for recovery, testing, or "
-                "post-/clear re-injection."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "source": {
-                        "type": "string",
-                        "enum": ["startup", "resume", "clear", "compact"],
-                        "description": (
-                            "SessionStart payload source. Unknown values "
-                            "coerce to 'startup' inside the service."
-                        ),
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": (
-                            "Optional SessionStart payload session_id. "
-                            "Defaults to $CLAUDE_SESSION_ID env var, or a "
-                            "fresh UUID."
-                        ),
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": (
-                            "Optional working directory. Defaults to "
-                            "server's process cwd."
-                        ),
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="memory.run_retention",
-            description=(
-                "Apply spec §9 retention rules — flip eligible "
-                "observations to status='archived' and optionally "
-                "hard-delete archived rows older than prune_age_days."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "retention_days": {
-                        "type": "integer",
-                        "default": 90,
-                        "description": (
-                            "Age threshold for the three archive "
-                            "rules. Default 90 (per spec §9)."
-                        ),
-                    },
-                    "prune": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": (
-                            "If true, also hard-delete archived rows "
-                            "older than prune_age_days."
-                        ),
-                    },
-                    "prune_age_days": {
-                        "type": "integer",
-                        "default": 365,
-                        "description": (
-                            "Age threshold for prune mode. Default 365."
-                        ),
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": (
-                            "If true, return the counts without "
-                            "writing any changes to the DB."
-                        ),
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="memory.list_session_exposures",
-            description=(
-                "Return the unrated session_memory_exposure rows for the "
-                "current Claude session (resolved server-side from "
-                "CLAUDE_SESSION_ID env). Read-only; no side effects. "
-                "Used by the rate-session-memories skill as the "
-                "authoritative anti-hallucination list."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="memory.apply_session_ratings",
-            description=(
-                "Atomic batch rating for the current Claude session "
-                "(resolved server-side from CLAUDE_SESSION_ID). Called "
-                "at session end by the rate-session-memories skill. "
-                "Raises if CLAUDE_SESSION_ID is unset — call only inside "
-                "an active Claude session."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["ratings"],
-                "properties": {
-                    "ratings": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["kind", "id", "class"],
-                            "properties": {
-                                "kind": {"enum": ["reflection", "semantic"]},
-                                "id": {"type": "string"},
-                                "class": {
-                                    "enum": [
-                                        "cited", "shaped", "ignored",
-                                        "misled", "overlooked",
-                                    ]
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="memory.credit",
-            description=(
-                "Per-tool-use credit. When you actively use a memory "
-                "retrieved during this session (quote it, follow its "
-                "guidance, or it misled you), call this immediately. "
-                "Resolved server-side from CLAUDE_SESSION_ID. "
-                "class must be 'cited', 'shaped', 'misled', or "
-                "'overlooked' — NOT 'ignored'. Use 'overlooked' when the "
-                "user pointed you back to a memory you already had but "
-                "had not applied."
-            ),
-            inputSchema={
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["kind", "id", "class"],
-                "properties": {
-                    "kind": {"enum": ["reflection", "semantic"]},
-                    "id": {"type": "string"},
-                    "class": {"enum": ["cited", "shaped", "misled", "overlooked"]},
-                },
-            },
-        ),
+    return [
+        Tool(name=h.name, description=h.description, inputSchema=h.schema)
+        for h in all_handlers()
+        if supports_synthesis or not h.requires_synthesis
     ]
-
-    if supports_synthesis:
-        tools.extend([
-            Tool(
-                name="memory.synthesize_next_get_context",
-                description=(
-                    "Return the next pending episode's full context for "
-                    "consolidation: episode metadata, all observations on it, "
-                    "and tech-filtered existing reflections. The IDE-LLM "
-                    "consumes this, decides what new/augment/merge/ignore "
-                    "actions to take, and submits the decision via "
-                    "memory.synthesize_next_apply. Returns "
-                    '{"episode_id": null, "queue": {...}} when the queue is '
-                    "empty. See the better-memory-synthesize skill for the "
-                    "full workflow and decision schema."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "project": {
-                            "type": "string",
-                            "description": (
-                                "Optional project override; defaults to "
-                                "cwd-derived."
-                            ),
-                        },
-                    },
-                },
-            ),
-            Tool(
-                name="memory.synthesize_next_apply",
-                description=(
-                    "Apply a synthesis decision for one episode. Atomically "
-                    "creates new reflections, augments existing ones, merges "
-                    "duplicates, and marks observations as consumed (or "
-                    "ignored). Marks the episode synthesized. Returns a "
-                    "step summary {episode_id, counts, queue, failure}. "
-                    "decision shape: {new: [...], augment: [...], "
-                    "merge: [...], ignore: [...]} — see the "
-                    "better-memory-synthesize skill for the per-entry "
-                    "field schema."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "required": ["episode_id", "decision"],
-                    "additionalProperties": False,
-                    "properties": {
-                        "episode_id": {"type": "string"},
-                        "decision": {
-                            "type": "object",
-                            "description": (
-                                "Decision JSON; validation errors are "
-                                "returned to the caller without stamping "
-                                "the episode failed (caller can retry)."
-                            ),
-                        },
-                        "project": {
-                            "type": "string",
-                            "description": (
-                                "Optional project override; defaults to "
-                                "cwd-derived."
-                            ),
-                        },
-                    },
-                },
-            ),
-        ])
-
-    return tools
-
-
-# --------------------------------------------------------------------------- helpers
-
-
-def _serialize_knowledge_search(result: KnowledgeSearchResult) -> dict[str, Any]:
-    doc = result.document
-    return {
-        "path": doc.path,
-        "scope": doc.scope,
-        "project": doc.project,
-        "language": doc.language,
-        "rank": result.rank,
-    }
-
-
-def _serialize_knowledge_doc(doc: KnowledgeDocument) -> dict[str, Any]:
-    return {
-        "path": doc.path,
-        "scope": doc.scope,
-        "project": doc.project,
-        "language": doc.language,
-    }
-
-
-def _serialize_queue(queue: EpisodeQueueCounts) -> dict[str, int]:
-    return {
-        "pending": queue.pending,
-        "in_cooldown": queue.in_cooldown,
-        "done": queue.done,
-    }
-
-
-def _serialize_synth_get_context(
-    ctx: EpisodeContext | None,
-    queue: EpisodeQueueCounts,
-) -> dict[str, Any]:
-    """Build the JSON payload for ``memory.synthesize_next_get_context``.
-
-    Returns ``{"episode_id": null, "queue": {...}}`` when the queue is
-    empty. Otherwise returns the full episode + observations + reflections
-    bundle the IDE-LLM consumes to decide on synthesis actions.
-    """
-    queue_json = _serialize_queue(queue)
-    if ctx is None:
-        return {"episode_id": None, "queue": queue_json}
-    return {
-        "episode_id": ctx.episode.id,
-        "queue": queue_json,
-        "episode": {
-            "id": ctx.episode.id,
-            "project": ctx.episode.project,
-            "goal": ctx.episode.goal,
-            "tech": ctx.episode.tech,
-            "outcome": ctx.episode.outcome,
-        },
-        "observations": [
-            {
-                "id": o.id,
-                "content": o.content,
-                "outcome": o.outcome,
-                "component": o.component,
-                "theme": o.theme,
-                "tech": o.tech,
-                "created_at": o.created_at,
-                "status": o.status,
-            }
-            for o in ctx.observations
-        ],
-        "reflections": [
-            {
-                "id": r.id,
-                "title": r.title,
-                "tech": r.tech,
-                "phase": r.phase,
-                "polarity": r.polarity,
-                "use_cases": r.use_cases,
-                "hints": json.loads(r.hints) if r.hints else [],
-                "confidence": r.confidence,
-                "status": r.status,
-            }
-            for r in ctx.reflections
-        ],
-    }
-
-
-def _serialize_synth_apply_ok(step: SynthesisStep) -> dict[str, Any]:
-    """Build the JSON payload for a successful ``memory.synthesize_next_apply``."""
-    return {
-        "ok": True,
-        "episode_id": step.episode_id,
-        "counts": step.counts,
-        "queue": _serialize_queue(step.queue),
-    }
-
-
-def _serialize_synth_apply_validation_error(message: str) -> dict[str, Any]:
-    """Build the JSON payload for a decision-validation failure.
-
-    Validation errors do NOT stamp ``synth_failed_at``; the caller can
-    retry with a corrected payload.
-    """
-    return {
-        "ok": False,
-        "error": "validation",
-        "message": message,
-    }
-
-
-def _serialize_synth_apply_state_error(message: str) -> dict[str, Any]:
-    """Build the JSON payload for an episode-state failure.
-
-    Surfaces apply-time precondition violations (episode not found,
-    wrong project, already synthesized) without raising into the MCP
-    framework's generic isError surface. Caller should NOT retry the
-    same episode_id; pull fresh context via
-    ``memory.synthesize_next_get_context`` first.
-    """
-    return {
-        "ok": False,
-        "error": "state",
-        "message": message,
-    }
-
-
-# --------------------------------------------------------------------------- factory
 
 
 @dataclass
@@ -848,12 +145,15 @@ class ServerContext:
     ``memory_conn`` is the underlying sqlite connection (None for non-sqlite
     backends in future plans); ``embedder`` is whatever was passed to the
     backend (None for the sqlite/FTS5 embeddings backend, which indexes via
-    DB triggers and needs no Python embedder).
+    DB triggers and needs no Python embedder). ``dispatcher`` is the live
+    :class:`ToolDispatcher` so tests can route tool calls without going
+    through the SDK request stack.
     """
 
     backend: StorageBackend
     memory_conn: sqlite3.Connection | None = None
     embedder: Any = None
+    dispatcher: ToolDispatcher | None = None
 
 
 def _build_services(
@@ -911,6 +211,45 @@ def _build_services(
     )
 
 
+def _make_cleanup(
+    memory_conn: sqlite3.Connection,
+    knowledge_conn: sqlite3.Connection,
+    embedder: OllamaEmbedder | None,
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """Build the idempotent shutdown closure.
+
+    Closes both SQLite connections and the embedder's HTTP client.
+    Safe to call multiple times: SQLite ``Connection.close`` is a no-op
+    after the first call, and a local ``cleaned`` flag guards against
+    double-closing the embedder's httpx client.
+    """
+    cleaned = False
+
+    async def cleanup() -> None:
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        try:
+            memory_conn.close()
+        except Exception:  # noqa: BLE001 — best-effort shutdown
+            pass
+        try:
+            knowledge_conn.close()
+        except Exception:  # noqa: BLE001 — best-effort shutdown
+            pass
+        # In the sqlite backend no embedder is built (FTS5 triggers handle
+        # indexing). Guard against the None case so this cleanup stays
+        # idempotent across both backends.
+        if embedder is not None:
+            try:
+                await embedder.aclose()
+            except Exception:  # noqa: BLE001 — best-effort shutdown
+                pass
+
+    return cleanup
+
+
 def create_server() -> tuple[
     Server,
     Callable[[], Coroutine[Any, Any, None]],
@@ -922,8 +261,20 @@ def create_server() -> tuple[
     idempotent async function that closes the two SQLite connections and
     the embedder's HTTP client, and ``ctx`` is a :class:`ServerContext`
     bundling the live :class:`StorageBackend`, its underlying memory
-    connection, and the embedder (if any). Callers must await ``cleanup``
-    on shutdown (typically in a ``finally`` around ``server.run``).
+    connection, the embedder (if any), and the :class:`ToolDispatcher`.
+    Callers must await ``cleanup`` on shutdown (typically in a ``finally``
+    around ``server.run``).
+
+    Concurrency invariant: the memory-side services share ``memory_conn``.
+    Each service's docstring documents that it owns the connection and the
+    caller must not share it with another service that has an open
+    transaction. That contract holds here only because the MCP stdio
+    transport serialises requests — ``_call_tool`` runs one tool
+    invocation at a time, so at most one service's SAVEPOINT is ever in
+    flight. If any future change introduces async fan-out, a background
+    task, or a worker thread that writes to ``memory_conn``, this
+    assumption breaks and the services must be reworked to use per-task
+    connections (or a connection pool with explicit checkout).
     """
     config = get_config()
 
@@ -946,19 +297,6 @@ def create_server() -> tuple[
         # memory.retrieve will succeed on their next call without a restart.
         _probe_ollama(config.ollama_host)
 
-    # Concurrency invariant: the five memory-side services below
-    # (EpisodeService, ObservationService, ReflectionSynthesisService,
-    # RetentionService, SpoolService) all share ``memory_conn``. Each
-    # service's docstring documents that it owns the connection and the
-    # caller must not share it with another service that has an open
-    # transaction. That contract holds here only because the MCP stdio
-    # transport serialises requests — _call_tool runs one tool invocation
-    # at a time, so at most one service's SAVEPOINT is ever in flight.
-    # If any future change introduces async fan-out, a background task,
-    # or a worker thread that writes to ``memory_conn``, this assumption
-    # breaks and the services must be reworked to use per-task
-    # connections (or a connection pool with explicit checkout).
-    #
     # Resolve project + session id ONCE at startup. Per-handler code can
     # still override per-call (handlers continue to read args.get("project")
     # / call project_name() for backwards compatibility), but the backend
@@ -974,15 +312,6 @@ def create_server() -> tuple[
         startup_project=project_name(),
         startup_session_id=resolve_session_id(config.home) or None,
     )
-    # Existing local names that the legacy if-chain still uses:
-    episodes = services.episodes
-    observations = services.observations
-    backend = services.backend
-    reflections = services.reflections
-    retention = services.retention
-    memory_rating = services.memory_rating
-    knowledge = services.knowledge
-    spool = services.spool
 
     # Session-start behaviour: reindex knowledge at startup. mtime-only, so
     # the cost is O(files) stat calls on an already-indexed corpus. We
@@ -990,525 +319,31 @@ def create_server() -> tuple[
     # not block the server from serving memory tools.
     if config.knowledge_base.is_dir():
         try:
-            knowledge.reindex()
+            services.knowledge.reindex()
         except Exception:  # noqa: BLE001 — best-effort startup hook
             pass
+
+    dispatcher = ToolDispatcher(services, all_handlers())
 
     server: Server = Server(name="better-memory")
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:
-        return _tool_definitions(supports_synthesis=backend.supports_synthesis)
+        return dispatcher.tool_definitions()
 
     @server.call_tool()
     async def _call_tool(
-        name: str, arguments: dict[str, Any] | None
+        name: str, arguments: dict[str, Any] | None,
     ) -> list[TextContent]:
-        args = arguments or {}
+        with _diag.trace(f"mcp.{name}"):
+            return await dispatcher.call(name, arguments or {})
 
-        if name == "memory.observe":
-            with _diag.trace(
-                "mcp.memory.observe",
-                content_len=len(args.get("content") or ""),
-                scope=args.get("scope") or "project",
-                component=args.get("component"),
-            ):
-                _diag.step("mcp.memory.observe", "calling_observations_create")
-                obs_id = await observations.create(
-                    content=args["content"],
-                    component=args.get("component"),
-                    theme=args.get("theme"),
-                    trigger_type=args.get("trigger_type"),
-                    outcome=args.get("outcome", "neutral"),
-                    tech=args.get("tech"),
-                    # `or "project"` (not `, "project"` default) defends against
-                    # MCP clients sending {"scope": null} — dict.get returns the
-                    # default only when the key is absent, not when its value is
-                    # None. Without this, scope=None propagates to ObservationService
-                    # .create() which raises ValueError.
-                    scope=args.get("scope") or "project",
-                )
-                _diag.step("mcp.memory.observe", "create_returned", obs_id=obs_id)
-                return [TextContent(type="text", text=json.dumps({"id": obs_id}))]
-
-        if name == "memory.semantic_observe":
-            from better_memory.services.semantic import SemanticMemoryService
-            project = project_name()
-            svc = SemanticMemoryService(memory_conn)
-            # `args.get("scope") or "project"` (not `, "project"` default) defends
-            # against MCP clients sending {"scope": null} — dict.get returns the
-            # default only when the key is absent, not when its value is None.
-            # Same fix as PR #25's BugBot finding on memory.observe.
-            memory_id = svc.create(
-                content=args["content"],
-                project=project,
-                scope=args.get("scope") or "project",
-            )
-            return [TextContent(type="text", text=json.dumps({"id": memory_id}))]
-
-        if name == "memory.semantic_retrieve":
-            from better_memory.services.semantic import SemanticMemoryService
-            project = args.get("project") or project_name()
-            svc = SemanticMemoryService(memory_conn)
-            memories = svc.list_for_project(project=project)
-            payload = [
-                {
-                    "id": m.id,
-                    "content": m.content,
-                    "project": m.project,
-                    "scope": m.scope,
-                    "created_at": m.created_at,
-                    "updated_at": m.updated_at,
-                }
-                for m in memories
-            ]
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        if name == "memory.semantic_update":
-            from better_memory.services.semantic import SemanticMemoryService
-            svc = SemanticMemoryService(memory_conn)
-            svc.update_text(id=args["id"], content=args["content"])
-            return [TextContent(type="text", text=json.dumps({"ok": True}))]
-
-        if name == "memory.semantic_delete":
-            from better_memory.services.semantic import SemanticMemoryService
-            svc = SemanticMemoryService(memory_conn)
-            svc.delete(id=args["id"])
-            return [TextContent(type="text", text=json.dumps({"ok": True}))]
-
-        if name == "memory.retrieve":
-            with _diag.trace(
-                "mcp.memory.retrieve",
-                project=args.get("project") or "<auto>",
-                tech=args.get("tech"),
-                phase=args.get("phase"),
-                polarity=args.get("polarity"),
-            ):
-                diag_cid: str | None = None
-                t_retrieve = 0.0
-                if _diag.enabled():
-                    diag_cid = uuid.uuid4().hex[:8]
-                    t_retrieve = time.monotonic()
-                    _diag.log(f"[bm-retrieve start cid={diag_cid}]")
-
-                # 1. Drain spool — must happen before any retrieval so fresh
-                #    hook events (session_start, commit_close) are processed.
-                #    SpoolService.drain is idempotent.
-                _diag.step("mcp.memory.retrieve", "before_spool_drain")
-                _run_best_effort("spool.drain", spool.drain, diag_cid=diag_cid)
-                _diag.step("mcp.memory.retrieve", "after_spool_drain")
-
-                # 2. Maybe run retention. Guard ensures at most once per 24h
-                #    regardless of how often retrieve is called. Best-effort:
-                #    a retention failure must NEVER block memory.retrieve.
-                def _retention_step() -> None:
-                    cfg = get_config()
-                    RetentionScheduler(
-                        memory_conn, auto_prune=cfg.auto_prune
-                    ).maybe_run(triggered_by="retrieve")
-
-                _diag.step("mcp.memory.retrieve", "before_retention_scheduler")
-                _run_best_effort(
-                    "retention scheduler", _retention_step, diag_cid=diag_cid
-                )
-                _diag.step("mcp.memory.retrieve", "after_retention_scheduler")
-
-                project = args.get("project") or project_name()
-                limit_per_bucket = args.get("limit_per_bucket", 20)
-                t_reflections = time.monotonic() if diag_cid else 0.0
-                _diag.step(
-                    "mcp.memory.retrieve",
-                    "before_retrieve_reflections",
-                    project=project,
-                )
-                buckets = backend.retrieve(
-                    project=project,
-                    tech=args.get("tech"),
-                    phase=args.get("phase"),
-                    polarity=args.get("polarity"),
-                    limit_per_bucket=limit_per_bucket,
-                )
-                _diag.step(
-                    "mcp.memory.retrieve",
-                    "after_retrieve_reflections",
-                    do=len(buckets.get("do", [])),
-                    dont=len(buckets.get("dont", [])),
-                    neutral=len(buckets.get("neutral", [])),
-                )
-                if diag_cid is not None:
-                    refl_ms = int((time.monotonic() - t_reflections) * 1000)
-                    total_ms = int((time.monotonic() - t_retrieve) * 1000)
-                    _diag.log(
-                        f"[bm-retrieve step=reflections cid={diag_cid} "
-                        f"ms={refl_ms} status=ok]"
-                    )
-                    _diag.log(
-                        f"[bm-retrieve done cid={diag_cid} total_ms={total_ms}]"
-                    )
-                return [TextContent(type="text", text=json.dumps(buckets))]
-
-        if name == "memory.retrieve_observations":
-            project = args.get("project") or project_name()
-            results = await observations.list_observations(
-                project=project,
-                episode_id=args.get("episode_id"),
-                component=args.get("component"),
-                theme=args.get("theme"),
-                outcome=args.get("outcome"),
-                query=args.get("query"),
-                limit=args.get("limit", 50),
-            )
-            return [TextContent(type="text", text=json.dumps(results))]
-
-        if name == "memory.record_use":
-            observations.record_use(
-                args["id"],
-                outcome=args.get("outcome"),
-            )
-            return [TextContent(type="text", text=json.dumps({"ok": True}))]
-
-        if name == "knowledge.search":
-            results = knowledge.search(
-                args["query"],
-                project=args.get("project"),
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        [_serialize_knowledge_search(r) for r in results]
-                    ),
-                )
-            ]
-
-        if name == "knowledge.list":
-            docs = knowledge.list_documents(project=args.get("project"))
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        [_serialize_knowledge_doc(d) for d in docs]
-                    ),
-                )
-            ]
-
-        if name == "memory.start_ui":
-            result = ui_launcher.start_ui()
-            return [
-                TextContent(type="text", text=json.dumps(result))
-            ]
-
-        if name == "memory.start_episode":
-            project = project_name()
-            episode_id = episodes.start_foreground(
-                session_id=observations.session_id,
-                project=project,
-                goal=args["goal"],
-                tech=args.get("tech"),
-            )
-            # Reflection synthesis is now interactive — driven by the IDE-LLM
-            # via memory.synthesize_next_get_context / _apply. We surface the
-            # current pending count so the LLM knows whether it should run
-            # synthesis (typically before treating retrieved reflections as
-            # canonical).
-            queue = reflections.read_queue_counts(project=project)
-            buckets = backend.retrieve(
-                project=project, tech=args.get("tech"),
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "episode_id": episode_id,
-                            "reflections": buckets,
-                            "pending_synthesis": _serialize_queue(queue),
-                        }
-                    ),
-                )
-            ]
-
-        if name == "memory.close_episode":
-            outcome = args["outcome"]
-            # Default close_reason: match outcome for the common paths.
-            default_reasons = {
-                "success": "goal_complete",
-                "partial": "plan_complete",
-                "abandoned": "abandoned",
-                "no_outcome": "session_end_reconciled",
-            }
-            close_reason = args.get("close_reason") or default_reasons[outcome]
-            try:
-                closed_id = episodes.close_active(
-                    session_id=observations.session_id,
-                    outcome=outcome,
-                    close_reason=close_reason,
-                    summary=args.get("summary"),
-                )
-            except ValueError:
-                # No active episode — already closed (e.g. by a prior commit-
-                # trailer drain) or never opened. Matches the "safe no-op"
-                # contract documented in the CLAUDE snippet's plan-complete
-                # section.
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps(
-                            {"closed_episode_id": None, "already_closed": True}
-                        ),
-                    )
-                ]
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {"closed_episode_id": closed_id, "already_closed": False}
-                    ),
-                )
-            ]
-
-        if name == "memory.reconcile_episodes":
-            open_episodes = episodes.unclosed_episodes(
-                exclude_session_ids={observations.session_id}
-            )
-            payload = [
-                {
-                    "episode_id": e.id,
-                    "project": e.project,
-                    "tech": e.tech,
-                    "goal": e.goal,
-                    "started_at": e.started_at,
-                }
-                for e in open_episodes
-            ]
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        if name == "memory.run_retention":
-            report = retention.run(
-                retention_days=args.get("retention_days", 90),
-                prune=args.get("prune", False),
-                prune_age_days=args.get("prune_age_days", 365),
-                dry_run=args.get("dry_run", False),
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "archived_via_retired_reflection":
-                            report.archived_via_retired_reflection,
-                        "archived_via_consumed_without_reflection":
-                            report.archived_via_consumed_without_reflection,
-                        "archived_via_no_outcome_episode":
-                            report.archived_via_no_outcome_episode,
-                        "pruned": report.pruned,
-                    }),
-                )
-            ]
-
-        if name == "memory.list_episodes":
-            rows = episodes.list_episodes(
-                project=args.get("project"),
-                outcome=args.get("outcome"),
-                only_open=args.get("only_open", False),
-            )
-            payload = [
-                {
-                    "episode_id": e.id,
-                    "project": e.project,
-                    "tech": e.tech,
-                    "goal": e.goal,
-                    "started_at": e.started_at,
-                    "hardened_at": e.hardened_at,
-                    "ended_at": e.ended_at,
-                    "close_reason": e.close_reason,
-                    "outcome": e.outcome,
-                    "summary": e.summary,
-                }
-                for e in rows
-            ]
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        if name == "memory.session_bootstrap":
-            from better_memory.services.session_bootstrap import (
-                SessionBootstrapService,
-            )
-
-            cwd_arg = args.get("cwd") or os.getcwd()
-            session_id_arg = (
-                args.get("session_id")
-                or os.environ.get("CLAUDE_SESSION_ID")
-                or os.environ.get("CLAUDE_CODE_SESSION_ID")
-                or uuid.uuid4().hex
-            )
-            svc = SessionBootstrapService(memory_conn)
-            result = svc.bootstrap(
-                source=args.get("source"),
-                session_id=session_id_arg,
-                cwd=Path(cwd_arg),
-            )
-            payload = {
-                "additionalContext": result.additional_context,
-                "project": result.project,
-                "source": result.source,
-                "episode": {
-                    "id": result.episode_id,
-                    "action": result.episode_action,
-                },
-                "counts": {
-                    "semantic": result.semantic_count,
-                    "reflections": result.reflections_counts,
-                },
-            }
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        if name == "memory.synthesize_next_get_context":
-            project = args.get("project") or project_name()
-            with _audit_synth_call(
-                config.home,
-                tool="get_context",
-                project=project,
-                episode_id=None,
-            ) as audit:
-                ctx = reflections.get_next_pending_context(project=project)
-                queue = reflections.read_queue_counts(project=project)
-                payload = _serialize_synth_get_context(ctx, queue)
-                if ctx is None:
-                    audit["result_kind"] = "empty"
-                else:
-                    audit["result_kind"] = "episode"
-                    audit["episode_id"] = ctx.episode.id
-                    audit["obs_count"] = len(ctx.observations)
-                    audit["refl_count"] = len(ctx.reflections)
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        if name == "memory.synthesize_next_apply":
-            from better_memory.services.reflection import (
-                SynthesisResponseError,
-            )
-            project = args.get("project") or project_name()
-            episode_id = args["episode_id"]
-            decision = args["decision"]
-            with _audit_synth_call(
-                config.home,
-                tool="apply",
-                project=project,
-                episode_id=episode_id,
-            ) as audit:
-                try:
-                    # ``decision`` is already a parsed dict (the MCP
-                    # framework decoded it before dispatch). Use the
-                    # dict-shape parser directly to skip a redundant
-                    # json.dumps → json.loads round-trip.
-                    response = reflections.parse_response_dict(decision)
-                except SynthesisResponseError as exc:
-                    audit["result_kind"] = "validation_error"
-                    audit["error"] = str(exc)
-                    payload = _serialize_synth_apply_validation_error(
-                        str(exc)
-                    )
-                    return [
-                        TextContent(type="text", text=json.dumps(payload))
-                    ]
-                try:
-                    step = reflections.apply_decision(
-                        episode_id=episode_id,
-                        response=response,
-                        project=project,
-                    )
-                except ValueError as exc:
-                    # Episode-state preconditions: not found / wrong
-                    # project / already synthesized. Surface as
-                    # structured error so the IDE-LLM can refetch
-                    # context instead of retrying the same stale id.
-                    audit["result_kind"] = "state_error"
-                    audit["error"] = str(exc)
-                    payload = _serialize_synth_apply_state_error(str(exc))
-                    return [
-                        TextContent(type="text", text=json.dumps(payload))
-                    ]
-                audit["result_kind"] = "applied"
-                audit["counts"] = step.counts
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(_serialize_synth_apply_ok(step)),
-                )
-            ]
-
-        if name == "memory.list_session_exposures":
-            from better_memory.services.session_bootstrap import (
-                SessionBootstrapService,
-            )
-
-            sid = resolve_session_id(config.home) or ""
-            payload = SessionBootstrapService(memory_conn).list_session_exposures(
-                session_id=sid,
-            )
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        if name == "memory.apply_session_ratings":
-            sid = resolve_session_id(config.home)
-            if not sid:
-                raise ValueError(
-                    "No active session: CLAUDE_SESSION_ID / "
-                    "CLAUDE_CODE_SESSION_ID not set and no session marker "
-                    "found (SessionStart hook may not have run)"
-                )
-            payload = memory_rating.apply_session_ratings(
-                session_id=sid,
-                ratings=args["ratings"],
-            )
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        if name == "memory.credit":
-            sid = resolve_session_id(config.home)
-            if not sid:
-                payload = {"applied": None, "skipped": "no_session"}
-            else:
-                payload = memory_rating.credit_one(
-                    session_id=sid,
-                    kind=args["kind"],
-                    id=args["id"],
-                    classification=args["class"],
-                )
-            return [TextContent(type="text", text=json.dumps(payload))]
-
-        raise ValueError(f"Unknown tool: {name}")
-
-    cleaned = False
-
-    async def cleanup() -> None:
-        """Close SQLite connections and the embedder HTTP client.
-
-        Idempotent: safe to call multiple times. SQLite ``Connection.close``
-        is a no-op after the first call, and we guard the embedder close with
-        a local flag so we don't double-close its httpx client either.
-        """
-        nonlocal cleaned
-        if cleaned:
-            return
-        cleaned = True
-        try:
-            memory_conn.close()
-        except Exception:  # noqa: BLE001 — best-effort shutdown
-            pass
-        try:
-            knowledge_conn.close()
-        except Exception:  # noqa: BLE001 — best-effort shutdown
-            pass
-        # In the sqlite backend no embedder is built (FTS5 triggers handle
-        # indexing). Guard against the None case so this cleanup stays
-        # idempotent across both backends.
-        if embedder is not None:
-            try:
-                await embedder.aclose()
-            except Exception:  # noqa: BLE001 — best-effort shutdown
-                pass
-
+    cleanup = _make_cleanup(memory_conn, knowledge_conn, embedder)
     return server, cleanup, ServerContext(
-        backend=backend,
+        backend=services.backend,
         memory_conn=memory_conn,
         embedder=embedder,
+        dispatcher=dispatcher,
     )
 
 
