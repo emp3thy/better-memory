@@ -157,6 +157,47 @@ Caps: **≤ 5 items**, **~400 tokens** total (truncate lowest-ranked first).
 | Deps | none (no Ollama, no FTS, no new packages) |
 | Backends | via `StorageBackend` abstraction; works sqlite + agentcore |
 
+## Assumptions & verification (2026-06-14)
+
+3-bucket review of design assumptions. The two load-bearing ones were verified
+against the official Claude Code hooks docs before proceeding.
+
+**🔴 Real concerns**
+1. **Lexical match may miss the most relevant memory** (the motivating case:
+   prompt vocabulary ≠ reflection body). *Accepted for v1* — plan/reflection
+   text overlaps in practice ("write the plan" ↔ planning reflections), and the
+   `PreToolUse`-on-`Skill` query (skill name) matches reflection `use_cases`.
+   Upgrade to `trigger_tags` or semantic ranking later if recall is poor.
+2. **Does injected `additionalContext` escape "background" framing?**
+   *Verified.* `UserPromptSubmit` `additionalContext` is "injected as a system
+   reminder that Claude reads as plain text" (CC hooks-guide). It is NOT a
+   stronger instruction envelope — the gain is **per-turn relevance + recency**,
+   not framing weight. Observationally it IS acted upon (the caveman
+   `UserPromptSubmit` hook stays active across a session). Implication: the
+   habituation risk on repetition is real → see the deferred dedup option.
+3. **`PreToolUse` for the `Skill` tool.** *Partially verified.* `PreToolUse`
+   supports `additionalContext` injection AND gating; matcher is the tool name
+   with alternation (`Skill|Task|Write`); the hook reads `tool_name`/`tool_input`
+   from stdin. **Gap:** docs don't confirm `PreToolUse` fires for the built-in
+   `Skill`/`Task` tools (examples are Bash/Edit/Write/mcp__). **Planning task:
+   empirically confirm Skill firing**; if it doesn't fire, `UserPromptSubmit`
+   remains the reliable backbone and the planning case is still covered by prompt
+   text. Not a blocker.
+
+**🟠 Medium**
+4. **Per-turn cold-start latency** (~150–250 ms python start on the turn's
+   critical path). Mitigate with lean imports; revisit a persistent helper.
+5. **`track_exposure=False` discards the surfaced-but-ignored signal**
+   (`times_overlooked`). Trade-off; revisit if ranking needs that feedback.
+
+**🟢 Verified-safe:** reflections have general scope (migration 0007);
+abstraction exposes `retrieve()` + `semantic_list()`; whole-word match needs no
+deps; hook stdin/exit-0 pattern proven.
+
+**⚪ Minor / accepted (tunables):** `neutral` bucket inclusion, `PreToolUse`
+matcher set, injection cap (5 / ~400 tok), keyword min-length 3 (drops 2-char
+tokens like "PR"/"CI"), no-dedup context growth.
+
 ## Deferred options (intentionally not built)
 
 - **Dedup / cooldown window.** Considered and rejected for v1: re-surfacing a
