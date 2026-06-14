@@ -52,7 +52,7 @@ The script:
 3. Checks for Ollama; offers to install via `brew` / `apt` / `winget` if missing.
 4. Pulls `nomic-embed-text`.
 5. Creates `~/.better-memory/{spool,knowledge-base/...}`.
-6. Auto-installs the MCP server registration into `~/.claude.json` and the three hooks (`session_bootstrap`, `observer`, `session_close`) into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
+6. Auto-installs the MCP server registration into `~/.claude.json` and the hooks (`session_bootstrap`, `observer`, `session_close`, and `contextual_inject` on `UserPromptSubmit` + `PreToolUse`) into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
 
 If you'd rather inspect or hand-edit the config, see [Manual setup](#manual-setup) below.
 

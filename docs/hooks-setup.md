@@ -1,12 +1,20 @@
 # better-memory hook registration
 
-better-memory ships three hooks that wire into Claude Code's hook framework:
+better-memory ships these hooks that wire into Claude Code's hook framework:
 
 | Hook | Purpose | Module |
 |---|---|---|
 | `SessionStart` | Open/reuse a background episode and inject project + general semantic memories and reflections as `additionalContext` | `better_memory.hooks.session_bootstrap` |
 | `PostToolUse` | Capture every tool invocation as a spool event | `better_memory.hooks.observer` |
 | `Stop` | Mark session end for consolidation boundary detection | `better_memory.hooks.session_close` |
+| `UserPromptSubmit` + `PreToolUse` | Inject curated memories (semantic + reflections) relevant to the current prompt / tool-input as `additionalContext` | `better_memory.hooks.contextual_inject` |
+
+The `contextual_inject` hook is gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE`
+(`userprompt` \| `pretool` \| `both` (default) \| `off`). It runs in-process
+against `memory.db`, whole-word-matches the curated memory set against the
+prompt / tool-input, and injects the top matches; it never blocks a turn.
+Note: whether `PreToolUse` fires for the built-in `Skill`/`Task` tools is
+environment-dependent — `UserPromptSubmit` is the reliable trigger.
 
 ## Registering the hooks
 
@@ -46,6 +54,27 @@ project-scoped):
             "type": "command",
             "command": "uv run python -m better_memory.hooks.session_close",
             "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python -m better_memory.hooks.contextual_inject"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Skill|Task|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python -m better_memory.hooks.contextual_inject"
           }
         ]
       }
