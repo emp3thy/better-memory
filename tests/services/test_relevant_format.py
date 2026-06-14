@@ -21,4 +21,4 @@ def test_includes_confidence_for_reflections():
 
 def test_semantic_has_no_confidence_tag():
     out = format_relevant([RelevantMemory("semantic", "s1", "a fact", None, 1)])
-    assert "conf" not in out
+    assert "· conf" not in out  # the confidence tag, not the word "conflicts" in the header
