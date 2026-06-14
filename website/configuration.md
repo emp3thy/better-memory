@@ -17,6 +17,7 @@ One environment variable roots the runtime filesystem layout. Everything else ha
 | `BETTER_MEMORY_AGENTCORE_REGION` | `eu-west-2` | AWS region for `bedrock-agentcore` / `bedrock-agentcore-control` clients when in `agentcore` mode. Only `eu-west-2` is verified by the maintainers; other regions may work if Bedrock AgentCore Memory is GA there. |
 | `BETTER_MEMORY_TEST_AGENTCORE` | unset | `1` enables integration tests against real AWS. Default off; never set in CI. |
 | `BETTER_MEMORY_TEST_AGENTCORE_REGION` | inherits `eu-west-2` | Override region used by integration tests. |
+| `BETTER_MEMORY_CONTEXT_INJECT_MODE` | `both` | Contextual memory-injection hook trigger: `userprompt` (on prompt only), `pretool` (on tool calls only), `both` (default), or `off`. The `contextual_inject` hook surfaces curated memories (semantic + reflections) relevant to the current prompt / tool-input. |
 
 ## Project-name override
 

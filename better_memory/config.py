@@ -212,6 +212,23 @@ class Config:
     agentcore_region: str
     agentcore_semantic_memory_id: str | None
     agentcore_episodic_memory_id: str | None
+    context_inject_mode: Literal["userprompt", "pretool", "both", "off"]
+
+
+_DEFAULT_CONTEXT_INJECT_MODE = "both"
+_VALID_CONTEXT_INJECT_MODES = ("userprompt", "pretool", "both", "off")
+
+
+def _resolve_context_inject_mode() -> Literal["userprompt", "pretool", "both", "off"]:
+    raw = os.environ.get(
+        "BETTER_MEMORY_CONTEXT_INJECT_MODE", _DEFAULT_CONTEXT_INJECT_MODE
+    )
+    if raw not in _VALID_CONTEXT_INJECT_MODES:
+        raise ValueError(
+            f"BETTER_MEMORY_CONTEXT_INJECT_MODE must be one of "
+            f"{_VALID_CONTEXT_INJECT_MODES}, got {raw!r}"
+        )
+    return raw  # type: ignore[return-value]
 
 
 def _resolve_embeddings_backend() -> Literal["ollama", "sqlite"]:
@@ -279,4 +296,5 @@ def get_config() -> Config:
         agentcore_region=agentcore_region,
         agentcore_semantic_memory_id=agentcore_semantic_memory_id,
         agentcore_episodic_memory_id=agentcore_episodic_memory_id,
+        context_inject_mode=_resolve_context_inject_mode(),
     )
