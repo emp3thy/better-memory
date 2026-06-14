@@ -159,36 +159,37 @@ Caps: **≤ 5 items**, **~400 tokens** total (truncate lowest-ranked first).
 
 ## Assumptions & verification (2026-06-14)
 
-3-bucket review of design assumptions. The two load-bearing ones were verified
-against the official Claude Code hooks docs before proceeding.
+Status after verifying the two load-bearing risks against the official Claude
+Code hooks docs. **No open 🔴 blockers remain.**
 
-**🔴 Real concerns**
-1. **Lexical match may miss the most relevant memory** (the motivating case:
-   prompt vocabulary ≠ reflection body). *Accepted for v1* — plan/reflection
-   text overlaps in practice ("write the plan" ↔ planning reflections), and the
-   `PreToolUse`-on-`Skill` query (skill name) matches reflection `use_cases`.
-   Upgrade to `trigger_tags` or semantic ranking later if recall is poor.
-2. **Does injected `additionalContext` escape "background" framing?**
-   *Verified.* `UserPromptSubmit` `additionalContext` is "injected as a system
-   reminder that Claude reads as plain text" (CC hooks-guide). It is NOT a
-   stronger instruction envelope — the gain is **per-turn relevance + recency**,
-   not framing weight. Observationally it IS acted upon (the caveman
-   `UserPromptSubmit` hook stays active across a session). Implication: the
-   habituation risk on repetition is real → see the deferred dedup option.
-3. **`PreToolUse` for the `Skill` tool.** *Partially verified.* `PreToolUse`
-   supports `additionalContext` injection AND gating; matcher is the tool name
-   with alternation (`Skill|Task|Write`); the hook reads `tool_name`/`tool_input`
-   from stdin. **Gap:** docs don't confirm `PreToolUse` fires for the built-in
-   `Skill`/`Task` tools (examples are Bash/Edit/Write/mcp__). **Planning task:
-   empirically confirm Skill firing**; if it doesn't fire, `UserPromptSubmit`
-   remains the reliable backbone and the planning case is still covered by prompt
-   text. Not a blocker.
+**✅ Resolved by verification**
+- **(was #2) `additionalContext` framing.** `UserPromptSubmit` `additionalContext`
+  is "injected as a system reminder that Claude reads as plain text" (CC
+  hooks-guide). Not a stronger instruction envelope — the gain is **per-turn
+  relevance + recency**, not framing weight. Confirmed acted-upon in practice
+  (the caveman `UserPromptSubmit` hook stays active across a session).
+  `PreToolUse` also supports `additionalContext` injection *and* allow/deny
+  gating. Premise holds.
+- **(was #3) `PreToolUse` mechanism.** Matcher = tool name with alternation
+  (`Skill|Task|Write`); hook reads `tool_name`/`tool_input` from stdin;
+  `additionalContext` is passed to Claude. The ONE residual unknown — does
+  `PreToolUse` fire for the built-in `Skill`/`Task` tools? (docs only show
+  Bash/Edit/Write/mcp__) — is reduced to a **single empirical check in the plan
+  (Task 0)**; `UserPromptSubmit` is the reliable backbone regardless, so this is
+  not a blocker.
 
-**🟠 Medium**
-4. **Per-turn cold-start latency** (~150–250 ms python start on the turn's
-   critical path). Mitigate with lean imports; revisit a persistent helper.
-5. **`track_exposure=False` discards the surfaced-but-ignored signal**
-   (`times_overlooked`). Trade-off; revisit if ranking needs that feedback.
+**🟡 Accepted for v1 (decided, with upgrade path)**
+- **(was #1) Lexical match may miss a relevant memory** (prompt vocabulary ≠
+  reflection body). Accepted: plan/reflection text overlaps in practice ("write
+  the plan" ↔ planning reflections) and the `PreToolUse`-on-`Skill` query (skill
+  name) matches reflection `use_cases`. Upgrade to `trigger_tags` or semantic
+  ranking later if recall proves weak.
+
+**🟠 Revisit during build (not blocking)**
+- **Per-turn cold-start latency** (~150–250 ms python start on the turn's
+  critical path). Mitigate with lean imports; revisit a persistent helper.
+- **`track_exposure=False` discards the surfaced-but-ignored signal**
+  (`times_overlooked`). Trade-off; revisit if ranking needs that feedback.
 
 **🟢 Verified-safe:** reflections have general scope (migration 0007);
 abstraction exposes `retrieve()` + `semantic_list()`; whole-word match needs no
