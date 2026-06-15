@@ -42,8 +42,8 @@ _SKILLS_TO_INSTALL: tuple[str, ...] = (
 @dataclass(frozen=True)
 class HookSpec:
     module: str           # e.g. "better_memory.hooks.session_start"
-    event: str            # "SessionStart" | "PostToolUse" | "Stop"
-    matcher: str | None   # None for SessionStart/Stop; "Write|Edit|Bash" for observer
+    event: str            # a Claude Code hook event name
+    matcher: str | None   # None for unscoped events; tool-name alternation otherwise
     is_async: bool        # True for PostToolUse + Stop
     needs_stdout: bool    # True for SessionStart bootstrap — Claude Code reads
                           # the hook's stdout for additionalContext, so the
@@ -56,6 +56,14 @@ _OUR_HOOKS: tuple[HookSpec, ...] = (
     HookSpec("better_memory.hooks.session_bootstrap", "SessionStart", None,              False, True),
     HookSpec("better_memory.hooks.observer",          "PostToolUse",  "Write|Edit|Bash", True,  False),
     HookSpec("better_memory.hooks.session_close",     "Stop",         None,              True,  False),
+    # Contextual injection: surface curated memories relevant to the current
+    # prompt / tool-input. Sync + needs_stdout (reads additionalContext from
+    # stdout). Gated at runtime by BETTER_MEMORY_CONTEXT_INJECT_MODE; both
+    # events install and the mode no-ops whichever isn't selected.
+    HookSpec("better_memory.hooks.contextual_inject", "UserPromptSubmit", None, False, True),
+    HookSpec(
+        "better_memory.hooks.contextual_inject", "PreToolUse", "Skill|Task|Write", False, True
+    ),
 )
 
 # Module paths that are no longer registered but may be present in users'
@@ -182,6 +190,17 @@ def merge_settings_json(
         hooks.setdefault("Stop", []).append({
             "hooks": [_hook_entry(spec, venv_py, venv_pyw)],
         })
+
+    for spec in (s for s in _OUR_HOOKS if s.event == "UserPromptSubmit"):
+        hooks.setdefault("UserPromptSubmit", []).append({
+            "hooks": [_hook_entry(spec, venv_py, venv_pyw)],
+        })
+
+    for spec in (s for s in _OUR_HOOKS if s.event == "PreToolUse"):
+        group = {"hooks": [_hook_entry(spec, venv_py, venv_pyw)]}
+        if spec.matcher is not None:
+            group["matcher"] = spec.matcher
+        hooks.setdefault("PreToolUse", []).append(group)
 
     config["hooks"] = hooks
     return config

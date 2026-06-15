@@ -82,10 +82,19 @@ class TestMergeClaudeJson:
 
 
 class TestHookSpec:
-    """Sanity checks on the hook registry — pin the three expected entries."""
+    """Sanity checks on the hook registry — pin the expected entries."""
 
-    def test_registry_has_three_entries(self) -> None:
-        assert len(_OUR_HOOKS) == 3
+    def test_registry_has_five_entries(self) -> None:
+        assert len(_OUR_HOOKS) == 5
+
+    def test_contextual_inject_registered_for_both_events(self) -> None:
+        ci = [s for s in _OUR_HOOKS if s.module.endswith("contextual_inject")]
+        events = {s.event for s in ci}
+        assert events == {"UserPromptSubmit", "PreToolUse"}
+        ups = next(s for s in ci if s.event == "UserPromptSubmit")
+        assert ups.matcher is None and ups.is_async is False and ups.needs_stdout is True
+        ptu = next(s for s in ci if s.event == "PreToolUse")
+        assert ptu.matcher == "Skill|Task|Write" and ptu.needs_stdout is True
 
     def test_session_bootstrap_is_session_start_event_no_matcher(self) -> None:
         sb = next(s for s in _OUR_HOOKS if s.module.endswith("session_bootstrap"))

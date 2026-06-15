@@ -396,3 +396,23 @@ def test_project_name_caches_negative_lookup(tmp_path: Path) -> None:
     assert bm_config.project_name(nongit) == "general"
     assert resolved in bm_config._git_project_cache
     assert bm_config._git_project_cache[resolved] is None
+
+
+@pytest.mark.parametrize("val,expected", [
+    (None, "both"), ("userprompt", "userprompt"), ("pretool", "pretool"),
+    ("both", "both"), ("off", "off"),
+])
+def test_context_inject_mode_valid(monkeypatch, val, expected):
+    from better_memory import config as cfg_mod
+    if val is None:
+        monkeypatch.delenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", raising=False)
+    else:
+        monkeypatch.setenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", val)
+    assert cfg_mod._resolve_context_inject_mode() == expected
+
+
+def test_context_inject_mode_invalid(monkeypatch):
+    from better_memory import config as cfg_mod
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", "bogus")
+    with pytest.raises(ValueError):
+        cfg_mod._resolve_context_inject_mode()
