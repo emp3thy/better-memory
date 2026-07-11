@@ -286,7 +286,7 @@ class AgentCoreBackend:
         return {
             # Public shape — must match ReflectionSynthesisService.retrieve_reflections
             # return: {id, title, phase, use_cases, hints (list), confidence (float),
-            #          tech, evidence_count, useful_count}
+            #          tech, evidence_count, useful_count, times_misled, updated_at}
             "id": rec["memoryRecordId"],
             "title": body.get("title", "") if isinstance(body, dict) else "",
             "phase": phase_value,
@@ -296,6 +296,10 @@ class AgentCoreBackend:
             "tech": tech_value,
             "evidence_count": int(_num("useful_count")) + int(_num("missed_count")),
             "useful_count": int(_num("useful_count")),
+            "times_misled": int(_num("times_misled")),
+            "updated_at": (
+                updated_at.isoformat() if isinstance(updated_at, datetime) else None
+            ),
             # Internal ranking helpers — leading underscore so callers ignore
             "_overlooked_count": int(_num("overlooked_count")),
             "_updated_at_ts": updated_at_ts,

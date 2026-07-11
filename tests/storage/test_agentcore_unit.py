@@ -920,6 +920,8 @@ def test_retrieve_malformed_json_content_falls_back_to_valid_shape(backend, mock
     assert refl["phase"] == "general"
     assert refl["useful_count"] == 2
     assert refl["evidence_count"] == 3  # useful_count + missed_count
+    assert refl["times_misled"] == 0
+    assert refl["updated_at"] is None or isinstance(refl["updated_at"], str)
 
 
 def test_retrieve_missing_content_key_falls_back_to_valid_shape(backend, mock_data_client) -> None:

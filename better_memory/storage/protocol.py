@@ -95,8 +95,9 @@ class StorageBackend(Protocol):
 
         Each bucket is a list of reflection dicts: ``{id, title, phase,
         use_cases, hints (list[str]), confidence (float), tech,
-        evidence_count, useful_count}``. Sync — no embedder call (reflections
-        are pre-extracted in both backends; sqlite mode ranks via SQL
+        evidence_count, useful_count, times_misled, updated_at}``. Sync —
+        no embedder call (reflections are pre-extracted in both backends;
+        sqlite mode ranks via SQL
         ORDER BY ``useful_count + 3 * times_overlooked DESC``, agentcore
         mode applies the same formula client-side over metadata counters).
 
