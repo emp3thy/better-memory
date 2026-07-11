@@ -1,15 +1,19 @@
 """Tests for format_relevant."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from better_memory.services.relevant import RelevantMemory, format_relevant
+
+_BASE = RelevantMemory(
+    kind="reflection", id="a" * 32, text="Use junit-xml on windows",
+    polarity="do", confidence=0.9, useful_count=15, age_days=34,
+    hits=3, score=5.0,
+)
 
 
 def _mem(**kw):
-    base = dict(kind="reflection", id="a" * 32, text="Use junit-xml on windows",
-                polarity="do", confidence=0.9, useful_count=15, age_days=34,
-                hits=3, score=5.0)
-    base.update(kw)
-    return RelevantMemory(**base)
+    return replace(_BASE, **kw)
 
 
 def test_empty_items_renders_empty():
