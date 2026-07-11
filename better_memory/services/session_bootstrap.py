@@ -53,25 +53,44 @@ def _render_header(*, project: str, source: str, action: str, episode_id: str) -
     )
 
 
-def _render_semantic(items) -> tuple[str, list[str]]:
+def _age_suffix(iso_ts: str | None, now: datetime) -> str:
+    if not iso_ts:
+        return ""
+    try:
+        ts = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return f" ({max(0, (now - ts).days)}d old)"
+
+
+def _render_semantic_full(items, now: datetime) -> tuple[str, list[str]]:
     if not items:
         return "", []
-    lines = [f"### Semantic memories ({len(items)} entries)"]
+    lines = [f"### Semantic memories ({len(items)} shown in full)"]
     ids: list[str] = []
     for m in items:
-        lines.append(f"- [{m.id[:8]}] {_truncate(m.content)}")
+        lines.append(f"- [{m.id}]{_age_suffix(m.updated_at, now)} {_truncate(m.content)}")
         ids.append(m.id)
     return "\n".join(lines), ids
 
 
-def _render_reflection_bucket(name: str, items) -> tuple[str, list[str]]:
-    if not items:
+def _render_reflections_full(pairs, now: datetime) -> tuple[str, list[str]]:
+    """pairs: list of (polarity, reflection-dict) already capped to top-N."""
+    if not pairs:
         return "", []
     blocks: list[str] = []
     ids: list[str] = []
-    for item in items:
+    for polarity, item in pairs:
+        label = {
+            "do": "do",
+            "dont": "dont (pitfall - do the corrective action)",
+            "neutral": "neutral",
+        }[polarity]
         lines = [
-            f"**{item['title']}**",
+            f"**{item['title']}** [{label}]"
+            f"{_age_suffix(item.get('updated_at'), now)}",
             f"_{item['use_cases']}_",
         ]
         for hint in item.get("hints", []):
@@ -79,7 +98,22 @@ def _render_reflection_bucket(name: str, items) -> tuple[str, list[str]]:
         lines.append(f"_id: {item['id']}_")
         blocks.append("\n".join(lines))
         ids.append(item["id"])
-    return f"### Reflections — {name}\n" + "\n\n".join(blocks), ids
+    return "### Reflections (shown in full)\n" + "\n\n".join(blocks), ids
+
+
+def _render_index(sem_index, refl_index) -> tuple[str, int]:
+    n = len(sem_index) + len(refl_index)
+    if n == 0:
+        return "", 0
+    lines = ["### Index (not expanded - retrieve on demand)"]
+    for polarity, item in refl_index:
+        conf = item.get("confidence")
+        conf_s = f", conf {conf:.1f}" if isinstance(conf, (int, float)) else ""
+        lines.append(f"- {item['title']} ({polarity}{conf_s})")
+    for m in sem_index:
+        first_line = (m.content or "").splitlines()[0][:100]
+        lines.append(f"- {first_line} (semantic)")
+    return "\n".join(lines), n
 
 
 @dataclass(frozen=True)
@@ -101,10 +135,12 @@ class SessionBootstrapService:
         conn,
         *,
         clock: Callable[[], datetime] | None = None,
+        top_n: int | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self._episodes = EpisodeService(conn)
+        self._top_n = top_n
 
     def record_exposures(
         self,
@@ -206,6 +242,33 @@ class SessionBootstrapService:
             "neutral": len(buckets["neutral"]),
         }
 
+        if self._top_n is not None:
+            top_n = self._top_n
+        else:
+            from better_memory.config import get_config
+            top_n = get_config().bootstrap_top_n
+
+        now = self._clock()
+
+        if top_n == 0:
+            sem_full, sem_index = list(semantic), []
+        else:
+            general = [m for m in semantic if m.scope == "general"]
+            project_scoped = [m for m in semantic if m.scope != "general"]
+            sem_full = general + project_scoped[:top_n]
+            sem_index = project_scoped[top_n:]
+
+        flat_reflections = (
+            [("do", r) for r in buckets["do"]]
+            + [("dont", r) for r in buckets["dont"]]
+            + [("neutral", r) for r in buckets["neutral"]]
+        )
+        if top_n == 0:
+            refl_full, refl_index = flat_reflections, []
+        else:
+            refl_full = flat_reflections[:top_n]
+            refl_index = flat_reflections[top_n:]
+
         sections: list[str] = [
             _render_header(
                 project=project,
@@ -214,26 +277,31 @@ class SessionBootstrapService:
                 episode_id=episode_id,
             ),
         ]
-        sem_section, semantic_ids = _render_semantic(semantic)
+        sem_section, semantic_ids = _render_semantic_full(sem_full, now)
         if sem_section:
             sections.append(sem_section)
-        do_section, do_ids = _render_reflection_bucket("do (prior wins)", buckets["do"])
-        if do_section:
-            sections.append(do_section)
-        dont_section, dont_ids = _render_reflection_bucket("dont (approaches to avoid)", buckets["dont"])
-        if dont_section:
-            sections.append(dont_section)
-        neutral_section, neutral_ids = _render_reflection_bucket("neutral (context)", buckets["neutral"])
-        if neutral_section:
-            sections.append(neutral_section)
+        refl_section, reflection_ids = _render_reflections_full(refl_full, now)
+        if refl_section:
+            sections.append(refl_section)
+        index_section, index_count = _render_index(sem_index, refl_index)
+        if index_section:
+            sections.append(index_section)
         sections.append("---")
-        sections.append(_FOOTER)
+        footer = _FOOTER
+        if index_count:
+            footer = (
+                f"{index_count} more memories are indexed above - call "
+                "mcp__better-memory__memory_retrieve or "
+                "mcp__better-memory__memory_retrieve_observations when a task "
+                "touches them.\n" + _FOOTER
+            )
+        sections.append(footer)
 
         rendered = "\n\n".join(sections)
 
         self._record_exposure(
             session_id=session_id,
-            reflection_ids=do_ids + dont_ids + neutral_ids,
+            reflection_ids=reflection_ids,
             semantic_ids=semantic_ids,
         )
 
