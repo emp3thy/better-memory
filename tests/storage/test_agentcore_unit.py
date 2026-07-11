@@ -541,6 +541,19 @@ def test_list_session_exposures_returns_empty_envelope(backend) -> None:
     assert result == {"session_id": "test-session-xyz", "exposures": []}
 
 
+def test_record_exposures_is_noop(
+    backend, mock_data_client, mock_control_client
+) -> None:
+    """No exposure log in agentcore mode (see list_session_exposures). Must
+    not raise and must not call either boto client."""
+    result = backend.record_exposures(
+        session_id="s", items=[("reflection", "r1")], source="contextual",
+    )
+    assert result is None
+    assert mock_data_client.method_calls == []
+    assert mock_control_client.method_calls == []
+
+
 @pytest.mark.parametrize(
     "classification,counter_key",
     list(_RATING_TO_COUNTER.items()),

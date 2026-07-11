@@ -258,6 +258,18 @@ class StorageBackend(Protocol):
         """Atomically apply per-exposure ratings. Returns ApplySessionRatingsResult."""
         ...
 
+    def record_exposures(
+        self,
+        *,
+        session_id: str,
+        items: list[tuple[str, str]],
+        source: str,
+    ) -> None:
+        """Record (kind, id) memory exposures for later rating. Sqlite writes
+        session_memory_exposure rows; agentcore is a documented no-op (it has
+        no exposure log — rating flows through credit_one)."""
+        ...
+
     def credit_one(
         self,
         *,

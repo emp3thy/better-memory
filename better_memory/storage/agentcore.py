@@ -882,6 +882,15 @@ class AgentCoreBackend:
             # already signals this at the Protocol level).
         }
 
+    def record_exposures(
+        self,
+        *,
+        session_id: str,
+        items: list[tuple[str, str]],
+        source: str,
+    ) -> None:
+        """No-op: agentcore mode has no exposure log (see list_session_exposures)."""
+
     def list_session_exposures(self, *, session_id: str) -> dict[str, Any]:
         """Per spec Rating model section: no exposure log in agentcore mode.
         Returns the standard envelope shape with an empty exposures list."""

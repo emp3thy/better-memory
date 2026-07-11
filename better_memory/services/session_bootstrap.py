@@ -12,7 +12,7 @@ Invoked on every Claude Code SessionStart event by the
 - Markdown rendering for ``additionalContext`` injection.
 
 Connection ownership: caller owns the sqlite3 connection. Episode opens
-commit through ``EpisodeService``'s existing SAVEPOINT envelope. ``_record_exposure``
+commit through ``EpisodeService``'s existing SAVEPOINT envelope. ``record_exposures``
 issues its own commit for the exposure write — callers must not wrap ``bootstrap()``
 in an outer transaction they intend to roll back.
 """
@@ -106,6 +106,29 @@ class SessionBootstrapService:
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self._episodes = EpisodeService(conn)
 
+    def record_exposures(
+        self,
+        *,
+        session_id: str,
+        items: list[tuple[str, str]],
+        source: str,
+    ) -> None:
+        """Write one session_memory_exposure row per (kind, id) item.
+
+        Best-effort: skips entirely when session_id is empty. Own commit
+        (see module docstring on connection ownership).
+        """
+        if not session_id or not items:
+            return
+        now = self._clock().isoformat()
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO session_memory_exposure "
+            "(session_id, memory_kind, memory_id, exposed_at, source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(session_id, kind, mid, now, source) for kind, mid in items],
+        )
+        self._conn.commit()
+
     def _record_exposure(
         self,
         *,
@@ -119,24 +142,12 @@ class SessionBootstrapService:
         the LLM never actually saw. Best-effort: skips entirely if
         session_id is empty (e.g., manual invocation without env).
         """
-        if not session_id:
-            return
-        now = self._clock().isoformat()
-        rows = (
-            [(session_id, "reflection", rid, now, "bootstrap")
-             for rid in reflection_ids] +
-            [(session_id, "semantic", sid, now, "bootstrap")
-             for sid in semantic_ids]
+        self.record_exposures(
+            session_id=session_id,
+            items=[("reflection", rid) for rid in reflection_ids]
+            + [("semantic", sid) for sid in semantic_ids],
+            source="bootstrap",
         )
-        if not rows:
-            return
-        self._conn.executemany(
-            "INSERT OR IGNORE INTO session_memory_exposure "
-            "(session_id, memory_kind, memory_id, exposed_at, source) "
-            "VALUES (?, ?, ?, ?, ?)",
-            rows,
-        )
-        self._conn.commit()
 
     def bootstrap(
         self,

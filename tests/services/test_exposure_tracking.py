@@ -216,6 +216,38 @@ class TestReflectionRetrieveExposureWrite:
         assert rows == []
 
 
+class TestRecordExposuresPublicMethod:
+    def test_record_exposures_contextual_source(self, conn, fixed_clock):
+        from better_memory.services.session_bootstrap import SessionBootstrapService
+
+        svc = SessionBootstrapService(conn, clock=fixed_clock)
+        svc.record_exposures(
+            session_id="s-ctx",
+            items=[("reflection", "r1"), ("semantic", "m1")],
+            source="contextual",
+        )
+        rows = conn.execute(
+            "SELECT memory_kind, memory_id, source FROM session_memory_exposure "
+            "WHERE session_id='s-ctx' ORDER BY memory_kind"
+        ).fetchall()
+        assert [(r["memory_kind"], r["memory_id"], r["source"]) for r in rows] == [
+            ("reflection", "r1", "contextual"),
+            ("semantic", "m1", "contextual"),
+        ]
+
+    def test_record_exposures_empty_session_id_is_noop(self, conn, fixed_clock):
+        from better_memory.services.session_bootstrap import SessionBootstrapService
+
+        svc = SessionBootstrapService(conn, clock=fixed_clock)
+        svc.record_exposures(
+            session_id="", items=[("reflection", "r1")], source="contextual",
+        )
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM session_memory_exposure"
+        ).fetchone()["n"]
+        assert n == 0
+
+
 class TestSemanticListExposureWrite:
     def test_list_for_project_writes_exposure_rows(
         self, conn, fixed_clock, monkeypatch,
