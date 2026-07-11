@@ -21,7 +21,7 @@ One environment variable roots the runtime filesystem layout. Everything else ha
 | `BETTER_MEMORY_BOOTSTRAP_TOP_N` | `5` | Number of project-scoped semantic memories and reflections the SessionStart bootstrap renders in full (beyond that, a one-line index plus a retrieve affordance). `0` disables slimming and dumps everything in full (legacy behavior). |
 | `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | Minimum number of distinct keyword hits a memory must clear against the current prompt / tool-input before `contextual_inject` will surface it. |
 | `BETTER_MEMORY_CONTEXT_MAX_ITEMS` | `3` | Max number of memories `contextual_inject` injects per firing, after the min-hits floor and ranking. |
-| `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns to wait before `contextual_inject` will re-inject a memory already seen this session. `0` means never re-inject (each memory surfaces at most once per session). |
+| `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns to wait before `contextual_inject` will re-inject a memory already seen this session. `0` means never re-inject (each memory surfaces at most once per session). A "turn" here means one firing of the `contextual_inject` hook, not one user prompt-response cycle: each user prompt counts as a turn, and in mode `both` each matched tool call (`Skill`, `Task`, `Write`) counts as a separate turn too. |
 
 ## Project-name override
 
@@ -53,6 +53,7 @@ Under `BETTER_MEMORY_HOME`:
 ├── knowledge.db           # FTS5 index over knowledge-base/
 ├── spool/                 # hook payloads awaiting drain
 │   └── .quarantine/       # malformed payloads (not deleted; kept for debug)
+├── state/                 # per-session context_seen_<session_id>.json files (contextual_inject dedup)
 └── knowledge-base/
     ├── standards/         # cross-project standards
     ├── languages/         # per-language conventions

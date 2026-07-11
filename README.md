@@ -173,7 +173,7 @@ One env var roots the runtime filesystem layout:
 | `BETTER_MEMORY_BOOTSTRAP_TOP_N` | `5` | Number of project-scoped semantic memories/reflections the SessionStart bootstrap renders in full; the rest collapse into a one-line index. `0` = legacy full dump. |
 | `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | Minimum distinct keyword hits a memory needs to clear the contextual-injection floor. |
 | `BETTER_MEMORY_CONTEXT_MAX_ITEMS` | `3` | Max memories the contextual-injection hook injects per firing. |
-| `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns before a contextually-injected memory can be re-injected. `0` = never re-inject. |
+| `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns before a contextually-injected memory can be re-injected. `0` = never re-inject. A turn is one firing of the `contextual_inject` hook (each user prompt, plus each matched tool call in mode `both`), not one user prompt-response cycle. |
 
 See [Configuration](website/configuration.md) for the full table and injection-tuning detail.
 
