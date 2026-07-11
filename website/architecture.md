@@ -39,6 +39,7 @@ flowchart LR
 | Multi-machine sync | No | Yes (shared memory resources) |
 | Closure events | N/A | `CreateEvent(role=OTHER)` from Stop hook |
 | Episode tracking | Local `episodes` table | Internal to AgentCore (sessionId) |
+| Exposure log (`record_exposures`) | Writes `session_memory_exposure` rows (sources `bootstrap` / `retrieve` / `contextual`) | No-op — no exposure log; rating flows through `memory.credit` only |
 
 See [Configuration](configuration.md) for env vars and [AgentCore setup](agentcore-setup.md) for the agentcore path.
 
@@ -50,6 +51,23 @@ See [Configuration](configuration.md) for env vars and [AgentCore setup](agentco
 2. **sqlite-vec** dense vector match against observation embeddings (768-dim from `nomic-embed-text`).
 3. **Reciprocal Rank Fusion (RRF)** combines the two ranked lists.
 4. Results are filtered by the bucket's polarity and weighted by `reinforcement_score` (each `memory.record_use` shifts a memory's score up on success or down on failure).
+
+## Injection strategies
+
+better-memory gets memory in front of Claude two ways: a slimmed-down dump at session start, and targeted mid-session injection keyed to what Claude is actually doing.
+
+**Bootstrap (SessionStart).** `SessionBootstrapService.bootstrap` (`better_memory/services/session_bootstrap.py`) renders project-scoped semantic memories and reflections in full only up to `BETTER_MEMORY_BOOTSTRAP_TOP_N` per set (default 5; general-scope semantic memories are always shown in full, uncapped). The remainder collapses into a one-line `### Index (not expanded - retrieve on demand)` section plus a footer affordance pointing at `memory.retrieve` / `memory.retrieve_observations`. Semantic memory ids in the rendered output are the full ids (not truncated), each stamped with an age suffix (`(Nd old)`). Setting `BETTER_MEMORY_BOOTSTRAP_TOP_N=0` disables slimming and renders everything in full (legacy behavior).
+
+**Contextual injection (UserPromptSubmit / PreToolUse).** The `contextual_inject` hook (`better_memory/hooks/contextual_inject.py`) scores the same curated memory set against the current prompt (UserPromptSubmit) or tool name + input (PreToolUse, matcher `Skill|Task|Write`) via `retrieve_relevant` (`better_memory/services/relevant.py`):
+
+- Keywords are extracted from the query (lowercased, tokenised, stopwords and <3-char tokens dropped).
+- Each candidate's score is `(distinct keyword hits + title hits) × activation`, where activation grows with `useful_count` and confidence and is halved when a memory has misled more often than it has helped.
+- Candidates below `BETTER_MEMORY_CONTEXT_MIN_HITS` distinct hits are dropped; survivors are ranked by score and capped to `BETTER_MEMORY_CONTEXT_MAX_ITEMS`.
+- A per-session `SeenStore` (`better_memory/services/context_seen.py`, JSON file at `<home>/state/context_seen_<session_id>.json`) deduplicates memories already injected this session. `BETTER_MEMORY_CONTEXT_REINJECT_TURNS=0` (default) means a memory is injected at most once per session; a positive value allows re-injection after that many turns have passed since it was last shown.
+- Survivors render as a `<project-memory source="better-memory">` XML block in `additionalContext`, one entry per item with its kind, id, confidence, `useful_count`, and age, a `dont`-polarity item prefixed `Known pitfall -- do this instead:`, and a footer inviting `memory_credit(kind, id, 'cited'|'shaped'|'misled')` when an entry actually helped or misled.
+- Survivors are logged to `session_memory_exposure` with `source='contextual'` (best-effort; a write failure never blocks injection) and counted in `rating_diagnostics` (`contextual_fired_userprompt`, `contextual_fired_pretool`, `contextual_injected`, `contextual_suppressed_floor`, `contextual_suppressed_dedup`).
+
+Gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE` (`userprompt` / `pretool` / `both` / `off`). The hook never raises and always exits 0 — failures are swallowed and logged to `hook_errors`, with no `additionalContext` emitted on that turn.
 
 ## Embeddings backends
 
@@ -96,16 +114,23 @@ captures whether memories actually shaped Claude's work:
 
 1. **Exposure** — every reflection or semantic memory surfaced by
    `memory.retrieve` / `memory.semantic_retrieve` / the SessionStart
-   bootstrap is logged to `session_memory_exposure` with the active
-   `session_id`.
+   bootstrap / the `contextual_inject` hook is logged to
+   `session_memory_exposure` with the active `session_id` and a
+   `source` of `retrieve`, `bootstrap`, or `contextual` respectively
+   (sqlite mode only — see [Injection strategies](#injection-strategies)
+   for what `contextual_inject` scores and dedups before it exposes
+   anything).
 2. **Mid-session credit** — `memory.credit(kind, id, class)` lets
    Claude credit a memory as `cited`, `shaped`, `misled`, or `overlooked` the moment
    it's used. Survives context compaction.
 3. **End-of-session sweep** — the
    [`session_close`](https://github.com/emp3thy/better-memory/blob/main/better_memory/hooks/session_close.py)
    hook checks for unrated exposures. If any exist, it emits a `Stop`
-   block directive triggering the `rate-session-memories` skill, which
-   calls `memory.list_session_exposures` and submits
+   block directive triggering the `rate-session-memories` skill. The
+   directive lists each pending exposure with its source tag
+   (`[bootstrap]` / `[retrieve]` / `[contextual]`) and a leading
+   `sources: bootstrap N, contextual N, retrieve N` counts line, then
+   the skill calls `memory.list_session_exposures` and submits
    `memory.apply_session_ratings` with one class per id
    (`cited` / `shaped` / `ignored` / `misled` / `overlooked`). Only on the second Stop
    fire — after ratings land — does the hook drop the `session_end`

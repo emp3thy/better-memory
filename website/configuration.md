@@ -18,6 +18,10 @@ One environment variable roots the runtime filesystem layout. Everything else ha
 | `BETTER_MEMORY_TEST_AGENTCORE` | unset | `1` enables integration tests against real AWS. Default off; never set in CI. |
 | `BETTER_MEMORY_TEST_AGENTCORE_REGION` | inherits `eu-west-2` | Override region used by integration tests. |
 | `BETTER_MEMORY_CONTEXT_INJECT_MODE` | `both` | Contextual memory-injection hook trigger: `userprompt` (on prompt only), `pretool` (on tool calls only), `both` (default), or `off`. The `contextual_inject` hook surfaces curated memories (semantic + reflections) relevant to the current prompt / tool-input. |
+| `BETTER_MEMORY_BOOTSTRAP_TOP_N` | `5` | Number of project-scoped semantic memories and reflections the SessionStart bootstrap renders in full (beyond that, a one-line index plus a retrieve affordance). `0` disables slimming and dumps everything in full (legacy behavior). |
+| `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | Minimum number of distinct keyword hits a memory must clear against the current prompt / tool-input before `contextual_inject` will surface it. |
+| `BETTER_MEMORY_CONTEXT_MAX_ITEMS` | `3` | Max number of memories `contextual_inject` injects per firing, after the min-hits floor and ranking. |
+| `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns to wait before `contextual_inject` will re-inject a memory already seen this session. `0` means never re-inject (each memory surfaces at most once per session). |
 
 ## Project-name override
 
@@ -60,10 +64,11 @@ The two SQLite files are never shared between processes — the MCP server owns 
 
 ## Hooks
 
-Three Claude Code hooks ship with better-memory and read or write the filesystem layout above. They are installed automatically by `./scripts/setup.sh` (which calls `python -m better_memory.cli.install_hooks` to merge them idempotently into `~/.claude/settings.json`). The list below is reference material:
+Four Claude Code hooks ship with better-memory and read or write the filesystem layout above. They are installed automatically by `./scripts/setup.sh` (which calls `python -m better_memory.cli.install_hooks` to merge them idempotently into `~/.claude/settings.json`). The list below is reference material:
 
-- **`better_memory.hooks.session_bootstrap`** (SessionStart) — opens or reuses a background episode for the session and injects the project's curated context (project-scoped and general-scope semantic memories plus the top distilled reflections in `do` / `dont` / `neutral` buckets, capped at 20 per bucket and ranked by usefulness then confidence) as `additionalContext` for Claude's first turn. Runs in-process against `memory.db`; failure-isolated: if bootstrap breaks, a fallback directive is injected and the failure is recorded in the `hook_errors` table.
+- **`better_memory.hooks.session_bootstrap`** (SessionStart) — opens or reuses a background episode for the session and injects the project's curated context (project-scoped and general-scope semantic memories plus distilled reflections in `do` / `dont` / `neutral` buckets, retrieved up to 20 per bucket and ranked by usefulness then confidence) as `additionalContext` for Claude's first turn. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5; general-scope semantic memories are always shown in full) render in full; the rest collapse into a one-line index plus a `memory.retrieve` / `memory.retrieve_observations` affordance. Setting `BETTER_MEMORY_BOOTSTRAP_TOP_N=0` restores the legacy full-dump behavior. Runs in-process against `memory.db`; failure-isolated: if bootstrap breaks, a fallback directive is injected and the failure is recorded in the `hook_errors` table.
 - **`better_memory.hooks.observer`** (PostToolUse) — captures tool-call snapshots into `spool/` for later observation creation.
-- **`better_memory.hooks.session_close`** (Stop) — writes a session-close marker into `spool/`.
+- **`better_memory.hooks.session_close`** (Stop) — writes a session-close marker into `spool/`; also emits the rating directive described in [Self-rating loop](architecture.md#self-rating-loop).
+- **`better_memory.hooks.contextual_inject`** (UserPromptSubmit + PreToolUse) — scores the curated memory set (semantic + reflections) against the current prompt or tool-input via keyword-hit x activation, drops candidates below `BETTER_MEMORY_CONTEXT_MIN_HITS`, caps survivors to `BETTER_MEMORY_CONTEXT_MAX_ITEMS`, and injects them as a `<project-memory>` block in `additionalContext`. A per-session seen-file dedups repeats (`BETTER_MEMORY_CONTEXT_REINJECT_TURNS` controls re-injection). Gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE`. See [Architecture](architecture.md#injection-strategies) for detail.
 
 See [`README.md`](https://github.com/emp3thy/better-memory/blob/main/README.md#manual-setup) for the exact `~/.claude/settings.json` registration JSON.

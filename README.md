@@ -87,7 +87,7 @@ Then add to `~/.claude.json` (user-scope MCP — create the file if it doesn't e
 
 And add hooks to `~/.claude/settings.json`:
 
-A single SessionStart hook ships: `session_bootstrap` opens (or reuses) a background episode for the session and injects the project's curated context — both project-scoped and general-scope semantic memories plus all distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext` so Claude has prior memory available without needing to call any retrieval tool first. The hook does its work in-process against `memory.db`; if it fails for any reason, a fallback directive is injected instructing Claude to call `mcp__better-memory__memory_session_bootstrap` manually.
+Four hooks ship. `session_bootstrap` (SessionStart) opens (or reuses) a background episode for the session and injects the project's curated context — project-scoped and general-scope semantic memories plus distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext` so Claude has prior memory available without needing to call any retrieval tool first. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5) render in full; the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` restores the old full-dump behavior). The hook does its work in-process against `memory.db`; if it fails for any reason, a fallback directive is injected instructing Claude to call `mcp__better-memory__memory_session_bootstrap` manually. `contextual_inject` (UserPromptSubmit + PreToolUse) additionally surfaces memories relevant to the current prompt/tool-input mid-session — see [Configuration](website/configuration.md) and [Architecture](website/architecture.md#injection-strategies) for how it scores, floors, and dedups candidates.
 
 ```json
 {
@@ -124,10 +124,33 @@ A single SessionStart hook ships: `session_bootstrap` opens (or reuses) a backgr
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.contextual_inject"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Skill|Task|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.contextual_inject"
+          }
+        ]
+      }
     ]
   }
 }
 ```
+
+`contextual_inject` is gated at runtime by `BETTER_MEMORY_CONTEXT_INJECT_MODE` (default `both`) — set it to `userprompt`, `pretool`, or `off` to narrow or disable which event actually injects.
 
 On Windows, point hooks at `.venv\Scripts\pythonw.exe` (no console flash) instead of `python.exe`.
 
@@ -146,6 +169,13 @@ One env var roots the runtime filesystem layout:
 | `BETTER_MEMORY_EMBEDDINGS_BACKEND` | `ollama` | `ollama` (default) — local Ollama at `OLLAMA_HOST`; `sqlite` — pure-SQL trigram-FTS5 fusion, no model downloads and no in-memory state. |
 | `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 | `BETTER_MEMORY_PROJECT` | unset | Force the project name for all calls in this process. Highest-priority project-resolution signal — overrides both the `.better-memory` file and the git-derived name. Designed for subprocess scoping (e.g. ralph's executor sets it per-iteration so subagent observations land in the PBI's target_repo regardless of the worktree's cwd). Empty/whitespace-only values are treated as unset. |
+| `BETTER_MEMORY_CONTEXT_INJECT_MODE` | `both` | Contextual memory-injection hook trigger: `userprompt`, `pretool`, `both` (default), or `off`. |
+| `BETTER_MEMORY_BOOTSTRAP_TOP_N` | `5` | Number of project-scoped semantic memories/reflections the SessionStart bootstrap renders in full; the rest collapse into a one-line index. `0` = legacy full dump. |
+| `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | Minimum distinct keyword hits a memory needs to clear the contextual-injection floor. |
+| `BETTER_MEMORY_CONTEXT_MAX_ITEMS` | `3` | Max memories the contextual-injection hook injects per firing. |
+| `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns before a contextually-injected memory can be re-injected. `0` = never re-inject. |
+
+See [Configuration](website/configuration.md) for the full table and injection-tuning detail.
 
 ### Project-name override
 
@@ -236,7 +266,7 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 
 | Tool | Purpose |
 |---|---|
-| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Reflections capped at 20 per polarity bucket, ranked by usefulness then confidence. Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. |
+| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Reflections retrieved up to 20 per polarity bucket, ranked by usefulness then confidence; only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items render in full, the rest collapse into a one-line index. Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. |
 | `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` | Apply spec §9 retention rules; archive or hard-delete. |
 | `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 
