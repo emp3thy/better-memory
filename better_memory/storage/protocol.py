@@ -267,7 +267,7 @@ class StorageBackend(Protocol):
     ) -> None:
         """Record (kind, id) memory exposures for later rating. Sqlite writes
         session_memory_exposure rows; agentcore is a documented no-op (it has
-        no exposure log — rating flows through credit_one)."""
+        no exposure log - rating flows through credit_one)."""
         ...
 
     def credit_one(
