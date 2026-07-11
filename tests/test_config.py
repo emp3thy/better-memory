@@ -416,3 +416,39 @@ def test_context_inject_mode_invalid(monkeypatch):
     monkeypatch.setenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", "bogus")
     with pytest.raises(ValueError):
         cfg_mod._resolve_context_inject_mode()
+
+
+def test_injection_knobs_defaults(monkeypatch):
+    for var in (
+        "BETTER_MEMORY_BOOTSTRAP_TOP_N",
+        "BETTER_MEMORY_CONTEXT_MIN_HITS",
+        "BETTER_MEMORY_CONTEXT_MAX_ITEMS",
+        "BETTER_MEMORY_CONTEXT_REINJECT_TURNS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    cfg = get_config()
+    assert cfg.bootstrap_top_n == 5
+    assert cfg.context_min_hits == 2
+    assert cfg.context_max_items == 3
+    assert cfg.context_reinject_turns == 0
+
+
+def test_injection_knobs_env_override(monkeypatch):
+    monkeypatch.setenv("BETTER_MEMORY_BOOTSTRAP_TOP_N", "0")
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_MIN_HITS", "1")
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_MAX_ITEMS", "5")
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_REINJECT_TURNS", "20")
+    cfg = get_config()
+    assert cfg.bootstrap_top_n == 0
+    assert cfg.context_min_hits == 1
+    assert cfg.context_max_items == 5
+    assert cfg.context_reinject_turns == 20
+
+
+def test_injection_knobs_invalid_raises(monkeypatch):
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_MIN_HITS", "banana")
+    with pytest.raises(ValueError):
+        get_config()
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_MIN_HITS", "-1")
+    with pytest.raises(ValueError):
+        get_config()

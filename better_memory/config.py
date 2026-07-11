@@ -12,7 +12,10 @@ filesystem layout. Everything lives under that directory:
 Default home is ``~/.better-memory``. External-service knobs
 (``OLLAMA_HOST``, ``EMBED_MODEL``, ``AUDIT_LOG_RETRIEVED``,
 ``BETTER_MEMORY_EMBEDDINGS_BACKEND``) are separate env vars because they're
-orthogonal to path layout.
+orthogonal to path layout. Injection-tuning knobs
+(``BETTER_MEMORY_BOOTSTRAP_TOP_N``, ``BETTER_MEMORY_CONTEXT_MIN_HITS``,
+``BETTER_MEMORY_CONTEXT_MAX_ITEMS``, ``BETTER_MEMORY_CONTEXT_REINJECT_TURNS``)
+control content injection strategies.
 """
 
 from __future__ import annotations
@@ -193,6 +196,19 @@ def _resolve_bool(env_var: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_nonneg_int(env_var: str, default: int) -> int:
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{env_var} must be a non-negative integer, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{env_var} must be a non-negative integer, got {raw!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     """Resolved better-memory configuration."""
@@ -213,6 +229,10 @@ class Config:
     agentcore_semantic_memory_id: str | None
     agentcore_episodic_memory_id: str | None
     context_inject_mode: Literal["userprompt", "pretool", "both", "off"]
+    bootstrap_top_n: int
+    context_min_hits: int
+    context_max_items: int
+    context_reinject_turns: int
 
 
 _DEFAULT_CONTEXT_INJECT_MODE = "both"
@@ -297,4 +317,8 @@ def get_config() -> Config:
         agentcore_semantic_memory_id=agentcore_semantic_memory_id,
         agentcore_episodic_memory_id=agentcore_episodic_memory_id,
         context_inject_mode=_resolve_context_inject_mode(),
+        bootstrap_top_n=_resolve_nonneg_int("BETTER_MEMORY_BOOTSTRAP_TOP_N", 5),
+        context_min_hits=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_MIN_HITS", 2),
+        context_max_items=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_MAX_ITEMS", 3),
+        context_reinject_turns=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_REINJECT_TURNS", 0),
     )
