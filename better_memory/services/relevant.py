@@ -130,12 +130,41 @@ def retrieve_relevant(
     return out[:max_items]
 
 
-def format_relevant(items: list[RelevantMemory], *, max_items: int = 5) -> str:
-    """Render the additionalContext block (<= max_items). Empty if no items."""
+_TEXT_MAX_CHARS = 400
+
+_BLOCK_HEADER = (
+    '<project-memory source="better-memory">\n'
+    "Prior knowledge from past sessions in this project "
+    "(factual records; verify if stale):"
+)
+_BLOCK_FOOTER = (
+    "If any entry above materially helps or misleads this task, credit it now: "
+    "memory_credit(kind, id, 'cited'|'shaped'|'misled').\n"
+    "</project-memory>"
+)
+
+
+def _meta_tag(m: RelevantMemory) -> str:
+    parts = [f"{m.kind} {m.id}"]
+    if m.confidence is not None:
+        parts.append(f"conf {m.confidence:.1f}")
+    if m.useful_count:
+        parts.append(f"used {m.useful_count}x")
+    if m.age_days is not None:
+        parts.append(f"{m.age_days}d old")
+    return "[" + " | ".join(parts) + "]"
+
+
+def format_relevant(items: list[RelevantMemory]) -> str:
+    """Render the additionalContext block. Empty string if no items."""
     if not items:
         return ""
-    lines = ["RELEVANT MEMORY — apply unless it conflicts with the user's request:"]
-    for m in items[:max_items]:
-        tag = m.kind + (f" · conf {m.confidence:.2f}" if m.confidence is not None else "")
-        lines.append(f"• [{tag}] {m.text}")
+    lines = [_BLOCK_HEADER]
+    for i, m in enumerate(items, start=1):
+        text = m.text if len(m.text) <= _TEXT_MAX_CHARS else m.text[: _TEXT_MAX_CHARS - 3] + "..."
+        if m.polarity == "dont":
+            text = f"Known pitfall -- do this instead: {text}"
+        lines.append(f"{i}. {_meta_tag(m)}")
+        lines.append(f"   {text}")
+    lines.append(_BLOCK_FOOTER)
     return "\n".join(lines)
