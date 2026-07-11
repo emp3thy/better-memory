@@ -73,9 +73,7 @@ def main() -> None:
                     session_id=None,
                     project=project,
                 )
-                items = retrieve_relevant(
-                    backend, query=query, project=project, limit=5
-                )
+                items = retrieve_relevant(backend, query=query, project=project)
             rendered = format_relevant(items)
     except BaseException as exc:  # noqa: BLE001
         try:
