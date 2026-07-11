@@ -37,7 +37,7 @@ def _age_days(iso_ts: str | None, now: datetime) -> int | None:
         return None
     try:
         ts = datetime.fromisoformat(iso_ts)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=UTC)

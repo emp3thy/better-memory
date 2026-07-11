@@ -25,9 +25,16 @@ def _run(payload: dict, monkeypatch, capsys, mode="both"):
     return json.loads(out) if out.strip() else {}
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def bm_home(tmp_path: Path, monkeypatch) -> Path:
-    """Isolated BETTER_MEMORY_HOME with migrations applied and a fixed project."""
+    """Isolated BETTER_MEMORY_HOME with migrations applied and a fixed project.
+
+    autouse so every test in this module runs against a tmp BETTER_MEMORY_HOME,
+    including the lower-level tests that don't reference the fixture by name
+    (e.g. test_userprompt_emits_envelope, test_mode_off_is_noop) -- otherwise
+    hook.main() falls back to the developer's real ~/.better-memory and writes
+    memory.db, diagnostics, and state/ files there.
+    """
     monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_path))
     monkeypatch.setenv("BETTER_MEMORY_PROJECT", _PROJECT)
     conn = connect(tmp_path / "memory.db")
@@ -176,6 +183,63 @@ def test_fired_counters(bm_home, monkeypatch, capsys):
         monkeypatch, capsys,
     )
     assert _diag_value(bm_home, "contextual_fired_pretool") == 1
+
+
+def test_agentcore_mode_does_not_open_sqlite_connection(bm_home, monkeypatch, capsys):
+    """storage_backend=agentcore must never call connect() (better_memory.db.connection.connect).
+
+    A true end-to-end agentcore hook test needs boto3/botocore stubs the hook-level
+    suite doesn't set up, so this narrows to: connect() is not invoked, and
+    build_backend is called with memory_conn=None, when storage_backend != sqlite.
+    """
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", "both")
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", "sem-1")
+    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", "epi-1")
+
+    connect_calls = []
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    def _track_connect(*args, **kwargs):
+        connect_calls.append(args)
+        return _FakeConn()
+
+    monkeypatch.setattr(hook, "connect", _track_connect)
+
+    build_backend_calls = []
+
+    class _FakeBackend:
+        def retrieve(self, **kwargs):
+            return {}
+
+        def semantic_list(self, **kwargs):
+            return []
+
+        def record_exposures(self, **kwargs):
+            pass
+
+    def _fake_build_backend(**kwargs):
+        build_backend_calls.append(kwargs)
+        return _FakeBackend()
+
+    monkeypatch.setattr(hook, "build_backend", _fake_build_backend)
+
+    monkeypatch.setattr(
+        sys, "stdin",
+        io.StringIO(json.dumps({
+            "hook_event_name": "UserPromptSubmit", "prompt": "hello world", "cwd": ".",
+        })),
+    )
+    with pytest.raises(SystemExit) as e:
+        hook.main()
+    assert e.value.code == 0
+
+    assert connect_calls == []
+    assert len(build_backend_calls) == 1
+    assert build_backend_calls[0]["memory_conn"] is None
 
 
 def test_exposure_write_failure_does_not_block_injection(bm_home, monkeypatch, capsys):

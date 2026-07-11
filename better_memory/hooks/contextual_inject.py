@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -36,7 +36,7 @@ _MAX_STDIN_BYTES = 1_000_000
 
 def _bump_diagnostic(conn, cfg, metric: str) -> None:
     """Best-effort observability counter. Sqlite mode only; never raises."""
-    if cfg.storage_backend != "sqlite":
+    if cfg.storage_backend != "sqlite" or conn is None:
         return
     try:
         conn.execute(
@@ -96,7 +96,12 @@ def main() -> None:
             prune_stale(state_dir, now=datetime.now(UTC))
             seen = SeenStore(state_dir, session_id)
             seen.bump_turn()
-            with closing(connect(cfg.memory_db)) as conn:
+            conn_ctx = (
+                closing(connect(cfg.memory_db))
+                if cfg.storage_backend == "sqlite"
+                else nullcontext(None)
+            )
+            with conn_ctx as conn:
                 _bump_diagnostic(
                     conn, cfg,
                     "contextual_fired_userprompt" if event == "UserPromptSubmit"
