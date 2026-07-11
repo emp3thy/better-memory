@@ -132,7 +132,10 @@ class TestShutdown:
 
 class TestInactivityTimeout:
     def test_request_resets_last_activity(self, tmp_path: Path) -> None:
-        app = create_app(db_path=tmp_path / "memory.db")
+        # start_watchdog=False: a live watchdog thread from this app would
+        # see the fabricated _last_activity and os._exit(0) the whole pytest
+        # process one poll interval later.
+        app = create_app(start_watchdog=False, db_path=tmp_path / "memory.db")
         with app.test_client() as c:
             app.config["_last_activity"] = 0.0  # pretend ancient
             c.get("/episodes")
@@ -140,7 +143,11 @@ class TestInactivityTimeout:
             assert _time.monotonic() - app.config["_last_activity"] < 0.1
 
     def test_healthz_does_not_reset_last_activity(self, tmp_path: Path) -> None:
-        app = create_app(db_path=tmp_path / "memory.db")
+        # start_watchdog=False: this test leaves _last_activity at 0.0, which
+        # a real watchdog thread reads as "idle since boot" (time.monotonic()
+        # epoch) and os._exit(0)s the pytest process ~30s later — a silent
+        # exit-0 suite kill.
+        app = create_app(start_watchdog=False, db_path=tmp_path / "memory.db")
         with app.test_client() as c:
             app.config["_last_activity"] = 0.0
             c.get("/healthz")
@@ -148,7 +155,13 @@ class TestInactivityTimeout:
             assert app.config["_last_activity"] == 0.0
 
     def test_check_idle_exits_when_over_threshold(self, tmp_path: Path) -> None:
-        app = create_app(inactivity_timeout=60.0, db_path=tmp_path / "memory.db")
+        # start_watchdog=False: _check_idle is driven synchronously below; a
+        # live watchdog would see the fabricated 120s idle and os._exit(0)
+        # the pytest process for real.
+        app = create_app(
+            inactivity_timeout=60.0, start_watchdog=False,
+            db_path=tmp_path / "memory.db",
+        )
         app.config["_last_activity"] = _time.monotonic() - 120.0  # 2 min idle
         with patch("better_memory.ui.app.resolve_home", return_value=tmp_path), \
              patch("better_memory.ui.app.os._exit") as mock_exit:
@@ -156,7 +169,13 @@ class TestInactivityTimeout:
             mock_exit.assert_called_once_with(0)
 
     def test_check_idle_noop_when_under_threshold(self, tmp_path: Path) -> None:
-        app = create_app(inactivity_timeout=60.0, db_path=tmp_path / "memory.db")
+        # start_watchdog=False: with a 60s timeout, a live watchdog from this
+        # app would os._exit(0) the pytest process ~60s into the rest of the
+        # suite run.
+        app = create_app(
+            inactivity_timeout=60.0, start_watchdog=False,
+            db_path=tmp_path / "memory.db",
+        )
         app.config["_last_activity"] = _time.monotonic()  # just now
         with patch("better_memory.ui.app.os._exit") as mock_exit:
             app.config["_check_idle"]()

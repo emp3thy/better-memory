@@ -114,7 +114,7 @@ class TestDiagnosticsPanel:
         _seed_rated_exposure(conn, "S1", "reflection", "r1", "cited")
 
         monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_memory_db.parent))
-        app = create_app()
+        app = create_app(start_watchdog=False)
         client = app.test_client()
         response = client.get("/diagnostics")
         assert response.status_code == 200
@@ -135,7 +135,7 @@ class TestDiagnosticsPanel:
         conn.commit()
 
         monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_memory_db.parent))
-        app = create_app()
+        app = create_app(start_watchdog=False)
         client = app.test_client()
         response = client.get("/diagnostics")
         body = response.data.decode("utf-8")
@@ -165,7 +165,7 @@ class TestDiagnosticsPanel:
         conn.commit()
 
         monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_memory_db.parent))
-        app = create_app()
+        app = create_app(start_watchdog=False)
         client = app.test_client()
         body = client.get("/diagnostics").data.decode("utf-8")
         assert "overlooked (total)" in body
