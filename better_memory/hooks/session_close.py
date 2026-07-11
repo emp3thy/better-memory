@@ -139,6 +139,7 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
                 """
                 SELECT e.memory_kind, e.memory_id,
                        MIN(e.exposed_at) AS exposed_at,
+                       MIN(e.source) AS source,
                        COALESCE(r.title, s.content) AS display
                   FROM session_memory_exposure e
                   LEFT JOIN reflections        r ON e.memory_kind='reflection'
@@ -160,17 +161,25 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
         CAP_BYTES = 8 * 1024
         refl_lines = []
         sem_lines = []
+        source_counts: dict[str, int] = {}
         for r in rows:
             display = (r["display"] or "")[:TRUNC]
+            source = r["source"] or "bootstrap"
+            source_counts[source] = source_counts.get(source, 0) + 1
+            line = f"- {r['memory_id']} [{source}]: {display}"
             if r["memory_kind"] == "reflection":
-                refl_lines.append(f"- {r['memory_id']}: {display}")
+                refl_lines.append(line)
             else:
-                sem_lines.append(f"- {r['memory_id']}: {display}")
+                sem_lines.append(line)
+        counts_line = "sources: " + ", ".join(
+            f"{k} {v}" for k, v in sorted(source_counts.items())
+        )
 
         directive = (
             "RATE_MEMORIES — before this session ends, classify the "
             "memories that were exposed during this session and that you "
-            "did NOT already credit via memory.credit.\n\n"
+            "did NOT already credit via memory.credit.\n"
+            f"({counts_line})\n\n"
             f"Reflections ({len(refl_lines)}):\n"
             + ("\n".join(refl_lines) if refl_lines else "  (none)")
             + f"\n\nSemantic memories ({len(sem_lines)}):\n"
