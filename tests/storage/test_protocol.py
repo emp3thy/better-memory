@@ -79,7 +79,7 @@ def test_protocol_declares_all_required_methods() -> None:
         "promote_reflection", "retire_reflection",
         # Session lifecycle
         "session_bootstrap", "list_session_exposures",
-        "apply_session_ratings", "credit_one",
+        "apply_session_ratings", "credit_one", "record_exposures",
         # Synthesis (sqlite-only — gated by supports_synthesis)
         "synthesize_next_get_context", "synthesize_next_apply",
     }
@@ -93,7 +93,7 @@ def test_protocol_methods_are_keyword_only() -> None:
     for name in (
         "observe", "semantic_observe", "open_background_episode",
         "close_active_episode", "apply_session_ratings", "credit_one",
-        "synthesize_next_apply",
+        "synthesize_next_apply", "record_exposures",
     ):
         method = getattr(StorageBackend, name)
         sig = inspect.signature(method)

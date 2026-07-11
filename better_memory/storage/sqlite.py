@@ -288,6 +288,17 @@ class SqliteBackend:
             session_id=session_id,
         )
 
+    def record_exposures(
+        self,
+        *,
+        session_id: str,
+        items: list[tuple[str, str]],
+        source: str,
+    ) -> None:
+        self._session_bootstrap.record_exposures(
+            session_id=session_id, items=items, source=source,
+        )
+
     def apply_session_ratings(
         self,
         *,

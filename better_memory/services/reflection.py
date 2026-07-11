@@ -1225,7 +1225,8 @@ class ReflectionSynthesisService:
             rows = self._conn.execute(
                 f"""
                 SELECT id, title, phase, polarity, use_cases, hints,
-                       confidence, tech, evidence_count, useful_count
+                       confidence, tech, evidence_count, useful_count,
+                       times_misled, updated_at
                 FROM reflections
                 WHERE {where}
                 ORDER BY (useful_count + ? * times_overlooked) DESC,
@@ -1252,6 +1253,8 @@ class ReflectionSynthesisService:
                     "tech": r["tech"],
                     "evidence_count": r["evidence_count"],
                     "useful_count": r["useful_count"],
+                    "times_misled": r["times_misled"],
+                    "updated_at": r["updated_at"],
                 })
             _diag.step(
                 fn, "bucketed",

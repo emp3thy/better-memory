@@ -23,7 +23,7 @@ def _run_hook(env: dict[str, str], stdin_data: str = "") -> subprocess.Completed
     )
 
 
-def _seed_unrated_exposure(db_path: Path, sid: str = "S1"):
+def _seed_unrated_exposure(db_path: Path, sid: str = "S1", source: str = "bootstrap"):
     c = connect(db_path)
     apply_migrations(c)
     c.execute(
@@ -36,9 +36,29 @@ def _seed_unrated_exposure(db_path: Path, sid: str = "S1"):
     c.execute(
         """INSERT INTO session_memory_exposure
            (session_id, memory_kind, memory_id, exposed_at, source)
-           VALUES (?, 'reflection', 'r1', '2026-05-11T11:00:00+00:00',
-                   'bootstrap')""",
-        (sid,),
+           VALUES (?, 'reflection', 'r1', '2026-05-11T11:00:00+00:00', ?)""",
+        (sid, source),
+    )
+    c.commit()
+    c.close()
+
+
+def _seed_semantic_exposure(db_path: Path, sid: str = "S1", source: str = "contextual"):
+    """Seed a semantic-memory unrated exposure. Assumes migrations already
+    applied (call after _seed_unrated_exposure, which applies them)."""
+    c = connect(db_path)
+    apply_migrations(c)
+    c.execute(
+        """INSERT INTO semantic_memories
+           (id, content, project, scope, created_at, updated_at)
+           VALUES ('s1', 'My Semantic Fact', 'p', 'project',
+                   '2026-01-01', '2026-01-01')"""
+    )
+    c.execute(
+        """INSERT INTO session_memory_exposure
+           (session_id, memory_kind, memory_id, exposed_at, source)
+           VALUES (?, 'semantic', 's1', '2026-05-11T12:00:00+00:00', ?)""",
+        (sid, source),
     )
     c.commit()
     c.close()
@@ -114,7 +134,7 @@ class TestRatingDirectiveEmission:
         payload = json.loads(result.stdout)
         directive = payload["hookSpecificOutput"]["additionalContext"]
         # Memory id should appear exactly once in the reflection bucket.
-        assert directive.count("- r-dup:") == 1
+        assert directive.count("- r-dup [") == 1
         # Total rating count in the reason should be 1, not 2.
         assert "1 pending" in payload["reason"]
 
@@ -163,3 +183,20 @@ class TestRatingDirectiveEmission:
         payload = json.loads(result.stdout)
         directive = payload["hookSpecificOutput"]["additionalContext"]
         assert "overlooked" in directive
+
+    def test_directive_shows_source_labels_and_counts(
+        self, tmp_path, tmp_memory_db,
+    ):
+        _seed_unrated_exposure(tmp_memory_db, "S1", source="bootstrap")
+        _seed_semantic_exposure(tmp_memory_db, "S1", source="contextual")
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        assert "[bootstrap]" in directive
+        assert "[contextual]" in directive
+        assert "sources: bootstrap 1, contextual 1" in directive

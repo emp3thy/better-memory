@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,29 +17,41 @@ from better_memory.services.session_bootstrap import SessionBootstrapService
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "better_memory" / "db" / "migrations"
 
 
-def _seed_semantic(conn, *, content: str, project: str, scope: str) -> str:
+def _seed_semantic(
+    conn, *, content: str, project: str, scope: str, updated_at: str | None = None
+) -> str:
     mid = uuid.uuid4().hex
     now = datetime.now(UTC).isoformat()
+    ts = updated_at or now
     conn.execute(
         "INSERT INTO semantic_memories "
         "(id, content, project, scope, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (mid, content, project, scope, now, now),
+        (mid, content, project, scope, now, ts),
     )
     conn.commit()
     return mid
 
 
-def _seed_reflection(conn, *, project: str, polarity: str, scope: str = "project") -> str:
+def _seed_reflection(
+    conn,
+    *,
+    project: str,
+    polarity: str,
+    scope: str = "project",
+    title: str = "t",
+    updated_at: str | None = None,
+) -> str:
     rid = uuid.uuid4().hex
     now = datetime.now(UTC).isoformat()
+    ts = updated_at or now
     conn.execute(
         "INSERT INTO reflections "
         "(id, title, project, tech, phase, polarity, use_cases, hints, "
         " confidence, status, evidence_count, created_at, updated_at, scope) "
-        "VALUES (?, 't', ?, NULL, 'implementation', ?, 'uc', ?, 0.9, "
+        "VALUES (?, ?, ?, NULL, 'implementation', ?, 'uc', ?, 0.9, "
         " 'confirmed', 1, ?, ?, ?)",
-        (rid, project, polarity, json.dumps(["h"]), now, now, scope),
+        (rid, title, project, polarity, json.dumps(["h"]), now, ts, scope),
     )
     conn.commit()
     return rid
@@ -185,9 +198,10 @@ def test_render_includes_semantic_and_reflections_sections(conn, git_repo: Path)
 
     text = svc.bootstrap(source="startup", session_id="sess-r2", cwd=git_repo).additional_context
 
-    assert "Semantic memories (1 entries)" in text
+    assert "Semantic memories (1 shown in full)" in text
     assert "my-fact" in text
-    assert "Reflections — do (prior wins)" in text
+    assert "Reflections (shown in full)" in text
+    assert "[do]" in text
 
 
 def test_render_omits_empty_sections(conn, git_repo: Path) -> None:
@@ -225,7 +239,7 @@ def test_render_multi_item_bucket(conn, git_repo: Path) -> None:
     assert f"_id: {rid1}_" in text
     assert f"_id: {rid2}_" in text
     # Header appears exactly once.
-    assert text.count("### Reflections — do (prior wins)") == 1
+    assert text.count("### Reflections (shown in full)") == 1
 
 
 def test_render_bucket_isolation(conn, git_repo: Path) -> None:
@@ -234,10 +248,158 @@ def test_render_bucket_isolation(conn, git_repo: Path) -> None:
     svc = SessionBootstrapService(conn)
     text = svc.bootstrap(source="startup", session_id="t-iso", cwd=git_repo).additional_context
 
-    # Only the do bucket header appears; dont and neutral are empty so absent.
-    assert "Reflections — do (prior wins)" in text
-    assert "Reflections — dont (approaches to avoid)" not in text
-    assert "Reflections — neutral (context)" not in text
+    # Only the do polarity label appears; dont and neutral are absent.
+    assert "[do]" in text
+    assert "[dont" not in text
+    assert "[neutral]" not in text
+
+
+# ---------------------------------------------------------------------------
+# Task 9: bootstrap slimming — top-N full render + index + affordance.
+# ---------------------------------------------------------------------------
+
+
+def test_top_n_limits_full_renders(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    for i in range(8):
+        _seed_semantic(conn, content=f"sem-{i}", project=proj, scope="project")
+
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    titles = []
+    ids = []
+    for i in range(8):
+        title = f"refl-title-{i}"
+        titles.append(title)
+        rid = _seed_reflection(
+            conn,
+            project=proj,
+            polarity="do",
+            scope="project",
+            title=title,
+            # Spaced updated_at so retrieve_reflections' updated_at DESC
+            # tiebreak makes ordering deterministic: highest i = newest =
+            # ranked first (full render); i=0 is oldest (index).
+            updated_at=(base + timedelta(minutes=i)).isoformat(),
+        )
+        ids.append(rid)
+
+    svc = SessionBootstrapService(conn, top_n=2)
+    text = svc.bootstrap(
+        source="startup", session_id="sess-topn", cwd=git_repo
+    ).additional_context
+
+    full_sem_lines = re.findall(r"^- \[[0-9a-f]{32}\]", text, flags=re.MULTILINE)
+    assert len(full_sem_lines) == 2
+
+    assert text.count("_id: ") == 2
+
+    assert "### Index" in text
+
+    # Oldest reflection (index 0) is guaranteed to land in the index —
+    # its title appears exactly once, and its id is never rendered.
+    assert text.count(titles[0]) == 1
+    assert f"_id: {ids[0]}_" not in text
+
+
+def test_general_semantic_always_full(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    for i in range(3):
+        _seed_semantic(conn, content=f"gen-{i}", project="anyproj", scope="general")
+    for i in range(3):
+        _seed_semantic(conn, content=f"proj-{i}", project=proj, scope="project")
+
+    svc = SessionBootstrapService(conn, top_n=1)
+    text = svc.bootstrap(
+        source="startup", session_id="sess-gen", cwd=git_repo
+    ).additional_context
+
+    full_sem_lines = re.findall(r"^- \[[0-9a-f]{32}\]", text, flags=re.MULTILINE)
+    # 3 general (always full) + 1 project-scope (top_n=1) = 4.
+    assert len(full_sem_lines) == 4
+    assert "### Index" in text
+
+
+def test_full_ids_never_truncated(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    mid = _seed_semantic(conn, content="fact", project=proj, scope="project")
+
+    svc = SessionBootstrapService(conn, top_n=5)
+    text = svc.bootstrap(
+        source="startup", session_id="sess-fullid", cwd=git_repo
+    ).additional_context
+
+    assert f"[{mid}]" in text
+    assert f"[{mid[:8]}]" not in text
+
+
+def test_age_stamp_present(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    fixed_now = datetime(2026, 7, 11, tzinfo=UTC)
+    old_ts = (fixed_now - timedelta(days=10)).isoformat()
+    _seed_semantic(conn, content="aged-fact", project=proj, scope="project", updated_at=old_ts)
+
+    svc = SessionBootstrapService(conn, clock=lambda: fixed_now, top_n=5)
+    text = svc.bootstrap(
+        source="startup", session_id="sess-age", cwd=git_repo
+    ).additional_context
+
+    assert "(10d old)" in text
+
+
+def test_affordance_footer_counts(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    for i in range(7):
+        _seed_semantic(conn, content=f"sem-{i}", project=proj, scope="project")
+
+    svc = SessionBootstrapService(conn, top_n=1)
+    text = svc.bootstrap(
+        source="startup", session_id="sess-footer", cwd=git_repo
+    ).additional_context
+
+    assert "6 more memories are indexed above" in text
+    assert "memory_retrieve" in text
+
+
+def test_top_n_zero_is_legacy_full_dump(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    for i in range(5):
+        _seed_semantic(conn, content=f"sem-{i}", project=proj, scope="project")
+    for i in range(5):
+        _seed_reflection(conn, project=proj, polarity="do", scope="project", title=f"t-{i}")
+
+    svc = SessionBootstrapService(conn, top_n=0)
+    text = svc.bootstrap(
+        source="startup", session_id="sess-legacy", cwd=git_repo
+    ).additional_context
+
+    full_sem_lines = re.findall(r"^- \[[0-9a-f]{32}\]", text, flags=re.MULTILINE)
+    assert len(full_sem_lines) == 5
+    assert text.count("_id: ") == 5
+    assert "### Index" not in text
+
+
+def test_exposures_only_for_full_renders(conn, git_repo: Path) -> None:
+    proj = git_repo.name
+    ids = [
+        _seed_semantic(conn, content=f"sem-{i}", project=proj, scope="project")
+        for i in range(3)
+    ]
+
+    svc = SessionBootstrapService(conn, top_n=1)
+    result = svc.bootstrap(source="startup", session_id="sess-exp", cwd=git_repo)
+
+    rows = conn.execute(
+        "SELECT memory_id FROM session_memory_exposure WHERE session_id = ?",
+        ("sess-exp",),
+    ).fetchall()
+    exposed_ids = {r["memory_id"] for r in rows}
+    assert len(exposed_ids) == 1
+
+    full_id = next(iter(exposed_ids))
+    assert f"[{full_id}]" in result.additional_context
+    for mid in ids:
+        if mid != full_id:
+            assert mid not in exposed_ids
 
 
 # ---------------------------------------------------------------------------

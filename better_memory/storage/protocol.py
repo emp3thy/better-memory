@@ -95,8 +95,9 @@ class StorageBackend(Protocol):
 
         Each bucket is a list of reflection dicts: ``{id, title, phase,
         use_cases, hints (list[str]), confidence (float), tech,
-        evidence_count, useful_count}``. Sync — no embedder call (reflections
-        are pre-extracted in both backends; sqlite mode ranks via SQL
+        evidence_count, useful_count, times_misled, updated_at}``. Sync —
+        no embedder call (reflections are pre-extracted in both backends;
+        sqlite mode ranks via SQL
         ORDER BY ``useful_count + 3 * times_overlooked DESC``, agentcore
         mode applies the same formula client-side over metadata counters).
 
@@ -255,6 +256,18 @@ class StorageBackend(Protocol):
         ratings: list[dict[str, str]],
     ) -> Any:
         """Atomically apply per-exposure ratings. Returns ApplySessionRatingsResult."""
+        ...
+
+    def record_exposures(
+        self,
+        *,
+        session_id: str,
+        items: list[tuple[str, str]],
+        source: str,
+    ) -> None:
+        """Record (kind, id) memory exposures for later rating. Sqlite writes
+        session_memory_exposure rows; agentcore is a documented no-op (it has
+        no exposure log - rating flows through credit_one)."""
         ...
 
     def credit_one(
