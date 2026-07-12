@@ -722,7 +722,12 @@ def test_semantic_observe_calls_batch_create_against_semantic_memory(backend, mo
     assert rec["memoryStrategyId"] == "userPreference-zXy1234567"
     assert rec["namespaces"] == ["projects/testproj/semantic/"]
     assert rec["content"]["text"] == "prefer uv over pip"
-    assert len(rec["requestIdentifier"]) <= 80
+    # Content-hash dedup contract: requestIdentifier is sha256(content)[:80],
+    # computed here independently so this is a genuine oracle. A scheme change
+    # (uuid4, content+timestamp hash) silently breaks natural dedup of
+    # repeated preferences on AWS.
+    expected_req_id = hashlib.sha256(b"prefer uv over pip").hexdigest()[:80]
+    assert rec["requestIdentifier"] == expected_req_id
     # Initial metadata
     assert rec["metadata"]["status"]["stringValue"] == "active"
     assert rec["metadata"]["useful_count"]["numberValue"] == 0

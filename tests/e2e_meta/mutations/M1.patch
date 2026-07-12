@@ -1,0 +1,13 @@
+diff --git a/better_memory/mcp/server.py b/better_memory/mcp/server.py
+index 13dbaf7..2ac16d6 100644
+--- a/better_memory/mcp/server.py
++++ b/better_memory/mcp/server.py
+@@ -162,7 +162,7 @@ def create_server() -> tuple[
+     config = get_config()
+ 
+     memory_conn = connect(config.memory_db)
+-    apply_migrations(memory_conn, migrations_dir=_MEMORY_MIGRATIONS)
++    # MUTATION M1: apply_migrations skipped for memory.db at boot.
+     knowledge_conn = connect(config.knowledge_db)
+     apply_migrations(knowledge_conn, migrations_dir=_KNOWLEDGE_MIGRATIONS)
+ 
