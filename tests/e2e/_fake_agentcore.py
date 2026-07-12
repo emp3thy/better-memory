@@ -116,6 +116,14 @@ def _validation_exception(message: str) -> tuple[int, dict[str, Any]]:
 
 
 def _check_metadata_filters(body: Any) -> tuple[int, dict[str, Any]] | None:
+    max_results = body.get("maxResults")
+    if isinstance(max_results, int) and max_results > 100:
+        # Verbatim live constraint (T3 run 2 hit this with maxResults=120).
+        return _validation_exception(
+            "1 validation error detected: Value at 'maxResults' failed to "
+            "satisfy constraint: Member must have value less than or equal "
+            "to 100"
+        )
     filters = body.get("metadataFilters") or (
         (body.get("searchCriteria") or {}).get("metadataFilters")
     ) or []

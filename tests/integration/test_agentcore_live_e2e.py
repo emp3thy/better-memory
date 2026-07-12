@@ -581,8 +581,10 @@ async def test_live_e4_mcp_semantic_crud_roundtrip(
 ) -> None:
     """E4: full MCP semantic round-trip against real AWS (fix plan section
     4 item 3): observe → retrieve surfaces the record (project + general
-    UD-2 merge) → update changes the text → delete removes it. All
-    record-level operations are promptly consistent. Zero local
+    UD-2 merge) → update changes the text → delete removes it. The record
+    LIST index is eventually consistent (~60s lag measured by the dialect
+    scout — aws_record_dialect.md section 3), so every retrieve step polls
+    with a bounded retry; writes themselves are synchronous. Zero local
     ``semantic_memories`` rows.
     """
     home, bm_home = _onboarding_home(
@@ -601,8 +603,28 @@ async def test_live_e4_mcp_semantic_crud_roundtrip(
     errlog_path = tmp_path / "e4-server.stderr"
     with errlog_path.open("w", encoding="utf-8") as errlog:
         async with mcp_session(
-            env, errlog=errlog, read_timeout=timedelta(seconds=90)
+            env, errlog=errlog, read_timeout=timedelta(seconds=120)
         ) as session:
+
+            async def _retrieve_until(
+                predicate, description: str, budget_s: float = 120.0
+            ) -> list:
+                """Poll semantic_retrieve until predicate(items) — the LIST
+                index lags writes by ~60s (dialect notes section 3)."""
+                deadline = asyncio.get_running_loop().time() + budget_s
+                while True:
+                    items = _tool_json(
+                        await session.call_tool("memory.semantic_retrieve", {})
+                    )
+                    if predicate(items):
+                        return items
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise AssertionError(
+                            f"{description} not observed within {budget_s}s: "
+                            f"{items!r}"
+                        )
+                    await asyncio.sleep(5)
+
             created = _tool_json(
                 await session.call_tool(
                     "memory.semantic_observe", {"content": marker}
@@ -612,11 +634,11 @@ async def test_live_e4_mcp_semantic_crud_roundtrip(
             # A genuine AWS memoryRecordId (>= 40 chars) — not a local uuid.
             assert isinstance(record_id, str) and len(record_id) >= 40
 
-            listed = _tool_json(
-                await session.call_tool("memory.semantic_retrieve", {})
+            listed = await _retrieve_until(
+                lambda items: len(_mine(items, record_id)) == 1,
+                "created record surfaced",
             )
             mine = _mine(listed, record_id)
-            assert len(mine) == 1, f"record not surfaced: {listed!r}"
             assert mine[0]["content"] == marker
             # Stable payload keys under the UD-2 merge contract.
             assert {"project", "scope", "created_at", "updated_at"} <= set(mine[0])
@@ -628,22 +650,24 @@ async def test_live_e4_mcp_semantic_crud_roundtrip(
                     {"id": record_id, "content": updated_marker},
                 )
             ) == {"ok": True}
-            re_listed = _tool_json(
-                await session.call_tool("memory.semantic_retrieve", {})
+            re_listed = await _retrieve_until(
+                lambda items: bool(
+                    _mine(items, record_id)
+                    and _mine(items, record_id)[0]["content"] == updated_marker
+                ),
+                "updated content surfaced",
             )
-            mine = _mine(re_listed, record_id)
-            assert len(mine) == 1
-            assert mine[0]["content"] == updated_marker
+            assert len(_mine(re_listed, record_id)) == 1
 
             assert _tool_json(
                 await session.call_tool(
                     "memory.semantic_delete", {"id": record_id}
                 )
             ) == {"ok": True}
-            final = _tool_json(
-                await session.call_tool("memory.semantic_retrieve", {})
+            await _retrieve_until(
+                lambda items: _mine(items, record_id) == [],
+                "deleted record gone from the index",
             )
-            assert _mine(final, record_id) == []
 
     assert _local_row_count(bm_home, "semantic_memories") == 0
 
@@ -694,8 +718,11 @@ async def test_live_e5_rating_credits_real_semantic_record_id(
                     },
                 )
             )
-            assert payload["applied"] == 1, payload
-            assert payload["failed"] == 0, payload
+            # Sqlite-parity result shape (repair-wave payload parity).
+            assert payload["session_id"], payload
+            assert payload["applied"]["cited"] == 1, payload
+            assert sum(payload["skipped"].values()) == 0, payload
+            assert "failed" not in payload, payload
 
             # Best-effort cleanup; teardown deletes the whole memory anyway.
             await session.call_tool("memory.semantic_delete", {"id": record_id})
@@ -779,7 +806,9 @@ def test_live_e7_session_close_closure_with_settings_only(
         tmp_path, agentcore_throwaway_memories, agentcore_region
     )
     session_id = _journey_session_id()
-    # The hook derives the closure actorId from the payload cwd's basename.
+    # The hook derives the closure actorId from the canonical project_name()
+    # resolution (repair-wave major 7) — BETTER_MEMORY_PROJECT wins here, so
+    # the closure lands under the SAME actor the MCP server uses.
     proj_dir = tmp_path / "bmintclose"
     proj_dir.mkdir()
     env = _live_env(
@@ -818,9 +847,11 @@ def test_live_e7_session_close_closure_with_settings_only(
             retries={"mode": "standard", "max_attempts": 5},
         ),
     )
+    from better_memory.storage.session import resolve_actor_id
+
     events = data.list_events(
         memoryId=epi_record.memory_id,
-        actorId="bmintclose",
+        actorId=resolve_actor_id(_JOURNEY_PROJECT),
         sessionId=session_id,
         includePayloads=True,
         maxResults=10,

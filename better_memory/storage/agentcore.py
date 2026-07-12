@@ -279,17 +279,28 @@ class AgentCoreBackend:
         ]
         if general_ns != project_ns:
             namespaces.append((general_ns, allowed_general))
-        # One page covers all three buckets now — scale the slack with the
-        # bucket count instead of the old per-polarity *2.
+        # Scale the fetch budget with the bucket count. The real service
+        # caps maxResults at 100 (live ValidationException above that), so
+        # page with nextToken until the budget is met or the index is dry.
         max_results = limit_per_bucket * len(_POLARITIES) * 2
 
         def _fetch(namespace: str) -> list[dict[str, Any]]:
-            response = self._data.list_memory_records(
-                memoryId=self._cfg.episodic.memory_id,
-                namespace=namespace,
-                maxResults=max_results,
-            )
-            return response.get("memoryRecordSummaries", [])
+            summaries: list[dict[str, Any]] = []
+            token: str | None = None
+            while len(summaries) < max_results:
+                kwargs: dict[str, Any] = {
+                    "memoryId": self._cfg.episodic.memory_id,
+                    "namespace": namespace,
+                    "maxResults": min(100, max_results - len(summaries)),
+                }
+                if token:
+                    kwargs["nextToken"] = token
+                response = self._data.list_memory_records(**kwargs)
+                summaries.extend(response.get("memoryRecordSummaries", []))
+                token = response.get("nextToken")
+                if not token:
+                    break
+            return summaries
 
         # Parallel fan-out via a thread pool. This path is sync but is called
         # from inside the MCP server's async `_call_tool`, so we cannot use
@@ -458,7 +469,8 @@ class AgentCoreBackend:
                 memoryId=self._cfg.episodic.memory_id,
                 actorId=actor_id,
                 sessionId=session_id,
-                maxResults=limit,
+                # Real service caps maxResults at 100.
+                maxResults=min(limit, 100),
                 includePayloads=True,
             ),
         )
