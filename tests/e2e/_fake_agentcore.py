@@ -183,7 +183,7 @@ class FakeAgentCore:
             do_DELETE = _handle
             do_PATCH = _handle
 
-            def log_message(self, *args: Any) -> None:  # silence stderr
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 — base class parameter name; silence stderr
                 pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)

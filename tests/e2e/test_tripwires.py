@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from tests.e2e._env import isolated_env
-from tests.e2e.conftest import mcp_session, run_hook
+from tests.e2e.conftest import mcp_session, run_hook, text_of
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
@@ -45,7 +45,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
     do_HEAD = _handle
     do_PUT = _handle
 
-    def log_message(self, *args: object) -> None:  # silence stderr chatter
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 — base class parameter name; silence stderr chatter
         pass
 
 
@@ -107,7 +107,7 @@ async def test_ollama_zero_traffic_across_journey_and_sync_hooks(
                     {"content": "tripwire observation", "outcome": "success"},
                 )
                 assert not r_obs.isError, r_obs.content
-                obs_id = json.loads(r_obs.content[0].text)["id"]
+                obs_id = json.loads(text_of(r_obs.content[0]))["id"]
                 assert obs_id
 
                 # Trigram drill-down (embedder is None in sqlite embeddings
@@ -117,7 +117,7 @@ async def test_ollama_zero_traffic_across_journey_and_sync_hooks(
                     "memory.retrieve_observations", {"query": "tripwire"}
                 )
                 assert not r_drill.isError, r_drill.content
-                drilled = json.loads(r_drill.content[0].text)
+                drilled = json.loads(text_of(r_drill.content[0]))
                 matched = [o for o in drilled if o["id"] == obs_id]
                 assert matched, f"observation {obs_id} not surfaced: {drilled!r}"
                 assert "tripwire observation" in matched[0]["content"]
@@ -126,7 +126,7 @@ async def test_ollama_zero_traffic_across_journey_and_sync_hooks(
                 # args — reflections filters only, so call it bare).
                 r_buckets = await session.call_tool("memory.retrieve", {})
                 assert not r_buckets.isError, r_buckets.content
-                buckets = json.loads(r_buckets.content[0].text)
+                buckets = json.loads(text_of(r_buckets.content[0]))
                 assert {"do", "dont", "neutral"} <= set(buckets)
 
         # --- both synchronous hooks under the same recorder env -----------

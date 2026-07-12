@@ -112,6 +112,18 @@ def run_hook(
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def text_of(block: object) -> str:
+    """Text of an MCP content block, narrowing the SDK's content union.
+
+    ``CallToolResult.content`` items are a union (TextContent | ImageContent
+    | ...); direct ``.text`` access fails type checking. Asserting on the
+    attribute both narrows for Pyright and fails loudly on a non-text block.
+    """
+    text = getattr(block, "text", None)
+    assert isinstance(text, str), f"expected a text content block, got: {block!r}"
+    return text
+
+
 @asynccontextmanager
 async def mcp_session(
     env: dict[str, str],

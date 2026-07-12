@@ -51,7 +51,7 @@ from better_memory.storage.agentcore_persistence import (
     save_agentcore_config,
 )
 from tests.e2e._env import isolated_env
-from tests.e2e.conftest import mcp_session
+from tests.e2e.conftest import mcp_session, text_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -344,7 +344,7 @@ async def test_live_mcp_retrieve_wired_path(
             )
             assert len(content) == 1, f"expected one content block: {content!r}"
             assert getattr(content[0], "type", None) == "text"
-            buckets = json.loads(content[0].text)
+            buckets = json.loads(text_of(content[0]))
 
     # Exact empty buckets: real AWS accepted the namespace + status
     # metadataFilters and returned zero reflections for this actor.

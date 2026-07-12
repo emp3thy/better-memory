@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.e2e._env import isolated_env
-from tests.e2e.conftest import mcp_session, run_hook
+from tests.e2e.conftest import mcp_session, run_hook, text_of
 
 INJECT_HOOK = "better_memory.hooks.contextual_inject"
 
@@ -163,7 +163,7 @@ class TestContextualInjectContract:
                     "memory.semantic_observe", {"content": content}
                 )
                 assert not result.isError, result.content
-                memory_id = json.loads(result.content[0].text)["id"]
+                memory_id = json.loads(text_of(result.content[0]))["id"]
         assert memory_id
 
         rc, out, err = run_hook(
