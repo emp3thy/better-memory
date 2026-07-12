@@ -260,8 +260,17 @@ def scrubbed_aws_process_env(
         "AWS_SESSION_TOKEN",
         "AWS_ENDPOINT_URL",
         "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+        # botocore resolves env proxies for loopback targets too — a dev
+        # shell's corporate proxy would swallow the fake-endpoint traffic.
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv(
         "AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-such-credentials")
     )

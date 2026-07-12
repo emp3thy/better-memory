@@ -45,10 +45,14 @@ from typing import Any
 
 import botocore
 
-#: Both planes' models, relative to the botocore package dir. The trailing
-#: ``.gz`` is load-bearing: the installed models are gzipped (judge fix —
-#: a plain ``service-2.json`` glob finds nothing at botocore 1.43.14).
-_MODEL_GLOB = "data/bedrock-agentcore*/*/service-2.json.gz"
+#: Both planes' models, relative to the botocore package dir. Models are
+#: gzipped at botocore 1.43.14 (judge fix), but the packaging has flipped
+#: between .json and .json.gz across botocore history — glob both so a
+#: botocore upgrade cannot silently break routing (review fix).
+_MODEL_GLOBS = (
+    "data/bedrock-agentcore*/*/service-2.json.gz",
+    "data/bedrock-agentcore*/*/service-2.json",
+)
 
 _PLACEHOLDER_RE = re.compile(r"\{([^}]+)\}")
 
@@ -72,15 +76,16 @@ def _load_routes() -> list[tuple[str, str, re.Pattern[str]]]:
     """Build ``(operation_name, http_method, path_regex)`` routes from the
     installed gzipped botocore models for both agentcore planes."""
     data_root = Path(botocore.__file__).resolve().parent
-    model_paths = sorted(data_root.glob(_MODEL_GLOB))
+    model_paths = sorted(p for g in _MODEL_GLOBS for p in data_root.glob(g))
     if not model_paths:
         raise FileNotFoundError(
             f"no bedrock-agentcore service models found under {data_root} "
-            f"(glob {_MODEL_GLOB!r}) — is the [agentcore] extra installed?"
+            f"(globs {_MODEL_GLOBS!r}) — is the [agentcore] extra installed?"
         )
     routes: list[tuple[str, str, re.Pattern[str]]] = []
     for model_path in model_paths:
-        model = json.loads(gzip.decompress(model_path.read_bytes()))
+        raw = model_path.read_bytes()
+        model = json.loads(gzip.decompress(raw) if model_path.suffix == ".gz" else raw)
         for op_name, op in model.get("operations", {}).items():
             http = op.get("http", {})
             request_uri = http.get("requestUri")

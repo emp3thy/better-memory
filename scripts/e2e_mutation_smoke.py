@@ -177,9 +177,31 @@ def _pytest_env(mutation: Mutation | None) -> dict[str, str]:
     for key in list(env):
         if key.upper() in _CONTROL_VARS:
             del env[key]
+    # The worktree must resolve its OWN editable venv — an inherited
+    # UV_PROJECT_ENVIRONMENT / VIRTUAL_ENV would silently point `uv run`
+    # back at the live repo's install and test unpatched code.
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
+    env.pop("VIRTUAL_ENV", None)
     if mutation is not None:
         env.update(mutation.extra_env)
     return env
+
+
+def _scratch_dir() -> Path:
+    """A short-lived scratch root for the throwaway worktree.
+
+    On Windows this must NOT live under %TEMP%: Git Bash mounts %TEMP% as
+    /tmp, so setup.sh sees the worktree at /tmp/... — a non-drive-letter
+    MSYS path that win_path() cannot rewrite, which breaks the two
+    test_setup_sh interpreter-path assertions in the control run for
+    environment reasons unrelated to HEAD. LOCALAPPDATA itself (the parent
+    of %TEMP%) is not mounted at /tmp and keeps paths short.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA")
+        if base and Path(base).is_dir():
+            return Path(tempfile.mkdtemp(prefix="bm-mutsmoke-", dir=base))
+    return Path(tempfile.mkdtemp(prefix="bm-mutsmoke-"))
 
 
 def _tail(text: str, lines: int = 30) -> str:
@@ -419,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         for line in dirty.stdout.strip().splitlines():
             _log(f"      {line}")
 
-    scratch = Path(tempfile.mkdtemp(prefix="bm-mutsmoke-"))
+    scratch = _scratch_dir()
     worktree: Path | None = None
     failures: list[str] = []
     try:

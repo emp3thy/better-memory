@@ -233,22 +233,40 @@ def _func_source(src: str, node: ast.Call) -> str:
     return (ast.get_source_segment(src, node.func) or "").strip()
 
 
-def _blessed_names(src: str, tree: ast.AST) -> set[str]:
-    """Names whose value provably derives from isolated_env/agentcore_env.
+def _walk_scope(node: ast.AST) -> list[ast.AST]:
+    """Nodes of one lexical scope — does NOT descend into nested function,
+    lambda, or class scopes (each gets analyzed as its own scope)."""
+    out: list[ast.AST] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(
+            child, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
+        ):
+            continue
+        out.append(child)
+        out.extend(_walk_scope(child))
+    return out
 
-    Seeds: function parameters named ``env``/``*_env`` (their values flow
-    from call sites, which are themselves checked). Fixed point over simple
-    assignments whose RHS mentions a helper or an already-blessed name.
+
+def _scope_blessed(src: str, scope: ast.AST) -> set[str]:
+    """Names in THIS scope provably derived from isolated_env/agentcore_env.
+
+    Seeds: the scope's own ``env``/``*_env`` parameters (their call sites are
+    checked separately by the wrapper rule). Fixed point over the scope's
+    simple assignments. TAINT WINS: a name with any assignment whose RHS does
+    not derive from a helper or blessed name is never blessed — a reassigned
+    parameter loses its blessing, and a hand-rolled ``env = {...}`` in a test
+    body is a violation even though some other function has an ``env`` param
+    (the module-wide-blessing bypass found in review).
     """
-    blessed: set[str] = set()
+    seeds: set[str] = set()
+    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+        a = scope.args
+        for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs]:
+            if _ENV_PARAM.match(arg.arg):
+                seeds.add(arg.arg)
     assignments: list[tuple[list[str], str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            a = node.args
-            for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs]:
-                if _ENV_PARAM.match(arg.arg):
-                    blessed.add(arg.arg)
-        elif isinstance(node, ast.Assign):
+    for node in _walk_scope(scope):
+        if isinstance(node, ast.Assign):
             names = [t.id for t in node.targets if isinstance(t, ast.Name)]
             if names:
                 assignments.append((names, ast.get_source_segment(src, node.value) or ""))
@@ -257,56 +275,143 @@ def _blessed_names(src: str, tree: ast.AST) -> set[str]:
                 assignments.append(
                     ([node.target.id], ast.get_source_segment(src, node.value) or "")
                 )
-    changed = True
-    while changed:
-        changed = False
+    tainted: set[str] = set()
+    blessed: set[str] = set()
+    for _ in range(10):  # small fixed point; taint and blessing interact
+        new_blessed = set(seeds) - tainted
+        changed = True
+        while changed:
+            changed = False
+            for names, rhs in assignments:
+                ok = bool(_HELPER_NAME.search(rhs)) or any(
+                    re.search(rf"\b{re.escape(b)}\b", rhs) for b in new_blessed
+                )
+                if ok:
+                    for n in names:
+                        if n not in new_blessed and n not in tainted:
+                            new_blessed.add(n)
+                            changed = True
+        new_tainted = set(tainted)
         for names, rhs in assignments:
-            if all(n in blessed for n in names):
-                continue
             ok = bool(_HELPER_NAME.search(rhs)) or any(
-                re.search(rf"\b{re.escape(b)}\b", rhs) for b in blessed
+                re.search(rf"\b{re.escape(b)}\b", rhs) for b in new_blessed
             )
-            if ok:
-                for n in names:
-                    if n not in blessed:
-                        blessed.add(n)
-                        changed = True
+            if not ok:
+                new_tainted.update(names)
+        new_blessed -= new_tainted
+        if new_blessed == blessed and new_tainted == tainted:
+            break
+        blessed, tainted = new_blessed, new_tainted
     return blessed
+
+
+def _env_param_wrappers(tree: ast.AST) -> dict[str, tuple[int, str]]:
+    """Module-local functions taking an env-like parameter: name ->
+    (positional index, param name). Their call sites must pass a
+    helper-derived env — otherwise the parameter seed would launder
+    arbitrary dicts through the wrapper (review bypass)."""
+    wrappers: dict[str, tuple[int, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            params = [*node.args.posonlyargs, *node.args.args]
+            for idx, arg in enumerate(params):
+                if _ENV_PARAM.match(arg.arg):
+                    wrappers[node.name] = (idx, arg.arg)
+                    break
+            else:
+                for arg in node.args.kwonlyargs:
+                    if _ENV_PARAM.match(arg.arg):
+                        wrappers[node.name] = (-1, arg.arg)
+                        break
+    return wrappers
+
+
+#: The env choke-point modules themselves hand-build the dict they return —
+#: their internal _set/_delete calls are the one legitimate exception to the
+#: wrapper rule. They still get the subprocess-spawn rules (they spawn nothing
+#: today; if one ever does, it must use its own product).
+_CHOKE_POINT_MODULES = {"_env.py", "_agentcore_env.py"}
 
 
 def _spawn_env_violations(path: Path) -> list[str]:
     src = path.read_text(encoding="utf-8")
     tree = ast.parse(src, filename=str(path))
-    blessed = _blessed_names(src, tree)
+    is_choke_point = path.name in _CHOKE_POINT_MODULES
+    wrappers = {} if is_choke_point else _env_param_wrappers(tree)
     violations: list[str] = []
 
-    def env_ok(expr: ast.expr | None, where: str) -> None:
-        if expr is None:
-            violations.append(f"{path.name}:{where}: spawn without explicit env=")
-            return
-        segment = ast.get_source_segment(src, expr) or ""
-        if _HELPER_NAME.search(segment):
-            return
-        if isinstance(expr, ast.Name) and expr.id in blessed:
-            return
-        violations.append(
-            f"{path.name}:{where}: env not derived from isolated_env/agentcore_env: {segment!r}"
-        )
-
+    # Attribute-held envs (self.env / harness.env) are acceptable at use sites
+    # because their fill sites are checked: ctor calls carry env= (generic
+    # kwarg rule) and explicit `x.env = ...` assignments are policed here.
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = _func_source(src, node)
-        kw_env = next((k.value for k in node.keywords if k.arg == "env"), None)
-        line = f"line {node.lineno}"
-        if _SUBPROCESS_FUNC.match(func) or func.endswith("StdioServerParameters"):
-            env_ok(kw_env, line)
-        elif func.endswith("run_hook"):
-            pos = node.args[2] if len(node.args) >= 3 else None
-            env_ok(kw_env if kw_env is not None else pos, line)
-        elif func.endswith("mcp_session"):
-            pos = node.args[0] if node.args else None
-            env_ok(kw_env if kw_env is not None else pos, line)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and _ENV_PARAM.match(target.attr):
+                    rhs = ast.get_source_segment(src, node.value) or ""
+                    if not (_HELPER_NAME.search(rhs) or re.search(r"\benv\b|_env\b", rhs)):
+                        violations.append(
+                            f"{path.name}:line {node.lineno}: attribute env assigned "
+                            f"from non-derived value: {rhs!r}"
+                        )
+
+    scopes: list[ast.AST] = [tree]
+    scopes.extend(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+    )
+    for scope in scopes:
+        scope_blessed = _scope_blessed(src, scope)
+
+        def env_ok(
+            expr: ast.expr | None, where: str, blessed: set[str] = scope_blessed
+        ) -> None:
+            if expr is None:
+                violations.append(f"{path.name}:{where}: spawn without explicit env=")
+                return
+            segment = ast.get_source_segment(src, expr) or ""
+            if "environ" in segment:
+                violations.append(
+                    f"{path.name}:{where}: env mentions os.environ: {segment!r}"
+                )
+                return
+            if _HELPER_NAME.search(segment):
+                return
+            if isinstance(expr, ast.Name) and expr.id in blessed:
+                return
+            if isinstance(expr, ast.Attribute) and _ENV_PARAM.match(expr.attr):
+                return  # fill sites policed above / via ctor env= kwarg rule
+            # Inline derivations of a blessed name, e.g. {**env, "X": "1"}.
+            if any(re.search(rf"\b{re.escape(b)}\b", segment) for b in blessed):
+                return
+            violations.append(
+                f"{path.name}:{where}: env not derived from "
+                f"isolated_env/agentcore_env: {segment!r}"
+            )
+
+        for node in _walk_scope(scope):
+            if not isinstance(node, ast.Call):
+                continue
+            func = _func_source(src, node)
+            func_tail = func.rsplit(".", 1)[-1]
+            kw_env = next((k.value for k in node.keywords if k.arg == "env"), None)
+            line = f"line {node.lineno}"
+            if _SUBPROCESS_FUNC.match(func) or func.endswith("StdioServerParameters"):
+                env_ok(kw_env, line)
+            elif func.endswith("run_hook"):
+                pos = node.args[2] if len(node.args) >= 3 else None
+                env_ok(kw_env if kw_env is not None else pos, line)
+            elif func.endswith("mcp_session"):
+                pos = node.args[0] if node.args else None
+                env_ok(kw_env if kw_env is not None else pos, line)
+            elif func_tail in wrappers:
+                idx, pname = wrappers[func_tail]
+                kw = next((k.value for k in node.keywords if k.arg == pname), None)
+                pos = node.args[idx] if 0 <= idx < len(node.args) else None
+                arg = kw if kw is not None else pos
+                if arg is not None:  # missing arg = default; wrapper's own body is checked
+                    env_ok(arg, line)
+            elif kw_env is not None and not is_choke_point:
+                # Any other call carrying an env= kwarg (harness ctors etc.).
+                env_ok(kw_env, line)
     return violations
 
 
@@ -328,6 +433,12 @@ def _environ_copy_violations(path: Path) -> list[str]:
             for key, value in zip(node.keys, node.values, strict=True):
                 if key is None and "environ" in (ast.get_source_segment(src, value) or ""):
                     violations.append(f"{path.name}:{node.lineno}: {{**os.environ, ...}}")
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            # PEP 584 merge: os.environ | {...} is a full-environment copy too.
+            for side in (node.left, node.right):
+                if "environ" in (ast.get_source_segment(src, side) or ""):
+                    violations.append(f"{path.name}:{node.lineno}: os.environ | {{...}}")
+                    break
     return violations
 
 
@@ -369,6 +480,35 @@ class TestContractCSingleChokePoint:
         assert len(spawn) == 3, spawn  # hand-rolled name, missing env=, environ.copy expr
         assert any("**os.environ" in v for v in copies)
         assert any("environ.copy" in v for v in copies)
+
+    def test_checker_flags_wrapper_laundering_bypass(self, tmp_path: Path) -> None:
+        """Review finding isolation-checker-env-param-blessing-bypass: a module
+        defining a spawn wrapper with an ``env`` param must NOT bless the bare
+        name 'env' module-wide, and wrapper call sites must be inspected."""
+        bad = tmp_path / "test_bypass.py"
+        bad.write_text(
+            "import subprocess, sys, os\n"
+            "def _spawn(env, argv):\n"
+            "    subprocess.run(argv, env=env)\n"
+            "def test_a(tmp_path):\n"
+            "    env = {'HOME': str(tmp_path)}\n"
+            "    subprocess.run([sys.executable, '-V'], env=env)\n"
+            "def test_b(tmp_path):\n"
+            "    env = os.environ | {'HOME': str(tmp_path)}\n"
+            "    subprocess.run([sys.executable, '-V'], env=env)\n"
+            "def test_c(tmp_path):\n"
+            "    _spawn({'HOME': str(tmp_path)}, [sys.executable, '-V'])\n"
+            "def test_d(tmp_path):\n"
+            "    _spawn(dict(os.environ), [sys.executable, '-V'])\n",
+            encoding="utf-8",
+        )
+        spawn = _spawn_env_violations(bad)
+        copies = _environ_copy_violations(bad)
+        # test_a: hand-rolled name; test_b: tainted name; test_c: inline dict
+        # at wrapper call; test_d: environ mention at wrapper call.
+        assert len(spawn) == 4, spawn
+        assert any("os.environ | {...}" in v for v in copies), copies
+        assert any("dict(os.environ)" in v for v in copies), copies
 
     def test_checker_accepts_helper_derived_env(self, tmp_path: Path) -> None:
         good = tmp_path / "test_good.py"

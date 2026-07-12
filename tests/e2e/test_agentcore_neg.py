@@ -201,7 +201,10 @@ class TestMissingAgentCoreJson:
                 # already dead, so shutdown returns immediately.
 
         assert exc_info.value.error.code == -32000
-        assert "Connection closed" in exc_info.value.error.message
+        # The error MESSAGE ('Connection closed') is mcp-SDK internal prose —
+        # not our contract. Pin only that a message exists; the -32000 code
+        # plus the product's own stderr text below carry the real assertions.
+        assert exc_info.value.error.message
         assert "agentcore.json not found" in errlog_path.read_text(
             encoding="utf-8"
         )

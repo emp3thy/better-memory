@@ -92,6 +92,15 @@ def _hostile_outer_env(canary: Path) -> dict[str, str]:
     # silently turn the meta-run vacuous — drop it.
     for key in [k for k in env if k.upper() == "PYTEST_ADDOPTS"]:
         del env[key]
+    # Pin uv's cache/python dirs to the HOST's real locations BEFORE the HOME
+    # override below: on POSIX the inner test_setup_sh would otherwise derive
+    # them from $HOME (== the canary), and setup.sh's `uv sync` would populate
+    # a cold cache tree inside the canary — a false HARNESS ISOLATION BREACH
+    # in the file-set diff (plus a multi-minute network download).
+    from tests.e2e.test_setup_sh import _host_uv_dirs
+
+    for key, value in _host_uv_dirs().items():
+        _set_ci(env, key, value)
     _set_ci(env, "HOME", str(canary))
     _set_ci(env, "USERPROFILE", str(canary))
     if sys.platform == "win32":

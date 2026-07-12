@@ -18,6 +18,7 @@ contract:
 
 from __future__ import annotations
 
+import socket
 import sqlite3
 import time
 from contextlib import closing
@@ -26,11 +27,20 @@ from pathlib import Path
 from tests.e2e._env import isolated_env
 from tests.e2e.conftest import mcp_session
 
-#: Loopback discard port: no listener on dev/CI boxes, so connects fail with
-#: an instant ECONNREFUSED — no DNS, no route, no 30s connect timeout. If a
-#: machine ever runs something on port 9 the failure mode is a clear
-#: assertion message, not a hang (design C8 determinism note).
-OLLAMA_ABSENT_HOST = "http://127.0.0.1:9"
+
+def _refused_loopback_port() -> int:
+    """A loopback port with provably no listener: bind an ephemeral port,
+    close it, use it immediately. Connects fail with an instant
+    ECONNREFUSED — no DNS, no route, no 30s connect timeout. (Review fix:
+    the previous hardcoded port 9 is not guaranteed free — Windows'
+    optional Simple TCP/IP Services runs a discard listener there, which
+    would turn this test into a hang/false pass.)"""
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+OLLAMA_ABSENT_HOST = f"http://127.0.0.1:{_refused_loopback_port()}"
 
 
 def _text_of(result: object) -> str:

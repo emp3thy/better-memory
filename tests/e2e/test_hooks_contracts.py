@@ -108,10 +108,15 @@ class TestContextualInjectContract:
         raise ValueError *inside* the try — the hook must swallow it,
         record_hook_error, and still print the envelope with exit 0.
 
-        Anti-vacuity: record_hook_error's connect() creates a schema-less
-        memory.db on a virgin home (its INSERT then silently no-ops — same
-        stray-DB defect pinned at agentcore level in scenario D6). Asserting
-        that artifact proves the except path actually executed.
+        Anti-vacuity: the schema-less memory.db alone is NOT discriminating —
+        the happy path on a virgin home creates an identical file via its own
+        connect(). The discriminator is ``state/``: SeenStore.bump_turn()
+        mkdirs it on the happy path (contextual_inject.py sets it up right
+        after get_config()), but an invalid mode raises inside get_config()
+        BEFORE that block — so memory.db present + state/ absent proves the
+        except path actually executed. (This test is the M3 mutation sentinel;
+        without the state/ assertion it would silently degrade into a
+        happy-path duplicate if the mode validation were ever loosened.)
         """
         env = isolated_env(
             clean_slate_home, BETTER_MEMORY_CONTEXT_INJECT_MODE="aggressive"
@@ -131,6 +136,9 @@ class TestContextualInjectContract:
         with closing(sqlite3.connect(db)) as conn:
             (tables,) = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
         assert tables == 0
+        # state/ is created by the happy path's SeenStore but never reached
+        # when get_config() raises — the genuinely discriminating assertion.
+        assert not (clean_slate_home / ".better-memory" / "state").exists()
 
     async def test_b_seeded_memory_injects_and_records_contextual_exposure(
         self, clean_slate_home: Path, tmp_path: Path

@@ -26,13 +26,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import uuid
 import warnings
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import timedelta
 from pathlib import Path
 from typing import IO, Any
@@ -262,6 +263,58 @@ def _canary_sha256(path: Path) -> str:
         return "<absent>"
 
 
+#: Values only the harness ever pins (tests/e2e/_env.py defaults). A live
+#: Claude session writes spool files and DB rows constantly, but never with
+#: these — fingerprint-filtered tell-tales are live-session-safe.
+_HARNESS_FINGERPRINTS = ("e2e-session", "e2e-project")
+
+
+def _canary_dataplane(home: Path) -> dict[str, Any]:
+    """Data-plane tell-tales in the REAL ~/.better-memory (review finding
+    isolation-canary-blind-to-dataplane-writes): a leaked hook/server spawn
+    that kept the real USERPROFILE writes episode/exposure rows and spool or
+    session-marker files carrying the harness's pinned session/project values.
+    Config-subtree comparison alone is blind to that."""
+    bm = home / ".better-memory"
+    out: dict[str, Any] = {}
+
+    db = bm / "memory.db"
+    for key, sql in (
+        (
+            "db_episode_sessions",
+            "SELECT COUNT(*) FROM episode_sessions WHERE session_id LIKE 'e2e-session%'",
+        ),
+        (
+            "db_exposures",
+            "SELECT COUNT(*) FROM session_memory_exposure WHERE session_id LIKE 'e2e-session%'",
+        ),
+    ):
+        try:
+            with closing(
+                sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=1)
+            ) as conn:
+                (out[key],) = conn.execute(sql).fetchone()
+        except (sqlite3.Error, OSError):
+            out[key] = "<n/a>"  # absent DB / locked / pre-migration schema
+
+    hits: list[str] = []
+    for sub in ("spool", "runtime/sessions"):
+        directory = bm / Path(sub)
+        if not directory.is_dir():
+            continue
+        for p in sorted(directory.iterdir()):
+            if p.name.startswith(CANARY_PREFIX) or not p.is_file():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(fp in text for fp in _HARNESS_FINGERPRINTS):
+                hits.append(f"{sub}/{p.name}")
+    out["fingerprinted_files"] = hits
+    return out
+
+
 def _real_home_snapshot(home: Path) -> dict[str, Any]:
     """Tell-tale state that only a leaked e2e subprocess would mutate."""
     claude_json = _canary_read_json(home / ".claude.json")
@@ -273,6 +326,7 @@ def _real_home_snapshot(home: Path) -> dict[str, Any]:
         "skills": _canary_entry_names(home / ".claude" / "skills"),
         "claude_json_sha": _canary_sha256(home / ".claude.json"),
         "settings_sha": _canary_sha256(home / ".claude" / "settings.json"),
+        "dataplane": _canary_dataplane(home),
     }
 
 
@@ -323,6 +377,13 @@ def real_home_canary() -> Iterator[None]:
     (demoted) hash warning would notice. That case is owned by the
     whole-suite meta-run in tests/e2e_meta/test_canary_home.py, which runs
     against a fresh seeded canary home where any leak is loud.
+
+    Data-plane coverage (review fix): the snapshot also fingerprints the
+    real ``~/.better-memory`` data plane — episode/exposure rows and
+    spool / runtime-session files carrying the harness-pinned
+    ``e2e-session*`` / ``e2e-project`` values — so a leaked hook or server
+    spawn that writes the user's real memory.db no longer goes unnoticed
+    just because the config subtrees stayed intact.
     """
     home = _PRISTINE_REAL_HOME
     worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
@@ -362,6 +423,7 @@ def real_home_canary() -> Iterator[None]:
         ("hook_bm", "~/.claude/settings.json better-memory hook entries"),
         ("install_backups", "~/.better-memory/install-backups entries"),
         ("skills", "~/.claude/skills entry names"),
+        ("dataplane", "~/.better-memory data-plane harness fingerprints"),
     ):
         if before[key] != after[key]:
             breaches.append(
