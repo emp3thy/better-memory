@@ -51,6 +51,7 @@ asyncio_mode = "auto"
 addopts = "-m 'not integration'"
 markers = [
     "integration: marks tests as integration tests (require external services)",
+    "e2e: end-to-end clean-slate smoke tests (hermetic)",
 ]
 
 [tool.ruff]

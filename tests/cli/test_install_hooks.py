@@ -558,6 +558,14 @@ class TestCLIIntegration:
         assert settings.read_text(encoding="utf-8") == '{"hooks": {invalid'
         # Critical: claude.json was NOT written.
         assert not claude_json.exists()
+        # A refused install takes no backup: neither _backup nor
+        # _atomic_write ever started. (The fixture pre-creates the empty
+        # install-backups dir, so pin its contents, not its existence.)
+        backups = mock_home / ".better-memory" / "install-backups"
+        assert not any(backups.iterdir())
+        # ... and leaves no .tmp litter next to (or anywhere near) either
+        # target — _atomic_write writes {target}.tmp before os.replace.
+        assert not list(mock_home.rglob("*.tmp"))
 
     def test_summary_lines_printed_on_success(self, mock_home: Path) -> None:
         result = _run_cli(mock_home)

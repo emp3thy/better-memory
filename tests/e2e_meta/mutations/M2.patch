@@ -1,0 +1,35 @@
+diff --git a/better_memory/hooks/session_bootstrap.py b/better_memory/hooks/session_bootstrap.py
+index 52f75de..9baacac 100644
+--- a/better_memory/hooks/session_bootstrap.py
++++ b/better_memory/hooks/session_bootstrap.py
+@@ -68,23 +68,19 @@ def main() -> None:
+ 
+     try:
+         cfg = get_config()
++        # MUTATION M2: write_session_id hoisted above service.bootstrap() —
++        # the marker now lands even when bootstrap fails on a virgin home.
++        write_session_id(
++            cfg.home,
++            session_id,
++            project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
++        )
+         with closing(connect(cfg.memory_db)) as conn:
+             service = SessionBootstrapService(conn)
+             result = service.bootstrap(
+                 source=source, session_id=session_id, cwd=Path(cwd_str),
+             )
+         rendered = result.additional_context
+-        # Bridge session_id to the MCP server: it doesn't see CLAUDE_SESSION_ID
+-        # in its spawn env. See better_memory/runtime/session_marker.py.
+-        # Resolution MUST match read_session_id's _resolve_project_dir order:
+-        # CLAUDE_PROJECT_DIR env first, then a non-empty fallback. The hook has
+-        # the payload's cwd as a stronger fallback than os.getcwd() because the
+-        # MCP server's cwd may not equal the project root.
+-        write_session_id(
+-            cfg.home,
+-            session_id,
+-            project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
+-        )
+     except BaseException as exc:  # noqa: BLE001
+         try:
+             record_hook_error(hook_name="session_bootstrap", exc=exc)

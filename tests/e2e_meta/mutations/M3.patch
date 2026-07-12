@@ -1,0 +1,14 @@
+diff --git a/better_memory/hooks/contextual_inject.py b/better_memory/hooks/contextual_inject.py
+index f158be2..fa580fd 100644
+--- a/better_memory/hooks/contextual_inject.py
++++ b/better_memory/hooks/contextual_inject.py
+@@ -150,7 +150,8 @@ def main() -> None:
+             record_hook_error(hook_name="contextual_inject", exc=exc)
+         except BaseException:  # noqa: BLE001
+             pass
+-        rendered = ""
++        # MUTATION M3: except path exits WITHOUT printing the envelope.
++        sys.exit(0)
+ 
+     try:
+         print(

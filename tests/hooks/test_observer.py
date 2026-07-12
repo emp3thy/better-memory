@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -57,12 +58,19 @@ def test_observer_writes_file_for_valid_json(tmp_spool: Path) -> None:
     result = _run_observer(tmp_spool, stdin=json.dumps(payload))
 
     assert result.returncode == 0, result.stderr
+    # Observer runs async under pythonw in prod — any stdout print indicates
+    # a contract misunderstanding.
+    assert result.stdout == ""
     files = list(tmp_spool.glob("*.json"))
     assert len(files) == 1
     written = json.loads(files[0].read_text(encoding="utf-8"))
     assert written["event_type"] == "tool_use"
     assert written["tool"] == "Edit"
     assert written["file"] == "auth.py"
+    # The observer's whole design point is zero-latency, zero-coupling
+    # spooling: the happy path must never touch (or create) a database
+    # anywhere under BETTER_MEMORY_HOME.
+    assert not list(tmp_spool.parent.rglob("*.db"))
 
 
 def test_observer_filename_contains_tool_and_json_ext(tmp_spool: Path) -> None:
@@ -81,6 +89,9 @@ def test_observer_filename_contains_tool_and_json_ext(tmp_spool: Path) -> None:
     assert "Bash" in name
     # ":" is a reserved char on NTFS; must have been scrubbed from the ts.
     assert ":" not in name
+    # Full naming contract: {timestamp}_{tool}_{12-hex-hash}.json. The regex
+    # tolerates any timestamp encoding while pinning the _<tool>_<12-hex> tail.
+    assert re.fullmatch(r".+_Bash_[0-9a-f]{12}\.json", name), name
 
 
 def test_observer_defaults_event_type_when_missing(tmp_spool: Path) -> None:
