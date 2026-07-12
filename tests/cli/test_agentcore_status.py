@@ -162,6 +162,29 @@ def test_status_reports_env_var_overriding_settings(
     assert "effective backend: sqlite (source: env)" in out
 
 
+def test_status_flags_invalid_env_backend_value(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """BugBot PR#79: an invalid BETTER_MEMORY_STORAGE_BACKEND (typo like
+    'agentcor') makes the runtime resolver raise and the server refuse to
+    start — status must flag it, not present it as a working backend."""
+    _write_config(tmp_path)
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcor")
+    monkeypatch.setattr(
+        "better_memory.cli.agentcore._build_control_client",
+        lambda region: _active_control(),
+    )
+
+    rc = _handle_status(_make_args(tmp_path))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "agentcor" in out
+    assert "INVALID" in out
+    assert "refuse to start" in out
+    # The invalid value must never be presented as a plain working backend.
+    assert "effective backend: agentcor (source: env)" not in out
+
+
 def test_status_reports_default_backend_without_env_or_settings(
     tmp_path, monkeypatch, capsys
 ) -> None:

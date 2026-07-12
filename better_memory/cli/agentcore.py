@@ -128,14 +128,22 @@ def _effective_backend(home: Path) -> tuple[str, str]:
     Mirrors :func:`better_memory.config.resolve_storage_backend` but honours
     the CLI's ``--home`` override (the config resolver only reads
     ``$BETTER_MEMORY_HOME``) and reports the source: ``env`` / ``settings`` /
-    ``default``. May raise ``ValueError`` on a corrupt settings.json.
+    ``default``. Where the runtime resolver would RAISE on an invalid env
+    value (killing the server at boot), status keeps going and flags the
+    value instead — a diagnostic tool must surface the misconfiguration, not
+    reproduce the crash. May raise ``ValueError`` on a corrupt settings.json.
     """
     import os
 
-    from better_memory.config import _read_settings_storage_backend
+    from better_memory.config import (
+        _VALID_STORAGE_BACKENDS,
+        _read_settings_storage_backend,
+    )
 
     raw = os.environ.get("BETTER_MEMORY_STORAGE_BACKEND")
     if raw is not None:
+        if raw not in _VALID_STORAGE_BACKENDS:
+            return raw, "env — INVALID value; the MCP server will refuse to start"
         return raw, "env"
     from_file = _read_settings_storage_backend(home)
     if from_file is not None:
