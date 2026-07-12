@@ -17,7 +17,15 @@ Behavior:
   per-request behavior);
 * any un-canned (or unroutable) request gets a ``200 {}`` fallback —
   botocore's rest-json parser tolerates missing output members, and the
-  repo's backend code uses ``response.get(...)`` throughout.
+  repo's backend code uses ``response.get(...)`` throughout;
+* the live-verified record-plane dialect is ENFORCED before any canned
+  response is consulted (see :func:`dialect_violation`): unknown
+  BatchCreate/BatchUpdate record keys and non-indexed metadata-filter keys
+  come back as HTTP 400 ValidationException, and BatchUpdate metadata
+  violations (reserved ``x-amz-agentcore-memory-*`` keys, a non-STRING
+  ``last_credited_at``) come back the way real AWS reports them — HTTP 200
+  with ``failedRecords`` — so the hermetic tier cannot lie about shapes
+  real AWS rejects.
 
 Plain HTTP, no TLS — verified end-to-end against boto3 1.43.14 (the
 ``AWS_ENDPOINT_URL`` seam covers both the ``bedrock-agentcore`` data plane
@@ -55,6 +63,170 @@ _MODEL_GLOBS = (
 )
 
 _PLACEHOLDER_RE = re.compile(r"\{([^}]+)\}")
+
+# ---------------------------------------------------------------------------
+# Live-verified record-plane dialect rules (aws_record_dialect.md, scouted
+# against real eu-west-2 on 2026-07-12). The fake REJECTS what real AWS
+# rejects so the hermetic tier can never lie about this dialect again.
+# ---------------------------------------------------------------------------
+
+#: BatchCreateMemoryRecords per-record input keys. memoryRecordId is NOT
+#: legal — the server mints the durable id.
+_BATCH_CREATE_ALLOWED_KEYS = frozenset(
+    {
+        "requestIdentifier",
+        "namespaces",
+        "content",
+        "timestamp",
+        "memoryStrategyId",
+        "metadata",
+    }
+)
+_BATCH_CREATE_REQUIRED_KEYS = frozenset(
+    {"requestIdentifier", "namespaces", "content", "timestamp"}
+)
+
+#: BatchUpdateMemoryRecords per-record input keys.
+_BATCH_UPDATE_ALLOWED_KEYS = frozenset(
+    {
+        "memoryRecordId",
+        "timestamp",
+        "content",
+        "namespaces",
+        "memoryStrategyId",
+        "metadata",
+    }
+)
+_BATCH_UPDATE_REQUIRED_KEYS = frozenset({"memoryRecordId", "timestamp"})
+
+#: Only the CreateMemory indexedKeys are legal metadata-filter keys —
+#: mirrors better_memory.cli._agentcore_strategies.INDEXED_KEYS. polarity,
+#: outcome, useful_count etc. are all rejected by real AWS.
+_VALID_METADATA_FILTER_KEYS = frozenset(
+    {"status", "last_credited_at", "overlooked_count"}
+)
+
+#: System-managed metadata keys; echoing them back on update is a real 400.
+_RESERVED_METADATA_PREFIX = "x-amz-agentcore-memory-"
+
+
+def _validation_exception(message: str) -> tuple[int, dict[str, Any]]:
+    """HTTP 400 ValidationException payload (botocore parses __type/message)."""
+    return 400, {"__type": "ValidationException", "message": message}
+
+
+def _check_metadata_filters(body: Any) -> tuple[int, dict[str, Any]] | None:
+    filters = body.get("metadataFilters") or (
+        (body.get("searchCriteria") or {}).get("metadataFilters")
+    ) or []
+    for entry in filters:
+        key = (entry.get("left") or {}).get("metadataKey")
+        if key not in _VALID_METADATA_FILTER_KEYS:
+            # Verbatim live error text (the real message does NOT enumerate
+            # the valid set).
+            return _validation_exception(
+                f"Filter key '{key}' is not a valid filter key"
+            )
+    if not body.get("namespace") and not body.get("namespacePath"):
+        return _validation_exception(
+            "At least one of 'namespace' or 'namespacePath' must be provided"
+        )
+    return None
+
+
+def _check_batch_update_record_metadata(rec: dict[str, Any]) -> str | None:
+    """Return the failedRecords errorMessage for an invalid metadata map."""
+    metadata = rec.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    reserved = sorted(k for k in metadata if k.startswith(_RESERVED_METADATA_PREFIX))
+    if reserved:
+        return (
+            "Metadata keys cannot use reserved names or prefixes: "
+            + ", ".join(reserved)
+        )
+    last_credited = metadata.get("last_credited_at")
+    if isinstance(last_credited, dict) and "stringValue" not in last_credited:
+        # last_credited_at is declared STRING in indexedKeys; dateTimeValue
+        # (or any other type) fails the whole record update on real AWS.
+        return (
+            "Metadata key 'last_credited_at' value type does not match "
+            "declared indexed key type 'STRING'."
+        )
+    return None
+
+
+def dialect_violation(
+    operation: str | None, body: Any
+) -> tuple[int, dict[str, Any]] | None:
+    """Return an overriding ``(http_status, payload)`` when the request
+    violates the live-verified record-plane dialect, else ``None`` (the
+    canned response is used). Batch-update metadata violations come back the
+    way real AWS reports them: HTTP 200 with ``failedRecords`` entries."""
+    if not isinstance(body, dict):
+        return None
+
+    if operation == "BatchCreateMemoryRecords":
+        for i, rec in enumerate(body.get("records") or []):
+            unknown = sorted(set(rec) - _BATCH_CREATE_ALLOWED_KEYS)
+            if unknown:
+                return _validation_exception(
+                    f"Unknown parameter in records[{i}]: "
+                    f"{', '.join(unknown)}, must be one of: "
+                    + ", ".join(sorted(_BATCH_CREATE_ALLOWED_KEYS))
+                )
+            missing = sorted(_BATCH_CREATE_REQUIRED_KEYS - set(rec))
+            if missing:
+                return _validation_exception(
+                    f"Missing required parameter in records[{i}]: "
+                    + ", ".join(missing)
+                )
+        return None
+
+    if operation in ("ListMemoryRecords", "RetrieveMemoryRecords"):
+        return _check_metadata_filters(body)
+
+    if operation == "BatchUpdateMemoryRecords":
+        successful: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for i, rec in enumerate(body.get("records") or []):
+            unknown = sorted(set(rec) - _BATCH_UPDATE_ALLOWED_KEYS)
+            if unknown:
+                return _validation_exception(
+                    f"Unknown parameter in records[{i}]: "
+                    f"{', '.join(unknown)}, must be one of: "
+                    + ", ".join(sorted(_BATCH_UPDATE_ALLOWED_KEYS))
+                )
+            missing = sorted(_BATCH_UPDATE_REQUIRED_KEYS - set(rec))
+            if missing:
+                return _validation_exception(
+                    f"Missing required parameter in records[{i}]: "
+                    + ", ".join(missing)
+                )
+            error_message = _check_batch_update_record_metadata(rec)
+            if error_message is not None:
+                failed.append(
+                    {
+                        "memoryRecordId": rec.get("memoryRecordId", ""),
+                        "status": "FAILED",
+                        "errorCode": 400,
+                        "errorMessage": error_message,
+                    }
+                )
+            else:
+                successful.append(
+                    {
+                        "memoryRecordId": rec.get("memoryRecordId", ""),
+                        "status": "SUCCEEDED",
+                    }
+                )
+        if failed:
+            # Real AWS: HTTP 200, per-record failures in failedRecords —
+            # never a raised ClientError.
+            return 200, {"successfulRecords": successful, "failedRecords": failed}
+        return None
+
+    return None
 
 
 def _uri_to_regex(request_uri: str) -> re.Pattern[str]:
@@ -265,12 +437,23 @@ class FakeAgentCore:
         with self._lock:
             self.requests.append(record)
 
-        payload = self._responses.get(operation or "", {})
-        if callable(payload):
-            payload = payload(record)
+        # Dialect enforcement BEFORE the canned-response lookup: requests
+        # real AWS rejects must fail here too, no matter what a test canned.
+        override = dialect_violation(operation, body)
+        if override is not None:
+            status_code, payload = override
+        else:
+            status_code = 200
+            payload = self._responses.get(operation or "", {})
+            if callable(payload):
+                payload = payload(record)
         data = json.dumps(payload).encode("utf-8")
 
-        handler.send_response(200)
+        handler.send_response(status_code)
+        if status_code == 400:
+            # botocore's rest-json error parser reads this header (and the
+            # __type body member) to raise ClientError ValidationException.
+            handler.send_header("x-amzn-ErrorType", "ValidationException")
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()

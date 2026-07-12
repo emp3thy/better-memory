@@ -107,8 +107,73 @@ def test_episode_gate_is_independent_of_synthesis_gate() -> None:
 # ---------------------------------------------------------------------------
 
 
+# --- sqlite payload-parity contracts (pinned shapes) -----------------------
+# The AgentCoreBackend must hand the dispatch layer the SAME payload shapes
+# sqlite mode produces; the dispatch layer must transmit them to the MCP
+# wire unmodified. Sources of truth:
+#   - reflection bucket item: ReflectionSynthesisService.retrieve_reflections
+#     (services/reflection.py bucket.append(...)) — internal ranking helpers
+#     (_overlooked_count / _updated_at_ts) are backend-private and must never
+#     reach the wire.
+#   - observation row: ObservationService._list_observations_via_filter
+#     SELECT list (services/observation.py).
+#   - apply_session_ratings: MemoryRatingService.apply_session_ratings
+#     documented return (services/memory_rating.py) — NOT the legacy
+#     agentcore {"applied": int, "failed": int} pair.
+
+SQLITE_REFLECTION_ITEM_KEYS = frozenset({
+    "id", "title", "phase", "use_cases", "hints", "confidence", "tech",
+    "evidence_count", "useful_count", "times_misled", "updated_at",
+})
+
+_PARITY_REFLECTION_ITEM: dict[str, Any] = {
+    "id": "mem-" + "0" * 36,
+    "title": "Use uv run for pytest",
+    "phase": "general",
+    "use_cases": "running the unit gate",
+    "hints": ["always uv run pytest"],
+    "confidence": 0.8,
+    "tech": "python",
+    "evidence_count": 3,
+    "useful_count": 2,
+    "times_misled": 0,
+    "updated_at": "2026-07-12T10:00:00+00:00",
+}
+
+SQLITE_OBSERVATION_ROW_KEYS = frozenset({
+    "id", "content", "component", "theme", "outcome",
+    "reinforcement_score", "created_at",
+})
+
+_PARITY_OBSERVATION_ROW: dict[str, Any] = {
+    "id": "evt-parity-1",
+    "content": "observation body",
+    "component": None,
+    "theme": "bug",
+    "outcome": "failure",
+    "reinforcement_score": None,
+    "created_at": "2026-07-12T09:00:00+00:00",
+}
+
+SQLITE_RATINGS_RESULT: dict[str, Any] = {
+    "session_id": "sid-parity-1",
+    "applied": {
+        "cited": 1, "shaped": 0, "ignored": 0, "misled": 0, "overlooked": 0,
+    },
+    "skipped": {
+        "not_exposed": 0, "already_rated": 0,
+        "memory_missing": 0, "memory_retired": 0,
+    },
+}
+
+
 class _StubRemoteBackend:
-    """Records data-tool calls; agentcore-shaped capability flags."""
+    """Records data-tool calls; agentcore-shaped capability flags.
+
+    The payload-returning methods hand back the SQLITE-PARITY shapes above
+    (the contract AgentCoreBackend implements) so the parity tests can pin
+    that the dispatch layer transmits them to the MCP wire unmodified.
+    """
 
     supports_synthesis = False
     supports_episodes = False
@@ -116,13 +181,32 @@ class _StubRemoteBackend:
     def __init__(self) -> None:
         self.observe_calls: list[dict[str, Any]] = []
         self.bootstrap_calls: list[dict[str, Any]] = []
+        self.list_observation_calls: list[dict[str, Any]] = []
+        self.ratings_calls: list[dict[str, Any]] = []
+        # Per-test overridable returns (defaults keep the older tests
+        # in this module byte-identical in behavior).
+        self.retrieve_buckets: dict[str, list[dict[str, Any]]] = {
+            "do": [], "dont": [], "neutral": [],
+        }
+        self.observation_rows: list[dict[str, Any]] = []
+        self.ratings_result: dict[str, Any] = json.loads(
+            json.dumps(SQLITE_RATINGS_RESULT)
+        )
 
     async def observe(self, **kwargs: Any) -> str:
         self.observe_calls.append(kwargs)
         return "stub-evt-0001"
 
     def retrieve(self, **kwargs: Any) -> dict[str, list[dict[str, Any]]]:
-        return {"do": [], "dont": [], "neutral": []}
+        return self.retrieve_buckets
+
+    async def list_observations(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.list_observation_calls.append(kwargs)
+        return self.observation_rows
+
+    def apply_session_ratings(self, **kwargs: Any) -> dict[str, Any]:
+        self.ratings_calls.append(kwargs)
+        return self.ratings_result
 
     def session_bootstrap(self, **kwargs: Any) -> dict[str, Any]:
         self.bootstrap_calls.append(kwargs)
@@ -265,5 +349,115 @@ async def test_sqlite_mode_dispatch_never_routes_to_backend_object(
         assert not result.isError, result
         assert stub.observe_calls == []
         assert _observation_row_count(home) == 1
+    finally:
+        await cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Payload parity with sqlite mode (agentcore dispatch → MCP wire pins)
+# ---------------------------------------------------------------------------
+
+
+def _agentcore_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Any, _StubRemoteBackend]:
+    _server_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+
+    import better_memory.mcp.server as server_mod
+
+    stub = _StubRemoteBackend()
+    monkeypatch.setattr(server_mod, "build_backend", lambda **kwargs: stub)
+    server, cleanup, _ctx = server_mod.create_server()
+    return server, cleanup, stub
+
+
+async def test_agentcore_retrieve_payload_matches_sqlite_item_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """memory.retrieve items reach the wire with EXACTLY the sqlite bucket
+    item key set — in particular no backend-internal ranking helpers
+    (_overlooked_count / _updated_at_ts) — and the dispatch layer transmits
+    the backend's items unmodified (no reshaping, no added keys)."""
+    server, cleanup, stub = _agentcore_server(tmp_path, monkeypatch)
+    stub.retrieve_buckets = {
+        "do": [dict(_PARITY_REFLECTION_ITEM)],
+        "dont": [],
+        "neutral": [],
+    }
+    try:
+        result = await _dispatch(server, "memory.retrieve", {})
+        assert not result.isError, result
+        buckets = json.loads(result.content[0].text)
+        assert set(buckets) == {"do", "dont", "neutral"}
+        assert buckets["dont"] == [] and buckets["neutral"] == []
+        (item,) = buckets["do"]
+        assert set(item) == SQLITE_REFLECTION_ITEM_KEYS
+        assert not any(
+            key.startswith("_")
+            for bucket in buckets.values()
+            for row in bucket
+            for key in row
+        )
+        assert item == _PARITY_REFLECTION_ITEM  # unmangled passthrough
+    finally:
+        await cleanup()
+
+
+async def test_agentcore_retrieve_observations_payload_matches_sqlite_row_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """memory.retrieve_observations rows carry the sqlite SELECT-list key
+    set (id, content, component, theme, outcome, reinforcement_score,
+    created_at — None where agentcore has no value) and pass through the
+    dispatch layer unmodified."""
+    server, cleanup, stub = _agentcore_server(tmp_path, monkeypatch)
+    stub.observation_rows = [dict(_PARITY_OBSERVATION_ROW)]
+    try:
+        result = await _dispatch(
+            server, "memory.retrieve_observations", {"project": "projx"}
+        )
+        assert not result.isError, result
+        rows = json.loads(result.content[0].text)
+        assert len(rows) == 1
+        assert set(rows[0]) == SQLITE_OBSERVATION_ROW_KEYS
+        assert rows[0] == _PARITY_OBSERVATION_ROW
+        assert len(stub.list_observation_calls) == 1
+        assert stub.list_observation_calls[0]["project"] == "projx"
+    finally:
+        await cleanup()
+
+
+async def test_agentcore_apply_session_ratings_payload_matches_sqlite_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """memory.apply_session_ratings in agentcore mode returns the sqlite
+    ApplySessionRatingsResult shape — {session_id, applied: {per-class},
+    skipped: {per-reason}} — NOT the legacy {"applied": int, "failed": int}
+    pair, and the dispatch layer transmits it verbatim."""
+    server, cleanup, stub = _agentcore_server(tmp_path, monkeypatch)
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "sid-parity-1")
+    ratings = [
+        {"kind": "semantic", "id": "mem-" + "1" * 36, "class": "cited"},
+    ]
+    try:
+        result = await _dispatch(
+            server, "memory.apply_session_ratings", {"ratings": ratings}
+        )
+        assert not result.isError, result
+        payload = json.loads(result.content[0].text)
+        assert payload == SQLITE_RATINGS_RESULT
+        assert set(payload) == {"session_id", "applied", "skipped"}
+        assert isinstance(payload["applied"], dict)  # per-class counts
+        assert set(payload["applied"]) == {
+            "cited", "shaped", "ignored", "misled", "overlooked",
+        }
+        assert set(payload["skipped"]) == {
+            "not_exposed", "already_rated", "memory_missing", "memory_retired",
+        }
+        assert "failed" not in payload  # legacy agentcore-only key is gone
+        assert stub.ratings_calls == [
+            {"session_id": "sid-parity-1", "ratings": ratings}
+        ]
     finally:
         await cleanup()

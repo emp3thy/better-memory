@@ -110,8 +110,20 @@ def agentcore_home_no_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_agentcore_mode_fires_closure_event(agentcore_config_present, monkeypatch):
-    """In agentcore mode, the Stop hook fires one CreateEvent with role=OTHER."""
+def test_agentcore_mode_fires_closure_event(
+    agentcore_config_present, tmp_path, monkeypatch
+):
+    """In agentcore mode, the Stop hook fires one CreateEvent with role=OTHER.
+
+    The actorId comes from ``config.project_name(Path(cwd))`` — proven here
+    via a ``.better-memory`` override file in the cwd, which a plain
+    ``basename(cwd)`` resolution would ignore (fix 7: hook/server actor-id
+    parity)."""
+    monkeypatch.delenv("BETTER_MEMORY_PROJECT", raising=False)
+    proj_dir = tmp_path / "some-worktree-dir"
+    proj_dir.mkdir()
+    (proj_dir / ".better-memory").write_text("testproj", encoding="utf-8")
+
     fake_data_client = MagicMock(name="bedrock-agentcore-data")
     fake_data_client.create_event.return_value = {"event": {"eventId": "evt-close"}}
 
@@ -121,15 +133,60 @@ def test_agentcore_mode_fires_closure_event(agentcore_config_present, monkeypatc
     )
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
-    rc = _fire_agentcore_closure(session_id="test-sess-abc", project="testproj")
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd=str(proj_dir))
     assert rc is True
     assert fake_data_client.create_event.call_count == 1
 
     call = fake_data_client.create_event.call_args.kwargs
     assert call["memoryId"] == "epi-test"
     assert call["sessionId"] == "test-sess-abc"
+    # project_name honoured the override file — NOT basename(cwd).
+    assert call["actorId"] == "testproj"
     payload = call["payload"][0]["conversational"]
     assert payload["role"] == "OTHER"
+
+
+def test_closure_actor_id_env_override_wins(
+    agentcore_config_present, tmp_path, monkeypatch
+):
+    """BETTER_MEMORY_PROJECT overrides any cwd-derived name — the exact
+    parity contract the server's resolve_actor_id(project_name()) follows."""
+    monkeypatch.setenv("BETTER_MEMORY_PROJECT", "env-scoped-project")
+    proj_dir = tmp_path / "unrelated-dir"
+    proj_dir.mkdir()
+
+    fake_client = MagicMock(name="bedrock-agentcore-data")
+    fake_client.create_event.return_value = {"event": {"eventId": "evt-close"}}
+    monkeypatch.setattr(
+        "better_memory.hooks.session_close._build_agentcore_data_client",
+        lambda region: fake_client,
+    )
+
+    from better_memory.hooks.session_close import _fire_agentcore_closure
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd=str(proj_dir))
+    assert rc is True
+    call = fake_client.create_event.call_args.kwargs
+    assert call["actorId"] == "env-scoped-project"
+
+
+def test_closure_actor_id_general_on_empty_cwd(
+    agentcore_config_present, monkeypatch
+):
+    """Empty cwd resolves to the cross-project 'general' bucket without ever
+    calling project_name (no git walk on a meaningless path)."""
+    monkeypatch.delenv("BETTER_MEMORY_PROJECT", raising=False)
+    fake_client = MagicMock(name="bedrock-agentcore-data")
+    fake_client.create_event.return_value = {"event": {"eventId": "evt-close"}}
+    monkeypatch.setattr(
+        "better_memory.hooks.session_close._build_agentcore_data_client",
+        lambda region: fake_client,
+    )
+
+    from better_memory.hooks.session_close import _fire_agentcore_closure
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd="   ")
+    assert rc is True
+    call = fake_client.create_event.call_args.kwargs
+    assert call["actorId"] == "general"
 
 
 def test_sqlite_mode_does_not_fire_closure(monkeypatch, tmp_path):
@@ -139,7 +196,7 @@ def test_sqlite_mode_does_not_fire_closure(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_SESSION_ID", "x")
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
-    rc = _fire_agentcore_closure(session_id="x", project="testproj")
+    rc = _fire_agentcore_closure(session_id="x", cwd="")
     assert rc is False
 
 
@@ -154,7 +211,7 @@ def test_agentcore_failure_is_non_fatal(agentcore_config_present, monkeypatch):
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
     # Must NOT raise
-    rc = _fire_agentcore_closure(session_id="test-sess-abc", project="testproj")
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd="")
     assert rc is False
 
 
@@ -216,7 +273,7 @@ def test_settings_json_resolves_agentcore_and_fires_closure(
     )
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
-    rc = _fire_agentcore_closure(session_id="test-sess-abc", project="testproj")
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd="")
     assert rc is True
     assert fake_client.create_event.call_count == 1
     call = fake_client.create_event.call_args.kwargs
@@ -238,7 +295,7 @@ def test_env_unset_no_settings_json_stays_sqlite_even_with_agentcore_json(
     )
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
-    rc = _fire_agentcore_closure(session_id="test-sess-abc", project="testproj")
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd="")
     assert rc is False
     assert fake_client.create_event.call_count == 0
     # Silent skip, not an error path: nothing wrote memory.db.
@@ -273,7 +330,7 @@ def test_explicit_env_sqlite_wins_over_settings_json(
     )
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
-    rc = _fire_agentcore_closure(session_id="test-sess-abc", project="testproj")
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd="")
     assert rc is False
     assert fake_client.create_event.call_count == 0
     # Fast path is silent — no error row, no memory.db.
@@ -297,7 +354,7 @@ def test_explicit_env_agentcore_wins_over_settings_json_sqlite(
     )
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
-    rc = _fire_agentcore_closure(session_id="test-sess-abc", project="testproj")
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd="")
     assert rc is True
     assert fake_client.create_event.call_count == 1
 
@@ -319,7 +376,7 @@ def test_corrupt_settings_json_records_hook_error_and_skips_closure(
     )
 
     from better_memory.hooks.session_close import _fire_agentcore_closure
-    rc = _fire_agentcore_closure(session_id="test-sess-abc", project="testproj")
+    rc = _fire_agentcore_closure(session_id="test-sess-abc", cwd="")
     assert rc is False
     assert fake_client.create_event.call_count == 0
     rows = _hook_error_rows(agentcore_home_no_env)
@@ -378,7 +435,7 @@ def test_env_sqlite_fast_exit_skips_boto3_and_agentcore_imports(
     hits = _forbid_imports(
         monkeypatch, "boto3", "botocore", "agentcore_persistence"
     )
-    rc = _fire_agentcore_closure(session_id="x", project="p")
+    rc = _fire_agentcore_closure(session_id="x", cwd="p")
     assert rc is False
     assert hits == []
 
@@ -396,7 +453,7 @@ def test_env_unset_no_settings_resolves_sqlite_without_boto3(
     hits = _forbid_imports(
         monkeypatch, "boto3", "botocore", "agentcore_persistence"
     )
-    rc = _fire_agentcore_closure(session_id="x", project="p")
+    rc = _fire_agentcore_closure(session_id="x", cwd="p")
     assert rc is False
     assert hits == []
 

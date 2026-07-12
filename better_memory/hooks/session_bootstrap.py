@@ -69,6 +69,25 @@ def main() -> None:
 
     try:
         cfg = get_config()
+        # Bridge session_id to the MCP server: it doesn't see CLAUDE_SESSION_ID
+        # in its spawn env. See better_memory/runtime/session_marker.py.
+        # Resolution MUST match read_session_id's _resolve_project_dir order:
+        # CLAUDE_PROJECT_DIR env first, then a non-empty fallback. The hook has
+        # the payload's cwd as a stronger fallback than os.getcwd() because the
+        # MCP server's cwd may not equal the project root.
+        #
+        # Deliberately hoisted ABOVE the bootstrap/backend call (both modes):
+        # the session id comes from the stdin payload, not from bootstrap, so
+        # the marker is valid even when bootstrap fails (e.g. virgin home,
+        # missing agentcore.json) — the first-session server can then resolve
+        # the session id and the manual memory_session_bootstrap remediation
+        # works on the first try. write_session_id is best-effort (it swallows
+        # OSError internally); a marker failure never blocks the bootstrap.
+        write_session_id(
+            cfg.home,
+            session_id,
+            project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
+        )
         if cfg.storage_backend == "agentcore":
             # Route through the storage factory like contextual_inject.py:
             # agentcore mode must never open the local sqlite database. The
@@ -95,17 +114,6 @@ def main() -> None:
                     source=source, session_id=session_id, cwd=Path(cwd_str),
                 )
             rendered = result.additional_context
-        # Bridge session_id to the MCP server: it doesn't see CLAUDE_SESSION_ID
-        # in its spawn env. See better_memory/runtime/session_marker.py.
-        # Resolution MUST match read_session_id's _resolve_project_dir order:
-        # CLAUDE_PROJECT_DIR env first, then a non-empty fallback. The hook has
-        # the payload's cwd as a stronger fallback than os.getcwd() because the
-        # MCP server's cwd may not equal the project root.
-        write_session_id(
-            cfg.home,
-            session_id,
-            project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
-        )
     except BaseException as exc:  # noqa: BLE001
         try:
             record_hook_error(hook_name="session_bootstrap", exc=exc)

@@ -263,16 +263,18 @@ def _resolve_embeddings_backend() -> Literal["ollama", "sqlite"]:
 def _read_settings_storage_backend(home: Path) -> str | None:
     """Read ``storage_backend`` from ``<home>/settings.json``.
 
-    Returns ``None`` when the file does not exist or carries no
-    ``storage_backend`` key (callers fall back to the default). Raises
+    Returns ``None`` when the file does not exist, cannot be read (any
+    :class:`OSError` — e.g. ``PermissionError``; the backend selection must
+    never crash ``get_config`` over an unreadable optional file), or carries
+    no ``storage_backend`` key (callers fall back to the default). Raises
     :class:`ValueError` — naming the file, with remediation — when the file
-    is malformed JSON, not a JSON object, or carries an invalid value
-    (symmetric to the invalid-env-var error).
+    is readable but malformed JSON, not a JSON object, or carries an invalid
+    value (symmetric to the invalid-env-var error).
     """
     settings_path = home / _SETTINGS_FILE
     try:
         text = settings_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:
         return None
     remediation = (
         "Fix or delete the file, or set BETTER_MEMORY_STORAGE_BACKEND to "

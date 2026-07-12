@@ -65,8 +65,21 @@ def remote() -> MagicMock:
     backend.semantic_list = MagicMock(return_value=[])
     backend.semantic_update_text = MagicMock(return_value=None)
     backend.semantic_delete = MagicMock(return_value=None)
-    backend.credit_one = MagicMock(return_value={"applied": "x", "skipped": None})
-    backend.apply_session_ratings = MagicMock(return_value={"applied": 1, "failed": 0})
+    backend.credit_one = MagicMock(return_value={"applied": "cited", "skipped": None})
+    # Sqlite-parity shape (AgentCoreBackend mirrors MemoryRatingService).
+    backend.apply_session_ratings = MagicMock(
+        return_value={
+            "session_id": "sid-env-1",
+            "applied": {
+                "cited": 1, "shaped": 0, "ignored": 0, "misled": 0,
+                "overlooked": 0,
+            },
+            "skipped": {
+                "not_exposed": 0, "already_rated": 0,
+                "memory_missing": 0, "memory_retired": 0,
+            },
+        }
+    )
     backend.list_session_exposures = MagicMock(
         return_value={"session_id": "s", "exposures": []}
     )
@@ -157,17 +170,22 @@ class TestObservationHandlersRemoteBranch:
     async def test_retrieve_observations_routes_to_remote_and_serializes_datetimes(
         self, observations, retention, remote
     ) -> None:
-        """AgentCore events carry datetime event_timestamps (botocore-parsed);
-        the remote branch must serialize them instead of crashing json.dumps."""
+        """The remote branch passes the backend's sqlite-parity rows through
+        (and json.dumps(default=str) keeps any residual datetime safe)."""
         list_mock = AsyncMock(
             return_value=[
                 {
+                    # AgentCoreBackend.list_observations returns rows key-
+                    # identical to the sqlite list_observations rows.
                     "id": "evt-1",
                     "content": "obs one",
-                    "session_id": "s-1",
-                    "actor_id": "projx",
-                    "event_timestamp": datetime(2026, 7, 12, 10, 30, tzinfo=UTC),
+                    "component": None,
+                    "theme": None,
                     "outcome": "success",
+                    "reinforcement_score": None,
+                    "created_at": datetime(
+                        2026, 7, 12, 10, 30, tzinfo=UTC
+                    ).isoformat(),
                 }
             ]
         )
@@ -178,7 +196,11 @@ class TestObservationHandlersRemoteBranch:
         result = await handlers.retrieve_observations({"project": "projx", "limit": 7})
         rows = _payload(result)
         assert rows[0]["id"] == "evt-1"
-        assert "2026" in rows[0]["event_timestamp"]
+        assert "2026" in rows[0]["created_at"]
+        assert set(rows[0]) == {
+            "id", "content", "component", "theme", "outcome",
+            "reinforcement_score", "created_at",
+        }
         observations.list_observations.assert_not_awaited()
         assert list_mock.await_args is not None
         kwargs = list_mock.await_args.kwargs
@@ -405,7 +427,10 @@ class TestSessionHandlersRemoteBranch:
         )
         ratings = [{"kind": "reflection", "id": _RECORD_ID_40, "class": "cited"}]
         payload = _payload(await handlers.apply_session_ratings({"ratings": ratings}))
-        assert payload == {"applied": 1, "failed": 0}
+        # The backend's sqlite-parity dict passes through unchanged.
+        assert payload["session_id"] == "sid-env-1"
+        assert payload["applied"]["cited"] == 1
+        assert payload["skipped"]["memory_missing"] == 0
         remote.apply_session_ratings.assert_called_once_with(
             session_id="sid-env-1", ratings=ratings
         )
@@ -440,7 +465,7 @@ class TestSessionHandlersRemoteBranch:
                 {"kind": "semantic", "id": _RECORD_ID_40, "class": "cited"}
             )
         )
-        assert payload == {"applied": "x", "skipped": None}
+        assert payload == {"applied": "cited", "skipped": None}
         remote.credit_one.assert_called_once_with(
             session_id="sid-env-1",
             kind="semantic",

@@ -236,10 +236,11 @@ def test_j2_session_bootstrap_hook_reaches_agentcore(
     clean_slate_home: Path, tmp_path: Path
 ) -> None:
     """SessionStart hook under the onboarding config routes through
-    ``build_backend`` to ``AgentCoreBackend.session_bootstrap``: exactly 4
-    ListMemoryRecords (3 EPI reflection buckets + 1 SEM), the envelope
-    carries the reflection/semantic summary, and NO memory content lands
-    in local sqlite.
+    ``build_backend`` to ``AgentCoreBackend.session_bootstrap``: exactly 3
+    ListMemoryRecords (2 EPI reflection namespaces — project + the
+    general/promoted merge, polarity bucketed client-side — + 1 SEM), the
+    envelope carries the reflection/semantic summary, and NO memory
+    content lands in local sqlite.
 
     regression_caught: reverting the hook's build_backend routing (fix
     Task 3) falls back to SessionBootstrapService on sqlite — zero wire
@@ -270,10 +271,13 @@ def test_j2_session_bootstrap_hook_reaches_agentcore(
         assert "Semantic memories:" in ctx
 
         lists = fake.requests_for("ListMemoryRecords")
-        assert len(lists) == 4
-        assert len(fake.requests) == 4
-        assert sum("EPI-FAKE-0001" in r.path for r in lists) == 3
+        assert len(lists) == 3
+        assert len(fake.requests) == 3
+        assert sum("EPI-FAKE-0001" in r.path for r in lists) == 2
         assert sum("SEM-FAKE-0001" in r.path for r in lists) == 1
+        # No metadataFilters anywhere — polarity is not a legal filter key
+        # on real AWS (the fake 400s it) and status is client-side.
+        assert all("metadataFilters" not in r.body for r in lists)
 
     # No memory-content sqlite write (a hook_errors-only migration would be
     # tolerated; memory content must be zero either way).
@@ -373,6 +377,13 @@ async def test_j3_observe_then_retrieve_observations_chains_aws_id(
                 # Metadata flattened out of the stringValue wrappers.
                 assert row["outcome"] == "failure"
                 assert row["theme"] == "bug"
+                # Key parity with the sqlite retrieve_observations rows —
+                # no agentcore-only keys (session_id/actor_id/
+                # event_timestamp) leak to the MCP payload.
+                assert set(row) == {
+                    "id", "content", "component", "theme", "outcome",
+                    "reinforcement_score", "created_at",
+                }
 
     # No sqlite leakage: the observation never landed locally.
     assert _row_count(bm_home / "memory.db", "observations") == 0
@@ -386,13 +397,15 @@ async def test_j3_observe_then_retrieve_observations_chains_aws_id(
 async def test_j4_retrieve_fans_out_three_epi_list_calls(
     clean_slate_home: Path, tmp_path: Path
 ) -> None:
-    """``memory.retrieve`` under settings.json activation: exactly 3
-    ListMemoryRecords to the EPI reflections namespace; buckets come back
-    as exactly ``{"do": [], "dont": [], "neutral": []}``. Polarity-filter
-    internals + the single-polarity restriction are owned by D2.
+    """``memory.retrieve`` under settings.json activation: exactly 2
+    ListMemoryRecords to the EPI memory — the project reflections
+    namespace plus the general/promoted merge — with no metadataFilters;
+    buckets come back as exactly ``{"do": [], "dont": [], "neutral": []}``.
+    Client-side bucketing internals are owned by D2.
 
-    regression_caught: collapsing the fan-out or reverting dispatch makes
-    the count != 3.
+    regression_caught: collapsing to a single namespace (promoted records
+    invisible) or reverting dispatch makes the count != 2; resurrecting
+    the polarity server filter now 400s against the dialect-enforcing fake.
     """
     with FakeAgentCore() as fake:
         _onboard(clean_slate_home)
@@ -409,11 +422,15 @@ async def test_j4_retrieve_fans_out_three_epi_list_calls(
 
         assert buckets == {"do": [], "dont": [], "neutral": []}
         lists = fake.requests_for("ListMemoryRecords")
-        assert len(lists) == 3
-        assert len(fake.requests) == 3
+        assert len(lists) == 2
+        assert len(fake.requests) == 2
         for request in lists:
             assert "EPI-FAKE-0001" in request.path
-            assert "reflections" in request.body.get("namespace", "")
+            assert "metadataFilters" not in request.body
+        assert {r.body.get("namespace") for r in lists} == {
+            "projects/e2e-project/reflections/",
+            "general/reflections/",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +464,9 @@ async def test_j5_semantic_observe_then_retrieve_merges_two_namespaces(
             },
         )
         # The same canned summary answers BOTH list calls — the merged
-        # payload having exactly one item proves the id-dedupe.
+        # payload having exactly one item proves the id-dedupe. The stored
+        # namespace carries the leading slash real AWS adds on read-back
+        # (live dialect) — the scope classifier must normalize it.
         fake.set_response(
             "ListMemoryRecords",
             {
@@ -455,7 +474,7 @@ async def test_j5_semantic_observe_then_retrieve_merges_two_namespaces(
                     {
                         "memoryRecordId": "sem-journey-1",
                         "content": {"text": "journey-sem-marker"},
-                        "namespaces": ["projects/e2e-project/semantic/"],
+                        "namespaces": ["/projects/e2e-project/semantic/"],
                     }
                 ]
             },
@@ -498,6 +517,8 @@ async def test_j5_semantic_observe_then_retrieve_merges_two_namespaces(
                 item = merged[0]
                 assert item["id"] == "sem-journey-1"  # cross-step id chain
                 assert item["content"] == "journey-sem-marker"
+                # "/projects/..." (stored leading slash) classifies as
+                # project, not general — the read-back normalization.
                 assert item["scope"] == "project"
                 # Stable keys, present as None (agentcore records carry no
                 # project/created_at/updated_at — UD-2 payload contract).
@@ -625,8 +646,12 @@ async def test_j6_rating_loop_guard_and_empty_exposures(
                         },
                     )
                 )
-                assert applied["applied"] == 1
-                assert applied["failed"] == 0
+                # Sqlite-parity envelope: per-class applied counts + the
+                # per-reason skipped counts, keyed by session_id.
+                assert applied["session_id"] == "e2e-session-1"
+                assert applied["applied"]["cited"] == 1
+                assert sum(applied["applied"].values()) == 1
+                assert sum(applied["skipped"].values()) == 0
                 gets = fake.requests_for("GetMemoryRecord")
                 updates = fake.requests_for("BatchUpdateMemoryRecords")
                 assert len(gets) == 1
@@ -655,7 +680,7 @@ def test_j7_contextual_inject_honours_settings_activation(
 ) -> None:
     """The per-prompt hook reaches AWS with NO backend env var — proving
     ``contextual_inject``'s resolver honours settings.json (the load-
-    bearing difference from D6-A, which force-sets the env var): 3 EPI +
+    bearing difference from D6-A, which force-sets the env var): 2 EPI +
     1 SEM list calls and a ``<project-memory>`` block in the envelope.
 
     regression_caught: reverting contextual_inject to env-only backend
@@ -693,7 +718,9 @@ def test_j7_contextual_inject_honours_settings_activation(
         assert "refl-fake-docker" in rendered
 
         paths = [r.path for r in fake.requests]
-        assert sum("EPI-FAKE-0001" in p for p in paths) == 3
+        # retrieve → 2 EPI namespace calls (project + general/promoted
+        # merge); semantic_list → 1 SEM call.
+        assert sum("EPI-FAKE-0001" in p for p in paths) == 2
         assert sum("SEM-FAKE-0001" in p for p in paths) == 1
 
 

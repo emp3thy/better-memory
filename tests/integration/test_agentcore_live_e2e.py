@@ -224,13 +224,30 @@ def test_live_init_status_journey(
     request.addfinalizer(_cleanup)
 
     # --- init: provisions both memories, writes agentcore.json -------------
+    # no_activate=False mirrors the CLI default (--no-activate not passed):
+    # init also activates the backend by writing settings.json. argparse
+    # would supply the attribute automatically; a hand-built Namespace must
+    # carry every init flag or handle() AttributeErrors mid-journey.
     rc = agentcore_cli.handle(
         argparse.Namespace(
-            subcommand="init", home=str(bm_home), region=agentcore_region, force=False
+            subcommand="init",
+            home=str(bm_home),
+            region=agentcore_region,
+            force=False,
+            no_activate=False,
         )
     )
     assert rc == 0
     assert config_path.exists()
+
+    # Activation side effect (no_activate=False): settings.json persists the
+    # backend selection — the exact onboarding state init leaves behind.
+    settings_path = bm_home / "settings.json"
+    assert settings_path.exists()
+    assert (
+        json.loads(settings_path.read_text(encoding="utf-8"))["storage_backend"]
+        == "agentcore"
+    )
 
     cfg = load_agentcore_config(bm_home)
     assert cfg is not None
@@ -252,7 +269,11 @@ def test_live_init_status_journey(
     capsys.readouterr()  # drain init's progress output
     rc2 = agentcore_cli.handle(
         argparse.Namespace(
-            subcommand="init", home=str(bm_home), region=agentcore_region, force=False
+            subcommand="init",
+            home=str(bm_home),
+            region=agentcore_region,
+            force=False,
+            no_activate=False,
         )
     )
     captured = capsys.readouterr()
@@ -279,6 +300,31 @@ def test_live_init_status_journey(
     assert "episodic:" in status.stdout
     assert "semantic:" in status.stdout
     assert "ACTIVE" in status.stdout
+    # Activation is visible through status: backend resolved from the
+    # settings.json init just wrote (isolated_env strips any outer
+    # BETTER_MEMORY_STORAGE_BACKEND, so 'settings' is the only source).
+    assert "effective backend: agentcore (source: settings)" in status.stdout
+
+    # --- status with a corrupt settings.json: WARN, keep reporting ---------
+    # status is the diagnostic tool the operator reaches for when the config
+    # is broken — a corrupt settings.json must produce a WARN on stderr, not
+    # take the memory-state report down (cli/agentcore.py _handle_status).
+    settings_path.write_text("{not valid json", encoding="utf-8")
+    status_corrupt = subprocess.run(  # noqa: S603 — test harness, fixed argv
+        _cli_argv("agentcore", "status", "--home", str(bm_home)),
+        env=_live_env(proc_home),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert status_corrupt.returncode == 0, (
+        status_corrupt.stdout + status_corrupt.stderr
+    )
+    assert "WARN: could not resolve the effective backend" in status_corrupt.stderr
+    assert "effective backend:" not in status_corrupt.stdout
+    assert cfg.episodic.memory_id in status_corrupt.stdout
+    assert cfg.semantic.memory_id in status_corrupt.stdout
+    assert "ACTIVE" in status_corrupt.stdout
 
 
 # ---------------------------------------------------------------------------

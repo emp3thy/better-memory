@@ -106,6 +106,42 @@ def test_hook_falls_back_on_db_failure(tmp_path, git_cwd):
     assert "memory_session_bootstrap" in text
 
 
+def test_hook_writes_marker_even_when_bootstrap_fails(tmp_path, git_cwd):
+    """Fix 6 pin: write_session_id is hoisted ABOVE the bootstrap call, so
+    the degraded path (bootstrap raises) still leaves a valid session marker
+    — the session id comes from the stdin payload, not from bootstrap, so
+    the first-session server can resolve it and the fallback directive's
+    manual memory_session_bootstrap remediation works on the first try."""
+    from better_memory.runtime.session_marker import read_session_id
+
+    bad_home = tmp_path / "bad-home"
+    bad_home.mkdir()
+    (bad_home / "memory.db").mkdir()  # directory in place of file → bootstrap fails
+    payload = json.dumps({
+        "source": "startup",
+        "session_id": "degraded-sid",
+        "cwd": str(git_cwd),
+    })
+
+    proc = _run_hook(
+        bad_home,
+        stdin=payload,
+        cwd=git_cwd,
+        # Pin the marker key deterministically (the outer test env may or
+        # may not carry CLAUDE_PROJECT_DIR).
+        extra_env={"CLAUDE_PROJECT_DIR": str(git_cwd)},
+    )
+
+    assert proc.returncode == 0
+    out = json.loads(proc.stdout)
+    text = out["hookSpecificOutput"]["additionalContext"]
+    assert "session bootstrap failed" in text
+    # Marker written despite the failure — hoisted, best-effort contract.
+    assert (
+        read_session_id(bad_home, project_dir=str(git_cwd)) == "degraded-sid"
+    )
+
+
 def test_hook_handles_oversized_stdin(home_with_schema, git_cwd):
     # Pipe ~1.5 MiB of garbage. Hook must drop it and proceed with defaults.
     big = "x" * (1_572_864)  # 1.5 MiB
@@ -344,12 +380,17 @@ def test_agentcore_mode_backend_failure_falls_back_to_directive(
 ):
     """Graceful degradation: build_backend failing (e.g. agentcore.json
     missing) must not crash the hook and must NOT fall back to sqlite —
-    the envelope carries the manual-bootstrap directive instead."""
+    the envelope carries the manual-bootstrap directive instead. The
+    session marker is STILL written (fix 6: hoisted write_session_id) so
+    the manual remediation can resolve the session id."""
+    from better_memory.runtime.session_marker import read_session_id
+
     home = tmp_path / "bm-home"
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
 
     connect_calls: list = []
     monkeypatch.setattr(
@@ -376,6 +417,8 @@ def test_agentcore_mode_backend_failure_falls_back_to_directive(
     assert "memory_session_bootstrap" in text
     # Misconfigured agentcore must not silently degrade INTO sqlite.
     assert connect_calls == []
+    # Fix 6: marker written BEFORE the failing backend call.
+    assert read_session_id(home, project_dir=str(proj)) == "ac-sess-2"
 
 
 def test_sqlite_mode_never_consults_build_backend(

@@ -77,21 +77,14 @@ def _tool_text(result: Any) -> str:
     return result.content[0].text
 
 
-def _polarity_filter_value(body: dict) -> str | None:
-    for entry in body.get("metadataFilters", []):
-        if entry.get("left", {}).get("metadataKey") == "polarity":
-            return entry["right"]["metadataValue"]["stringValue"]
-    return None
-
-
-def _has_active_status_filter(body: dict) -> bool:
-    return any(
-        entry.get("left", {}).get("metadataKey") == "status"
-        and entry.get("operator") == "EQUALS_TO"
-        and entry.get("right", {}).get("metadataValue", {}).get("stringValue")
-        == "active"
+def _filter_keys(body: dict) -> set[str]:
+    """metadataFilters keys present on a ListMemoryRecords body (empty set
+    when the request carries no filters — the live-verified dialect for the
+    reflections read path: polarity is NOT a legal filter key)."""
+    return {
+        entry.get("left", {}).get("metadataKey")
         for entry in body.get("metadataFilters", [])
-    )
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -140,16 +133,18 @@ class TestServerBootToolsHidden:
 
 
 class TestRetrievePolarityFanout:
-    async def test_retrieve_fans_out_three_filtered_list_records(
+    async def test_retrieve_fans_out_two_namespace_list_records(
         self, clean_slate_home: Path
     ) -> None:
         """``memory.retrieve`` is the ONE data tool wired to
         ``AgentCoreBackend`` (ReflectionToolHandlers → backend.retrieve):
-        exactly 3 ListMemoryRecords against the EPISODIC memory's
-        reflections namespace, order-insensitive polarity set
-        {do,dont,neutral}, each carrying a status=active filter; buckets
-        come back as exact empty lists. A single-polarity call restricts
-        the fan-out to exactly 1 request."""
+        exactly 2 ListMemoryRecords against the EPISODIC memory — the
+        project reflections namespace plus general/reflections/ (the
+        promoted merge) — carrying NO metadataFilters at all (live AWS
+        rejects 'polarity' as a filter key, and the fake now 400s it too;
+        polarity/status filtering is client-side); buckets come back as
+        exact empty lists. A single-polarity call keeps the same wire
+        fan-out (polarity cannot narrow the wire any more)."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
             write_fake_agentcore_json(bm_home)
@@ -168,29 +163,33 @@ class TestRetrievePolarityFanout:
                 assert buckets["neutral"] == []
 
                 requests = list(fake.requests)
-                # Exactly 3 wire requests, all ListMemoryRecords — a
-                # collapsed/unfiltered rewrite flips this red.
-                assert len(requests) == 3
+                # Exactly 2 wire requests, all ListMemoryRecords — a
+                # collapsed single-namespace rewrite (promoted records
+                # invisible again) or a resurrected polarity filter flips
+                # this red.
+                assert len(requests) == 2
                 assert {r.operation for r in requests} == {"ListMemoryRecords"}
                 for request in requests:
                     assert "EPI-FAKE-0001" in request.path
-                    assert "reflections" in request.body.get("namespace", "")
-                    assert _has_active_status_filter(request.body), request.body
-                polarities = {
-                    _polarity_filter_value(r.body) for r in requests
-                }
+                    assert _filter_keys(request.body) == set(), request.body
                 # Order-insensitive: ThreadPoolExecutor fan-out is unordered.
-                assert polarities == {"do", "dont", "neutral"}
+                assert {r.body.get("namespace") for r in requests} == {
+                    "projects/e2e-project/reflections/",
+                    "general/reflections/",
+                }
 
-                # Single-polarity leg: exactly one request, filter 'do'.
+                # Single-polarity leg: same 2-namespace wire fan-out,
+                # non-requested buckets still exactly empty.
                 fake.clear()
                 result2 = await session.call_tool(
                     "memory.retrieve", {"polarity": "do"}
                 )
                 assert not result2.isError
+                buckets2 = json.loads(_tool_text(result2))
+                assert buckets2["dont"] == []
+                assert buckets2["neutral"] == []
                 single = fake.requests_for("ListMemoryRecords")
-                assert len(single) == 1
-                assert _polarity_filter_value(single[0].body) == "do"
+                assert len(single) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +552,11 @@ class TestBackendWireFidelity:
             assert metadata["useful_count"]["numberValue"] == pytest.approx(3)
             # Full snapshot, not a diff: non-counter keys preserved.
             assert metadata["status"] == {"stringValue": "active"}
-            assert "last_credited_at" in metadata  # presence only
+            # last_credited_at as stringValue iso8601 — the indexedKey is
+            # declared STRING; real AWS fails the whole record update on a
+            # dateTimeValue (and the fake now mirrors that failedRecords
+            # rejection, so this line is belt-and-braces).
+            assert set(metadata["last_credited_at"]) == {"stringValue"}
 
     def test_credit_one_semantic_kind_routes_to_sem_and_strips(
         self, tmp_path: Path
@@ -593,7 +596,8 @@ class TestBackendWireFidelity:
                 id=_SEM_RECORD_ID,
                 classification="cited",
             )
-            assert result == {"applied": _SEM_RECORD_ID, "skipped": None}
+            # Sqlite parity: the applied CLASSIFICATION, not the record id.
+            assert result == {"applied": "cited", "skipped": None}
 
             gets = fake.requests_for("GetMemoryRecord")
             updates = fake.requests_for("BatchUpdateMemoryRecords")
@@ -608,7 +612,111 @@ class TestBackendWireFidelity:
             ), metadata
             # cited → useful_count += 1 (4 → 5).
             assert metadata["useful_count"]["numberValue"] == pytest.approx(5)
-            assert "last_credited_at" in metadata
+            assert set(metadata["last_credited_at"]) == {"stringValue"}
+
+
+@pytest.mark.usefixtures("scrubbed_aws_process_env")
+class TestFakeDialectEnforcement:
+    """The fake REJECTS what real AWS rejects (aws_record_dialect.md) — a
+    hermetic tripwire so no future rewrite can reintroduce the shapes the
+    live run caught. Raw boto3 against the fake, no product code."""
+
+    def _client(self, fake: FakeAgentCore) -> Any:
+        import boto3
+        from botocore.config import Config as BotoConfig
+
+        return boto3.client(
+            "bedrock-agentcore",
+            endpoint_url=fake.endpoint_url,
+            region_name="eu-west-2",
+            aws_access_key_id="bm-e2e-fake",
+            aws_secret_access_key="bm-e2e-fake-secret",
+            config=BotoConfig(retries={"mode": "standard", "max_attempts": 1}),
+        )
+
+    def test_polarity_metadata_filter_is_rejected(self) -> None:
+        """polarity is not a CreateMemory indexedKey → ValidationException
+        with the verbatim live error text (this is what broke retrieve's
+        fan-out + session_bootstrap against real AWS)."""
+        from botocore.exceptions import ClientError
+
+        with FakeAgentCore() as fake:
+            fake.set_response("ListMemoryRecords", {"memoryRecordSummaries": []})
+            client = self._client(fake)
+            with pytest.raises(ClientError, match="not a valid filter key"):
+                client.list_memory_records(
+                    memoryId="EPI-FAKE-0001",
+                    namespace="projects/x/reflections/",
+                    metadataFilters=[{
+                        "left": {"metadataKey": "polarity"},
+                        "operator": "EQUALS_TO",
+                        "right": {"metadataValue": {"stringValue": "do"}},
+                    }],
+                )
+            # An indexed key still passes and reaches the canned response.
+            ok = client.list_memory_records(
+                memoryId="EPI-FAKE-0001",
+                namespace="projects/x/reflections/",
+                metadataFilters=[{
+                    "left": {"metadataKey": "status"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": "active"}},
+                }],
+            )
+            assert ok["memoryRecordSummaries"] == []
+
+    def test_batch_update_datetime_last_credited_at_fails_record(self) -> None:
+        """A dateTimeValue last_credited_at comes back exactly the way real
+        AWS reports it: HTTP 200 with a failedRecords entry (the live root
+        cause of apply_session_ratings applied:0/failed:1) — regardless of
+        any canned success response."""
+        from datetime import UTC, datetime
+
+        with FakeAgentCore() as fake:
+            fake.set_response(
+                "BatchUpdateMemoryRecords",
+                {
+                    "successfulRecords": [{"memoryRecordId": _REFL_RECORD_ID}],
+                    "failedRecords": [],
+                },
+            )
+            client = self._client(fake)
+            response = client.batch_update_memory_records(
+                memoryId="EPI-FAKE-0001",
+                records=[{
+                    "memoryRecordId": _REFL_RECORD_ID,
+                    "timestamp": datetime.now(UTC),
+                    "metadata": {
+                        "last_credited_at": {"dateTimeValue": datetime.now(UTC)},
+                    },
+                }],
+            )
+            assert response["successfulRecords"] == []
+            failed = response["failedRecords"]
+            assert len(failed) == 1
+            assert "last_credited_at" in failed[0]["errorMessage"]
+            assert "STRING" in failed[0]["errorMessage"]
+
+    def test_batch_update_reserved_metadata_keys_fail_record(self) -> None:
+        with FakeAgentCore() as fake:
+            from datetime import UTC, datetime
+
+            client = self._client(fake)
+            response = client.batch_update_memory_records(
+                memoryId="EPI-FAKE-0001",
+                records=[{
+                    "memoryRecordId": _REFL_RECORD_ID,
+                    "timestamp": datetime.now(UTC),
+                    "metadata": {
+                        "x-amz-agentcore-memory-recordType": {
+                            "stringValue": "BASE"
+                        },
+                    },
+                }],
+            )
+            failed = response["failedRecords"]
+            assert len(failed) == 1
+            assert "reserved names or prefixes" in failed[0]["errorMessage"]
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +885,9 @@ _DOCKER_REFLECTION_SUMMARY = {
     "metadata": {
         "useful_count": {"numberValue": 2},
         "status": {"stringValue": "active"},
+        # Client-side bucketing (polarity is not a legal AWS filter key):
+        # 'do' keeps this record inside retrieve_relevant's do/dont order.
+        "polarity": {"stringValue": "do"},
     },
 }
 
@@ -826,9 +937,10 @@ class TestContextualInjectWireAndDegradation:
             assert "refl-fake-docker" in rendered
 
             paths = [r.path for r in fake.requests]
-            # backend.retrieve → 3 polarity-filtered EPI list calls;
+            # backend.retrieve → 2 namespace EPI list calls (project +
+            # general/promoted merge, polarity client-side);
             # backend.semantic_list → 1 SEM list call.
-            assert sum("EPI-FAKE-0001" in p for p in paths) == 3
+            assert sum("EPI-FAKE-0001" in p for p in paths) == 2
             assert sum("SEM-FAKE-0001" in p for p in paths) == 1
 
     def test_case_b_misconfig_clean_slate_silent_noop_with_stray_db(
@@ -969,7 +1081,7 @@ class TestRegionSingleSource:
                 assert not result.isError
 
             server_requests = fake.requests_for("ListMemoryRecords")
-            assert len(server_requests) == 3
+            assert len(server_requests) == 2
             for request in server_requests:
                 # Single source of truth: the json's region, never a
                 # product default.

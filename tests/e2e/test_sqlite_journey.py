@@ -31,6 +31,7 @@ from typing import Any
 
 import pytest
 
+from better_memory.runtime.session_marker import encode_project_dir
 from tests.e2e._env import isolated_env
 from tests.e2e.conftest import mcp_session, run_hook
 
@@ -223,14 +224,17 @@ async def test_first_boot_migrates_tools_knowledge(
 def test_hook_before_server_degraded(
     clean_slate_home: Path, tmp_path: Path
 ) -> None:
-    """KNOWN-DEFECT PIN (design §4 item 3): SessionStart hook fired before
-    any server boot on a virgin home. Contract: exit 0, empty stderr, a
-    single fallback-directive envelope, a schema-less ``memory.db`` (the
-    file exists, 0 tables), NO ``runtime/sessions`` marker, no other dirs,
-    and the ``hook_errors`` write silently no-ops (no table to insert into).
+    """SessionStart hook fired before any server boot on a virgin home.
+    Contract: exit 0, empty stderr, a single fallback-directive envelope, a
+    schema-less ``memory.db`` (the file exists, 0 tables), the
+    ``runtime/sessions`` marker IS written with the payload's session id
+    (``write_session_id`` is hoisted above the bootstrap call — the id
+    comes from stdin, so even the degraded first session leaves a valid
+    bridge for the server to resolve), no spool, and the ``hook_errors``
+    write silently no-ops (no table to insert into).
 
-    This test flips red on the intended fix (hook-side migrations or a
-    hoisted ``write_session_id``) — that is deliberate: the fix must update
+    The remaining KNOWN-DEFECT PIN (design §4 item 3) is the no-migrations
+    half: flipping the 0-tables assertion (hook-side migrations) must update
     this contract and the heal-sequence test together.
     """
     env = isolated_env(clean_slate_home)
@@ -259,15 +263,23 @@ def test_hook_before_server_degraded(
     assert db_path.exists()
     assert _table_names(db_path) == set(), "hook must not run migrations"
 
-    # Marker skipped: write_session_id sits after bootstrap() in the try.
-    assert not (bm_home / "runtime").exists()
+    # Marker WRITTEN before bootstrap (hoisted write_session_id): the id
+    # comes from the stdin payload, so the degraded path still leaves a
+    # valid session bridge keyed by the payload cwd. Exactly one file —
+    # no .sid-* tempfile droppings.
+    sessions_dir = bm_home / "runtime" / "sessions"
+    marker = sessions_dir / encode_project_dir(str(proj_dir))
+    assert marker.is_file(), f"session marker missing: {marker}"
+    assert marker.read_text(encoding="utf-8").strip() == "e2e-session-1"
+    assert [p for p in sessions_dir.iterdir()] == [marker]
     assert not (bm_home / "spool").exists()
-    # No other dirs at all; only the db file (+ possible WAL side files).
-    assert [p for p in bm_home.iterdir() if p.is_dir()] == []
+    # Only the marker tree beside the db file (+ possible WAL side files).
+    assert [p.name for p in bm_home.iterdir() if p.is_dir()] == ["runtime"]
     assert {p.name for p in bm_home.iterdir()} <= {
         "memory.db",
         "memory.db-wal",
         "memory.db-shm",
+        "runtime",
     }
 
 
@@ -280,12 +292,13 @@ async def test_hook_first_then_server_heals(
     clean_slate_home: Path, tmp_path: Path
 ) -> None:
     """The real new-user SEQUENCE: degraded SessionStart hook leaves a
-    schema-less WAL ``memory.db`` → the first server boot heals it
-    (migrations apply onto the pre-existing 0-table file) → the fallback
-    directive's promised ``memory.session_bootstrap`` MCP tool works
-    (``episode.action == 'opened'``) → a re-run of the hook reports
-    ``Episode: reused`` and writes the session marker. Exactly one open
-    episode row exists throughout.
+    schema-less WAL ``memory.db`` plus the session marker (hoisted
+    ``write_session_id`` fires before bootstrap) → the first server boot
+    heals the db (migrations apply onto the pre-existing 0-table file) →
+    the fallback directive's promised ``memory.session_bootstrap`` MCP tool
+    works (``episode.action == 'opened'``) → a re-run of the hook reports
+    ``Episode: reused`` and the marker still holds (rewritten to the same
+    key — exactly one file). Exactly one open episode row exists throughout.
     """
     env = isolated_env(clean_slate_home)
     proj_dir = tmp_path / "proj"
@@ -300,7 +313,15 @@ async def test_hook_first_then_server_heals(
     assert ctx.startswith("better-memory: session bootstrap failed (")
     db_path = bm_home / "memory.db"
     assert _table_names(db_path) == set()
-    assert not (bm_home / "runtime" / "sessions").exists()
+    # Hoisted write_session_id: the marker lands even on the degraded leg,
+    # so the server booted in leg 2 can already resolve the session id.
+    degraded_marker = (
+        bm_home / "runtime" / "sessions" / encode_project_dir(str(proj_dir))
+    )
+    assert degraded_marker.is_file()
+    assert (
+        degraded_marker.read_text(encoding="utf-8").strip() == "e2e-session-1"
+    )
 
     # Leg 2 — server boots onto the pre-existing 0-table WAL file and
     # heals it; the directive's remediation tool actually works.

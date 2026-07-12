@@ -512,13 +512,20 @@ def _handle_smoke(args: argparse.Namespace) -> int:
         print(f"   ok ({len(events)} events)")
 
         print(">> 4. BatchCreateMemoryRecords — semantic write")
-        record_id = f"smoke-rec-{int(time.time())}"
+        # Live-verified request shape (aws_record_dialect.md §1): per-record
+        # required keys are requestIdentifier + namespaces + content +
+        # timestamp. memoryRecordId is NOT a valid input key (botocore
+        # ParamValidationError) — the SERVER mints the durable mem-<uuid4>
+        # id, returned in successfulRecords[0].memoryRecordId;
+        # requestIdentifier is correlation-only.
+        request_identifier = f"smoke-rec-{int(time.time())}"
         create_resp = data.batch_create_memory_records(
             memoryId=cfg.semantic.memory_id,
             records=[{
-                "memoryRecordId": record_id,
+                "requestIdentifier": request_identifier,
                 "namespaces": [f"projects/{actor_id}/semantic/"],
                 "content": {"text": "smoke test semantic record"},
+                "timestamp": datetime.now(UTC),
                 "metadata": {
                     "useful_count": {"numberValue": 0},
                     "status": {"stringValue": "active"},
@@ -536,16 +543,31 @@ def _handle_smoke(args: argparse.Namespace) -> int:
         real_id = successful[0]["memoryRecordId"]
         print(f"   ok (id={real_id})")
 
-        print(">> 5. ListMemoryRecords — readback")
-        list_resp = data.list_memory_records(
-            memoryId=cfg.semantic.memory_id,
-            namespace=f"projects/{actor_id}/semantic/",
-            maxResults=10,
-        )
-        summaries = list_resp.get("memoryRecordSummaries", [])
-        if not summaries:
-            raise RuntimeError("list_memory_records returned no summaries")
-        print(f"   ok ({len(summaries)} records)")
+        print(">> 5. GetMemoryRecord — readback")
+        # get_memory_record is read-your-write (~1s); list_memory_records
+        # shares an index with ~60s lag and would force the smoke to poll
+        # for a minute (aws_record_dialect.md §3). Retry a few times to
+        # cover the sub-second window all the same.
+        record = None
+        for attempt in range(1, 6):
+            try:
+                record = data.get_memory_record(
+                    memoryId=cfg.semantic.memory_id,
+                    memoryRecordId=real_id,
+                )["memoryRecord"]
+                break
+            except Exception as get_exc:  # noqa: BLE001 — retried, re-raised below
+                code = getattr(get_exc, "response", {}).get(
+                    "Error", {}
+                ).get("Code", "")
+                if code != "ResourceNotFoundException" or attempt == 5:
+                    raise
+                time.sleep(2)
+        if record is None or record.get("memoryRecordId") != real_id:
+            raise RuntimeError(
+                f"get_memory_record readback mismatch: {record!r}"
+            )
+        print("   ok (readback id matches)")
 
         print(">> 6. BatchDeleteMemoryRecords — cleanup")
         del_resp = data.batch_delete_memory_records(
