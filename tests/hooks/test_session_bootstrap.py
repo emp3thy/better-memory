@@ -1,6 +1,11 @@
-"""Subprocess tests for better_memory.hooks.session_bootstrap."""
+"""Subprocess tests for better_memory.hooks.session_bootstrap.
+
+The agentcore-routing tests at the bottom run in-process (monkeypatched
+``connect`` / ``build_backend``) so they need no boto3 stubs.
+"""
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -11,6 +16,7 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.hooks import session_bootstrap as hook
 
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "better_memory" / "db" / "migrations"
 
@@ -240,3 +246,156 @@ def test_hook_session_id_resolves_from_env_var(home_with_schema, git_cwd):
     out2 = json.loads(proc2.stdout)
     text2 = out2["hookSpecificOutput"]["additionalContext"]
     assert "Episode: reused" in text2
+
+
+# ---------------------------------------------------------------------------
+# Agentcore-mode routing (in-process): the SessionStart hook must route
+# through build_backend and never open the local sqlite database when the
+# resolved backend is agentcore. Mirrors tests/hooks/test_contextual_inject.py
+# ::test_agentcore_mode_does_not_open_sqlite_connection.
+# ---------------------------------------------------------------------------
+
+
+class _FakeConn:
+    def close(self) -> None:
+        pass
+
+
+class _FakeRemoteBackend:
+    def __init__(self) -> None:
+        self.bootstrap_calls: list[dict] = []
+
+    def session_bootstrap(self, **kwargs):
+        self.bootstrap_calls.append(kwargs)
+        return {
+            "additional_context": "remote-bootstrap-context",
+            "project": "/testproj",
+            "source": kwargs.get("source") or "",
+            "episode_id": kwargs.get("session_id"),
+            "episode_action": "opened",
+            "semantic_count": 0,
+            "reflections_counts": {"do": 0, "dont": 0, "neutral": 0},
+        }
+
+
+def _run_inprocess(payload: dict, monkeypatch, capsys) -> dict:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    with pytest.raises(SystemExit) as e:
+        hook.main()
+    assert e.value.code == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_agentcore_mode_does_not_open_sqlite_connection(
+    tmp_path, monkeypatch, capsys
+):
+    """storage_backend=agentcore must never call connect(); bootstrap goes
+    through build_backend(memory_conn=None) and renders the backend dict's
+    additional_context. The session marker is still written (the MCP server
+    needs the session-id bridge in agentcore mode too)."""
+    from better_memory.runtime.session_marker import read_session_id
+
+    home = tmp_path / "bm-home"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+
+    connect_calls: list = []
+    monkeypatch.setattr(
+        hook, "connect",
+        lambda *a, **kw: connect_calls.append(a) or _FakeConn(),
+    )
+
+    build_backend_calls: list[dict] = []
+    fake_backend = _FakeRemoteBackend()
+
+    def _fake_build_backend(**kwargs):
+        build_backend_calls.append(kwargs)
+        return fake_backend
+
+    monkeypatch.setattr(hook, "build_backend", _fake_build_backend)
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "ac-sess-1", "cwd": str(proj)},
+        monkeypatch, capsys,
+    )
+
+    assert res["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert (
+        res["hookSpecificOutput"]["additionalContext"]
+        == "remote-bootstrap-context"
+    )
+    assert connect_calls == []
+    assert len(build_backend_calls) == 1
+    assert build_backend_calls[0]["memory_conn"] is None
+    assert build_backend_calls[0]["session_id"] == "ac-sess-1"
+    assert len(fake_backend.bootstrap_calls) == 1
+    call = fake_backend.bootstrap_calls[0]
+    assert call["session_id"] == "ac-sess-1"
+    assert call["source"] == "startup"
+    assert call["cwd"] == Path(str(proj))
+    # Session-id bridge marker still written in agentcore mode.
+    assert read_session_id(home, project_dir=str(proj)) == "ac-sess-1"
+
+
+def test_agentcore_mode_backend_failure_falls_back_to_directive(
+    tmp_path, monkeypatch, capsys
+):
+    """Graceful degradation: build_backend failing (e.g. agentcore.json
+    missing) must not crash the hook and must NOT fall back to sqlite —
+    the envelope carries the manual-bootstrap directive instead."""
+    home = tmp_path / "bm-home"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+
+    connect_calls: list = []
+    monkeypatch.setattr(
+        hook, "connect",
+        lambda *a, **kw: connect_calls.append(a) or _FakeConn(),
+    )
+
+    def _boom(**kwargs):
+        raise FileNotFoundError(
+            f"{home}/agentcore.json not found. Run `better-memory agentcore "
+            f"init` to create the memory resources and persist their IDs."
+        )
+
+    monkeypatch.setattr(hook, "build_backend", _boom)
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "ac-sess-2", "cwd": str(proj)},
+        monkeypatch, capsys,
+    )
+
+    text = res["hookSpecificOutput"]["additionalContext"]
+    assert "session bootstrap failed" in text
+    assert "FileNotFoundError" in text
+    assert "memory_session_bootstrap" in text
+    # Misconfigured agentcore must not silently degrade INTO sqlite.
+    assert connect_calls == []
+
+
+def test_sqlite_mode_never_consults_build_backend(
+    home_with_schema, git_cwd, monkeypatch, capsys
+):
+    """Byte-identical sqlite oracle: with the backend resolved to sqlite the
+    hook uses the direct SessionBootstrapService path and never touches the
+    storage factory."""
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home_with_schema))
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+
+    def _forbidden(**kwargs):
+        raise AssertionError("build_backend consulted on the sqlite path")
+
+    # raising=False: passes against pre-fix code that has no such symbol.
+    monkeypatch.setattr(hook, "build_backend", _forbidden, raising=False)
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "sq-sess-1", "cwd": str(git_cwd)},
+        monkeypatch, capsys,
+    )
+    text = res["hookSpecificOutput"]["additionalContext"]
+    assert "## better-memory: session bootstrap" in text

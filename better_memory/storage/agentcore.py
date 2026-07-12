@@ -84,6 +84,39 @@ class AgentCoreBackend:
     def supports_episodes(self) -> bool:
         return False
 
+    # ----- Session-id lazy re-resolution -----
+
+    def _require_session_id(self, operation: str) -> str:
+        """Return the session id, lazily re-resolving when frozen at None.
+
+        The MCP server resolves the session id once at startup, but real
+        Claude Code does not propagate CLAUDE_SESSION_ID into the spawned
+        stdio server's env and the server may spawn BEFORE the SessionStart
+        hook writes the marker file — so construction-time resolution can
+        legitimately yield None. Re-resolve (env var, then the marker under
+        the resolved BETTER_MEMORY_HOME) at first use instead of raising
+        forever. When neither source resolves, raise WITHOUT any wire call
+        (no uuid4 fallback fabricating identities).
+        """
+        if self._session_id is None:
+            # Local import: keeps the storage layer free of an mcp import
+            # edge at module scope (and off the hooks' lightweight-import
+            # path — this only loads when an event operation runs).
+            from better_memory._common import resolve_home
+            from better_memory.mcp._util import resolve_session_id
+
+            self._session_id = resolve_session_id(resolve_home())
+        if self._session_id is None:
+            raise ValueError(
+                f"AgentCoreBackend.{operation} requires session_id: none was "
+                "available at construction time and re-resolution found "
+                "neither CLAUDE_SESSION_ID / CLAUDE_CODE_SESSION_ID in the "
+                "environment nor a SessionStart marker file under "
+                "BETTER_MEMORY_HOME (the SessionStart hook writes it; if you "
+                "see this in production the hook has not run yet)."
+            )
+        return self._session_id
+
     # ----- Observations: filled in by Tasks 5-6 -----
 
     async def observe(
@@ -101,16 +134,12 @@ class AgentCoreBackend:
     ) -> str:
         """Write an observation as a CreateEvent against the episodic memory.
 
-        sessionId is the backend's held session id (raised if None — events
-        require a real session). actorId is resolved from project (or
-        "general" when no project is in scope). Returns the AgentCore
-        eventId."""
-        if self._session_id is None:
-            raise ValueError(
-                "AgentCoreBackend.observe requires session_id at construction "
-                "time. The MCP server populates it from CLAUDE_SESSION_ID at "
-                "startup; if you see this in production, the env var is missing."
-            )
+        sessionId is the backend's held session id, lazily re-resolved from
+        env / SessionStart marker when construction saw None (raised, with
+        zero wire calls, when nothing resolves — events require a real
+        session). actorId is resolved from project (or "general" when no
+        project is in scope). Returns the AgentCore eventId."""
+        session_id = self._require_session_id("observe")
         actor_id = resolve_actor_id(project or self._project)
 
         # Event-level metadata is stringValue-only (verified API surface);
@@ -140,7 +169,7 @@ class AgentCoreBackend:
             lambda: self._data.create_event(
                 memoryId=self._cfg.episodic.memory_id,
                 actorId=actor_id,
-                sessionId=self._session_id,
+                sessionId=session_id,
                 eventTimestamp=datetime.now(UTC),
                 payload=[
                     {
@@ -317,12 +346,9 @@ class AgentCoreBackend:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """List raw events from the CURRENT session as observations. Cross-
-        session enumeration is deferred (ListEvents requires sessionId)."""
-        if self._session_id is None:
-            raise ValueError(
-                "AgentCoreBackend.list_observations requires session_id at "
-                "construction time."
-            )
+        session enumeration is deferred (ListEvents requires sessionId).
+        Same lazy session-id re-resolution contract as ``observe``."""
+        session_id = self._require_session_id("list_observations")
         actor_id = resolve_actor_id(project or self._project)
 
         # boto3 list_events is synchronous I/O; offload to a thread so the
@@ -335,7 +361,7 @@ class AgentCoreBackend:
             lambda: self._data.list_events(
                 memoryId=self._cfg.episodic.memory_id,
                 actorId=actor_id,
-                sessionId=self._session_id,
+                sessionId=session_id,
                 maxResults=limit,
                 includePayloads=True,
             ),

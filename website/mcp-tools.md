@@ -2,6 +2,8 @@
 
 better-memory exposes its functionality via the [Model Context Protocol](https://modelcontextprotocol.io/) over stdio. Once installed, Claude Code calls these tools directly.
 
+In [agentcore mode](agentcore-setup.md), the observation, retrieval, semantic, rating, and session-bootstrap tools dispatch to AWS Bedrock AgentCore instead of the local SQLite database; the synthesis, episode, and retention tools are not registered (noted per tool below).
+
 ## Memory tools
 
 ### `memory.observe`
@@ -58,6 +60,9 @@ Stamp reinforcement outcome on a memory after validation.
 
 Use sparingly and only when the signal is clear. Reinforcement decays stale memories and promotes reliable ones.
 
+!!! note "Id domain in agentcore mode"
+    In agentcore mode this dispatches to AgentCore and only accepts genuine AgentCore memory-record ids (40+ characters, as returned by `memory.retrieve` / `memory.semantic_retrieve` in that mode). Shorter ids — including the event ids returned by `memory.observe` — are rejected with a clear error before any AWS call.
+
 ### `memory.start_episode`
 
 Start a foreground episode for a specific goal. Triggers synthesis on the prior episode if one was open.
@@ -69,11 +74,8 @@ Start a foreground episode for a specific goal. Triggers synthesis on the prior 
 
 Returns `{"episode_id": "<uuid>", "reflections": {...}}`.
 
-!!! note "No-op in agentcore mode"
-    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
-
-!!! note "Response shape differs in agentcore mode"
-    `pending_synthesis` is omitted from the response — AgentCore has no local pending queue. UI consumers should check whether the field is present rather than assuming it always is.
+!!! note "Not registered in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`, so the episode-lifecycle tools are hidden from the advertised tool list in agentcore mode. (The handler stays registered defensively; if called anyway it returns a synthetic episode id and omits `pending_synthesis` — there is no local pending queue.)
 
 ### `memory.close_episode`
 
@@ -88,26 +90,29 @@ Close the active episode.
 !!! note "Outcome enum differs from observations"
     Episode outcomes do **not** include `failure`. The valid set is `success` / `partial` / `abandoned` / `no_outcome`. `failure` is valid for `memory.observe` and `memory.record_use`, not for episodes.
 
-!!! note "No-op in agentcore mode"
-    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
+!!! note "Not registered in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`, so this tool is hidden from the advertised tool list in agentcore mode.
 
 ### `memory.list_episodes`
 
 List recent episodes with their open/closed state.
 
-!!! note "No-op in agentcore mode"
-    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
+!!! note "Not registered in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`, so this tool is hidden from the advertised tool list in agentcore mode.
 
 ### `memory.reconcile_episodes`
 
 Surface and resolve inconsistencies in episode state.
 
-!!! note "No-op in agentcore mode"
-    AgentCore manages event grouping internally via `sessionId`. In agentcore mode this tool succeeds but is effectively a no-op — episode IDs are synthetic and not used downstream.
+!!! note "Not registered in agentcore mode"
+    AgentCore manages event grouping internally via `sessionId`, so this tool is hidden from the advertised tool list in agentcore mode.
 
 ### `memory.run_retention`
 
 Manually trigger the retention service. (Auto-fires on `memory.retrieve` once per 24h.)
+
+!!! note "Not registered in agentcore mode"
+    Local retention rules only apply to `memory.db` content. AgentCore applies its own event expiry (set at `init`), so this tool is hidden from the advertised tool list in agentcore mode — and the auto-fire on `memory.retrieve` is skipped too.
 
 ### `memory.start_ui`
 
@@ -174,7 +179,7 @@ Return the next pending episode's full context: episode metadata, all observatio
 | `project` | string | optional | Defaults to cwd-derived. |
 
 !!! note "Not available in agentcore mode"
-    These tools are NOT registered when `BETTER_MEMORY_STORAGE_BACKEND=agentcore`. AgentCore's built-in episodic strategy performs extraction in the cloud; there is no local pending queue to drain.
+    These tools are NOT registered in agentcore mode (backend resolved from `BETTER_MEMORY_STORAGE_BACKEND`, else `settings.json`). AgentCore's built-in episodic strategy performs extraction in the cloud; there is no local pending queue to drain.
 
 ### `memory.synthesize_next_apply`
 
@@ -189,7 +194,7 @@ Apply a synthesis decision for one episode. Atomically creates new reflections, 
 Returns a step summary: `{episode_id, counts, queue, failure}`.
 
 !!! note "Not available in agentcore mode"
-    These tools are NOT registered when `BETTER_MEMORY_STORAGE_BACKEND=agentcore`. AgentCore's built-in episodic strategy performs extraction in the cloud; there is no local pending queue to drain.
+    These tools are NOT registered in agentcore mode (backend resolved from `BETTER_MEMORY_STORAGE_BACKEND`, else `settings.json`). AgentCore's built-in episodic strategy performs extraction in the cloud; there is no local pending queue to drain.
 
 ## Rating tools
 

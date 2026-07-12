@@ -315,14 +315,15 @@ def test_storage_backend_defaults_to_sqlite(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_storage_backend_agentcore_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The env var alone selects agentcore — no memory-id env vars required.
+
+    The vestigial idvar gate (BETTER_MEMORY_AGENTCORE_{SEMANTIC,EPISODIC}_MEMORY_ID)
+    is deleted; runtime memory ids come exclusively from agentcore.json via the
+    storage factory.
+    """
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
-    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", "mem-sem-abc1234567")
-    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", "mem-epi-xyz1234567")
     cfg = get_config()
     assert cfg.storage_backend == "agentcore"
-    assert cfg.agentcore_region == "eu-west-2"
-    assert cfg.agentcore_semantic_memory_id == "mem-sem-abc1234567"
-    assert cfg.agentcore_episodic_memory_id == "mem-epi-xyz1234567"
 
 
 def test_storage_backend_unknown_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,48 +332,125 @@ def test_storage_backend_unknown_value_raises(monkeypatch: pytest.MonkeyPatch) -
         get_config()
 
 
-def test_agentcore_mode_without_memory_ids_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
-    monkeypatch.delenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", raising=False)
-    monkeypatch.delenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", raising=False)
-    with pytest.raises(ValueError, match="agentcore init"):
-        get_config()
+# ---------------------------------------------------------------------------
+# $BETTER_MEMORY_HOME/settings.json storage_backend resolution
+# ---------------------------------------------------------------------------
+
+
+def _pin_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point BETTER_MEMORY_HOME at a fresh tmp dir and return it."""
+    home = tmp_path / "bm"
+    home.mkdir()
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+    return home
+
+
+def _write_settings(home: Path, text: str) -> None:
+    (home / "settings.json").write_text(text, encoding="utf-8")
+
+
+def test_storage_backend_no_env_no_settings_defaults_to_sqlite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Byte-identical default: no env var, no settings.json → sqlite."""
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    assert get_config().storage_backend == "sqlite"
+
+
+def test_storage_backend_settings_file_selects_agentcore(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """settings.json {"storage_backend": "agentcore"} + no env → agentcore."""
+    home = _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    _write_settings(home, '{"storage_backend": "agentcore"}')
+    assert get_config().storage_backend == "agentcore"
 
 
 @pytest.mark.parametrize(
-    "set_var,unset_var",
+    "env_value,file_value,expected",
     [
-        (
-            "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID",
-            "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID",
-        ),
-        (
-            "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID",
-            "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID",
-        ),
+        ("sqlite", "agentcore", "sqlite"),
+        ("agentcore", "sqlite", "agentcore"),
     ],
 )
-def test_agentcore_mode_with_only_one_memory_id_raises(
-    monkeypatch: pytest.MonkeyPatch, set_var: str, unset_var: str
+def test_storage_backend_env_wins_over_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_value: str,
+    file_value: str,
+    expected: str,
 ) -> None:
-    """Setting only one of the two memory IDs still trips the cross-field check.
+    """BETTER_MEMORY_STORAGE_BACKEND beats settings.json in both directions."""
+    home = _pin_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", env_value)
+    _write_settings(home, f'{{"storage_backend": "{file_value}"}}')
+    assert get_config().storage_backend == expected
 
-    The validation uses ``or``, so each side of the disjunction needs coverage.
-    """
-    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
-    monkeypatch.setenv(set_var, "mem-only-one-1234567")
-    monkeypatch.delenv(unset_var, raising=False)
-    with pytest.raises(ValueError, match="agentcore init"):
+
+def test_storage_backend_settings_without_key_defaults_to_sqlite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A settings.json without a storage_backend key falls back to sqlite."""
+    home = _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    _write_settings(home, '{"unrelated": true}')
+    assert get_config().storage_backend == "sqlite"
+
+
+def test_storage_backend_settings_malformed_json_raises_naming_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    _write_settings(home, "{not valid json")
+    with pytest.raises(ValueError, match="settings.json") as excinfo:
+        get_config()
+    msg = str(excinfo.value)
+    assert str(home / "settings.json") in msg
+    assert "BETTER_MEMORY_STORAGE_BACKEND" in msg  # remediation: env override
+
+
+def test_storage_backend_settings_non_object_raises_naming_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    _write_settings(home, '["storage_backend"]')
+    with pytest.raises(ValueError, match="settings.json"):
         get_config()
 
 
-def test_agentcore_region_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
-    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_REGION", "us-west-2")
-    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", "mem-sem-abc1234567")
-    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", "mem-epi-xyz1234567")
-    cfg = get_config()
-    assert cfg.agentcore_region == "us-west-2"
+def test_storage_backend_settings_invalid_value_raises_naming_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Invalid storage_backend in settings.json errors symmetrically to the env var."""
+    home = _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    _write_settings(home, '{"storage_backend": "bogus"}')
+    with pytest.raises(ValueError, match="storage_backend") as excinfo:
+        get_config()
+    msg = str(excinfo.value)
+    assert str(home / "settings.json") in msg
+    assert "'bogus'" in msg
+    assert "sqlite" in msg and "agentcore" in msg  # valid values listed
+
+
+def test_resolve_storage_backend_public_helper_re_resolves_per_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """resolve_storage_backend() is exported for hooks and never memoized —
+    editing settings.json between calls takes effect immediately."""
+    from better_memory.config import resolve_storage_backend
+
+    home = _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    assert resolve_storage_backend() == "sqlite"
+    _write_settings(home, '{"storage_backend": "agentcore"}')
+    assert resolve_storage_backend() == "agentcore"
+    _write_settings(home, '{"storage_backend": "sqlite"}')
+    assert resolve_storage_backend() == "sqlite"
 
 
 def test_project_name_caches_negative_lookup(tmp_path: Path) -> None:

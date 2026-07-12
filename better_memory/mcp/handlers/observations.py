@@ -15,19 +15,34 @@ from better_memory import _diag
 from better_memory.config import project_name
 from better_memory.services.observation import ObservationService
 from better_memory.services.retention import RetentionService
+from better_memory.storage import StorageBackend
+
+#: AgentCore memoryRecordIds are >= 40 chars (enforced client-side by
+#: botocore). memory.observe returns EVENT ids (shorter, different id
+#: domain) which are not ratable records — without this floor, a
+#: record_use on an event id stalls ~20s in the backend's transient-404
+#: retry loop inside the serialized MCP dispatch loop.
+_MIN_AGENTCORE_RECORD_ID_LEN = 40
 
 
 class ObservationToolHandlers:
-    """Observation create / drill-down / reinforcement / retention."""
+    """Observation create / drill-down / reinforcement / retention.
+
+    ``remote`` (agentcore mode) routes the data tools to the
+    StorageBackend; ``None`` (the sqlite default) keeps the original
+    service path unchanged.
+    """
 
     def __init__(
         self,
         *,
         observations: ObservationService,
         retention: RetentionService,
+        remote: StorageBackend | None = None,
     ) -> None:
         self._observations = observations
         self._retention = retention
+        self._remote = remote
 
     def tools(self) -> dict[str, Any]:
         return {
@@ -44,6 +59,24 @@ class ObservationToolHandlers:
             scope=args.get("scope") or "project",
             component=args.get("component"),
         ):
+            if self._remote is not None:
+                _diag.step("mcp.memory.observe", "calling_remote_observe")
+                obs_id = await self._remote.observe(
+                    content=args["content"],
+                    component=args.get("component"),
+                    theme=args.get("theme"),
+                    trigger_type=args.get("trigger_type"),
+                    outcome=args.get("outcome", "neutral"),
+                    tech=args.get("tech"),
+                    # Same {"scope": null} defence as the sqlite path below.
+                    scope=args.get("scope") or "project",
+                )
+                _diag.step(
+                    "mcp.memory.observe", "remote_returned", obs_id=obs_id
+                )
+                return [
+                    TextContent(type="text", text=json.dumps({"id": obs_id}))
+                ]
             _diag.step("mcp.memory.observe", "calling_observations_create")
             obs_id = await self._observations.create(
                 content=args["content"],
@@ -66,6 +99,23 @@ class ObservationToolHandlers:
         self, args: dict[str, Any]
     ) -> list[TextContent]:
         project = args.get("project") or project_name()
+        if self._remote is not None:
+            remote_results = await self._remote.list_observations(
+                project=project,
+                episode_id=args.get("episode_id"),
+                component=args.get("component"),
+                theme=args.get("theme"),
+                outcome=args.get("outcome"),
+                query=args.get("query"),
+                limit=args.get("limit", 50),
+            )
+            # AgentCore events carry datetime event_timestamps
+            # (botocore-parsed); default=str keeps the payload JSON-safe.
+            return [
+                TextContent(
+                    type="text", text=json.dumps(remote_results, default=str)
+                )
+            ]
         results = await self._observations.list_observations(
             project=project,
             episode_id=args.get("episode_id"),
@@ -78,6 +128,17 @@ class ObservationToolHandlers:
         return [TextContent(type="text", text=json.dumps(results))]
 
     async def record_use(self, args: dict[str, Any]) -> list[TextContent]:
+        if self._remote is not None:
+            record_id = args["id"]
+            if len(record_id) < _MIN_AGENTCORE_RECORD_ID_LEN:
+                raise ValueError(
+                    "memory.record_use in agentcore mode takes an AgentCore "
+                    "memory RECORD id (>= 40 chars, e.g. from "
+                    f"memory.retrieve); got {record_id!r}. Event ids "
+                    "returned by memory.observe are not ratable records."
+                )
+            self._remote.record_use(record_id, outcome=args.get("outcome"))
+            return [TextContent(type="text", text=json.dumps({"ok": True}))]
         self._observations.record_use(
             args["id"],
             outcome=args.get("outcome"),

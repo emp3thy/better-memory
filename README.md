@@ -2,7 +2,7 @@
 
 **better-memory gives your AI coding assistant a memory that grows with your project.** It remembers what worked and what didn't, picks up the preferences and conventions you care about, and when you have to point it back to something it should have used, it records that too — so the same lesson surfaces on its own next time. Every lesson is captured the moment a decision is made and distilled into short, relevance-ranked guidance the assistant pulls up on its own. The result: an assistant that *compounds* — getting sharper on your codebase the more you work together.
 
-It's a memory layer for Claude Code that runs entirely on your machine. Your observations, distilled lessons, and knowledge base live in a local SQLite database — nothing is sent to a cloud service. Even the work of turning raw notes into durable lessons runs inside your own Claude Code session — no separate cloud LLM, no second subscription, no third party seeing your code.
+It's a memory layer for Claude Code that (with the default sqlite backend) runs entirely on your machine. Your observations, distilled lessons, and knowledge base live in a local SQLite database — nothing is sent to a cloud service. Even the work of turning raw notes into durable lessons runs inside your own Claude Code session — no separate cloud LLM, no second subscription, no third party seeing your code. (An optional [AWS-backed backend](website/agentcore-setup.md) exists for teams that want cloud-managed memory.)
 
 ## How it works
 
@@ -34,9 +34,9 @@ better-memory has two storage backends. Pick one:
 | Backend | When to pick | Setup |
 |---|---|---|
 | **`sqlite`** (default) | Single-machine usage; full offline operation; no cloud cost. | None — works out of the box. |
-| **`agentcore`** | Multi-machine syncing; managed extraction by AWS; team-shared memory bucket. | Requires AWS account with Bedrock AgentCore Memory enabled in `eu-west-2`. See [AgentCore setup](website/agentcore-setup.md). |
+| **`agentcore`** | Multi-machine syncing; managed extraction by AWS; team-shared memory bucket. | Requires an AWS account with Bedrock AgentCore Memory available in your chosen region (`init --region` defaults to `eu-west-2`). See [AgentCore setup](website/agentcore-setup.md). |
 
-Switch backends via `BETTER_MEMORY_STORAGE_BACKEND=agentcore` (default: `sqlite`). The MCP server reads the env var at startup and dispatches accordingly. Switching is one-way today — there is no bulk migration tool (deferred; clean start in agentcore mode is the supported path).
+Switching to agentcore is done by `better-memory agentcore init`, which provisions the AWS memories and activates the backend by writing `{"storage_backend": "agentcore"}` to `$BETTER_MEMORY_HOME/settings.json`. The MCP server, hooks, and CLI all resolve the backend the same way: `BETTER_MEMORY_STORAGE_BACKEND` env var if set (always wins), else `settings.json`, else `sqlite`. To revert, remove the `storage_backend` key from `settings.json` or set the env var to `sqlite`. Switching is one-way today — there is no bulk migration tool (deferred; clean start in agentcore mode is the supported path).
 
 `agentcore` mode needs the optional dependency group: `pip install 'better-memory[agentcore]'` (or `uv pip install '.[agentcore]'`). Sqlite-only installs skip boto3 entirely.
 
@@ -87,7 +87,7 @@ Then add to `~/.claude.json` (user-scope MCP — create the file if it doesn't e
 
 And add hooks to `~/.claude/settings.json`:
 
-Four hooks ship. `session_bootstrap` (SessionStart) opens (or reuses) a background episode for the session and injects the project's curated context — project-scoped and general-scope semantic memories plus distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext` so Claude has prior memory available without needing to call any retrieval tool first. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5) render in full; the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` restores the old full-dump behavior). The hook does its work in-process against `memory.db`; if it fails for any reason, a fallback directive is injected instructing Claude to call `mcp__better-memory__memory_session_bootstrap` manually. `contextual_inject` (UserPromptSubmit + PreToolUse) additionally surfaces memories relevant to the current prompt/tool-input mid-session — see [Configuration](website/configuration.md) and [Architecture](website/architecture.md#injection-strategies) for how it scores, floors, and dedups candidates.
+Four hooks ship. `session_bootstrap` (SessionStart) opens (or reuses) a background episode for the session and injects the project's curated context — project-scoped and general-scope semantic memories plus distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext` so Claude has prior memory available without needing to call any retrieval tool first. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5) render in full; the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` restores the old full-dump behavior). The hook does its work in-process against `memory.db` (in agentcore mode it routes through the storage backend instead and never opens the local database); if it fails for any reason, a fallback directive is injected instructing Claude to call `mcp__better-memory__memory_session_bootstrap` manually. `contextual_inject` (UserPromptSubmit + PreToolUse) additionally surfaces memories relevant to the current prompt/tool-input mid-session — see [Configuration](website/configuration.md) and [Architecture](website/architecture.md#injection-strategies) for how it scores, floors, and dedups candidates.
 
 ```json
 {
@@ -167,6 +167,7 @@ One env var roots the runtime filesystem layout:
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model (must produce 768-dim vectors) |
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
 | `BETTER_MEMORY_EMBEDDINGS_BACKEND` | `ollama` | `ollama` (default) — local Ollama at `OLLAMA_HOST`; `sqlite` — pure-SQL trigram-FTS5 fusion, no model downloads and no in-memory state. |
+| `BETTER_MEMORY_STORAGE_BACKEND` | unset | `sqlite` or `agentcore`. Explicit override of the storage backend; when unset, `$BETTER_MEMORY_HOME/settings.json` (written by `better-memory agentcore init`) decides, falling back to `sqlite`. The env var always wins over settings.json. |
 | `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 | `BETTER_MEMORY_PROJECT` | unset | Force the project name for all calls in this process. Highest-priority project-resolution signal — overrides both the `.better-memory` file and the git-derived name. Designed for subprocess scoping (e.g. ralph's executor sets it per-iteration so subagent observations land in the PBI's target_repo regardless of the worktree's cwd). Empty/whitespace-only values are treated as unset. |
 | `BETTER_MEMORY_CONTEXT_INJECT_MODE` | `both` | Contextual memory-injection hook trigger: `userprompt`, `pretool`, `both` (default), or `off`. |
@@ -211,7 +212,7 @@ despite the shared name.
 
 ## MCP tools
 
-The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/tools.py`.
+The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-tools.md`](website/mcp-tools.md) and live in `better_memory/mcp/tools.py`. (In agentcore mode the two synthesis tools, the four episode tools, and `memory.run_retention` are hidden from the advertised list — 15 tools; the memory-data tools dispatch to AWS instead of SQLite.)
 
 **Episodic memory** — observations the AI writes during a session.
 

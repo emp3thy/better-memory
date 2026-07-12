@@ -1,24 +1,25 @@
 diff --git a/better_memory/hooks/session_bootstrap.py b/better_memory/hooks/session_bootstrap.py
-index 52f75de..9baacac 100644
+index d862de1..5097199 100644
 --- a/better_memory/hooks/session_bootstrap.py
 +++ b/better_memory/hooks/session_bootstrap.py
-@@ -68,23 +68,19 @@ def main() -> None:
+@@ -69,6 +69,13 @@ def main() -> None:
  
      try:
          cfg = get_config()
-+        # MUTATION M2: write_session_id hoisted above service.bootstrap() —
++        # MUTATION M2: write_session_id hoisted above the bootstrap work —
 +        # the marker now lands even when bootstrap fails on a virgin home.
 +        write_session_id(
 +            cfg.home,
 +            session_id,
 +            project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
 +        )
-         with closing(connect(cfg.memory_db)) as conn:
-             service = SessionBootstrapService(conn)
-             result = service.bootstrap(
-                 source=source, session_id=session_id, cwd=Path(cwd_str),
-             )
-         rendered = result.additional_context
+         if cfg.storage_backend == "agentcore":
+             # Route through the storage factory like contextual_inject.py:
+             # agentcore mode must never open the local sqlite database. The
+@@ -95,17 +102,6 @@ def main() -> None:
+                     source=source, session_id=session_id, cwd=Path(cwd_str),
+                 )
+             rendered = result.additional_context
 -        # Bridge session_id to the MCP server: it doesn't see CLAUDE_SESSION_ID
 -        # in its spawn env. See better_memory/runtime/session_marker.py.
 -        # Resolution MUST match read_session_id's _resolve_project_dir order:

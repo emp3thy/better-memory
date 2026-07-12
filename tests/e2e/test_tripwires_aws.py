@@ -9,10 +9,13 @@ Proves the T2 harness can never touch real AWS:
   against the fake: every request's Host is ``127.0.0.1:*`` and every
   SigV4 scope is ``Credential=bm-e2e-fake/...`` (i.e. the default chain
   never reached a real ``~/.aws``, SSO cache, IMDS, or shell creds) —
-  red BEFORE anything could ever be billed;
-* workaround containment — the dummy ``BETTER_MEMORY_AGENTCORE_*_MEMORY_ID``
-  literals (FIXME(idvar-gate) workaround) are grep-pinned to exactly two
-  files: the single env helper and the one defect-pin negative test.
+  red BEFORE anything could ever be billed.
+
+The FIXME(idvar-gate) dummy-ID-var containment tripwire that used to live
+here was deleted together with the workaround itself when the vestigial
+config gate was removed (onboarding-fix wave, Task 1); the poison entries
+in ``tests/e2e_meta/test_env_bleed.py`` now prove the removed env vars
+stay inert.
 """
 
 from __future__ import annotations
@@ -24,7 +27,6 @@ from pathlib import Path
 import pytest
 
 from tests.e2e._agentcore_env import (
-    DUMMY_ID_VARS,
     FAKE_ACCESS_KEY_ID,
     FAKE_SECRET_ACCESS_KEY,
     agentcore_env,
@@ -81,10 +83,12 @@ class TestAgentcoreEnvLockdownContract:
             assert Path(str(tmp_path)) in locked.parents
 
         assert env["BETTER_MEMORY_STORAGE_BACKEND"] == "agentcore"
-        assert env["BETTER_MEMORY_AGENTCORE_REGION"]
-        # FIXME(idvar-gate) workaround values present (see _agentcore_env).
-        for var_name, dummy_value in DUMMY_ID_VARS.items():
-            assert env[var_name] == dummy_value
+        # The deleted region/memory-ID env knobs must never reappear: the
+        # helper sets ONLY the backend switch among BETTER_MEMORY_* keys
+        # beyond isolated_env's own pins.
+        assert not any(
+            k.upper().startswith("BETTER_MEMORY_AGENTCORE_") for k in env
+        )
 
     def test_pins_can_remove_lockdown_keys_for_negative_tests(
         self, tmp_path: Path
@@ -162,20 +166,23 @@ class TestAwsLockdownRoundTrip:
                 assert request.operation == "GetMemory"
 
 
-class TestDummyIdVarContainment:
-    """The FIXME(idvar-gate) workaround must never metastasize per-test."""
+class TestDeletedEnvKnobsStayDead:
+    """The deleted BETTER_MEMORY_AGENTCORE_* env knobs must never return.
 
-    #: The ONLY files allowed to spell out the dummy-ID var names:
-    #: the single env helper, and the defect-pin negative test that gets
-    #: deleted together with the workaround when the product fix lands.
-    _ALLOWED = frozenset({"_agentcore_env.py", "test_agentcore_neg.py"})
+    Replaces the old TestDummyIdVarContainment (deleted with the
+    idvar-gate workaround): no e2e test module may spell out the removed
+    memory-ID / region env var names again — re-introducing them would
+    resurrect config surface the product no longer reads.
+    """
 
-    @pytest.mark.parametrize("kind", ["SEMANTIC", "EPISODIC"])
-    def test_dummy_idvar_literal_only_in_helper_and_defect_pin(
-        self, kind: str
+    @pytest.mark.parametrize(
+        "suffix", ["SEMANTIC_MEMORY_ID", "EPISODIC_MEMORY_ID", "REGION"]
+    )
+    def test_deleted_env_var_literal_absent_from_e2e_suite(
+        self, suffix: str
     ) -> None:
         # Built by concatenation so THIS file never matches its own grep.
-        needle = "BETTER_MEMORY_AGENTCORE_" + kind + "_MEMORY_ID"
+        needle = "BETTER_MEMORY_AGENTCORE_" + suffix
         e2e_dir = Path(__file__).resolve().parent
 
         containing = {
@@ -183,17 +190,8 @@ class TestDummyIdVarContainment:
             for path in sorted(e2e_dir.glob("*.py"))
             if needle in path.read_text(encoding="utf-8", errors="ignore")
         }
-
-        offenders = containing - self._ALLOWED
-        assert not offenders, (
-            f"{needle} leaked outside the single helper + defect-pin test "
-            f"(see FIXME(idvar-gate) in _agentcore_env.py): {sorted(offenders)}. "
-            f"Use agentcore_env()/remove_dummy_id_vars_pins() instead."
-        )
-        # Anti-vacuity: the two allowed files really do carry the literal —
-        # an over-eager cleanup that renamed the var would green this test
-        # while breaking the workaround.
-        assert self._ALLOWED <= containing, (
-            f"expected {needle} in {sorted(self._ALLOWED)}, "
-            f"found only in {sorted(containing)}"
+        assert not containing, (
+            f"{needle} was deleted by the onboarding-fix wave (region and "
+            f"memory ids are single-sourced from agentcore.json) but "
+            f"reappeared in: {sorted(containing)}"
         )

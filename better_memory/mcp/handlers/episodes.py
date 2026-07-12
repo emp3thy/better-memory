@@ -29,11 +29,16 @@ class EpisodeToolHandlers:
         observations: ObservationService,
         reflections: ReflectionSynthesisService,
         backend: StorageBackend,
+        remote: StorageBackend | None = None,
     ) -> None:
         self._episodes = episodes
         self._observations = observations
         self._reflections = reflections
         self._backend = backend
+        # agentcore-mode marker: episode tools are hidden from the
+        # advertised list (supports_episodes=False) but stay registered
+        # defensively; reconcile must not surface stale LOCAL episodes.
+        self._remote = remote
 
     def tools(self) -> dict[str, Any]:
         return {
@@ -115,6 +120,11 @@ class EpisodeToolHandlers:
     async def reconcile_episodes(
         self, args: dict[str, Any]
     ) -> list[TextContent]:
+        if self._remote is not None:
+            # AgentCore manages event grouping itself; the local episodes
+            # table is not the source of truth in agentcore mode, so a
+            # defensive caller gets an empty list rather than stale rows.
+            return [TextContent(type="text", text=json.dumps([]))]
         open_episodes = self._episodes.unclosed_episodes(
             exclude_session_ids={self._observations.session_id}
         )

@@ -15,11 +15,12 @@ from contextlib import closing
 from pathlib import Path
 
 from better_memory._common import get_session_id
-from better_memory.config import get_config
+from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.hooks._error_log import record_hook_error
 from better_memory.runtime.session_marker import write_session_id
 from better_memory.services.session_bootstrap import SessionBootstrapService
+from better_memory.storage import build_backend
 
 _MAX_STDIN_BYTES = 1_048_576
 
@@ -68,12 +69,32 @@ def main() -> None:
 
     try:
         cfg = get_config()
-        with closing(connect(cfg.memory_db)) as conn:
-            service = SessionBootstrapService(conn)
-            result = service.bootstrap(
+        if cfg.storage_backend == "agentcore":
+            # Route through the storage factory like contextual_inject.py:
+            # agentcore mode must never open the local sqlite database. The
+            # backend returns the BootstrapResult-shaped dict (see
+            # AgentCoreBackend.session_bootstrap); on any failure (missing
+            # agentcore.json, boto3 absent, wire error) the except below
+            # emits the manual-bootstrap fallback directive — never a
+            # silent fall-through to sqlite.
+            backend = build_backend(
+                config=cfg,
+                memory_conn=None,
+                embedder=None,
+                session_id=session_id or None,
+                project=project_name(Path(cwd_str)),
+            )
+            remote_result = backend.session_bootstrap(
                 source=source, session_id=session_id, cwd=Path(cwd_str),
             )
-        rendered = result.additional_context
+            rendered = str(remote_result["additional_context"])
+        else:
+            with closing(connect(cfg.memory_db)) as conn:
+                service = SessionBootstrapService(conn)
+                result = service.bootstrap(
+                    source=source, session_id=session_id, cwd=Path(cwd_str),
+                )
+            rendered = result.additional_context
         # Bridge session_id to the MCP server: it doesn't see CLAUDE_SESSION_ID
         # in its spawn env. See better_memory/runtime/session_marker.py.
         # Resolution MUST match read_session_id's _resolve_project_dir order:

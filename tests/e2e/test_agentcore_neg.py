@@ -2,15 +2,18 @@
 
 The failure surfaces a brand-new agentcore user actually hits:
 
-* D8  ``e2e-ac-neg-prehandshake-config-errors`` — parametrized idvar-gate
-      (KNOWN-DEFECT PIN) + backend-name typo, sharing one raw-spawn helper;
+* D8  ``e2e-ac-neg-prehandshake-config-errors`` — backend-name typo dying
+      loudly pre-handshake (the idvar-gate KNOWN-DEFECT PIN param was
+      deleted with the gate itself, onboarding-fix wave Task 1);
 * D9  ``e2e-ac-neg-missing-agentcore-json`` — raw + SDK-client levels
-      (the enduring negative that survives the idvar-gate fix);
+      (the enduring negative that survived the idvar-gate fix);
 * D10 ``e2e-ac-neg-corrupt-agentcore-json`` — truncated JSON + forward
-      schema_version, both fail loudly, neither offers remediation (pin);
+      schema_version, both fail loudly naming the file WITH ``agentcore
+      init`` remediation (inverted from the old no-remediation pin);
 * D11 ``e2e-ac-neg-boto3-missing`` — PYTHONPATH shadow simulating a plain
-      ``pip install better-memory`` (no [agentcore] extra), raw traceback
-      with no install hint (PRODUCT GAP PIN), content-based control run.
+      ``pip install better-memory`` (no [agentcore] extra), now dying with
+      the ``better-memory[agentcore]`` install hint (inverted from the old
+      raw-traceback pin), content-based control run.
 """
 
 from __future__ import annotations
@@ -26,7 +29,6 @@ from mcp.shared.exceptions import McpError
 
 from tests.e2e._agentcore_env import (
     agentcore_env,
-    remove_dummy_id_vars_pins,
     write_fake_agentcore_json,
 )
 from tests.e2e._env import isolated_env
@@ -68,69 +70,42 @@ def _assert_prehandshake_death(
 
 
 class TestPrehandshakeConfigErrors:
-    @pytest.mark.parametrize("case", ["idvar-gate", "backend-typo"])
+    @pytest.mark.parametrize("case", ["backend-typo"])
     def test_config_error_kills_server_prehandshake_before_any_disk_write(
         self, case: str, clean_slate_home: Path
     ) -> None:
-        """Two get_config() raises sharing one spawn helper + one shared
-        ordering pin (config is validated before ANY disk write — no
-        memory.db afterwards, distinguishing config-stage death from the
-        post-config failures in TestMissingAgentCoreJson).
+        """get_config() raise + ordering pin (config is validated before
+        ANY disk write — no memory.db afterwards, distinguishing
+        config-stage death from the post-config failures in
+        TestMissingAgentCoreJson).
 
-        [idvar-gate] KNOWN-DEFECT PIN (design section 4 item 1): the
-        presence-only gate at better_memory/config.py:293-301 is vestigial
-        — its values are consumed by nothing (IDs come from
-        agentcore.json; commit 0056935 switched the transport) and its own
-        remediation text ('agentcore init') cannot clear it, since init
-        never sets env vars. Every documented agentcore setup dies
-        pre-handshake like this. DELETE this case together with the
-        FIXME(idvar-gate) dummy vars in tests/e2e/_agentcore_env.py when
-        the product fix lands.
+        The old [idvar-gate] KNOWN-DEFECT PIN param was DELETED per its
+        own deletion contract when the vestigial presence-only gate was
+        removed from better_memory/config.py (onboarding-fix wave Task 1).
 
         [backend-typo] 'AgentCore' (case typo) must die loudly with the
         offending value echoed — never silently coerce/default to sqlite
         (the worst-case silent misconfig: the user believes they are on
         AWS while every memory lands in a local file)."""
+        assert case == "backend-typo"
         bm_home = _bm_home(clean_slate_home)
 
-        if case == "idvar-gate":
-            with FakeAgentCore() as fake:
-                write_fake_agentcore_json(bm_home)  # valid json — gate still kills
-                env = agentcore_env(
-                    clean_slate_home, fake.port, **remove_dummy_id_vars_pins()
-                )
-                rc, out, err = run_hook(_SERVER_MODULE, None, env)
-                assert fake.requests == []
-            _assert_prehandshake_death(
-                rc,
-                out,
-                err,
-                [
-                    "BETTER_MEMORY_STORAGE_BACKEND=agentcore requires both",
-                    "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID",
-                    "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID",
-                    # Pins the remediation that cannot actually clear the
-                    # gate — anyone rewording it re-reads this docstring.
-                    "agentcore init",
-                ],
-            )
-        else:
-            env = isolated_env(
-                clean_slate_home, BETTER_MEMORY_STORAGE_BACKEND="AgentCore"
-            )
-            rc, out, err = run_hook(_SERVER_MODULE, None, env)
-            _assert_prehandshake_death(
-                rc,
-                out,
-                err,
-                [
-                    "ValueError",
-                    "is not one of",
-                    "'AgentCore'",  # repr'd — the user can SEE the typo
-                ],
-            )
+        env = isolated_env(
+            clean_slate_home, BETTER_MEMORY_STORAGE_BACKEND="AgentCore"
+        )
+        rc, out, err = run_hook(_SERVER_MODULE, None, env)
+        _assert_prehandshake_death(
+            rc,
+            out,
+            err,
+            [
+                "ValueError",
+                "is not one of",
+                "'AgentCore'",  # repr'd — the user can SEE the typo
+            ],
+        )
 
-        # Shared ordering pin: get_config raises before connect() —
+        # Ordering pin: get_config raises before connect() —
         # config failures leave zero disk artifacts.
         assert not (bm_home / "memory.db").exists()
 
@@ -144,9 +119,9 @@ class TestMissingAgentCoreJson:
     def test_raw_spawn_remediation_text_and_migrated_before_failure(
         self, clean_slate_home: Path
     ) -> None:
-        """ID vars set but no agentcore.json (the classic second-machine
-        setup failure): pre-handshake FileNotFoundError with the one
-        accurate remediation hint in this flow. Plus the ordering/docs
+        """backend=agentcore but no agentcore.json (the classic
+        second-machine setup failure): pre-handshake FileNotFoundError
+        with the accurate ``agentcore init`` remediation hint. Plus the ordering/docs
         pin: create_server migrates BOTH sqlite DBs BEFORE build_backend
         fails, so a *migrated* memory.db exists after the failed boot
         (sqlite_master > 0 — distinguishing it from the hook's schema-less
@@ -228,11 +203,10 @@ class TestCorruptAgentCoreJson:
     ) -> None:
         """Truncated JSON (killed-mid-write / hand-edit) and a forward
         schema_version both raise AgentCoreConfigError naming the file —
-        the fail-loud contract the persistence module docstring promises.
-        NEGATIVE PIN (design section 4 item 8): unlike the missing-file
-        path, the corrupt-file error offers NO 'agentcore init'
-        remediation — a flagged product gap; flip the last assertion when
-        remediation text is added."""
+        the fail-loud contract the persistence module docstring promises —
+        AND carry 'agentcore init' remediation text (inverted from the old
+        design-section-4-item-8 no-remediation pin when the onboarding-fix
+        wave added the shared remediation sentence)."""
         bm_home = _bm_home(clean_slate_home)
         if case == "truncated":
             bm_home.mkdir(parents=True)
@@ -260,8 +234,9 @@ class TestCorruptAgentCoreJson:
             err,
             ["AgentCoreConfigError", "agentcore.json", *case_stderr],
         )
-        # Product-gap pin: no remediation breadcrumb on the corrupt path.
-        assert "agentcore init" not in err
+        # Inverted (old product-gap pin): the corrupt path now carries the
+        # delete-then-re-init remediation breadcrumb.
+        assert "agentcore init" in err
 
 
 # ---------------------------------------------------------------------------
@@ -270,15 +245,16 @@ class TestCorruptAgentCoreJson:
 
 
 class TestBoto3MissingImportSurface:
-    def test_shadowed_boto3_yields_raw_traceback_without_install_hint(
+    def test_shadowed_boto3_dies_with_install_hint(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
-        """PRODUCT GAP PIN (design section 4 item 7): a plain
-        ``pip install better-memory`` (no [agentcore] extra) +
+        """Inverted from the old design-section-4-item-7 product-gap pin:
+        a plain ``pip install better-memory`` (no [agentcore] extra) +
         backend=agentcore dies at the lazy ``import boto3`` in
-        better_memory/storage/factory.py with a RAW ModuleNotFoundError —
-        no 'better-memory[agentcore]' / 'pip install' breadcrumb. INVERT
-        the two 'not in' assertions when the friendly message lands.
+        better_memory/storage/factory.py with a ModuleNotFoundError that
+        NOW carries the friendly "pip install 'better-memory[agentcore]'"
+        breadcrumb (chained ``from exc``, so the original
+        "No module named 'boto3'" traceback line survives too).
 
         boto3 is a dev-group dep in this venv, so absence is simulated
         with a PYTHONPATH-front shadow module. The shadow's raise SITE
@@ -311,9 +287,9 @@ class TestBoto3MissingImportSurface:
                 err,
                 ["ModuleNotFoundError", "No module named 'boto3'"],
             )
-            # PRODUCT GAP PIN — inverted assertions (see docstring).
-            assert "better-memory[agentcore]" not in err
-            assert "pip install" not in err
+            # Inverted (old product-gap pin): friendly install hint present.
+            assert "better-memory[agentcore]" in err
+            assert "pip install" in err
 
             # Vacuity guard: the same env WITHOUT the shadow must not die
             # on the boto3 import — proving the shadow (not some other

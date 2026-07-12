@@ -62,6 +62,26 @@ def _strip_leaked_claude_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_better_memory_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin ``BETTER_MEMORY_HOME`` to a per-test tmp dir.
+
+    The storage backend is resolved from ``$BETTER_MEMORY_HOME/settings.json``
+    when the ``BETTER_MEMORY_STORAGE_BACKEND`` env var is unset, so any test
+    calling ``get_config()`` / ``resolve_storage_backend()`` without pinning
+    the home would read the developer's real ``~/.better-memory/settings.json``
+    and could silently flip to the agentcore backend. Tests that deliberately
+    exercise the real-home default explicitly ``delenv`` the variable; tests
+    that need a specific home ``setenv`` over this pin.
+
+    (E2E tests are unaffected: they build child-process environments from
+    scratch via the ``isolated_env`` helpers and never inherit this value.)
+    """
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_path / "bm-home"))
+
+
 @pytest.fixture
 def tmp_memory_db(tmp_path: Path) -> Iterator[Path]:
     """Yield a path to a fresh (non-existent) SQLite database file.

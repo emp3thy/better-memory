@@ -47,8 +47,16 @@ def _build_agentcore_data_client(region: str):
     Defined as a module-level function so tests can patch it without needing
     boto3 installed. boto3 is imported lazily so sqlite-mode hooks never pay
     for the import."""
-    import boto3
-    from botocore.config import Config as BotoConfig
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+    except ImportError as exc:
+        # Same install hint as better_memory/storage/factory.py — keep the
+        # two lazy-import surfaces consistent.
+        raise ModuleNotFoundError(
+            "boto3 is required for the agentcore storage backend. "
+            "Install it with: pip install 'better-memory[agentcore]'"
+        ) from exc
     return boto3.client(
         "bedrock-agentcore",
         config=BotoConfig(
@@ -69,11 +77,28 @@ def _fire_agentcore_closure(*, session_id: str, project: str) -> bool:
     `better_memory/storage/session.py` so there's a single source of truth
     for the payload shape and actor-id resolution — AgentCoreBackend.observe
     uses the same helpers."""
-    # Env-var guard BEFORE any import so sqlite-mode pays nothing.
-    if os.environ.get("BETTER_MEMORY_STORAGE_BACKEND", "sqlite") != "agentcore":
+    # Env-var check BEFORE any lazy import or file I/O: an explicit env value
+    # keeps today's semantics — sqlite-mode (or any non-agentcore value) pays
+    # nothing and skips even the settings.json resolver.
+    env_backend = os.environ.get("BETTER_MEMORY_STORAGE_BACKEND")
+    if env_backend is not None and env_backend != "agentcore":
         return False
 
     try:
+        if env_backend is None:
+            # No env override: resolve via the shared helper (env →
+            # $BETTER_MEMORY_HOME/settings.json → "sqlite"). Installed hooks
+            # get no env from Claude Code, so the settings file written by
+            # `agentcore init` is what activates the closure (defect 4).
+            # Import stays lazy so the explicit-env fast path above never
+            # touches the resolver. A resolver error (e.g. corrupt
+            # settings.json) falls into the except below: record_hook_error
+            # + return False — hooks never fail, marker still written.
+            from better_memory.config import resolve_storage_backend
+
+            if resolve_storage_backend() != "agentcore":
+                return False
+
         # Lazy imports — sqlite mode short-circuited above and never reaches
         # this block.
         from datetime import UTC, datetime

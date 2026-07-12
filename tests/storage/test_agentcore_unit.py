@@ -203,20 +203,63 @@ async def test_observe_drops_none_metadata_keys(backend, mock_data_client) -> No
     assert metadata["theme"]["stringValue"] == "bug"
 
 
-@pytest.mark.asyncio
-async def test_observe_raises_value_error_when_session_id_is_none(ac_config, mock_data_client, mock_control_client) -> None:
-    """CreateEvent on the episodic memory requires sessionId (per the
-    output schema and our usage pattern). A backend with session_id=None
-    cannot fire events — raise so the operator sees the misconfiguration."""
-    backend = AgentCoreBackend(
+@pytest.fixture
+def backend_without_session(
+    ac_config, mock_data_client, mock_control_client
+) -> AgentCoreBackend:
+    return AgentCoreBackend(
         config=ac_config,
         data_client=mock_data_client,
         control_client=mock_control_client,
         session_id=None,
         project="testproj",
     )
+
+
+@pytest.mark.asyncio
+async def test_observe_raises_when_session_id_unresolvable(
+    backend_without_session, mock_data_client
+) -> None:
+    """session_id=None triggers lazy re-resolution (env var → SessionStart
+    marker under $BETTER_MEMORY_HOME). With neither available observe must
+    still raise — and make ZERO wire calls. (The autouse conftest fixtures
+    strip CLAUDE_*SESSION_ID and pin BETTER_MEMORY_HOME to an empty tmp
+    dir, so nothing resolves here.)"""
     with pytest.raises(ValueError, match="session_id"):
-        await backend.observe(content="x")
+        await backend_without_session.observe(content="x")
+    mock_data_client.create_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_observe_lazily_resolves_session_id_from_env(
+    backend_without_session, mock_data_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP server may spawn before CLAUDE_SESSION_ID / the marker
+    exists; a backend frozen at session_id=None must re-resolve at first
+    observe instead of raising forever."""
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-resolved-session")
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    result = await backend_without_session.observe(content="x")
+    assert result == "evt-x"
+    kwargs = mock_data_client.create_event.call_args.kwargs
+    assert kwargs["sessionId"] == "env-resolved-session"
+
+
+@pytest.mark.asyncio
+async def test_observe_lazily_resolves_session_id_from_marker(
+    backend_without_session, mock_data_client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Marker-file fallback: the SessionStart hook writes the marker after
+    the server spawns; observe picks it up on first use."""
+    from better_memory.runtime.session_marker import write_session_id
+
+    bm_home = tmp_path / "bm-marker-home"
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(bm_home))
+    write_session_id(bm_home, "marker-resolved-session")
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    await backend_without_session.observe(content="x")
+    kwargs = mock_data_client.create_event.call_args.kwargs
+    assert kwargs["sessionId"] == "marker-resolved-session"
 
 
 @pytest.mark.asyncio
@@ -277,16 +320,25 @@ async def test_list_observations_returns_empty_when_no_events(backend, mock_data
 
 
 @pytest.mark.asyncio
-async def test_list_observations_raises_when_session_id_is_none(ac_config, mock_data_client, mock_control_client) -> None:
-    backend = AgentCoreBackend(
-        config=ac_config,
-        data_client=mock_data_client,
-        control_client=mock_control_client,
-        session_id=None,
-        project="testproj",
-    )
+async def test_list_observations_raises_when_session_id_unresolvable(
+    backend_without_session, mock_data_client
+) -> None:
+    """Same lazy re-resolution contract as observe: env → marker → raise
+    with zero wire calls when nothing resolves."""
     with pytest.raises(ValueError, match="session_id"):
-        await backend.list_observations(limit=5)
+        await backend_without_session.list_observations(limit=5)
+    mock_data_client.list_events.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_list_observations_lazily_resolves_session_id_from_env(
+    backend_without_session, mock_data_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-resolved-session")
+    mock_data_client.list_events.return_value = {"events": []}
+    assert await backend_without_session.list_observations(limit=5) == []
+    kwargs = mock_data_client.list_events.call_args.kwargs
+    assert kwargs["sessionId"] == "env-resolved-session"
 
 
 def test_retrieve_returns_dict_with_polarity_buckets(backend, mock_data_client) -> None:

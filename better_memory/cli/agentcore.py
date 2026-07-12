@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -28,9 +29,9 @@ from better_memory.storage.agentcore_persistence import (
 
 _POLL_INTERVAL_S = 5
 # Bumped to 240s vs the 180s the Plan 2 smoke uses: smoke runs solo against
-# a clean account, but `init` runs after the user has just `export`ed env
-# vars and may be hitting a fresh / cold region — small extra headroom is
-# cheap and prevents the user thinking init hung.
+# a clean account, but `init` is often the user's very first call into a
+# fresh / cold region — small extra headroom is cheap and prevents the user
+# thinking init hung.
 _POLL_TIMEOUT_S = 240
 
 
@@ -49,6 +50,15 @@ def add_subparsers(parent: argparse.ArgumentParser) -> None:
         "--force",
         action="store_true",
         help="Overwrite existing agentcore.json",
+    )
+    p_init.add_argument(
+        "--no-activate",
+        action="store_true",
+        help=(
+            "Provision the AWS memories and write agentcore.json without "
+            "activating the agentcore backend in settings.json "
+            "(provision-only scripting)"
+        ),
     )
 
     p_status = subparsers.add_parser(
@@ -86,6 +96,51 @@ def _resolve_home(arg_home: str | None) -> Path:
     if arg_home:
         return Path(arg_home).expanduser()
     return Path(os.environ.get("BETTER_MEMORY_HOME", "~/.better-memory")).expanduser()
+
+
+def _write_settings_activation(home: Path) -> Path:
+    """Persist ``{"storage_backend": "agentcore"}`` into ``<home>/settings.json``.
+
+    Merges into an existing JSON object so unrelated keys survive; a missing
+    or corrupt file is replaced wholesale (init IS the remediation path for a
+    broken settings.json, so it must not crash on one). Written atomically —
+    tmp file + replace, the same pattern as ``save_agentcore_config``.
+    """
+    settings_path = home / "settings.json"
+    data: dict[str, Any] = {}
+    try:
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            data = raw
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    data["storage_backend"] = "agentcore"
+    home.mkdir(parents=True, exist_ok=True)
+    tmp = settings_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(settings_path)
+    return settings_path
+
+
+def _effective_backend(home: Path) -> tuple[str, str]:
+    """Resolve the backend ``home`` would use, plus where the answer came from.
+
+    Mirrors :func:`better_memory.config.resolve_storage_backend` but honours
+    the CLI's ``--home`` override (the config resolver only reads
+    ``$BETTER_MEMORY_HOME``) and reports the source: ``env`` / ``settings`` /
+    ``default``. May raise ``ValueError`` on a corrupt settings.json.
+    """
+    import os
+
+    from better_memory.config import _read_settings_storage_backend
+
+    raw = os.environ.get("BETTER_MEMORY_STORAGE_BACKEND")
+    if raw is not None:
+        return raw, "env"
+    from_file = _read_settings_storage_backend(home)
+    if from_file is not None:
+        return from_file, "settings"
+    return "sqlite", "default"
 
 
 def _build_control_client(region: str) -> Any:
@@ -304,15 +359,38 @@ def _handle_init(args: argparse.Namespace) -> int:
     )
     save_agentcore_config(cfg, home)
 
+    settings_path = home / "settings.json"
+    activate = not args.no_activate
+    if activate:
+        _write_settings_activation(home)
+
     print()
     print(f"agentcore.json written to {config_path}")
     print(f"  episodic memory_id: {episodic.memory_id}")
     print(f"  semantic memory_id: {semantic.memory_id}")
     print()
+    if activate:
+        print(
+            f"agentcore is now the default backend for {home} (persisted in "
+            f"{settings_path}; the BETTER_MEMORY_STORAGE_BACKEND env var "
+            f"still overrides — unset it or set it to agentcore). To revert: "
+            f"remove 'storage_backend' from settings.json or set the env var "
+            f"to sqlite."
+        )
+    else:
+        print(
+            f"Activation skipped (--no-activate): agentcore.json is written "
+            f"but the backend for {home} is unchanged. To activate later, "
+            f'add {{"storage_backend": "agentcore"}} to {settings_path} or '
+            f"set BETTER_MEMORY_STORAGE_BACKEND=agentcore."
+        )
+    print()
     print("Next steps:")
-    print("  1. Export BETTER_MEMORY_STORAGE_BACKEND=agentcore")
-    print("  2. Restart your MCP server (or Claude Code session)")
-    print("  3. Run `better-memory agentcore smoke` to verify the round-trip")
+    print("  1. Restart Claude Code (or your MCP server) so it picks up the new backend")
+    print("  2. Run `better-memory agentcore status` to confirm the effective backend")
+    print("     and that both memories are ACTIVE")
+    print("  3. Run `better-memory agentcore smoke` to verify the AWS round-trip")
+    print("     (smoke validates AWS credentials and wire access, not MCP registration)")
     return 0
 
 
@@ -326,6 +404,17 @@ def _handle_status(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+
+    try:
+        backend, source = _effective_backend(home)
+        print(f"effective backend: {backend} (source: {source})")
+    except ValueError as exc:
+        # A corrupt settings.json must not take `status` down — it is the
+        # diagnostic tool the user reaches for. Warn and keep reporting.
+        print(
+            f"WARN: could not resolve the effective backend: {exc}",
+            file=sys.stderr,
+        )
 
     region = args.region or cfg.region
     control = _build_control_client(region)

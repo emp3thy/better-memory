@@ -45,12 +45,17 @@ class ReflectionToolHandlers:
         spool: SpoolService,
         memory_conn: sqlite3.Connection,
         home: Path,
+        remote: StorageBackend | None = None,
     ) -> None:
         self._backend = backend
         self._reflections = reflections
         self._spool = spool
         self._memory_conn = memory_conn
         self._home = home
+        # agentcore-mode marker: gates the sqlite-local best-effort
+        # pre-hooks inside ``retrieve`` (spool drain + retention). The
+        # retrieval itself always goes through ``backend``.
+        self._remote = remote
 
     def tools(self) -> dict[str, Any]:
         return {
@@ -74,27 +79,35 @@ class ReflectionToolHandlers:
                 t_retrieve = time.monotonic()
                 _diag.log(f"[bm-retrieve start cid={diag_cid}]")
 
-            # 1. Drain spool — must happen before any retrieval so fresh
-            #    hook events (session_start, commit_close) are processed.
-            #    SpoolService.drain is idempotent.
-            _diag.step("mcp.memory.retrieve", "before_spool_drain")
-            run_best_effort("spool.drain", self._spool.drain, diag_cid=diag_cid)
-            _diag.step("mcp.memory.retrieve", "after_spool_drain")
+            # Local best-effort pre-hooks run on the sqlite path only
+            # (remote is None). In agentcore mode both would mutate local
+            # episode/retention rows that no longer back retrieval; the
+            # spool markers written by session hooks simply accumulate
+            # un-drained there (files, not sqlite — no correctness impact).
+            if self._remote is None:
+                # 1. Drain spool — must happen before any retrieval so fresh
+                #    hook events (session_start, commit_close) are processed.
+                #    SpoolService.drain is idempotent.
+                _diag.step("mcp.memory.retrieve", "before_spool_drain")
+                run_best_effort(
+                    "spool.drain", self._spool.drain, diag_cid=diag_cid
+                )
+                _diag.step("mcp.memory.retrieve", "after_spool_drain")
 
-            # 2. Maybe run retention. Guard ensures at most once per 24h
-            #    regardless of how often retrieve is called. Best-effort:
-            #    a retention failure must NEVER block memory.retrieve.
-            def _retention_step() -> None:
-                cfg = get_config()
-                RetentionScheduler(
-                    self._memory_conn, auto_prune=cfg.auto_prune
-                ).maybe_run(triggered_by="retrieve")
+                # 2. Maybe run retention. Guard ensures at most once per 24h
+                #    regardless of how often retrieve is called. Best-effort:
+                #    a retention failure must NEVER block memory.retrieve.
+                def _retention_step() -> None:
+                    cfg = get_config()
+                    RetentionScheduler(
+                        self._memory_conn, auto_prune=cfg.auto_prune
+                    ).maybe_run(triggered_by="retrieve")
 
-            _diag.step("mcp.memory.retrieve", "before_retention_scheduler")
-            run_best_effort(
-                "retention scheduler", _retention_step, diag_cid=diag_cid
-            )
-            _diag.step("mcp.memory.retrieve", "after_retention_scheduler")
+                _diag.step("mcp.memory.retrieve", "before_retention_scheduler")
+                run_best_effort(
+                    "retention scheduler", _retention_step, diag_cid=diag_cid
+                )
+                _diag.step("mcp.memory.retrieve", "after_retention_scheduler")
 
             project = args.get("project") or project_name()
             limit_per_bucket = args.get("limit_per_bucket", 20)
