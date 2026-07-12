@@ -15,6 +15,15 @@ from pathlib import Path
 _AGENTCORE_FILE = "agentcore.json"
 _CURRENT_SCHEMA_VERSION = 1
 
+# Shared remediation sentence for every AgentCoreConfigError. `init` without
+# --force refuses to run while the file exists (cli/agentcore.py), so the
+# delete-then-init / --force wording is deliberate.
+_REMEDIATION = (
+    "Delete the file and re-run `better-memory agentcore init` (or use "
+    "`--force`); existing AWS memories can be re-linked by hand-editing "
+    "the file."
+)
+
 
 class AgentCoreConfigError(Exception):
     """Raised when agentcore.json is missing required fields, corrupt,
@@ -71,23 +80,26 @@ def load_agentcore_config(home: Path) -> AgentCoreConfig | None:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise AgentCoreConfigError(
-            f"failed to parse {target}: {exc}"
+            f"failed to parse {target}: {exc}. {_REMEDIATION}"
         ) from exc
 
     if not isinstance(raw, dict):
-        raise AgentCoreConfigError(f"{target} is not a JSON object")
+        raise AgentCoreConfigError(
+            f"{target} is not a JSON object. {_REMEDIATION}"
+        )
 
     schema_version = raw.get("schema_version")
     if schema_version != _CURRENT_SCHEMA_VERSION:
         raise AgentCoreConfigError(
             f"{target} has unsupported schema_version={schema_version!r}; "
-            f"expected {_CURRENT_SCHEMA_VERSION}"
+            f"expected {_CURRENT_SCHEMA_VERSION} — this file may have been "
+            f"written by a newer better-memory. {_REMEDIATION}"
         )
 
     for required in ("region", "semantic", "episodic"):
         if required not in raw:
             raise AgentCoreConfigError(
-                f"{target} missing required field {required!r}"
+                f"{target} missing required field {required!r}. {_REMEDIATION}"
             )
 
     try:
@@ -99,5 +111,6 @@ def load_agentcore_config(home: Path) -> AgentCoreConfig | None:
         )
     except TypeError as exc:
         raise AgentCoreConfigError(
-            f"{target} has malformed semantic / episodic block: {exc}"
+            f"{target} has malformed semantic / episodic block: {exc}. "
+            f"{_REMEDIATION}"
         ) from exc

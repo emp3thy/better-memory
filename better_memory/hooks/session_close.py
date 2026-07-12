@@ -16,6 +16,7 @@ import os
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from better_memory._common import (
     default_spool_dir,
@@ -24,7 +25,7 @@ from better_memory._common import (
     resolve_home,
     safe_timestamp,
 )
-from better_memory.config import get_config
+from better_memory.config import get_config, project_name
 
 # Mirror the observer cap: reject any stdin payload above 1 MiB without
 # raising. Hooks must never fail.
@@ -47,8 +48,16 @@ def _build_agentcore_data_client(region: str):
     Defined as a module-level function so tests can patch it without needing
     boto3 installed. boto3 is imported lazily so sqlite-mode hooks never pay
     for the import."""
-    import boto3
-    from botocore.config import Config as BotoConfig
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+    except ImportError as exc:
+        # Same install hint as better_memory/storage/factory.py — keep the
+        # two lazy-import surfaces consistent.
+        raise ModuleNotFoundError(
+            "boto3 is required for the agentcore storage backend. "
+            "Install it with: pip install 'better-memory[agentcore]'"
+        ) from exc
     return boto3.client(
         "bedrock-agentcore",
         config=BotoConfig(
@@ -57,7 +66,7 @@ def _build_agentcore_data_client(region: str):
     )
 
 
-def _fire_agentcore_closure(*, session_id: str, project: str) -> bool:
+def _fire_agentcore_closure(*, session_id: str, cwd: str) -> bool:
     """In agentcore mode, fire one CreateEvent(role=OTHER) against the
     current session. Returns True if a closure event was fired, False if
     we short-circuited (sqlite mode, missing config, or any failure).
@@ -68,12 +77,38 @@ def _fire_agentcore_closure(*, session_id: str, project: str) -> bool:
     Reuses Plan 2's `closure_event_payload()` + `resolve_actor_id()` from
     `better_memory/storage/session.py` so there's a single source of truth
     for the payload shape and actor-id resolution — AgentCoreBackend.observe
-    uses the same helpers."""
-    # Env-var guard BEFORE any import so sqlite-mode pays nothing.
-    if os.environ.get("BETTER_MEMORY_STORAGE_BACKEND", "sqlite") != "agentcore":
+    uses the same helpers.
+
+    ``cwd`` is the payload's working directory; the project is resolved from
+    it via ``config.project_name`` INSIDE this function (after the backend
+    gate) so it matches the server's ``resolve_actor_id(project_name())``
+    exactly — a plain ``basename(cwd)`` diverges on git worktrees,
+    subdirectories, and ``BETTER_MEMORY_PROJECT`` / ``.better-memory``
+    overrides, sending the closure event to an actor stream the session's
+    events never used. Empty ``cwd`` resolves to the ``"general"`` bucket,
+    and sqlite mode never pays the git-walk cost."""
+    # Env-var check BEFORE any lazy import or file I/O: an explicit env value
+    # keeps today's semantics — sqlite-mode (or any non-agentcore value) pays
+    # nothing and skips even the settings.json resolver.
+    env_backend = os.environ.get("BETTER_MEMORY_STORAGE_BACKEND")
+    if env_backend is not None and env_backend != "agentcore":
         return False
 
     try:
+        if env_backend is None:
+            # No env override: resolve via the shared helper (env →
+            # $BETTER_MEMORY_HOME/settings.json → "sqlite"). Installed hooks
+            # get no env from Claude Code, so the settings file written by
+            # `agentcore init` is what activates the closure (defect 4).
+            # Import stays lazy so the explicit-env fast path above never
+            # touches the resolver. A resolver error (e.g. corrupt
+            # settings.json) falls into the except below: record_hook_error
+            # + return False — hooks never fail, marker still written.
+            from better_memory.config import resolve_storage_backend
+
+            if resolve_storage_backend() != "agentcore":
+                return False
+
         # Lazy imports — sqlite mode short-circuited above and never reaches
         # this block.
         from datetime import UTC, datetime
@@ -90,6 +125,11 @@ def _fire_agentcore_closure(*, session_id: str, project: str) -> bool:
         cfg = load_agentcore_config(home)
         if cfg is None:
             return False
+
+        # Actor-id parity with the server (see docstring): resolve the
+        # project through the same helper the server uses. None (empty cwd)
+        # falls back to the "general" bucket inside resolve_actor_id.
+        project = project_name(Path(cwd)) if cwd.strip() else None
 
         client = _build_agentcore_data_client(cfg.region)
         client.create_event(
@@ -274,17 +314,13 @@ def main() -> None:
         # strategy triggers extraction within minutes rather than waiting
         # ~15-20m for idle detection (spec § "Spike findings" Finding 2).
         # Non-fatal: failure is logged but does not block the spool marker.
-        project_for_closure = (
-            data.get("cwd", "general") or "general"
-        )
-        if isinstance(project_for_closure, str):
-            # Use git-derived project name when possible; fall back to "general"
-            project_for_closure = os.path.basename(
-                project_for_closure.rstrip("/\\")
-            ) or "general"
+        # Project resolution happens INSIDE _fire_agentcore_closure (after
+        # the backend gate) via config.project_name, matching the server's
+        # actor-id resolution — see the function docstring.
+        cwd_for_closure = data.get("cwd")
         _fire_agentcore_closure(
             session_id=str(session_id_str or ""),
-            project=str(project_for_closure),
+            cwd=cwd_for_closure if isinstance(cwd_for_closure, str) else "",
         )
 
         spool_dir = default_spool_dir()

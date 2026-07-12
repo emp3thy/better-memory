@@ -8,11 +8,15 @@ Covers:
 
 * D1 ``e2e-ac-server-boot-tools-hidden``
 * D2 ``e2e-ac-retrieve-polarity-fanout``
-* D3 ``e2e-ac-mcp-dispatch-gap-pin``       (KNOWN-DEFECT PIN)
+* D3 ``e2e-ac-mcp-dispatch-wired``         (inverted from the old
+      dispatch-gap KNOWN-DEFECT PIN — observe/semantic/record_use now
+      dispatch to AgentCoreBackend over the wire)
 * D4 ``e2e-ac-backend-wire-fidelity``      (in-process backend, real boto3)
 * D5 ``e2e-ac-session-close-closure-and-env-gate``
 * D6 ``e2e-ac-contextual-inject-wire-and-degradation``
-* D7 ``e2e-ac-region-split-brain-pin``     (KNOWN-DEFECT PIN)
+* D7 ``e2e-ac-region-single-source``       (inverted from the old
+      region-split-brain KNOWN-DEFECT PIN — both planes sign
+      agentcore.json's region)
 """
 
 from __future__ import annotations
@@ -27,10 +31,8 @@ from typing import Any
 import pytest
 
 from tests.e2e._agentcore_env import (
-    DUMMY_EPISODIC_MEMORY_ID,
-    DUMMY_ID_VARS,
     agentcore_env,
-    remove_dummy_id_vars_pins,
+    write_backend_settings,
     write_fake_agentcore_json,
 )
 from tests.e2e._fake_agentcore import FakeAgentCore
@@ -46,6 +48,16 @@ EXPECTED_TOOL_SUBSET = {
 SYNTHESIZE_TOOLS = {
     "memory.synthesize_next_get_context",
     "memory.synthesize_next_apply",
+}
+#: Episode + retention tools are sqlite-only concepts: hidden in agentcore
+#: mode via ``supports_episodes=False`` (fix plan UD-1); still advertised on
+#: the sqlite path (owned by the sqlite journey + tools unit tests).
+EPISODE_AND_RETENTION_TOOLS = {
+    "memory.start_episode",
+    "memory.close_episode",
+    "memory.reconcile_episodes",
+    "memory.list_episodes",
+    "memory.run_retention",
 }
 
 
@@ -65,21 +77,14 @@ def _tool_text(result: Any) -> str:
     return result.content[0].text
 
 
-def _polarity_filter_value(body: dict) -> str | None:
-    for entry in body.get("metadataFilters", []):
-        if entry.get("left", {}).get("metadataKey") == "polarity":
-            return entry["right"]["metadataValue"]["stringValue"]
-    return None
-
-
-def _has_active_status_filter(body: dict) -> bool:
-    return any(
-        entry.get("left", {}).get("metadataKey") == "status"
-        and entry.get("operator") == "EQUALS_TO"
-        and entry.get("right", {}).get("metadataValue", {}).get("stringValue")
-        == "active"
+def _filter_keys(body: dict) -> set[str]:
+    """metadataFilters keys present on a ListMemoryRecords body (empty set
+    when the request carries no filters — the live-verified dialect for the
+    reflections read path: polarity is NOT a legal filter key)."""
+    return {
+        entry.get("left", {}).get("metadataKey")
         for entry in body.get("metadataFilters", [])
-    )
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -93,10 +98,11 @@ class TestServerBootToolsHidden:
     ) -> None:
         """Real server boots from a fabricated agentcore.json against the
         fake endpoint. Boot makes ZERO AWS calls; synthesize tools are
-        hidden (supports_synthesis=False); and — docs-contradiction pin —
-        both local sqlite DBs are still created + migrated in agentcore
-        mode (design section 4 item 12: the 'No SQLite traffic' doc claim
-        is false)."""
+        hidden (supports_synthesis=False); episode + retention tools are
+        hidden too (supports_episodes=False, fix plan UD-1); and — docs-
+        contradiction pin — both local sqlite DBs are still created +
+        migrated in agentcore mode (design section 4 item 12 resolved
+        doc-side per UD-4: memory.db carries hook-error logging only)."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
             write_fake_agentcore_json(bm_home)
@@ -108,6 +114,10 @@ class TestServerBootToolsHidden:
             names = {tool.name for tool in tools.tools}
             assert EXPECTED_TOOL_SUBSET <= names
             assert not (SYNTHESIZE_TOOLS & names)
+            # UD-1: backend no-op tools are not advertised in agentcore
+            # mode (their sqlite-path presence is owned by the sqlite
+            # journey and the tools unit tests).
+            assert not (EPISODE_AND_RETENTION_TOOLS & names)
             # Boot never touches AWS (boto3 client construction only).
             assert fake.requests == []
 
@@ -123,16 +133,18 @@ class TestServerBootToolsHidden:
 
 
 class TestRetrievePolarityFanout:
-    async def test_retrieve_fans_out_three_filtered_list_records(
+    async def test_retrieve_fans_out_two_namespace_list_records(
         self, clean_slate_home: Path
     ) -> None:
         """``memory.retrieve`` is the ONE data tool wired to
         ``AgentCoreBackend`` (ReflectionToolHandlers → backend.retrieve):
-        exactly 3 ListMemoryRecords against the EPISODIC memory's
-        reflections namespace, order-insensitive polarity set
-        {do,dont,neutral}, each carrying a status=active filter; buckets
-        come back as exact empty lists. A single-polarity call restricts
-        the fan-out to exactly 1 request."""
+        exactly 2 ListMemoryRecords against the EPISODIC memory — the
+        project reflections namespace plus general/reflections/ (the
+        promoted merge) — carrying NO metadataFilters at all (live AWS
+        rejects 'polarity' as a filter key, and the fake now 400s it too;
+        polarity/status filtering is client-side); buckets come back as
+        exact empty lists. A single-polarity call keeps the same wire
+        fan-out (polarity cannot narrow the wire any more)."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
             write_fake_agentcore_json(bm_home)
@@ -151,93 +163,169 @@ class TestRetrievePolarityFanout:
                 assert buckets["neutral"] == []
 
                 requests = list(fake.requests)
-                # Exactly 3 wire requests, all ListMemoryRecords — a
-                # collapsed/unfiltered rewrite flips this red.
-                assert len(requests) == 3
+                # Exactly 2 wire requests, all ListMemoryRecords — a
+                # collapsed single-namespace rewrite (promoted records
+                # invisible again) or a resurrected polarity filter flips
+                # this red.
+                assert len(requests) == 2
                 assert {r.operation for r in requests} == {"ListMemoryRecords"}
                 for request in requests:
                     assert "EPI-FAKE-0001" in request.path
-                    assert "reflections" in request.body.get("namespace", "")
-                    assert _has_active_status_filter(request.body), request.body
-                polarities = {
-                    _polarity_filter_value(r.body) for r in requests
-                }
+                    assert _filter_keys(request.body) == set(), request.body
                 # Order-insensitive: ThreadPoolExecutor fan-out is unordered.
-                assert polarities == {"do", "dont", "neutral"}
+                assert {r.body.get("namespace") for r in requests} == {
+                    "projects/e2e-project/reflections/",
+                    "general/reflections/",
+                }
 
-                # Single-polarity leg: exactly one request, filter 'do'.
+                # Single-polarity leg: same 2-namespace wire fan-out,
+                # non-requested buckets still exactly empty.
                 fake.clear()
                 result2 = await session.call_tool(
                     "memory.retrieve", {"polarity": "do"}
                 )
                 assert not result2.isError
+                buckets2 = json.loads(_tool_text(result2))
+                assert buckets2["dont"] == []
+                assert buckets2["neutral"] == []
                 single = fake.requests_for("ListMemoryRecords")
-                assert len(single) == 1
-                assert _polarity_filter_value(single[0].body) == "do"
+                assert len(single) == 2
 
 
 # ---------------------------------------------------------------------------
-# D3 — MCP dispatch gap (KNOWN-DEFECT PIN)
+# D3 — MCP dispatch wired to AgentCoreBackend (inverted from the old
+#      dispatch-gap KNOWN-DEFECT PIN, fix plan Task 2)
 # ---------------------------------------------------------------------------
 
+#: ≥40 chars: real botocore request validation enforces a 40-char minimum
+#: on memoryRecordId, so the MCP-level record_use leg must use a genuine-
+#: shaped id (short observe-returned EVENT ids are guarded product-side).
+_MCP_RECORD_USE_ID = "refl-mcp-dispatch-" + "0" * 30 + "7"
 
-class TestMcpDispatchGapPin:
-    async def test_observe_semantic_record_use_never_reach_the_wire(
+
+class TestMcpDispatchWired:
+    async def test_observe_semantic_record_use_reach_the_wire(
         self, clean_slate_home: Path
     ) -> None:
-        """KNOWN-DEFECT PIN (design section 4 item 2, the highest-priority
-        product finding): in agentcore mode ``memory.observe``,
-        ``memory.semantic_observe`` and ``memory.record_use`` dispatch to
-        LOCAL sqlite services, never to AgentCoreBackend — the registry in
-        better_memory/mcp/server.py:249-271 constructs
-        ObservationToolHandlers/SemanticToolHandlers on sqlite services
-        unconditionally. Agentcore users' memories silently land in a
-        local file.
-
-        DELETE (and replace with wire tests promoted from
-        TestBackendWireFidelity) the day the dispatch layer is wired to
-        the backend — this test flips loudly on that day."""
+        """Replaces the old TestMcpDispatchGapPin per its deletion
+        contract (design section 4 item 2 FIXED by the dispatch wiring):
+        in agentcore mode ``memory.observe``, ``memory.semantic_observe``
+        and ``memory.record_use`` now dispatch to AgentCoreBackend over
+        MCP — real requests on the wire, ZERO rows in the local sqlite
+        file (the exact inversion of the old pin's two halves)."""
         bm_home = _bm_home(clean_slate_home)
+        marker_obs = "dispatch-wired-marker-obs"
+        marker_sem = "dispatch-wired-marker-semantic"
+        expected_req_id = hashlib.sha256(
+            marker_sem.encode("utf-8")
+        ).hexdigest()[:80]
+
         with FakeAgentCore() as fake:
             write_fake_agentcore_json(bm_home)
+            fake.set_response(
+                "CreateEvent", {"event": {"eventId": "fake-evt-mcp-1"}}
+            )
+            fake.set_response(
+                "BatchCreateMemoryRecords",
+                {
+                    "successfulRecords": [{"memoryRecordId": "fake-rec-mcp-1"}],
+                    "failedRecords": [],
+                },
+            )
+            fake.set_response(
+                "GetMemoryRecord",
+                {
+                    "memoryRecord": {
+                        "memoryRecordId": _MCP_RECORD_USE_ID,
+                        "metadata": {
+                            "useful_count": {"numberValue": 1},
+                            "status": {"stringValue": "active"},
+                            "x-amz-agentcore-memory-recordType": {
+                                "stringValue": "EXTRACTED"
+                            },
+                        },
+                    }
+                },
+            )
+            fake.set_response(
+                "BatchUpdateMemoryRecords",
+                {
+                    "successfulRecords": [
+                        {"memoryRecordId": _MCP_RECORD_USE_ID}
+                    ],
+                    "failedRecords": [],
+                },
+            )
             env = agentcore_env(clean_slate_home, fake.port)
 
             async with mcp_session(env) as session:
+                # -- memory.observe → backend.observe → CreateEvent -------
                 observe = await session.call_tool(
-                    "memory.observe", {"content": "dispatch-gap-marker-obs"}
+                    "memory.observe", {"content": marker_obs}
                 )
                 assert not observe.isError
-                obs_id = json.loads(_tool_text(observe))["id"]
-                # A local uuid, not an AgentCore eventId from the fake.
-                assert obs_id
+                # The returned id IS the AgentCore eventId, not a local uuid.
+                assert json.loads(_tool_text(observe))["id"] == "fake-evt-mcp-1"
 
+                creates = fake.requests_for("CreateEvent")
+                assert len(creates) == 1
+                assert len(fake.requests) == 1  # exactly ONE wire request
+                create = creates[0]
+                assert "EPI-FAKE-0001" in create.path
+                assert create.body["sessionId"] == "e2e-session-1"
+                conversational = create.body["payload"][0]["conversational"]
+                assert conversational["role"] == "USER"
+                assert conversational["content"]["text"] == marker_obs
+
+                # -- memory.semantic_observe → BatchCreateMemoryRecords ---
+                fake.clear()
                 semantic = await session.call_tool(
-                    "memory.semantic_observe",
-                    {"content": "dispatch-gap-marker-semantic"},
+                    "memory.semantic_observe", {"content": marker_sem}
                 )
                 assert not semantic.isError
 
+                batch_creates = fake.requests_for("BatchCreateMemoryRecords")
+                assert len(batch_creates) == 1
+                assert len(fake.requests) == 1
+                batch = batch_creates[0]
+                assert "SEM-FAKE-0001" in batch.path
+                assert "EPI-FAKE-0001" not in batch.text()  # never EPI
+                record = batch.body["records"][0]
+                assert record["requestIdentifier"] == expected_req_id
+
+                # -- memory.record_use → GetMemoryRecord + BatchUpdate ----
+                fake.clear()
                 record_use = await session.call_tool(
-                    "memory.record_use", {"id": obs_id, "outcome": "success"}
+                    "memory.record_use",
+                    {"id": _MCP_RECORD_USE_ID, "outcome": "success"},
                 )
                 assert not record_use.isError
-                assert json.loads(_tool_text(record_use)) == {"ok": True}
 
-            # THE pin: zero wire requests across all three data tools.
-            assert fake.requests == []
+                gets = fake.requests_for("GetMemoryRecord")
+                updates = fake.requests_for("BatchUpdateMemoryRecords")
+                assert len(gets) == 1
+                assert len(updates) == 1
+                assert "EPI-FAKE-0001" in gets[0].path
+                assert "EPI-FAKE-0001" in updates[0].path
+                metadata = updates[0].body["records"][0]["metadata"]
+                # System keys stripped (echoing them back is a real AWS 400).
+                assert not any(
+                    key.startswith("x-amz-agentcore-memory-")
+                    for key in metadata
+                ), metadata
 
-        # ... and the writes landed in the local sqlite file instead.
-        with closing(sqlite3.connect(_bm_home(clean_slate_home) / "memory.db")) as conn:
-            obs_rows = conn.execute(
-                "SELECT content FROM observations WHERE content = ?",
-                ("dispatch-gap-marker-obs",),
-            ).fetchall()
-            sem_rows = conn.execute(
-                "SELECT content FROM semantic_memories WHERE content = ?",
-                ("dispatch-gap-marker-semantic",),
-            ).fetchall()
-        assert len(obs_rows) == 1
-        assert len(sem_rows) == 1
+        # The inverted half of the old pin: NOTHING landed in local sqlite.
+        with closing(
+            sqlite3.connect(_bm_home(clean_slate_home) / "memory.db")
+        ) as conn:
+            (obs_count,) = conn.execute(
+                "SELECT COUNT(*) FROM observations"
+            ).fetchone()
+            (sem_count,) = conn.execute(
+                "SELECT COUNT(*) FROM semantic_memories"
+            ).fetchone()
+        assert obs_count == 0
+        assert sem_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +375,11 @@ _SEM_RECORD_ID = "sem-rec-e2e-" + "1" * 30
 @pytest.mark.usefixtures("scrubbed_aws_process_env")
 class TestBackendWireFidelity:
     """Direct AgentCoreBackend with REAL boto3 clients against the fake —
-    real botocore serialization, no MagicMocks. Re-homed here from the MCP
-    layer per the judges: these paths are unreachable over MCP today (see
-    TestMcpDispatchGapPin), but hooks (contextual_inject, session_close)
-    and the future dispatch wiring hit them for real."""
+    real botocore serialization, no MagicMocks. Complements the MCP-level
+    dispatch tests (TestMcpDispatchWired): since the fix-wave dispatch
+    wiring, these paths are reachable both over MCP and from the hooks
+    (contextual_inject, session_close); this class owns the exhaustive
+    wire-shape assertions at the backend boundary."""
 
     def _make_backend(
         self,
@@ -363,11 +452,13 @@ class TestBackendWireFidelity:
     async def test_observe_without_session_id_raises_before_wire(
         self, tmp_path: Path
     ) -> None:
-        """observe with no session id → ValueError, ZERO wire requests
+        """observe with no session id, no CLAUDE_SESSION_ID env (the unit
+        conftest strips it) and no session marker in the isolated home →
+        lazy re-resolution finds nothing → ValueError, ZERO wire requests
         (no uuid4 fallback fabricating identities — folded set-3 gap-2)."""
         with FakeAgentCore() as fake:
             backend = self._make_backend(fake, tmp_path, session_id=None)
-            with pytest.raises(ValueError, match="requires session_id"):
+            with pytest.raises(ValueError, match="session"):
                 await backend.observe(content="never-sent")
             assert fake.requests == []
 
@@ -461,7 +552,11 @@ class TestBackendWireFidelity:
             assert metadata["useful_count"]["numberValue"] == pytest.approx(3)
             # Full snapshot, not a diff: non-counter keys preserved.
             assert metadata["status"] == {"stringValue": "active"}
-            assert "last_credited_at" in metadata  # presence only
+            # last_credited_at as stringValue iso8601 — the indexedKey is
+            # declared STRING; real AWS fails the whole record update on a
+            # dateTimeValue (and the fake now mirrors that failedRecords
+            # rejection, so this line is belt-and-braces).
+            assert set(metadata["last_credited_at"]) == {"stringValue"}
 
     def test_credit_one_semantic_kind_routes_to_sem_and_strips(
         self, tmp_path: Path
@@ -501,7 +596,8 @@ class TestBackendWireFidelity:
                 id=_SEM_RECORD_ID,
                 classification="cited",
             )
-            assert result == {"applied": _SEM_RECORD_ID, "skipped": None}
+            # Sqlite parity: the applied CLASSIFICATION, not the record id.
+            assert result == {"applied": "cited", "skipped": None}
 
             gets = fake.requests_for("GetMemoryRecord")
             updates = fake.requests_for("BatchUpdateMemoryRecords")
@@ -516,7 +612,111 @@ class TestBackendWireFidelity:
             ), metadata
             # cited → useful_count += 1 (4 → 5).
             assert metadata["useful_count"]["numberValue"] == pytest.approx(5)
-            assert "last_credited_at" in metadata
+            assert set(metadata["last_credited_at"]) == {"stringValue"}
+
+
+@pytest.mark.usefixtures("scrubbed_aws_process_env")
+class TestFakeDialectEnforcement:
+    """The fake REJECTS what real AWS rejects (aws_record_dialect.md) — a
+    hermetic tripwire so no future rewrite can reintroduce the shapes the
+    live run caught. Raw boto3 against the fake, no product code."""
+
+    def _client(self, fake: FakeAgentCore) -> Any:
+        import boto3
+        from botocore.config import Config as BotoConfig
+
+        return boto3.client(
+            "bedrock-agentcore",
+            endpoint_url=fake.endpoint_url,
+            region_name="eu-west-2",
+            aws_access_key_id="bm-e2e-fake",
+            aws_secret_access_key="bm-e2e-fake-secret",
+            config=BotoConfig(retries={"mode": "standard", "max_attempts": 1}),
+        )
+
+    def test_polarity_metadata_filter_is_rejected(self) -> None:
+        """polarity is not a CreateMemory indexedKey → ValidationException
+        with the verbatim live error text (this is what broke retrieve's
+        fan-out + session_bootstrap against real AWS)."""
+        from botocore.exceptions import ClientError
+
+        with FakeAgentCore() as fake:
+            fake.set_response("ListMemoryRecords", {"memoryRecordSummaries": []})
+            client = self._client(fake)
+            with pytest.raises(ClientError, match="not a valid filter key"):
+                client.list_memory_records(
+                    memoryId="EPI-FAKE-0001",
+                    namespace="projects/x/reflections/",
+                    metadataFilters=[{
+                        "left": {"metadataKey": "polarity"},
+                        "operator": "EQUALS_TO",
+                        "right": {"metadataValue": {"stringValue": "do"}},
+                    }],
+                )
+            # An indexed key still passes and reaches the canned response.
+            ok = client.list_memory_records(
+                memoryId="EPI-FAKE-0001",
+                namespace="projects/x/reflections/",
+                metadataFilters=[{
+                    "left": {"metadataKey": "status"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": "active"}},
+                }],
+            )
+            assert ok["memoryRecordSummaries"] == []
+
+    def test_batch_update_datetime_last_credited_at_fails_record(self) -> None:
+        """A dateTimeValue last_credited_at comes back exactly the way real
+        AWS reports it: HTTP 200 with a failedRecords entry (the live root
+        cause of apply_session_ratings applied:0/failed:1) — regardless of
+        any canned success response."""
+        from datetime import UTC, datetime
+
+        with FakeAgentCore() as fake:
+            fake.set_response(
+                "BatchUpdateMemoryRecords",
+                {
+                    "successfulRecords": [{"memoryRecordId": _REFL_RECORD_ID}],
+                    "failedRecords": [],
+                },
+            )
+            client = self._client(fake)
+            response = client.batch_update_memory_records(
+                memoryId="EPI-FAKE-0001",
+                records=[{
+                    "memoryRecordId": _REFL_RECORD_ID,
+                    "timestamp": datetime.now(UTC),
+                    "metadata": {
+                        "last_credited_at": {"dateTimeValue": datetime.now(UTC)},
+                    },
+                }],
+            )
+            assert response["successfulRecords"] == []
+            failed = response["failedRecords"]
+            assert len(failed) == 1
+            assert "last_credited_at" in failed[0]["errorMessage"]
+            assert "STRING" in failed[0]["errorMessage"]
+
+    def test_batch_update_reserved_metadata_keys_fail_record(self) -> None:
+        with FakeAgentCore() as fake:
+            from datetime import UTC, datetime
+
+            client = self._client(fake)
+            response = client.batch_update_memory_records(
+                memoryId="EPI-FAKE-0001",
+                records=[{
+                    "memoryRecordId": _REFL_RECORD_ID,
+                    "timestamp": datetime.now(UTC),
+                    "metadata": {
+                        "x-amz-agentcore-memory-recordType": {
+                            "stringValue": "BASE"
+                        },
+                    },
+                }],
+            )
+            failed = response["failedRecords"]
+            assert len(failed) == 1
+            assert "reserved names or prefixes" in failed[0]["errorMessage"]
 
 
 # ---------------------------------------------------------------------------
@@ -531,12 +731,13 @@ class TestSessionCloseClosureAndEnvGate:
         """Case A: the Stop hook builds a REAL boto3 client (zero coverage
         elsewhere — the hook unit tests MagicMock it) and fires exactly one
         role=OTHER closure CreateEvent, SigV4-signed with agentcore.json's
-        region (json says us-east-1 while the env pin stays eu-west-2 —
-        proving cfg.region, not env, drives the hook client); the spool
-        marker is still written."""
+        region (json says us-east-1, deliberately not the fabrication
+        default eu-west-2 — proving cfg.region drives the hook client);
+        the spool marker is still written. Env-precedence regression
+        guard: BETTER_MEMORY_STORAGE_BACKEND=agentcore is set here."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
-            # Deliberately different from the env region pin (eu-west-2).
+            # Deliberately different from the fabrication default region.
             write_fake_agentcore_json(bm_home, region="us-east-1")
             env = agentcore_env(clean_slate_home, fake.port)
 
@@ -565,8 +766,8 @@ class TestSessionCloseClosureAndEnvGate:
             # env CLAUDE_SESSION_ID wins over the stdin payload session_id.
             assert request.body["sessionId"] == "e2e-session-1"
             # The hook signs with agentcore.json's region (session_close.py
-            # builds its client from cfg.region) — the other half of the
-            # region split-brain pinned in TestRegionSplitBrainPin.
+            # builds its client from cfg.region) — the hook half of the
+            # convergence asserted in TestRegionSingleSource.
             assert request.sigv4_region == "us-east-1"
 
         markers = list((bm_home / "spool").glob("*_session_end_*.json"))
@@ -576,21 +777,24 @@ class TestSessionCloseClosureAndEnvGate:
         # Closure succeeded → no hook_errors write → no memory.db at all.
         assert not (bm_home / "memory.db").exists()
 
-    def test_stop_hook_without_backend_env_skips_aws_but_writes_marker(
+    def test_stop_hook_without_backend_env_resolves_settings_and_fires_closure(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
-        """Case B — KNOWN-DEFECT PIN (design section 4 item 5, hook
-        env-propagation gap): the installer writes NO env into hook
-        commands, so a real agentcore user's Stop hook runs WITHOUT
-        BETTER_MEMORY_STORAGE_BACKEND and the closure event silently never
-        fires (session_close.py's guard reads the raw env and returns
-        before its try block — no hook_errors row, no error, nothing).
-        The spool marker is still written. Flips loudly when the installer
-        starts propagating hook env (the intended fix) or the guard
-        condition changes."""
+        """Case B — INVERTED from the defect-4 KNOWN-DEFECT PIN (design
+        section 4 item 5, hook env-propagation gap): the installer still
+        writes NO env into hook commands, but the Stop hook now resolves
+        the backend from settings.json (written by ``agentcore init``,
+        fabricated here via ``write_backend_settings``) when
+        BETTER_MEMORY_STORAGE_BACKEND is absent — so a real onboarded
+        user's closure event FIRES: exactly one CreateEvent (role=OTHER,
+        EPI-FAKE-0001 in path) SigV4-signed with agentcore.json's region.
+        The spool marker is still written and no memory.db is created."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
-            write_fake_agentcore_json(bm_home)
+            # Non-default json region: proves the closure client signs the
+            # json's region on the settings-resolved path too.
+            write_fake_agentcore_json(bm_home, region="us-east-1")
+            write_backend_settings(bm_home)
             env = agentcore_env(
                 clean_slate_home, fake.port, BETTER_MEMORY_STORAGE_BACKEND=None
             )
@@ -607,14 +811,52 @@ class TestSessionCloseClosureAndEnvGate:
             assert rc == 0
             assert out == ""
             assert "Traceback" not in err
-            # THE pin: zero wire requests — silent skip.
+
+            requests = list(fake.requests)
+            assert len(requests) == 1
+            request = requests[0]
+            assert request.operation == "CreateEvent"
+            assert "EPI-FAKE-0001" in request.path
+            conversational = request.body["payload"][0]["conversational"]
+            assert conversational["role"] == "OTHER"
+            assert request.sigv4_region == "us-east-1"
+
+        markers = list((bm_home / "spool").glob("*_session_end_*.json"))
+        assert len(markers) == 1
+        # Closure succeeded → no hook_errors write → no memory.db at all.
+        assert not (bm_home / "memory.db").exists()
+
+    def test_stop_hook_sqlite_default_ignores_agentcore_json_existence(
+        self, clean_slate_home: Path, tmp_path: Path
+    ) -> None:
+        """Sqlite-safety oracle (fix plan Task 3 sibling): env absent AND
+        no settings.json → the hook stays on the sqlite default and makes
+        ZERO wire requests even though agentcore.json exists — existence
+        is not consent (a once-provisioned-then-reverted sqlite user must
+        never be silently switched back). Marker still written."""
+        bm_home = _bm_home(clean_slate_home)
+        with FakeAgentCore() as fake:
+            write_fake_agentcore_json(bm_home)  # provisioned, NOT activated
+            env = agentcore_env(
+                clean_slate_home, fake.port, BETTER_MEMORY_STORAGE_BACKEND=None
+            )
+
+            rc, out, err = run_hook(
+                "better_memory.hooks.session_close",
+                {
+                    "session_id": "e2e-session-1",
+                    "cwd": str(tmp_path / "proj"),
+                    "hook_event_name": "Stop",
+                },
+                env,
+            )
+            assert rc == 0
+            assert out == ""
+            assert "Traceback" not in err
             assert fake.requests == []
 
         markers = list((bm_home / "spool").glob("*_session_end_*.json"))
         assert len(markers) == 1
-        # Guard short-circuits BEFORE the try block: no record_hook_error,
-        # hence no memory.db (and therefore no hook_errors row) at all.
-        assert not (bm_home / "memory.db").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +885,9 @@ _DOCKER_REFLECTION_SUMMARY = {
     "metadata": {
         "useful_count": {"numberValue": 2},
         "status": {"stringValue": "active"},
+        # Client-side bucketing (polarity is not a legal AWS filter key):
+        # 'do' keeps this record inside retrieve_relevant's do/dont order.
+        "polarity": {"stringValue": "do"},
     },
 }
 
@@ -692,28 +937,34 @@ class TestContextualInjectWireAndDegradation:
             assert "refl-fake-docker" in rendered
 
             paths = [r.path for r in fake.requests]
-            # backend.retrieve → 3 polarity-filtered EPI list calls;
+            # backend.retrieve → 2 namespace EPI list calls (project +
+            # general/promoted merge, polarity client-side);
             # backend.semantic_list → 1 SEM list call.
-            assert sum("EPI-FAKE-0001" in p for p in paths) == 3
+            assert sum("EPI-FAKE-0001" in p for p in paths) == 2
             assert sum("SEM-FAKE-0001" in p for p in paths) == 1
 
     def test_case_b_misconfig_clean_slate_silent_noop_with_stray_db(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
-        """Case B — KNOWN-DEFECT PIN (design section 4 item 6): ID vars
-        unset (exactly the state a user who followed the documented setup
-        is in) on a clean slate → every prompt silently gets the empty
-        envelope, zero wire traffic, AND record_hook_error's connect()
-        leaves a stray schema-less memory.db behind while the hook_errors
-        INSERT silently no-ops (no table). Flips when the idvar gate is
-        fixed or record_hook_error stops creating the stray DB."""
+        """Case B — misconfig re-expressed post-fix (was the idvar-gate
+        defect pin, design section 4 item 6): settings.json activates
+        agentcore (env var absent) but agentcore.json was never written —
+        the realistic broken state after a hand-rolled activation or a
+        half-copied home. Every prompt silently gets the empty envelope,
+        zero wire traffic; build_backend's FileNotFoundError is swallowed
+        by the hook, record_hook_error's connect() leaves a stray
+        schema-less memory.db behind (INSERT no-ops — no table), and the
+        SeenStore has already dropped its state/ dir (the failure now
+        happens AFTER the seen-store block, unlike the old config-stage
+        death)."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
+            write_backend_settings(bm_home)  # activation without provisioning
             env = agentcore_env(
                 clean_slate_home,
                 fake.port,
                 BETTER_MEMORY_CONTEXT_INJECT_MODE="userprompt",
-                **remove_dummy_id_vars_pins(),
+                BETTER_MEMORY_STORAGE_BACKEND=None,
             )
 
             rc, out, err = run_hook(
@@ -731,18 +982,24 @@ class TestContextualInjectWireAndDegradation:
             }
             assert fake.requests == []
 
-        # Stray schema-less DB is the ONLY artifact; no state/ litter.
-        assert {child.name for child in bm_home.iterdir()} == {"memory.db"}
+        # Exact artifact set: the pre-written settings.json, the stray
+        # schema-less DB, and the seen-store's state/ dir.
+        assert {child.name for child in bm_home.iterdir()} == {
+            "memory.db",
+            "settings.json",
+            "state",
+        }
         assert _table_names(bm_home / "memory.db") == set()
 
     def test_case_c_misconfig_premigrated_db_records_one_hook_error_row(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
-        """Case C: same misconfig against a pre-migrated memory.db →
-        exactly one hook_errors row (hook_name='contextual_inject',
-        exception_type='ValueError', exception_message naming both ID
-        vars — column name per migration 0005_phase_c.sql); state/ still
-        never created (get_config raises before the SeenStore block)."""
+        """Case C: same misconfig (settings.json activation, no
+        agentcore.json) against a pre-migrated memory.db → exactly one
+        hook_errors row (hook_name='contextual_inject',
+        exception_type='FileNotFoundError', exception_message naming
+        agentcore.json and the init remediation — column names per
+        migration 0005_phase_c.sql)."""
         from better_memory.db.connection import connect
         from better_memory.db.schema import apply_migrations
 
@@ -754,11 +1011,12 @@ class TestContextualInjectWireAndDegradation:
             conn.close()
 
         with FakeAgentCore() as fake:
+            write_backend_settings(bm_home)
             env = agentcore_env(
                 clean_slate_home,
                 fake.port,
                 BETTER_MEMORY_CONTEXT_INJECT_MODE="userprompt",
-                **remove_dummy_id_vars_pins(),
+                BETTER_MEMORY_STORAGE_BACKEND=None,
             )
             rc, out, err = run_hook(
                 "better_memory.hooks.contextual_inject",
@@ -775,7 +1033,6 @@ class TestContextualInjectWireAndDegradation:
             }
             assert fake.requests == []
 
-        assert not (bm_home / "state").exists()
         with closing(sqlite3.connect(bm_home / "memory.db")) as check:
             rows = check.execute(
                 "SELECT hook_name, exception_type, exception_message "
@@ -784,30 +1041,29 @@ class TestContextualInjectWireAndDegradation:
         assert len(rows) == 1
         hook_name, exception_type, exception_message = rows[0]
         assert hook_name == "contextual_inject"
-        assert exception_type == "ValueError"
-        # Both var names (taken from the single helper's source of truth —
-        # never spelled out here; the tripwire grep-pins the literals).
-        for var_name in DUMMY_ID_VARS:
-            assert var_name in exception_message
+        assert exception_type == "FileNotFoundError"
+        # The error names the missing file and the accurate remediation.
+        assert "agentcore.json" in exception_message
+        assert "agentcore init" in exception_message
 
 
 # ---------------------------------------------------------------------------
-# D7 — region split-brain (KNOWN-DEFECT PIN)
+# D7 — region single-source (inverted from the old split-brain pin)
 # ---------------------------------------------------------------------------
 
 
-class TestRegionSplitBrainPin:
-    async def test_server_signs_env_default_while_hook_signs_json_region(
+class TestRegionSingleSource:
+    async def test_server_and_hook_both_sign_json_region(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
-        """KNOWN-DEFECT PIN (design section 4 item 4): with agentcore.json
-        region=us-east-1 and BETTER_MEMORY_AGENTCORE_REGION unset, the two
-        planes disagree — (a) the MCP server's wired ``memory.retrieve``
-        signs SigV4 with eu-west-2 (the env DEFAULT from
-        better_memory/config.py) while consuming the json's memory id
-        (MEM-EPI-JSON on the wire; the dummy env value never is);
-        (b) the session_close hook signs us-east-1 (json-derived).
-        A single-source-of-truth fix flips both halves visibly."""
+        """INVERTED from the old region-split-brain KNOWN-DEFECT PIN
+        (design section 4 item 4): the region env var was deleted and the
+        factory now signs with agentcore.json's region, so with json
+        region=us-east-1 BOTH planes converge — (a) the MCP server's
+        ``memory.retrieve`` signs SigV4 with us-east-1 while consuming the
+        json's memory id (MEM-EPI-JSON on the wire — id provenance proof);
+        (b) the session_close hook signs us-east-1 too (json-derived, as
+        it always did — the convergence target)."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
             write_fake_agentcore_json(
@@ -817,12 +1073,7 @@ class TestRegionSplitBrainPin:
                 semantic_memory_id="MEM-SEM-JSON",
             )
             fake.set_response("ListMemoryRecords", {"memoryRecordSummaries": []})
-            # The split-brain condition: env region var ABSENT.
-            env = agentcore_env(
-                clean_slate_home,
-                fake.port,
-                BETTER_MEMORY_AGENTCORE_REGION=None,
-            )
+            env = agentcore_env(clean_slate_home, fake.port)
 
             # (a) server plane — memory.retrieve is the WIRED trigger.
             async with mcp_session(env) as session:
@@ -830,17 +1081,15 @@ class TestRegionSplitBrainPin:
                 assert not result.isError
 
             server_requests = fake.requests_for("ListMemoryRecords")
-            assert len(server_requests) == 3
+            assert len(server_requests) == 2
             for request in server_requests:
-                assert request.sigv4_region == "eu-west-2"  # env default
-                assert request.sigv4_region != "us-east-1"  # NOT the json's
-                # Runtime IDs come from agentcore.json — presence of the
-                # real id, plus absence of the dummy env value, proves the
-                # dead env vars are never consumed.
+                # Single source of truth: the json's region, never a
+                # product default.
+                assert request.sigv4_region == "us-east-1"
+                # Runtime IDs come from agentcore.json too — id provenance.
                 assert "MEM-EPI-JSON" in request.path
-                assert DUMMY_EPISODIC_MEMORY_ID not in request.text()
 
-            # (b) hook plane — session_close signs with the json's region.
+            # (b) hook plane — session_close signs the same json region.
             fake.clear()
             rc, out, _err = run_hook(
                 "better_memory.hooks.session_close",

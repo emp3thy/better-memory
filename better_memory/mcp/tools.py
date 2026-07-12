@@ -9,8 +9,27 @@ from __future__ import annotations
 
 from mcp.types import Tool
 
+#: Tools gated on ``supports_episodes``: the episode lifecycle plus local
+#: retention are sqlite-only concepts. In agentcore mode AgentCore manages
+#: event grouping via sessionId and applies its own event expiry, so these
+#: are hidden from the advertised list (handlers stay registered
+#: defensively — see ``create_server``).
+_EPISODE_GATED_TOOLS: frozenset[str] = frozenset(
+    {
+        "memory.start_episode",
+        "memory.close_episode",
+        "memory.reconcile_episodes",
+        "memory.list_episodes",
+        "memory.run_retention",
+    }
+)
 
-def tool_definitions(*, supports_synthesis: bool = True) -> list[Tool]:
+
+def tool_definitions(
+    *,
+    supports_synthesis: bool = True,
+    supports_episodes: bool = True,
+) -> list[Tool]:
     """Return the list of tools exposed over MCP.
 
     When ``supports_synthesis`` is False, the
@@ -18,6 +37,10 @@ def tool_definitions(*, supports_synthesis: bool = True) -> list[Tool]:
     tools are omitted. This gates the synthesis surface on the active
     StorageBackend's capability flag — backends without a local episode
     queue (e.g. AgentCoreBackend in Plan 2) do not expose these tools.
+
+    When ``supports_episodes`` is False, the four episode-lifecycle tools
+    and ``memory.run_retention`` are omitted too (same capability-flag
+    pattern; False for AgentCoreBackend).
     """
     tools: list[Tool] = [
         Tool(
@@ -556,5 +579,8 @@ def tool_definitions(*, supports_synthesis: bool = True) -> list[Tool]:
                 },
             ),
         ])
+
+    if not supports_episodes:
+        tools = [t for t in tools if t.name not in _EPISODE_GATED_TOOLS]
 
     return tools

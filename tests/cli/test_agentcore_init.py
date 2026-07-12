@@ -9,17 +9,22 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from better_memory.cli.agentcore import _handle_init
+from better_memory.cli.agentcore import _handle_init, add_subparsers
 
 
 def _make_args(
-    home: Path, *, force: bool = False, region: str = "eu-west-2"
+    home: Path,
+    *,
+    force: bool = False,
+    region: str = "eu-west-2",
+    no_activate: bool = False,
 ) -> argparse.Namespace:
     """Build an argparse.Namespace the handler accepts."""
     return argparse.Namespace(
         home=str(home),
         region=region,
         force=force,
+        no_activate=no_activate,
         subcommand="init",
     )
 
@@ -102,6 +107,31 @@ def test_init_creates_both_memories_and_writes_config(
     assert "sem-XYZ" in out
 
 
+def _happy_control(epi_id: str = "epi-XYZ", sem_id: str = "sem-XYZ") -> MagicMock:
+    """Build a control-plane mock where both memories go ACTIVE immediately."""
+    control = MagicMock(name="bedrock-agentcore-control")
+    paginator = MagicMock()
+    paginator.paginate.return_value = iter([{"memories": []}])
+    control.get_paginator.return_value = paginator
+    control.create_memory.side_effect = [
+        _create_memory_response(epi_id, "epi-strat-1"),
+        _create_memory_response(sem_id, "sem-strat-1"),
+    ]
+    control.get_memory.side_effect = [
+        _active_memory_response(epi_id, "epi-strat-1"),
+        _active_memory_response(sem_id, "sem-strat-1"),
+    ]
+    return control
+
+
+def _patch_control(monkeypatch, control: MagicMock) -> None:
+    monkeypatch.setattr(
+        "better_memory.cli.agentcore._build_control_client",
+        lambda region: control,
+    )
+    monkeypatch.setattr("better_memory.cli.agentcore.time.sleep", lambda _s: None)
+
+
 def test_init_refuses_when_config_exists_without_force(
     tmp_path, monkeypatch
 ) -> None:
@@ -110,6 +140,8 @@ def test_init_refuses_when_config_exists_without_force(
 
     rc = _handle_init(_make_args(tmp_path))
     assert rc == 1
+    # Refusal must not activate anything either.
+    assert not (tmp_path / "settings.json").exists()
 
 
 def test_init_overwrites_when_force_set(tmp_path, monkeypatch) -> None:
@@ -335,3 +367,136 @@ def test_init_preflight_checks_both_names(tmp_path, monkeypatch, capsys) -> None
     control.create_memory.assert_not_called()
     err = capsys.readouterr().err
     assert "better_memory_semantic" in err
+
+
+# ---------------------------------------------------------------------------
+# settings.json activation (UD-3) + next-steps stdout contract
+# ---------------------------------------------------------------------------
+
+
+def test_init_argparse_accepts_no_activate() -> None:
+    """`--no-activate` is a registered init flag; defaults to False."""
+    parser = argparse.ArgumentParser()
+    add_subparsers(parser)
+    args = parser.parse_args(
+        ["init", "--no-activate", "--home", "x", "--region", "us-east-1"]
+    )
+    assert args.no_activate is True
+    assert parser.parse_args(["init"]).no_activate is False
+
+
+def test_init_writes_settings_activation_by_default(
+    tmp_path, monkeypatch
+) -> None:
+    """Successful init persists {"storage_backend": "agentcore"} into
+    <home>/settings.json (atomically — no .tmp residue)."""
+    _patch_control(monkeypatch, _happy_control())
+
+    rc = _handle_init(_make_args(tmp_path))
+    assert rc == 0
+
+    settings_path = tmp_path / "settings.json"
+    assert settings_path.exists()
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["storage_backend"] == "agentcore"
+    assert not (tmp_path / "settings.json.tmp").exists()
+
+
+def test_init_no_activate_skips_settings_write(tmp_path, monkeypatch, capsys) -> None:
+    """`--no-activate` provisions AWS + agentcore.json but leaves the
+    backend selection untouched; stdout explains how to activate later."""
+    _patch_control(monkeypatch, _happy_control())
+
+    rc = _handle_init(_make_args(tmp_path, no_activate=True))
+    assert rc == 0
+    assert (tmp_path / "agentcore.json").exists()
+    assert not (tmp_path / "settings.json").exists()
+
+    out = capsys.readouterr().out
+    assert "--no-activate" in out
+    assert "settings.json" in out
+    assert "Export BETTER_MEMORY_STORAGE_BACKEND" not in out
+    # BugBot PR#79: next-steps must not contradict the skip message — no
+    # "picks up the new backend" restart instruction when nothing changed.
+    assert "picks up the new backend" not in out
+    assert "no backend change was made yet" in out
+
+
+def test_init_failure_path_does_not_write_settings(tmp_path, monkeypatch) -> None:
+    """When memory creation fails, init must not activate the backend
+    (no settings.json), just as it writes no agentcore.json."""
+    control = MagicMock(name="bedrock-agentcore-control")
+    paginator = MagicMock()
+    paginator.paginate.return_value = iter([{"memories": []}])
+    control.get_paginator.return_value = paginator
+    control.create_memory.side_effect = [
+        _create_memory_response("epi-orphan", "epi-strat"),
+        RuntimeError("simulated semantic create failure"),
+    ]
+    control.get_memory.side_effect = [
+        _active_memory_response("epi-orphan", "epi-strat"),
+    ]
+    _patch_control(monkeypatch, control)
+
+    with pytest.raises(RuntimeError, match="semantic create"):
+        _handle_init(_make_args(tmp_path))
+
+    assert not (tmp_path / "agentcore.json").exists()
+    assert not (tmp_path / "settings.json").exists()
+
+
+def test_init_activation_preserves_existing_settings_keys(
+    tmp_path, monkeypatch
+) -> None:
+    """An existing settings.json with unrelated keys is merged into, not
+    clobbered."""
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"other_key": 42}), encoding="utf-8"
+    )
+    _patch_control(monkeypatch, _happy_control())
+
+    rc = _handle_init(_make_args(tmp_path))
+    assert rc == 0
+
+    settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert settings["storage_backend"] == "agentcore"
+    assert settings["other_key"] == 42
+
+
+def test_init_activation_replaces_corrupt_settings(tmp_path, monkeypatch) -> None:
+    """A corrupt settings.json is replaced with a valid activation object
+    (init is the remediation path, it must not crash on the broken file)."""
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
+    _patch_control(monkeypatch, _happy_control())
+
+    rc = _handle_init(_make_args(tmp_path))
+    assert rc == 0
+
+    settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert settings == {"storage_backend": "agentcore"}
+
+
+def test_init_next_steps_stdout_contract(tmp_path, monkeypatch, capsys) -> None:
+    """Next-steps text names the settings.json mechanism and env precedence,
+    and no longer tells the user to export an env var (the onboarding trap:
+    an exported var in one shell never reaches Claude Code's hooks)."""
+    _patch_control(monkeypatch, _happy_control())
+
+    rc = _handle_init(_make_args(tmp_path))
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    # The onboarding trap must be gone.
+    assert "Export BETTER_MEMORY_STORAGE_BACKEND" not in out
+    # Activation mechanism + env precedence are named.
+    assert "settings.json" in out
+    assert "BETTER_MEMORY_STORAGE_BACKEND" in out
+    assert "overrides" in out
+    # Revert path.
+    assert "revert" in out.lower()
+    assert "sqlite" in out
+    # Follow-ups: restart, status, then smoke — with the smoke caveat.
+    assert "Restart" in out
+    assert "agentcore status" in out
+    assert "agentcore smoke" in out
+    assert "not MCP registration" in out

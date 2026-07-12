@@ -194,8 +194,6 @@ def test_agentcore_mode_does_not_open_sqlite_connection(bm_home, monkeypatch, ca
     """
     monkeypatch.setenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", "both")
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
-    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", "sem-1")
-    monkeypatch.setenv("BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", "epi-1")
 
     connect_calls = []
 

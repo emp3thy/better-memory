@@ -8,6 +8,7 @@ filesystem layout. Everything lives under that directory:
         knowledge.db
         spool/
         knowledge-base/
+        settings.json      (optional; persists storage_backend selection)
 
 Default home is ``~/.better-memory``. External-service knobs
 (``OLLAMA_HOST``, ``EMBED_MODEL``, ``AUDIT_LOG_RETRIEVED``,
@@ -20,6 +21,7 @@ control content injection strategies.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +36,7 @@ _DEFAULT_EMBEDDINGS_BACKEND = "ollama"
 _VALID_EMBEDDINGS_BACKENDS = ("ollama", "sqlite")
 _DEFAULT_STORAGE_BACKEND = "sqlite"
 _VALID_STORAGE_BACKENDS = ("sqlite", "agentcore")
-_DEFAULT_AGENTCORE_REGION = "eu-west-2"
+_SETTINGS_FILE = "settings.json"
 
 
 # Maps absolute cwd string → resolved project name (or None when no git tree
@@ -225,9 +227,6 @@ class Config:
     diag_logging: bool
     embeddings_backend: Literal["ollama", "sqlite"]
     storage_backend: Literal["sqlite", "agentcore"]
-    agentcore_region: str
-    agentcore_semantic_memory_id: str | None
-    agentcore_episodic_memory_id: str | None
     context_inject_mode: Literal["userprompt", "pretool", "both", "off"]
     bootstrap_top_n: int
     context_min_hits: int
@@ -261,14 +260,72 @@ def _resolve_embeddings_backend() -> Literal["ollama", "sqlite"]:
     return raw  # type: ignore[return-value]
 
 
-def _resolve_storage_backend() -> Literal["sqlite", "agentcore"]:
-    raw = os.environ.get("BETTER_MEMORY_STORAGE_BACKEND", _DEFAULT_STORAGE_BACKEND)
-    if raw not in _VALID_STORAGE_BACKENDS:
+def _read_settings_storage_backend(home: Path) -> str | None:
+    """Read ``storage_backend`` from ``<home>/settings.json``.
+
+    Returns ``None`` when the file does not exist, cannot be read (any
+    :class:`OSError` — e.g. ``PermissionError``; the backend selection must
+    never crash ``get_config`` over an unreadable optional file), or carries
+    no ``storage_backend`` key (callers fall back to the default). Raises
+    :class:`ValueError` — naming the file, with remediation — when the file
+    is readable but malformed JSON, not a JSON object, or carries an invalid
+    value (symmetric to the invalid-env-var error).
+    """
+    settings_path = home / _SETTINGS_FILE
+    try:
+        text = settings_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    remediation = (
+        "Fix or delete the file, or set BETTER_MEMORY_STORAGE_BACKEND to "
+        "override it. It is written by `better-memory agentcore init`."
+    )
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise ValueError(
-            f"BETTER_MEMORY_STORAGE_BACKEND={raw!r} is not one of "
-            f"{_VALID_STORAGE_BACKENDS}"
+            f"failed to parse {settings_path}: {exc}. {remediation}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"{settings_path} is not a JSON object. {remediation}")
+    value = raw.get("storage_backend")
+    if value is None:
+        return None
+    if value not in _VALID_STORAGE_BACKENDS:
+        raise ValueError(
+            f"storage_backend={value!r} in {settings_path} is not one of "
+            f"{_VALID_STORAGE_BACKENDS}. {remediation}"
         )
-    return raw  # type: ignore[return-value]
+    return value
+
+
+def resolve_storage_backend() -> Literal["sqlite", "agentcore"]:
+    """Resolve the effective storage backend for the current environment.
+
+    Resolution order:
+
+    1. ``BETTER_MEMORY_STORAGE_BACKEND`` env var, when set (validated —
+       an invalid value raises rather than falling through).
+    2. ``$BETTER_MEMORY_HOME/settings.json`` ``storage_backend`` key
+       (missing file or missing key falls through; malformed file or
+       invalid value raises :class:`ValueError` naming the file).
+    3. ``"sqlite"`` — the byte-identical default.
+
+    Public export for hooks (and the CLI): re-resolved on every call, never
+    memoized, so env/file edits between calls take effect immediately.
+    """
+    raw = os.environ.get("BETTER_MEMORY_STORAGE_BACKEND")
+    if raw is not None:
+        if raw not in _VALID_STORAGE_BACKENDS:
+            raise ValueError(
+                f"BETTER_MEMORY_STORAGE_BACKEND={raw!r} is not one of "
+                f"{_VALID_STORAGE_BACKENDS}"
+            )
+        return raw  # type: ignore[return-value]
+    from_file = _read_settings_storage_backend(resolve_home())
+    if from_file is not None:
+        return from_file  # type: ignore[return-value]
+    return _DEFAULT_STORAGE_BACKEND  # type: ignore[return-value]
 
 
 def get_config() -> Config:
@@ -278,27 +335,7 @@ def get_config() -> Config:
     """
     home = resolve_home()
 
-    storage_backend = _resolve_storage_backend()
-
-    agentcore_region = _resolve_str(
-        "BETTER_MEMORY_AGENTCORE_REGION", _DEFAULT_AGENTCORE_REGION
-    )
-    agentcore_semantic_memory_id = _resolve_str(
-        "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID", ""
-    ) or None
-    agentcore_episodic_memory_id = _resolve_str(
-        "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID", ""
-    ) or None
-
-    if storage_backend == "agentcore" and (
-        agentcore_semantic_memory_id is None or agentcore_episodic_memory_id is None
-    ):
-        raise ValueError(
-            "BETTER_MEMORY_STORAGE_BACKEND=agentcore requires both "
-            "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID and "
-            "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID to be set. "
-            "Run `better-memory agentcore init` to create the memory resources."
-        )
+    storage_backend = resolve_storage_backend()
 
     return Config(
         home=home,
@@ -313,9 +350,6 @@ def get_config() -> Config:
         diag_logging=_resolve_bool("BETTER_MEMORY_DIAG_LOGGING", default=False),
         embeddings_backend=_resolve_embeddings_backend(),
         storage_backend=storage_backend,
-        agentcore_region=agentcore_region,
-        agentcore_semantic_memory_id=agentcore_semantic_memory_id,
-        agentcore_episodic_memory_id=agentcore_episodic_memory_id,
         context_inject_mode=_resolve_context_inject_mode(),
         bootstrap_top_n=_resolve_nonneg_int("BETTER_MEMORY_BOOTSTRAP_TOP_N", 5),
         context_min_hits=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_MIN_HITS", 2),

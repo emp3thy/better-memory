@@ -241,32 +241,49 @@ def create_server() -> tuple[
         except Exception:  # noqa: BLE001 — best-effort startup hook
             pass
 
+    # Remote dispatch (agentcore mode): the data-tool handlers receive the
+    # backend as ``remote`` iff the CONFIG string says agentcore. The
+    # predicate is deliberately the config value — never backend truthiness
+    # or isinstance — so the sqlite default path keeps ``remote=None`` and
+    # its service-stack behaviour is byte-identical (session-id / project
+    # resolution semantics differ between the standalone services and
+    # SqliteBackend; routing sqlite through the backend would change them).
+    remote: StorageBackend | None = (
+        backend if config.storage_backend == "agentcore" else None
+    )
+
     # All tool behaviour lives in the per-domain handler classes; this
     # registry is the single dispatch surface for _call_tool. The
     # synthesize handlers stay registered even when the backend does not
     # support synthesis — only the *advertised* tool list is gated (see
-    # _list_tools), matching the pre-extraction dispatcher.
+    # _list_tools), matching the pre-extraction dispatcher. The same holds
+    # for the episode/retention handlers in agentcore mode.
     registry = build_registry(
-        ObservationToolHandlers(observations=observations, retention=retention),
+        ObservationToolHandlers(
+            observations=observations, retention=retention, remote=remote
+        ),
         ReflectionToolHandlers(
             backend=backend,
             reflections=reflections,
             spool=spool,
             memory_conn=memory_conn,
             home=config.home,
+            remote=remote,
         ),
         EpisodeToolHandlers(
             episodes=episodes,
             observations=observations,
             reflections=reflections,
             backend=backend,
+            remote=remote,
         ),
-        SemanticToolHandlers(semantic=semantic),
+        SemanticToolHandlers(semantic=semantic, remote=remote),
         KnowledgeToolHandlers(knowledge=knowledge),
         SessionToolHandlers(
             session_bootstrap=session_bootstrap,
             memory_rating=memory_rating,
             home=config.home,
+            remote=remote,
         ),
     )
 
@@ -274,7 +291,10 @@ def create_server() -> tuple[
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:
-        return _tool_definitions(supports_synthesis=backend.supports_synthesis)
+        return _tool_definitions(
+            supports_synthesis=backend.supports_synthesis,
+            supports_episodes=backend.supports_episodes,
+        )
 
     @server.call_tool()
     async def _call_tool(

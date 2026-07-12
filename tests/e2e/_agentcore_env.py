@@ -5,7 +5,8 @@
 allowlist choke point, so the e2e_meta contract tests bless spawns whose
 env came from here):
 
-* ``BETTER_MEMORY_STORAGE_BACKEND=agentcore`` + a pinned test region;
+* ``BETTER_MEMORY_STORAGE_BACKEND=agentcore`` (pin ``None`` to test the
+  settings.json activation path instead — see ``write_backend_settings``);
 * ``AWS_ENDPOINT_URL`` → the local :class:`tests.e2e._fake_agentcore.
   FakeAgentCore` port, so every boto3 request from every child process
   lands on loopback (verified for both agentcore planes at boto3 1.43.14);
@@ -17,13 +18,19 @@ env came from here):
   var) never survives: ``isolated_env`` builds from an allowlist and drops
   all ``AWS_*`` keys case-insensitively.
 
-This module is THE ONLY place the two dummy memory-ID vars are set — see
-the FIXME below. ``tests/e2e/test_tripwires_aws.py`` grep-pins that
-exclusivity.
+Region is single-sourced from ``agentcore.json`` (the file
+``write_fake_agentcore_json`` fabricates): the product's agentcore region
+env var and the vestigial memory-ID env vars were deleted by the
+onboarding-fix wave (2026-07-12-agentcore-onboarding-fix-design.md,
+Task 1), so this helper no longer sets any of them — the tripwire in
+``tests/e2e/test_tripwires_aws.py`` grep-pins their absence from the whole
+e2e suite, and the poison entries in ``tests/e2e_meta/test_env_bleed.py``
+keep proving the removed knobs stay inert.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from better_memory.storage.agentcore_persistence import (
@@ -38,43 +45,11 @@ from tests.e2e._env import isolated_env
 FAKE_ACCESS_KEY_ID = "bm-e2e-fake"
 FAKE_SECRET_ACCESS_KEY = "bm-e2e-fake-secret"
 
-#: Region pinned into the child env (BETTER_MEMORY_AGENTCORE_REGION). Note
-#: this matches the product default in better_memory/config.py so removing
-#: the pin (pin=None) still signs eu-west-2 — the region-split-brain test
-#: relies on that.
+#: Default region written into fabricated agentcore.json files. Purely a
+#: test-data default — the product reads the region exclusively from
+#: agentcore.json, so tests that assert region provenance override this
+#: with a distinctive value (e.g. us-east-1).
 DEFAULT_TEST_REGION = "eu-west-2"
-
-# FIXME(idvar-gate): the two BETTER_MEMORY_AGENTCORE_*_MEMORY_ID env vars
-# below are a WORKAROUND for the dead presence-only gate at
-# better_memory/config.py:293-301. Their values are consumed by NOTHING —
-# runtime memory IDs come exclusively from agentcore.json (see
-# better_memory/storage/factory.py; the region-split-brain test proves the
-# dummies never reach the wire). This is the ONLY location that sets them
-# (grep-pinned by tests/e2e/test_tripwires_aws.py). DELETE these two
-# entries together with tests/e2e/test_agentcore_neg.py's idvar-gate
-# defect-pin test when the product fix (remove the gate, or repoint it at
-# agentcore.json existence) lands.
-DUMMY_ID_VARS: dict[str, str] = {
-    "BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID": "DUMMY-SEM",
-    "BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID": "DUMMY-EPI",
-}
-
-#: Dummy values, exported so wire-absence assertions ("the dead env values
-#: never appear in any request") don't have to hardcode them.
-DUMMY_SEMANTIC_MEMORY_ID = DUMMY_ID_VARS["BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID"]
-DUMMY_EPISODIC_MEMORY_ID = DUMMY_ID_VARS["BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID"]
-
-
-def remove_dummy_id_vars_pins() -> dict[str, None]:
-    """Pins that REMOVE the two dummy ID vars (misconfig scenarios).
-
-    Kwarg-splat into :func:`agentcore_env` so tests never spell the var
-    names out (the tripwire grep-pins the literals to this module plus the
-    one defect-pin test)::
-
-        env = agentcore_env(home, fake.port, **remove_dummy_id_vars_pins())
-    """
-    return dict.fromkeys(DUMMY_ID_VARS)
 
 
 def agentcore_env(
@@ -85,10 +60,9 @@ def agentcore_env(
     ``fake_port`` is the local :class:`FakeAgentCore` port. ``pins``
     override or extend the defaults exactly like ``isolated_env`` pins
     (``None`` removes a key — e.g. ``BETTER_MEMORY_STORAGE_BACKEND=None``
-    for the session-close env-gate case)."""
+    for the settings.json-activation and sqlite-safety cases)."""
     defaults: dict[str, str | None] = {
         "BETTER_MEMORY_STORAGE_BACKEND": "agentcore",
-        "BETTER_MEMORY_AGENTCORE_REGION": DEFAULT_TEST_REGION,
         "AWS_ENDPOINT_URL": f"http://127.0.0.1:{fake_port}",
         "AWS_ACCESS_KEY_ID": FAKE_ACCESS_KEY_ID,
         "AWS_SECRET_ACCESS_KEY": FAKE_SECRET_ACCESS_KEY,
@@ -99,10 +73,28 @@ def agentcore_env(
         ),
         "AWS_CONFIG_FILE": str(Path(tmp_home) / "no-such-aws-config"),
         "AWS_EC2_METADATA_DISABLED": "true",
-        **DUMMY_ID_VARS,  # FIXME(idvar-gate) — see module comment above.
     }
     defaults.update(pins)
     return isolated_env(tmp_home, **defaults)
+
+
+def write_backend_settings(bm_home: Path) -> Path:
+    """Write ``settings.json`` activating the agentcore backend.
+
+    Fabricates exactly what ``better-memory agentcore init`` persists
+    (UD-3): ``{"storage_backend": "agentcore"}`` at
+    ``<bm_home>/settings.json``, where ``bm_home`` is the
+    BETTER_MEMORY_HOME dir (``<tmp_home>/.better-memory``). Composes with
+    ``BETTER_MEMORY_STORAGE_BACKEND=None`` pins to prove the env-var-free
+    onboarding path: ``resolve_storage_backend()`` falls through to this
+    file. Returns the settings.json path.
+    """
+    bm_home.mkdir(parents=True, exist_ok=True)
+    settings_path = bm_home / "settings.json"
+    settings_path.write_text(
+        json.dumps({"storage_backend": "agentcore"}), encoding="utf-8"
+    )
+    return settings_path
 
 
 def write_fake_agentcore_json(

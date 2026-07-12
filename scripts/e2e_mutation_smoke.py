@@ -15,9 +15,10 @@ Mutations (artifacts live in ``tests/e2e_meta/mutations/``):
 
 * M1 ``M1.patch``  — ``better_memory/mcp/server.py``: skip ``apply_migrations``
   for memory.db at boot. Sentinel: ``test_first_boot_migrates_tools_knowledge``.
-* M2 ``M2.patch``  — ``better_memory/hooks/session_bootstrap.py``: hoist
-  ``write_session_id`` above ``service.bootstrap()``. Sentinel:
-  ``test_hook_before_server_degraded`` (runtime/sessions-absent assertion).
+* M2 ``M2.patch``  — ``better_memory/hooks/session_bootstrap.py``: delete the
+  ``write_session_id`` call entirely (the session-id bridge marker is never
+  written). Sentinel: ``test_hook_before_server_degraded`` (marker-exists
+  assertion — the hoisted-write contract).
 * M3 ``M3.patch``  — ``better_memory/hooks/contextual_inject.py``: except path
   exits without printing the envelope. Sentinel:
   ``test_a_config_error_swallowed_envelope_still_printed`` (exactly-one-JSON-line).
@@ -97,7 +98,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         num=2,
-        title="session_bootstrap.py: write_session_id hoisted above bootstrap()",
+        title="session_bootstrap.py: write_session_id call deleted",
         kind="patch",
         artifact="M2.patch",
         targets=("better_memory/hooks/session_bootstrap.py",),

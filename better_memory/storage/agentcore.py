@@ -84,6 +84,51 @@ class AgentCoreBackend:
     def supports_episodes(self) -> bool:
         return False
 
+    # ----- Session-id per-operation re-resolution -----
+
+    def _require_session_id(self, operation: str) -> str:
+        """Resolve the session id fresh on EVERY operation — never freeze.
+
+        The MCP server resolves the session id once at startup, but real
+        Claude Code does not propagate CLAUDE_SESSION_ID into the spawned
+        stdio server's env; the server may spawn BEFORE the SessionStart
+        hook writes the marker file, and — the live-review major — a
+        long-lived server process outlives Claude sessions, so a marker
+        adopted once would go stale for the rest of the process lifetime.
+
+        Resolution order per call:
+        1. live sources: CLAUDE_SESSION_ID / CLAUDE_CODE_SESSION_ID env,
+           then the SessionStart marker under the resolved
+           BETTER_MEMORY_HOME (a fresh marker always beats any value seen
+           at construction time);
+        2. the construction-time session_id, as a fallback when no live
+           source resolves;
+        3. otherwise raise WITHOUT any wire call (no uuid4 fallback
+           fabricating identities).
+
+        The result is deliberately NOT cached on self — the whole point is
+        that a new session's marker takes effect on the next operation.
+        """
+        # Local import: keeps the storage layer free of an mcp import
+        # edge at module scope (and off the hooks' lightweight-import
+        # path — this only loads when an event operation runs).
+        from better_memory._common import resolve_home
+        from better_memory.mcp._util import resolve_session_id
+
+        live = resolve_session_id(resolve_home())
+        if live is not None:
+            return live
+        if self._session_id is not None:
+            return self._session_id
+        raise ValueError(
+            f"AgentCoreBackend.{operation} requires session_id: none was "
+            "available at construction time and re-resolution found "
+            "neither CLAUDE_SESSION_ID / CLAUDE_CODE_SESSION_ID in the "
+            "environment nor a SessionStart marker file under "
+            "BETTER_MEMORY_HOME (the SessionStart hook writes it; if you "
+            "see this in production the hook has not run yet)."
+        )
+
     # ----- Observations: filled in by Tasks 5-6 -----
 
     async def observe(
@@ -101,16 +146,12 @@ class AgentCoreBackend:
     ) -> str:
         """Write an observation as a CreateEvent against the episodic memory.
 
-        sessionId is the backend's held session id (raised if None — events
-        require a real session). actorId is resolved from project (or
-        "general" when no project is in scope). Returns the AgentCore
-        eventId."""
-        if self._session_id is None:
-            raise ValueError(
-                "AgentCoreBackend.observe requires session_id at construction "
-                "time. The MCP server populates it from CLAUDE_SESSION_ID at "
-                "startup; if you see this in production, the env var is missing."
-            )
+        sessionId is the backend's held session id, lazily re-resolved from
+        env / SessionStart marker when construction saw None (raised, with
+        zero wire calls, when nothing resolves — events require a real
+        session). actorId is resolved from project (or "general" when no
+        project is in scope). Returns the AgentCore eventId."""
+        session_id = self._require_session_id("observe")
         actor_id = resolve_actor_id(project or self._project)
 
         # Event-level metadata is stringValue-only (verified API surface);
@@ -140,7 +181,7 @@ class AgentCoreBackend:
             lambda: self._data.create_event(
                 memoryId=self._cfg.episodic.memory_id,
                 actorId=actor_id,
-                sessionId=self._session_id,
+                sessionId=session_id,
                 eventTimestamp=datetime.now(UTC),
                 payload=[
                     {
@@ -167,9 +208,13 @@ class AgentCoreBackend:
     ) -> dict[str, list[dict[str, Any]]]:
         """Bucketed reflection retrieval matching ReflectionSynthesisService.retrieve_reflections.
 
-        Per-polarity list_memory_records against the reflections namespace,
-        parse JSON content, rank via the sqlite ordering rule
-        (useful_count + 3*times_overlooked DESC, confidence DESC, updated_at DESC).
+        One list_memory_records per reflections namespace (project +
+        general — the promoted/cross-project merge, mirroring the sqlite
+        ``project = ? OR scope = 'general'`` clause), parse JSON content,
+        bucket by polarity CLIENT-SIDE (live AWS rejects ``polarity`` as a
+        metadata filter key — only the CreateMemory indexedKeys are legal),
+        rank via the sqlite ordering rule (useful_count +
+        3*times_overlooked DESC, confidence DESC, updated_at DESC).
         Returns dict[polarity, list[reflection_dict]] in the same shape sqlite mode
         returns; the MCP memory.retrieve handler json-dumps this directly to Claude.
 
@@ -178,66 +223,135 @@ class AgentCoreBackend:
         not part of the agentcore-mode rating model.
         """
         actor_id = resolve_actor_id(project or self._project)
-        namespace = resolve_namespace(actor_id, "reflections")
         effective_limit = limit_per_bucket if limit_per_bucket is not None else 20
-
-        # Restrict fan-out to a single polarity if the caller specified one
-        polarities_to_fetch: tuple[str, ...] = (
-            (polarity,) if polarity in _POLARITIES else _POLARITIES
+        return self._fetch_reflection_buckets(
+            actor_id=actor_id,
+            limit_per_bucket=effective_limit,
+            tech=tech,
+            phase=phase,
+            polarity=polarity if polarity in _POLARITIES else None,
         )
 
-        def _fetch(p: str) -> list[dict[str, Any]]:
-            filters: list[dict[str, Any]] = [
-                {
-                    "left": {"metadataKey": "polarity"},
-                    "operator": "EQUALS_TO",
-                    "right": {"metadataValue": {"stringValue": p}},
-                },
-                {
-                    "left": {"metadataKey": "status"},
-                    "operator": "EQUALS_TO",
-                    "right": {"metadataValue": {"stringValue": "active"}},
-                },
+    def _fetch_reflection_buckets(
+        self,
+        *,
+        actor_id: str,
+        limit_per_bucket: int,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Two-namespace reflection fan-out shared by retrieve() and
+        session_bootstrap().
+
+        Wire shape (live-verified dialect, aws_record_dialect.md):
+
+        * NO ``metadataFilters`` — ``polarity`` is not a legal filter key
+          (only the indexedKeys status / last_credited_at /
+          overlooked_count are), and a server-side ``status`` EQUALS_TO
+          filter would hide AgentCore-extracted reflections that carry no
+          status metadata at all. All polarity/status filtering happens
+          client-side on the parsed records.
+        * One call per namespace: ``projects/{actor}/reflections/`` and
+          ``general/reflections/`` (promoted reflections move to general/
+          with status=promoted — without this second call they become
+          invisible). The general call is skipped when actor == general
+          (same namespace).
+
+        Client-side status semantics (mirrors sqlite's
+        ``(project = ? OR scope='general') AND status IN (...)``):
+        project namespace admits status == active; the general namespace
+        admits active AND promoted. Records with no status metadata parse
+        as active; records with no/unknown polarity bucket as neutral —
+        AgentCore's own extraction strategy writes neither key, and those
+        records must still be retrievable. Dedup by record id across the
+        two calls (a just-promoted record can appear in both while the
+        list index lags), project namespace winning.
+        """
+        project_ns = resolve_namespace(actor_id, "reflections")
+        general_ns = resolve_namespace("general", "reflections")
+        allowed_general = frozenset({"active", "promoted"})
+        allowed_project = (
+            allowed_general if actor_id == "general" else frozenset({"active"})
+        )
+        namespaces: list[tuple[str, frozenset[str]]] = [
+            (project_ns, allowed_project)
+        ]
+        if general_ns != project_ns:
+            namespaces.append((general_ns, allowed_general))
+        # Scale the fetch budget with the bucket count. The real service
+        # caps maxResults at 100 (live ValidationException above that), so
+        # page with nextToken until the budget is met or the index is dry.
+        max_results = limit_per_bucket * len(_POLARITIES) * 2
+
+        def _fetch(namespace: str) -> list[dict[str, Any]]:
+            summaries: list[dict[str, Any]] = []
+            token: str | None = None
+            while len(summaries) < max_results:
+                kwargs: dict[str, Any] = {
+                    "memoryId": self._cfg.episodic.memory_id,
+                    "namespace": namespace,
+                    "maxResults": min(100, max_results - len(summaries)),
+                }
+                if token:
+                    kwargs["nextToken"] = token
+                response = self._data.list_memory_records(**kwargs)
+                summaries.extend(response.get("memoryRecordSummaries", []))
+                token = response.get("nextToken")
+                if not token:
+                    break
+            return summaries
+
+        # Parallel fan-out via a thread pool. This path is sync but is called
+        # from inside the MCP server's async `_call_tool`, so we cannot use
+        # asyncio.run here (would raise "event loop is already running").
+        # ThreadPoolExecutor gives the same wire-level parallelism without
+        # touching the outer event loop.
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(namespaces)
+        ) as pool:
+            futures = [
+                (allowed, pool.submit(_fetch, namespace))
+                for namespace, allowed in namespaces
             ]
-            response = self._data.list_memory_records(
-                memoryId=self._cfg.episodic.memory_id,
-                namespace=namespace,
-                maxResults=effective_limit * 2,  # fetch some slack for client-side ranking
-                metadataFilters=filters,
-            )
-            parsed_raw = [
-                self._parse_reflection_record(rec, tech_filter=tech, phase_filter=phase)
-                for rec in response.get("memoryRecordSummaries", [])
-            ]
-            # Drop None entries (filtered out by tech/phase post-filter)
-            parsed: list[dict[str, Any]] = [r for r in parsed_raw if r is not None]
+            fetched = [(allowed, future.result()) for allowed, future in futures]
+
+        buckets: dict[str, list[dict[str, Any]]] = {p: [] for p in _POLARITIES}
+        seen_ids: set[str] = set()
+        for allowed_statuses, summaries in fetched:
+            for rec in summaries:
+                parsed = self._parse_reflection_record(
+                    rec, tech_filter=tech, phase_filter=phase
+                )
+                if parsed is None:
+                    continue
+                if parsed["id"] in seen_ids:
+                    continue
+                if parsed["_status"] not in allowed_statuses:
+                    continue
+                bucket = parsed["_polarity"]
+                if polarity is not None and bucket != polarity:
+                    continue
+                seen_ids.add(parsed["id"])
+                buckets[bucket].append(parsed)
+
+        for bucket_name, items in buckets.items():
             # Sqlite ordering: (useful_count + 3*times_overlooked) DESC,
             # confidence DESC, updated_at DESC.
-            parsed.sort(
+            items.sort(
                 key=lambda r: (
                     -(r["useful_count"] + _OVERLOOKED_RANKING_WEIGHT * r["_overlooked_count"]),
                     -r["confidence"],
                     -r["_updated_at_ts"],
                 )
             )
-            return parsed[:effective_limit]
-
-        # Parallel fan-out via a thread pool. `retrieve` is sync but is called
-        # from inside the MCP server's async `_call_tool`, so we cannot use
-        # asyncio.run here (would raise "event loop is already running").
-        # ThreadPoolExecutor gives the same wire-level parallelism without
-        # touching the outer event loop.
-        def _gather_all() -> dict[str, list[dict[str, Any]]]:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(polarities_to_fetch) or 1
-            ) as pool:
-                futures = {p: pool.submit(_fetch, p) for p in polarities_to_fetch}
-                return {p: f.result() for p, f in futures.items()}
-
-        fetched = _gather_all()
-
-        # Always return all 3 keys for stable shape; unfetched buckets are [].
-        return {p: fetched.get(p, []) for p in _POLARITIES}
+            # Strip the internal ranking/bucketing helpers — the payload
+            # must be key-identical to the sqlite reflection dicts.
+            buckets[bucket_name] = [
+                {k: v for k, v in r.items() if not k.startswith("_")}
+                for r in items[:limit_per_bucket]
+            ]
+        return buckets
 
     def _parse_reflection_record(
         self,
@@ -248,7 +362,11 @@ class AgentCoreBackend:
     ) -> dict[str, Any] | None:
         """Map MemoryRecordSummary -> sqlite-shaped reflection dict.
 
-        Returns None if tech_filter / phase_filter excludes this record."""
+        Returns None if tech_filter / phase_filter excludes this record.
+
+        Underscore-prefixed keys are internal (ranking + client-side
+        polarity/status bucketing); _fetch_reflection_buckets strips them
+        before the payload leaves the backend."""
         text = rec.get("content", {}).get("text", "")
         try:
             body = json.loads(text) if isinstance(text, str) else {}
@@ -280,8 +398,23 @@ class AgentCoreBackend:
         except (TypeError, ValueError):
             confidence = 0.0
 
-        updated_at = rec.get("updatedAt") or rec.get("createdAt")
+        # Live dialect: NO updatedAt field exists on any record shape
+        # (createdAt only). Update recency lives in the system metadata key
+        # x-amz-agentcore-memory-updatedAt (dateTimeValue).
+        sys_updated = metadata_raw.get(
+            f"{_AGENTCORE_SYSTEM_METADATA_PREFIX}updatedAt", {}
+        ).get("dateTimeValue")
+        updated_at = sys_updated or rec.get("updatedAt") or rec.get("createdAt")
         updated_at_ts = updated_at.timestamp() if isinstance(updated_at, datetime) else 0.0
+
+        # Client-side bucketing inputs. Missing/unknown polarity buckets as
+        # neutral and missing status parses as active — AgentCore's own
+        # extraction strategy writes neither key, and those records must
+        # still be retrievable (see _fetch_reflection_buckets).
+        polarity_value = metadata_raw.get("polarity", {}).get("stringValue")
+        if polarity_value not in _POLARITIES:
+            polarity_value = "neutral"
+        status_value = metadata_raw.get("status", {}).get("stringValue") or "active"
 
         return {
             # Public shape — must match ReflectionSynthesisService.retrieve_reflections
@@ -300,9 +433,12 @@ class AgentCoreBackend:
             "updated_at": (
                 updated_at.isoformat() if isinstance(updated_at, datetime) else None
             ),
-            # Internal ranking helpers — leading underscore so callers ignore
+            # Internal ranking/bucketing helpers — stripped by
+            # _fetch_reflection_buckets before the payload leaves the backend.
             "_overlooked_count": int(_num("overlooked_count")),
             "_updated_at_ts": updated_at_ts,
+            "_polarity": polarity_value,
+            "_status": status_value,
         }
 
     async def list_observations(
@@ -317,12 +453,9 @@ class AgentCoreBackend:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """List raw events from the CURRENT session as observations. Cross-
-        session enumeration is deferred (ListEvents requires sessionId)."""
-        if self._session_id is None:
-            raise ValueError(
-                "AgentCoreBackend.list_observations requires session_id at "
-                "construction time."
-            )
+        session enumeration is deferred (ListEvents requires sessionId).
+        Same lazy session-id re-resolution contract as ``observe``."""
+        session_id = self._require_session_id("list_observations")
         actor_id = resolve_actor_id(project or self._project)
 
         # boto3 list_events is synchronous I/O; offload to a thread so the
@@ -335,8 +468,9 @@ class AgentCoreBackend:
             lambda: self._data.list_events(
                 memoryId=self._cfg.episodic.memory_id,
                 actorId=actor_id,
-                sessionId=self._session_id,
-                maxResults=limit,
+                sessionId=session_id,
+                # Real service caps maxResults at 100.
+                maxResults=min(limit, 100),
                 includePayloads=True,
             ),
         )
@@ -354,14 +488,27 @@ class AgentCoreBackend:
                 k: v.get("stringValue") for k, v in event.get("metadata", {}).items()
             }
 
+            event_ts = event.get("eventTimestamp")
             results.append(
                 {
+                    # Key parity with the sqlite rows list_observations
+                    # returns ({id, content, component, theme, outcome,
+                    # reinforcement_score, created_at}) — no extra
+                    # agentcore-only keys leak to the MCP payload.
+                    # reinforcement_score has no event-plane equivalent;
+                    # stable None placeholder (same convention as the
+                    # semantic_retrieve UD-2 payload contract).
                     "id": event["eventId"],
                     "content": payload_text,
-                    "session_id": event.get("sessionId"),
-                    "actor_id": event.get("actorId"),
-                    "event_timestamp": event.get("eventTimestamp"),
-                    **flat_metadata,
+                    "component": flat_metadata.get("component"),
+                    "theme": flat_metadata.get("theme"),
+                    "outcome": flat_metadata.get("outcome"),
+                    "reinforcement_score": None,
+                    "created_at": (
+                        event_ts.isoformat()
+                        if isinstance(event_ts, datetime)
+                        else event_ts
+                    ),
                 }
             )
 
@@ -465,7 +612,13 @@ class AgentCoreBackend:
 
         updates: dict[str, dict[str, Any]] = {
             counter_key: {"numberValue": current_count + 1},
-            "last_credited_at": {"dateTimeValue": datetime.now(UTC)},
+            # last_credited_at is declared STRING in the CreateMemory
+            # indexedKeys; a dateTimeValue fails the whole record update
+            # ("value type does not match declared indexed key type") —
+            # the live root cause of apply_session_ratings applied:0.
+            "last_credited_at": {
+                "stringValue": datetime.now(UTC).isoformat()
+            },
         }
         snapshot = self._full_metadata_snapshot(metadata, updates)
 
@@ -591,9 +744,14 @@ class AgentCoreBackend:
                 "id": rec["memoryRecordId"],
                 "content": rec.get("content", {}).get("text", ""),
                 "namespaces": rec.get("namespaces", []),
+                # Live dialect: stored namespaces gain a leading slash
+                # ("/general/semantic/") — normalize before classifying or
+                # every read-back record misreports as project scope.
                 "scope": (
                     "general"
-                    if (next(iter(rec.get("namespaces") or [""]), "")).startswith("general/")
+                    if (next(iter(rec.get("namespaces") or [""]), ""))
+                    .lstrip("/")
+                    .startswith("general/")
                     else "project"
                 ),
             }
@@ -791,35 +949,29 @@ class AgentCoreBackend:
         matching the BootstrapResult shape the MCP handler at
         server.py:1398-1411 unwraps.
 
-        Uses list_memory_records (not retrieve_memory_records) — bootstrap is
-        metadata-only, no semantic search query. 4 boto3 calls are independent
-        network round-trips, so we fan out via concurrent.futures.ThreadPoolExecutor.
+        Reflections go through the same two-namespace fan-out as retrieve()
+        (_fetch_reflection_buckets: project + general/promoted merge,
+        client-side polarity bucketing — live AWS rejects polarity as a
+        metadata filter key). Uses list_memory_records (not
+        retrieve_memory_records) — bootstrap is metadata-only, no semantic
+        search query. The boto3 calls are independent network round-trips,
+        so we fan out via concurrent.futures.ThreadPoolExecutor.
         The Protocol signature is sync, but session_bootstrap is reached via
         the MCP server's async `_call_tool` — meaning an event loop is already
         running; asyncio.run() would raise. ThreadPoolExecutor provides the
-        same parallelism without touching the outer loop."""
-        actor_id = resolve_actor_id(project or self._project)
-        reflections_namespace = resolve_namespace(actor_id, "reflections")
-        semantic_namespace = resolve_namespace(actor_id, "semantic")
+        same parallelism without touching the outer loop.
 
-        def _fetch_reflections(polarity: str) -> dict[str, Any]:
-            return self._data.list_memory_records(
-                memoryId=self._cfg.episodic.memory_id,
-                namespace=reflections_namespace,
-                maxResults=5,
-                metadataFilters=[
-                    {
-                        "left": {"metadataKey": "polarity"},
-                        "operator": "EQUALS_TO",
-                        "right": {"metadataValue": {"stringValue": polarity}},
-                    },
-                    {
-                        "left": {"metadataKey": "status"},
-                        "operator": "EQUALS_TO",
-                        "right": {"metadataValue": {"stringValue": "active"}},
-                    },
-                ],
-            )
+        Project resolution honours the cwd param (sqlite-parity): explicit
+        project wins, then project_name(cwd), then the construction-time
+        project."""
+        if project is None and cwd is not None:
+            from pathlib import Path
+
+            from better_memory.config import project_name
+
+            project = project_name(Path(cwd))
+        actor_id = resolve_actor_id(project or self._project)
+        semantic_namespace = resolve_namespace(actor_id, "semantic")
 
         def _fetch_semantic() -> dict[str, Any]:
             return self._data.list_memory_records(
@@ -828,21 +980,19 @@ class AgentCoreBackend:
                 maxResults=10,
             )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            reflection_futures = {
-                polarity: pool.submit(_fetch_reflections, polarity)
-                for polarity in _POLARITIES
-            }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            reflections_future = pool.submit(
+                self._fetch_reflection_buckets,
+                actor_id=actor_id,
+                limit_per_bucket=5,
+            )
             semantic_future = pool.submit(_fetch_semantic)
 
-            reflection_calls = {
-                polarity: future.result()
-                for polarity, future in reflection_futures.items()
-            }
+            reflection_buckets = reflections_future.result()
             semantic_response = semantic_future.result()
 
         reflections_counts = {
-            polarity: len(reflection_calls[polarity].get("memoryRecordSummaries", []))
+            polarity: len(reflection_buckets[polarity])
             for polarity in _POLARITIES
         }
         semantic_items = semantic_response.get("memoryRecordSummaries", [])
@@ -933,7 +1083,10 @@ class AgentCoreBackend:
 
         updates: dict[str, dict[str, Any]] = {
             counter_key: {"numberValue": current + 1},
-            "last_credited_at": {"dateTimeValue": datetime.now(UTC)},
+            # STRING indexed key — dateTimeValue is rejected (see record_use).
+            "last_credited_at": {
+                "stringValue": datetime.now(UTC).isoformat()
+            },
         }
         snapshot = self._full_metadata_snapshot(metadata, updates)
 
@@ -955,7 +1108,9 @@ class AgentCoreBackend:
                 "applied": None,
                 "skipped": failed[0].get("errorMessage", "unknown"),
             }
-        return {"applied": id, "skipped": None}
+        # Sqlite parity: MemoryRatingService.credit_one returns the applied
+        # CLASSIFICATION (not the memory id) on success.
+        return {"applied": classification, "skipped": None}
 
     def apply_session_ratings(
         self,
@@ -963,16 +1118,68 @@ class AgentCoreBackend:
         session_id: str,
         ratings: list[dict[str, str]],
     ) -> dict[str, Any]:
-        """Iterate ratings, call credit_one per entry. Return summary dict
-        with `applied` (count of successful credits) and `failed` (count of
-        skip / error results)."""
-        applied = 0
-        failed = 0
+        """Batch rating apply — sqlite-parity validation and return shape.
+
+        Mirrors MemoryRatingService.apply_session_ratings: the whole batch
+        is validated BEFORE any wire call (non-empty session_id/ratings,
+        kind in {reflection, semantic}, class in the five rating classes,
+        non-empty string id, no duplicate (kind, id) pairs — ValueError on
+        any violation), then each entry runs through credit_one.
+
+        Returns the sqlite shape::
+
+            {"session_id": str,
+             "applied":  {"cited": int, "shaped": int, "ignored": int,
+                          "misled": int, "overlooked": int},
+             "skipped":  {"not_exposed": int, "already_rated": int,
+                          "memory_missing": int, "memory_retired": int}}
+
+        Agentcore has no exposure log, so not_exposed / already_rated /
+        memory_retired never fire here; a missing record (GetMemoryRecord
+        404) or a per-record batch-update failure counts as
+        memory_missing. There is no AWS-side atomicity — entries already
+        credited stay credited if a later entry raises."""
+        if not session_id:
+            raise ValueError("session_id must be non-empty")
+        if not ratings:
+            raise ValueError("ratings must be non-empty")
+
+        valid_kinds = {"reflection", "semantic"}
+        seen: set[tuple[str, str]] = set()
+        for i, r in enumerate(ratings):
+            for field_name in ("kind", "class", "id"):
+                if field_name not in r:
+                    raise ValueError(
+                        f"ratings[{i}].{field_name}: missing required field"
+                    )
+            kind = r["kind"]
+            rid = r["id"]
+            cls = r["class"]
+            if kind not in valid_kinds:
+                raise ValueError(
+                    f"ratings[{i}].kind: invalid {kind!r}; "
+                    f"expected one of {valid_kinds}"
+                )
+            if cls not in _RATING_TO_COUNTER:
+                raise ValueError(
+                    f"ratings[{i}].class: invalid {cls!r}; "
+                    f"expected one of {set(_RATING_TO_COUNTER)}"
+                )
+            if not isinstance(rid, str) or not rid:
+                raise ValueError(f"ratings[{i}].id: must be non-empty string")
+            key = (kind, rid)
+            if key in seen:
+                raise ValueError(f"ratings[{i}]: duplicate (kind, id) = {key!r}")
+            seen.add(key)
+
+        applied: dict[str, int] = {cls: 0 for cls in _RATING_TO_COUNTER}
+        skipped: dict[str, int] = {
+            "not_exposed": 0,
+            "already_rated": 0,
+            "memory_missing": 0,
+            "memory_retired": 0,
+        }
         for r in ratings:
-            # Guard each iteration: a single malformed entry (missing key or
-            # unknown classification raising ValueError inside credit_one)
-            # must not abort the remainder of the list or drop the
-            # accumulated counts.
             try:
                 result = self.credit_one(
                     session_id=session_id,
@@ -980,14 +1187,21 @@ class AgentCoreBackend:
                     id=r["id"],
                     classification=r["class"],
                 )
-            except (KeyError, ValueError):
-                failed += 1
+            except _ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code != "ResourceNotFoundException":
+                    raise
+                # The record no longer exists — sqlite calls this
+                # memory_missing; keep rating the rest of the batch.
+                skipped["memory_missing"] += 1
                 continue
             if result["applied"] is not None:
-                applied += 1
+                applied[r["class"]] += 1
             else:
-                failed += 1
-        return {"applied": applied, "failed": failed}
+                # Per-record batch-update failure (failedRecords) — the
+                # closest sqlite skip reason is memory_missing.
+                skipped["memory_missing"] += 1
+        return {"session_id": session_id, "applied": applied, "skipped": skipped}
 
     # ----- Synthesis: no-ops in agentcore mode -----
 

@@ -1,6 +1,6 @@
 # Architecture
 
-better-memory is a four-layer epistemic hierarchy backed by a single SQLite database, with embeddings supplied by one of two pluggable backends (Ollama, or an in-SQL trigram-FTS5 fusion).
+better-memory is a four-layer epistemic hierarchy backed by a pluggable storage backend — a single SQLite database by default — with embeddings supplied by one of two pluggable backends (Ollama, or an in-SQL trigram-FTS5 fusion).
 
 ## The four layers
 
@@ -19,27 +19,28 @@ better-memory is a four-layer epistemic hierarchy backed by a single SQLite data
 
 ## Storage backends
 
-better-memory abstracts persistence behind the `StorageBackend` protocol (`better_memory/storage/protocol.py`). At server startup, the factory (`better_memory/storage/factory.py`) selects an implementation based on `BETTER_MEMORY_STORAGE_BACKEND`:
+better-memory abstracts persistence behind the `StorageBackend` protocol (`better_memory/storage/protocol.py`). At server startup, the factory (`better_memory/storage/factory.py`) selects an implementation based on the resolved backend — `BETTER_MEMORY_STORAGE_BACKEND` env var if set, else the `storage_backend` key in `$BETTER_MEMORY_HOME/settings.json`, else `sqlite`:
 
 ```mermaid
 flowchart LR
-  ENV["BETTER_MEMORY_STORAGE_BACKEND"]
-  ENV -->|sqlite| SQLITE["SqliteBackend<br/>(local memory.db + sqlite-vec)"]
-  ENV -->|agentcore| AGENTCORE["AgentCoreBackend<br/>(AWS Bedrock AgentCore Memory)"]
+  RESOLVE["env var, else settings.json,<br/>else sqlite"]
+  RESOLVE -->|sqlite| SQLITE["SqliteBackend<br/>(local memory.db + sqlite-vec)"]
+  RESOLVE -->|agentcore| AGENTCORE["AgentCoreBackend<br/>(AWS Bedrock AgentCore Memory)"]
   SQLITE -->|sync I/O| DB[("memory.db")]
-  AGENTCORE -->|boto3| AWS[("eu-west-2<br/>bedrock-agentcore")]
+  AGENTCORE -->|boto3| AWS[("region from agentcore.json<br/>bedrock-agentcore")]
 ```
 
 | Aspect | `sqlite` | `agentcore` |
 |---|---|---|
-| Data location | Local file (`memory.db`) | AWS-managed (`eu-west-2`) |
+| Data location | Local file (`memory.db`) | AWS-managed (region from `agentcore.json`) |
+| Local files | `memory.db` + `knowledge.db` (all memory content) | `memory.db` + `knowledge.db` still created — hook-error log + knowledge index only (no memory content) |
 | Extraction | Local Claude (synthesize_next_* tools) | Cloud (built-in strategies) |
 | Latency | Single-digit ms | 100-500 ms per AWS call |
 | Cost | Free | Per-API-call + per-record pricing |
 | Multi-machine sync | No | Yes (shared memory resources) |
 | Closure events | N/A | `CreateEvent(role=OTHER)` from Stop hook |
 | Episode tracking | Local `episodes` table | Internal to AgentCore (sessionId) |
-| Exposure log (`record_exposures`) | Writes `session_memory_exposure` rows (sources `bootstrap` / `retrieve` / `contextual`) | No-op — no exposure log; rating flows through `memory.credit` only |
+| Exposure log (`record_exposures`) | Writes `session_memory_exposure` rows (sources `bootstrap` / `retrieve` / `contextual`) | No-op — no exposure log, so the end-of-session rating sweep has nothing to trigger on; rating flows through `memory.credit` (and direct `memory.apply_session_ratings` calls) |
 
 See [Configuration](configuration.md) for env vars and [AgentCore setup](agentcore-setup.md) for the agentcore path.
 

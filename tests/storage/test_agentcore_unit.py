@@ -4,6 +4,8 @@ behavior. Integration tests against real AWS land in Plan 3."""
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -135,9 +137,6 @@ def test_list_episodes_returns_empty_list(backend) -> None:
     assert backend.list_episodes() == []
 
 
-from datetime import datetime, UTC
-
-
 @pytest.mark.asyncio
 async def test_observe_calls_create_event_with_correct_kwargs(backend, mock_data_client) -> None:
     """observe builds a CreateEvent against the EPISODIC memory with
@@ -203,20 +202,117 @@ async def test_observe_drops_none_metadata_keys(backend, mock_data_client) -> No
     assert metadata["theme"]["stringValue"] == "bug"
 
 
-@pytest.mark.asyncio
-async def test_observe_raises_value_error_when_session_id_is_none(ac_config, mock_data_client, mock_control_client) -> None:
-    """CreateEvent on the episodic memory requires sessionId (per the
-    output schema and our usage pattern). A backend with session_id=None
-    cannot fire events — raise so the operator sees the misconfiguration."""
-    backend = AgentCoreBackend(
+@pytest.fixture
+def backend_without_session(
+    ac_config, mock_data_client, mock_control_client
+) -> AgentCoreBackend:
+    return AgentCoreBackend(
         config=ac_config,
         data_client=mock_data_client,
         control_client=mock_control_client,
         session_id=None,
         project="testproj",
     )
+
+
+@pytest.mark.asyncio
+async def test_observe_raises_when_session_id_unresolvable(
+    backend_without_session, mock_data_client
+) -> None:
+    """session_id=None triggers lazy re-resolution (env var → SessionStart
+    marker under $BETTER_MEMORY_HOME). With neither available observe must
+    still raise — and make ZERO wire calls. (The autouse conftest fixtures
+    strip CLAUDE_*SESSION_ID and pin BETTER_MEMORY_HOME to an empty tmp
+    dir, so nothing resolves here.)"""
     with pytest.raises(ValueError, match="session_id"):
-        await backend.observe(content="x")
+        await backend_without_session.observe(content="x")
+    mock_data_client.create_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_observe_lazily_resolves_session_id_from_env(
+    backend_without_session, mock_data_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP server may spawn before CLAUDE_SESSION_ID / the marker
+    exists; a backend frozen at session_id=None must re-resolve at first
+    observe instead of raising forever."""
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-resolved-session")
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    result = await backend_without_session.observe(content="x")
+    assert result == "evt-x"
+    kwargs = mock_data_client.create_event.call_args.kwargs
+    assert kwargs["sessionId"] == "env-resolved-session"
+
+
+@pytest.mark.asyncio
+async def test_observe_lazily_resolves_session_id_from_marker(
+    backend_without_session, mock_data_client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Marker-file fallback: the SessionStart hook writes the marker after
+    the server spawns; observe picks it up on first use."""
+    from better_memory.runtime.session_marker import write_session_id
+
+    bm_home = tmp_path / "bm-marker-home"
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(bm_home))
+    write_session_id(bm_home, "marker-resolved-session")
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    await backend_without_session.observe(content="x")
+    kwargs = mock_data_client.create_event.call_args.kwargs
+    assert kwargs["sessionId"] == "marker-resolved-session"
+
+
+@pytest.mark.asyncio
+async def test_observe_reresolves_session_id_on_every_operation(
+    backend_without_session, mock_data_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live-review major: the session id must NOT freeze at first
+    resolution. A long-lived server process spans Claude sessions — each
+    operation resolves the CURRENT env/marker value."""
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "session-one")
+    await backend_without_session.observe(content="first")
+    assert (
+        mock_data_client.create_event.call_args.kwargs["sessionId"]
+        == "session-one"
+    )
+
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "session-two")
+    await backend_without_session.observe(content="second")
+    assert (
+        mock_data_client.create_event.call_args.kwargs["sessionId"]
+        == "session-two"
+    )
+
+
+@pytest.mark.asyncio
+async def test_observe_fresh_marker_beats_construction_time_session_id(
+    backend, mock_data_client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A marker written AFTER construction (a new Claude session started
+    against the same long-lived server) supersedes the construction-time
+    session id — the exact stale-adoption the freeze caused."""
+    from better_memory.runtime.session_marker import write_session_id
+
+    bm_home = tmp_path / "bm-fresh-marker-home"
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(bm_home))
+    write_session_id(bm_home, "fresh-marker-session")
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    await backend.observe(content="x")
+    kwargs = mock_data_client.create_event.call_args.kwargs
+    assert kwargs["sessionId"] == "fresh-marker-session"  # not test-session-xyz
+
+
+@pytest.mark.asyncio
+async def test_observe_falls_back_to_construction_session_id(
+    backend, mock_data_client
+) -> None:
+    """No live env var, no marker → the construction-time session id still
+    works (the conftest strips CLAUDE_*SESSION_ID and pins an empty home)."""
+    mock_data_client.create_event.return_value = {"event": {"eventId": "evt-x"}}
+    await backend.observe(content="x")
+    kwargs = mock_data_client.create_event.call_args.kwargs
+    assert kwargs["sessionId"] == "test-session-xyz"
 
 
 @pytest.mark.asyncio
@@ -260,6 +356,17 @@ async def test_list_observations_returns_current_session_events(backend, mock_da
     assert result[0]["content"] == "obs one"
     assert result[0]["outcome"] == "success"
     assert result[0]["theme"] == "test"
+    # Key parity with the sqlite list_observations rows — no agentcore-only
+    # keys (session_id/actor_id/event_timestamp) leak; created_at is the
+    # iso-formatted event timestamp; reinforcement_score is a stable None
+    # placeholder (no event-plane counter).
+    assert set(result[0]) == {
+        "id", "content", "component", "theme", "outcome",
+        "reinforcement_score", "created_at",
+    }
+    assert result[0]["created_at"] == "2026-05-25T12:00:00+00:00"
+    assert result[0]["reinforcement_score"] is None
+    assert result[0]["component"] is None
 
     # ListEvents call shape
     call_kwargs = mock_data_client.list_events.call_args.kwargs
@@ -277,16 +384,25 @@ async def test_list_observations_returns_empty_when_no_events(backend, mock_data
 
 
 @pytest.mark.asyncio
-async def test_list_observations_raises_when_session_id_is_none(ac_config, mock_data_client, mock_control_client) -> None:
-    backend = AgentCoreBackend(
-        config=ac_config,
-        data_client=mock_data_client,
-        control_client=mock_control_client,
-        session_id=None,
-        project="testproj",
-    )
+async def test_list_observations_raises_when_session_id_unresolvable(
+    backend_without_session, mock_data_client
+) -> None:
+    """Same lazy re-resolution contract as observe: env → marker → raise
+    with zero wire calls when nothing resolves."""
     with pytest.raises(ValueError, match="session_id"):
-        await backend.list_observations(limit=5)
+        await backend_without_session.list_observations(limit=5)
+    mock_data_client.list_events.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_list_observations_lazily_resolves_session_id_from_env(
+    backend_without_session, mock_data_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-resolved-session")
+    mock_data_client.list_events.return_value = {"events": []}
+    assert await backend_without_session.list_observations(limit=5) == []
+    kwargs = mock_data_client.list_events.call_args.kwargs
+    assert kwargs["sessionId"] == "env-resolved-session"
 
 
 def test_retrieve_returns_dict_with_polarity_buckets(backend, mock_data_client) -> None:
@@ -299,25 +415,51 @@ def test_retrieve_returns_dict_with_polarity_buckets(backend, mock_data_client) 
         assert isinstance(result[bucket], list)
 
 
-def test_retrieve_fires_one_list_call_per_polarity(backend, mock_data_client) -> None:
-    """Three list_memory_records calls (no semantic search): one per polarity."""
+def test_retrieve_fires_project_and_general_namespace_calls(backend, mock_data_client) -> None:
+    """Two list_memory_records calls — the project reflections namespace plus
+    the general/promoted namespace — with NO metadataFilters (live AWS
+    rejects 'polarity' as a filter key; a server-side status filter would
+    hide extraction-strategy records that carry no status metadata)."""
     mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
     backend.retrieve(project="testproj")
-    assert mock_data_client.list_memory_records.call_count == 3
+    assert mock_data_client.list_memory_records.call_count == 2
 
-    polarities_filtered = []
+    namespaces = set()
     for call in mock_data_client.list_memory_records.call_args_list:
-        for f in call.kwargs["metadataFilters"]:
-            if f["left"]["metadataKey"] == "polarity":
-                polarities_filtered.append(f["right"]["metadataValue"]["stringValue"])
-    assert set(polarities_filtered) == {"do", "dont", "neutral"}
+        assert call.kwargs["memoryId"] == "mem-epi-def4567890"
+        assert "metadataFilters" not in call.kwargs
+        namespaces.add(call.kwargs["namespace"])
+    assert namespaces == {
+        "projects/testproj/reflections/",
+        "general/reflections/",
+    }
 
 
-def test_retrieve_with_polarity_kwarg_fetches_only_that_bucket(backend, mock_data_client) -> None:
-    """polarity='do' -> only the do bucket gets fetched; others empty."""
+def test_retrieve_general_actor_skips_duplicate_namespace_call(
+    ac_config, mock_data_client, mock_control_client
+) -> None:
+    """actor == general → project and general namespaces coincide; exactly
+    one wire call, never two identical ones."""
+    backend = AgentCoreBackend(
+        config=ac_config,
+        data_client=mock_data_client,
+        control_client=mock_control_client,
+        session_id="test-session-xyz",
+        project="general",
+    )
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.retrieve(project="general")
+    assert mock_data_client.list_memory_records.call_count == 1
+    call = mock_data_client.list_memory_records.call_args
+    assert call.kwargs["namespace"] == "general/reflections/"
+
+
+def test_retrieve_with_polarity_kwarg_buckets_only_that_polarity(backend, mock_data_client) -> None:
+    """polarity='do' -> other buckets stay empty. The namespace fan-out is
+    unchanged (polarity is client-side now — it cannot narrow the wire)."""
     mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
     result = backend.retrieve(project="testproj", polarity="do")
-    assert mock_data_client.list_memory_records.call_count == 1
+    assert mock_data_client.list_memory_records.call_count == 2
     assert result["dont"] == []
     assert result["neutral"] == []
 
@@ -354,6 +496,8 @@ def test_retrieve_parses_reflection_json_content(backend, mock_data_client) -> N
     }
     result = backend.retrieve(project="testproj")
     do_bucket = result["do"]
+    # The same canned summary answers BOTH namespace calls — a single merged
+    # entry proves the cross-namespace id-dedup.
     assert len(do_bucket) == 1
     refl = do_bucket[0]
     # Match the sqlite-mode reflection dict shape
@@ -363,6 +507,8 @@ def test_retrieve_parses_reflection_json_content(backend, mock_data_client) -> N
     assert refl["hints"] == ["First hint.", "Second hint.", "Third hint."]
     assert refl["confidence"] == 0.85  # float
     assert refl["useful_count"] == 3
+    # Internal ranking/bucketing helpers must NOT leak to the payload.
+    assert not any(key.startswith("_") for key in refl), refl
 
 
 def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) -> None:
@@ -390,18 +536,15 @@ def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) 
         }
 
     def stub(**kwargs):
-        for f in kwargs.get("metadataFilters", []):
-            if f["left"]["metadataKey"] == "polarity":
-                pol = f["right"]["metadataValue"]["stringValue"]
-                if pol == "do":
-                    # high-rank: useful=10 -> score 10
-                    # mid-rank:  useful=2, overlooked=3 -> score 2 + 9 = 11
-                    # low-rank:  useful=0, overlooked=0 -> score 0
-                    return {"memoryRecordSummaries": [
-                        make_record("low", useful=0, overlooked=0),
-                        make_record("high-via-useful", useful=10, overlooked=0),
-                        make_record("highest-via-overlooked", useful=2, overlooked=3),
-                    ]}
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            # high-rank: useful=10 -> score 10
+            # mid-rank:  useful=2, overlooked=3 -> score 2 + 9 = 11
+            # low-rank:  useful=0, overlooked=0 -> score 0
+            return {"memoryRecordSummaries": [
+                make_record("low", useful=0, overlooked=0),
+                make_record("high-via-useful", useful=10, overlooked=0),
+                make_record("highest-via-overlooked", useful=2, overlooked=3),
+            ]}
         return {"memoryRecordSummaries": []}
 
     mock_data_client.list_memory_records.side_effect = stub
@@ -412,6 +555,133 @@ def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) 
     # high-via-useful:        10 + 0 = 10
     # low:                    0 + 0 = 0
     assert do_titles == ["highest-via-overlooked", "high-via-useful", "low"]
+
+
+def _reflection_summary(
+    rec_id: str,
+    *,
+    namespace: str,
+    status: str | None = "active",
+    polarity: str | None = "do",
+) -> dict:
+    """MemoryRecordSummary for the client-side status/polarity tests.
+    status/polarity=None omit the metadata key entirely (the shape
+    AgentCore's own extraction strategy produces)."""
+    import json
+    metadata: dict = {"useful_count": {"numberValue": 0}}
+    if status is not None:
+        metadata["status"] = {"stringValue": status}
+    if polarity is not None:
+        metadata["polarity"] = {"stringValue": polarity}
+    return {
+        "memoryRecordId": rec_id,
+        "content": {"text": json.dumps({
+            "title": rec_id, "use_cases": "u", "hints": "h", "confidence": "0.5",
+        })},
+        "namespaces": [namespace],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": metadata,
+    }
+
+
+def test_retrieve_includes_promoted_records_from_general_namespace(
+    backend, mock_data_client
+) -> None:
+    """Live-review major: promote_reflection moves records to
+    general/reflections/ with status=promoted — retrieve must surface them
+    (the old status==active project-only query made them invisible)."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _reflection_summary(
+                    "rec-promoted",
+                    namespace="/general/reflections/",
+                    status="promoted",
+                    polarity="dont",
+                )
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    assert [r["id"] for r in result["dont"]] == ["rec-promoted"]
+
+
+def test_retrieve_excludes_non_active_status_in_project_namespace(
+    backend, mock_data_client
+) -> None:
+    """A project-namespace record whose status is explicitly not active
+    (e.g. retired, or promoted served stale by the lagging index) is
+    excluded — promoted records are only admitted via general/."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _reflection_summary(
+                    "rec-retired",
+                    namespace="/projects/testproj/reflections/",
+                    status="retired",
+                ),
+                _reflection_summary(
+                    "rec-stale-promoted",
+                    namespace="/projects/testproj/reflections/",
+                    status="promoted",
+                ),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    assert result == {"do": [], "dont": [], "neutral": []}
+
+
+def test_retrieve_defaults_missing_status_and_polarity(
+    backend, mock_data_client
+) -> None:
+    """Records written by AgentCore's own extraction strategy carry NO
+    status/polarity metadata; they must still be retrievable — missing
+    status parses as active, missing polarity buckets as neutral."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _reflection_summary(
+                    "rec-extracted",
+                    namespace="/projects/testproj/reflections/",
+                    status=None,
+                    polarity=None,
+                )
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    assert [r["id"] for r in result["neutral"]] == ["rec-extracted"]
+    assert result["do"] == []
+    assert result["dont"] == []
+
+
+def test_retrieve_dedupes_record_seen_in_both_namespaces(
+    backend, mock_data_client
+) -> None:
+    """A just-promoted record can be served by BOTH namespace queries while
+    the list index lags — it must appear exactly once."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _reflection_summary(
+                    "rec-dup", namespace="/projects/testproj/reflections/",
+                    status="active", polarity="do",
+                )
+            ]}
+        return {"memoryRecordSummaries": [
+            _reflection_summary(
+                "rec-dup", namespace="/general/reflections/",
+                status="promoted", polarity="do",
+            )
+        ]}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    assert [r["id"] for r in result["do"]] == ["rec-dup"]
 
 
 def _make_record_response(rec_id: str, **counters) -> dict:
@@ -451,8 +721,13 @@ def test_record_use_success_bumps_useful_count(backend, mock_data_client) -> Non
     assert rec["memoryRecordId"] == "rec-x"
     assert rec["metadata"]["useful_count"]["numberValue"] == 3
     assert rec["metadata"]["missed_count"]["numberValue"] == 0
-    # last_credited_at refreshed
-    assert "last_credited_at" in rec["metadata"]
+    # last_credited_at refreshed — as stringValue iso8601, NEVER
+    # dateTimeValue: the indexedKey is declared STRING and real AWS fails
+    # the whole record update on a type mismatch (live root cause of
+    # apply_session_ratings applied:0/failed:1).
+    last_credited = rec["metadata"]["last_credited_at"]
+    assert set(last_credited) == {"stringValue"}
+    assert isinstance(last_credited["stringValue"], str)
 
 
 def test_record_use_failure_bumps_missed_count(backend, mock_data_client) -> None:
@@ -572,9 +847,12 @@ def test_credit_one_bumps_correct_counter(
         id="rec-c",
         classification=classification,
     )
-    assert result["applied"] == "rec-c"
+    # Sqlite parity: credit_one returns the applied CLASSIFICATION.
+    assert result == {"applied": classification, "skipped": None}
     rec = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
     assert rec["metadata"][counter_key]["numberValue"] == 1
+    # STRING indexed key — dateTimeValue fails the record on real AWS.
+    assert set(rec["metadata"]["last_credited_at"]) == {"stringValue"}
 
 
 def test_credit_one_rejects_unknown_classification(backend) -> None:
@@ -617,7 +895,7 @@ def test_credit_one_routes_semantic_kind_to_semantic_memory(backend, mock_data_c
         id="sm-rec",
         classification="cited",
     )
-    assert result["applied"] == "sm-rec"
+    assert result == {"applied": "cited", "skipped": None}
 
     # Verify both calls targeted SEMANTIC memory, not episodic
     get_call = mock_data_client.get_memory_record.call_args.kwargs
@@ -627,6 +905,9 @@ def test_credit_one_routes_semantic_kind_to_semantic_memory(backend, mock_data_c
 
 
 def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) -> None:
+    """Return shape is sqlite-parity: {session_id, applied: {per-class
+    counts}, skipped: {per-reason counts}} — NOT the old flat
+    {applied: int, failed: int}."""
     mock_data_client.get_memory_record.side_effect = [
         _make_record_response("rec-1"),
         _make_record_response("rec-2"),
@@ -643,32 +924,88 @@ def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) ->
         ],
     )
     assert mock_data_client.batch_update_memory_records.call_count == 2
-    assert result["applied"] == 2
-    assert result["failed"] == 0
-
-
-def test_apply_session_ratings_empty_returns_zero_summary(backend) -> None:
-    result = backend.apply_session_ratings(session_id="x", ratings=[])
-    assert result == {"applied": 0, "failed": 0}
-
-
-def test_apply_session_ratings_skips_malformed_entries(backend, mock_data_client) -> None:
-    """Malformed entries (missing key, unknown class) increment `failed` instead of crashing the loop."""
-    mock_data_client.get_memory_record.return_value = _make_record_response("rec-ok")
-    mock_data_client.batch_update_memory_records.return_value = {
-        "successfulRecords": [{"memoryRecordId": "rec-ok", "status": "SUCCEEDED"}],
-        "failedRecords": [],
+    assert result == {
+        "session_id": "test-session-xyz",
+        "applied": {
+            "cited": 1, "shaped": 0, "ignored": 0, "misled": 0,
+            "overlooked": 1,
+        },
+        "skipped": {
+            "not_exposed": 0, "already_rated": 0,
+            "memory_missing": 0, "memory_retired": 0,
+        },
     }
+
+
+def test_apply_session_ratings_empty_raises_like_sqlite(backend) -> None:
+    """Sqlite parity: MemoryRatingService.apply_session_ratings raises on
+    an empty ratings list."""
+    with pytest.raises(ValueError, match="non-empty"):
+        backend.apply_session_ratings(session_id="x", ratings=[])
+
+
+@pytest.mark.parametrize(
+    "ratings,match",
+    [
+        ([{"kind": "reflection", "id": "rec-x"}], "missing required field"),
+        ([{"kind": "reflection", "id": "rec-x", "class": "bogus"}], "invalid 'bogus'"),
+        ([{"kind": "widget", "id": "rec-x", "class": "cited"}], "invalid 'widget'"),
+        ([{"kind": "reflection", "id": "", "class": "cited"}], "non-empty string"),
+        (
+            [
+                {"kind": "reflection", "id": "rec-x", "class": "cited"},
+                {"kind": "reflection", "id": "rec-x", "class": "misled"},
+            ],
+            "duplicate",
+        ),
+    ],
+)
+def test_apply_session_ratings_validates_batch_before_any_wire_call(
+    backend, mock_data_client, ratings, match
+) -> None:
+    """Sqlite parity: the whole batch is validated up front — ValueError,
+    zero wire calls (nothing partially credited)."""
+    with pytest.raises(ValueError, match=match):
+        backend.apply_session_ratings(session_id="s", ratings=ratings)
+    mock_data_client.get_memory_record.assert_not_called()
+    mock_data_client.batch_update_memory_records.assert_not_called()
+
+
+def test_apply_session_ratings_counts_wire_failures_as_memory_missing(
+    backend, mock_data_client
+) -> None:
+    """A per-record batch-update failure (real AWS reports these as HTTP
+    200 failedRecords) counts under skipped.memory_missing and does not
+    abort the rest of the batch."""
+    mock_data_client.get_memory_record.side_effect = [
+        _make_record_response("rec-fail"),
+        _make_record_response("rec-ok"),
+    ]
+    mock_data_client.batch_update_memory_records.side_effect = [
+        {
+            "successfulRecords": [],
+            "failedRecords": [{
+                "memoryRecordId": "rec-fail",
+                "status": "FAILED",
+                "errorCode": 400,
+                "errorMessage": "boom",
+            }],
+        },
+        {
+            "successfulRecords": [{"memoryRecordId": "rec-ok", "status": "SUCCEEDED"}],
+            "failedRecords": [],
+        },
+    ]
     result = backend.apply_session_ratings(
         session_id="test-session-xyz",
         ratings=[
-            {"kind": "reflection", "id": "rec-ok", "class": "cited"},  # OK
-            {"kind": "reflection", "id": "rec-missing-class"},  # KeyError
-            {"kind": "reflection", "id": "rec-bad", "class": "bogus"},  # ValueError
+            {"kind": "reflection", "id": "rec-fail", "class": "cited"},
+            {"kind": "reflection", "id": "rec-ok", "class": "shaped"},
         ],
     )
-    assert result["applied"] == 1
-    assert result["failed"] == 2
+    assert result["applied"]["shaped"] == 1
+    assert result["applied"]["cited"] == 0
+    assert result["skipped"]["memory_missing"] == 1
 
 
 def test_promote_reflection_moves_to_general_namespace(backend, mock_data_client) -> None:
@@ -699,19 +1036,28 @@ def test_promote_reflection_raises_when_batch_fails(backend, mock_data_client) -
     mock_data_client.get_memory_record.return_value = _make_record_response("rec-fail")
     mock_data_client.batch_update_memory_records.return_value = {
         "successfulRecords": [],
-        "failedRecords": [{"memoryRecordId": "rec-fail", "status": "FAILED", "errorMessage": "boom"}],
+        "failedRecords": [
+            {"memoryRecordId": "rec-fail", "status": "FAILED", "errorMessage": "boom"}
+        ],
     }
     with pytest.raises(RuntimeError, match="rec-fail"):
         backend.promote_reflection(reflection_id="rec-fail")
 
 
 # ===== Task 11: semantic CRUD =====
-import hashlib
 
 
-def test_semantic_observe_calls_batch_create_against_semantic_memory(backend, mock_data_client) -> None:
+def test_semantic_observe_calls_batch_create_against_semantic_memory(
+    backend, mock_data_client
+) -> None:
     mock_data_client.batch_create_memory_records.return_value = {
-        "successfulRecords": [{"memoryRecordId": "sm-1", "status": "SUCCEEDED", "requestIdentifier": "any"}],
+        "successfulRecords": [
+            {
+                "memoryRecordId": "sm-1",
+                "status": "SUCCEEDED",
+                "requestIdentifier": "any",
+            }
+        ],
         "failedRecords": [],
     }
     sm_id = backend.semantic_observe(content="prefer uv over pip")
@@ -768,6 +1114,34 @@ def test_semantic_list_without_search_uses_list_memory_records(backend, mock_dat
     backend.semantic_list()
     mock_data_client.list_memory_records.assert_called_once()
     mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_semantic_list_scope_classification_normalizes_leading_slash(
+    backend, mock_data_client
+) -> None:
+    """Live dialect: stored namespaces come back WITH a leading slash
+    ("/general/semantic/") — the scope classifier must normalize or every
+    read-back general record misreports as project scope."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "sm-slash-general",
+                "content": {"text": "g"},
+                "namespaces": ["/general/semantic/"],
+            },
+            {
+                "memoryRecordId": "sm-slash-project",
+                "content": {"text": "p"},
+                "namespaces": ["/projects/testproj/semantic/"],
+            },
+        ]
+    }
+    result = backend.semantic_list()
+    scopes = {r["id"]: r["scope"] for r in result}
+    assert scopes == {
+        "sm-slash-general": "general",
+        "sm-slash-project": "project",
+    }
 
 
 def test_semantic_update_text_calls_batch_update(backend, mock_data_client) -> None:
@@ -868,18 +1242,14 @@ async def test_observe_propagates_transport_timeout(backend, mock_data_client) -
         await backend.observe(content="x")
 
 
-def test_retrieve_propagates_when_one_polarity_fetch_fails(backend, mock_data_client) -> None:
-    """One polarity's list_memory_records raising must propagate out of
+def test_retrieve_propagates_when_one_namespace_fetch_fails(backend, mock_data_client) -> None:
+    """One namespace's list_memory_records raising must propagate out of
     retrieve via Future.result() — no silent partial result."""
     good = {"memoryRecordSummaries": []}
 
     def stub(**kwargs):
-        for f in kwargs.get("metadataFilters", []):
-            if (
-                f["left"]["metadataKey"] == "polarity"
-                and f["right"]["metadataValue"]["stringValue"] == "dont"
-            ):
-                raise _FakeClientError(code="ThrottlingException", message="rate exceeded")
+        if kwargs["namespace"] == "general/reflections/":
+            raise _FakeClientError(code="ThrottlingException", message="rate exceeded")
         return good
 
     mock_data_client.list_memory_records.side_effect = stub
@@ -903,7 +1273,9 @@ def test_retrieve_propagates_worker_timeout(backend, mock_data_client) -> None:
         backend.retrieve(project="testproj")
 
 
-def test_retrieve_malformed_json_content_falls_back_to_valid_shape(backend, mock_data_client) -> None:
+def test_retrieve_malformed_json_content_falls_back_to_valid_shape(
+    backend, mock_data_client
+) -> None:
     """_parse_reflection_record swallows json.JSONDecodeError and degrades to
     an empty body — the record still comes back in the public reflection
     shape with defaulted body fields and metadata-derived counters intact."""
@@ -968,7 +1340,9 @@ def test_retrieve_missing_content_key_falls_back_to_valid_shape(backend, mock_da
     assert refl["confidence"] == 0.0
 
 
-def test_retrieve_non_dict_json_content_falls_back_to_valid_shape(backend, mock_data_client) -> None:
+def test_retrieve_non_dict_json_content_falls_back_to_valid_shape(
+    backend, mock_data_client
+) -> None:
     """Valid JSON that is not an object (e.g. a list) exercises the
     isinstance(body, dict) guards — every body-derived field defaults."""
     mock_data_client.list_memory_records.return_value = {
@@ -998,26 +1372,75 @@ def test_retrieve_non_dict_json_content_falls_back_to_valid_shape(backend, mock_
     assert refl["phase"] == "general"
 
 
-def test_session_bootstrap_fires_4_parallel_list_calls(backend, mock_data_client) -> None:
-    """One per polarity (do/dont/neutral) against episodic + one against
-    semantic — all 4 dispatched via asyncio.gather + run_in_executor.
+def test_session_bootstrap_fires_3_parallel_list_calls(backend, mock_data_client) -> None:
+    """Two reflection namespace calls (project + general/promoted merge,
+    shared with retrieve()) against episodic + one against semantic. No
+    metadataFilters anywhere — polarity is not a legal filter key on real
+    AWS and status filtering is client-side.
 
     Uses list_memory_records (not retrieve_memory_records) because
     bootstrap is recency / metadata-only — no semantic search query."""
     mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
     backend.session_bootstrap(session_id="test-session", project="testproj")
-    # 4 calls total — 3 reflection (episodic) + 1 semantic
-    assert mock_data_client.list_memory_records.call_count == 4
+    # 3 calls total — 2 reflection (episodic) + 1 semantic
+    assert mock_data_client.list_memory_records.call_count == 3
 
     targets = []
     for call in mock_data_client.list_memory_records.call_args_list:
+        assert "metadataFilters" not in call.kwargs
         targets.append((call.kwargs["memoryId"], call.kwargs["namespace"]))
 
     assert ("mem-epi-def4567890", "projects/testproj/reflections/") in targets
+    assert ("mem-epi-def4567890", "general/reflections/") in targets
     assert ("mem-sem-abc1234567", "projects/testproj/semantic/") in targets
 
 
-def test_session_bootstrap_returns_envelope_matching_sqlite_shape(backend, mock_data_client) -> None:
+def test_session_bootstrap_counts_promoted_general_reflections(
+    backend, mock_data_client
+) -> None:
+    """Promoted reflections (general namespace, status=promoted) show up in
+    the bootstrap counts — the live-review invisibility major."""
+    def stub(**kwargs):
+        if kwargs.get("namespace") == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _reflection_summary(
+                    "rec-promoted", namespace="/general/reflections/",
+                    status="promoted", polarity="do",
+                )
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.session_bootstrap(session_id="s", project="testproj")
+    assert result["reflections_counts"] == {"do": 1, "dont": 0, "neutral": 0}
+
+
+def test_session_bootstrap_honours_cwd_param(
+    backend, mock_data_client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """project=None + cwd → the project resolves via project_name(cwd)
+    (sqlite parity), NOT the construction-time project. A .better-memory
+    override file in cwd makes the resolution deterministic."""
+    proj_dir = tmp_path / "somewhere"
+    proj_dir.mkdir()
+    (proj_dir / ".better-memory").write_text("cwdproj\n", encoding="utf-8")
+    monkeypatch.delenv("BETTER_MEMORY_PROJECT", raising=False)
+
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    result = backend.session_bootstrap(session_id="s", cwd=proj_dir)
+    assert result["project"] == "cwdproj"
+    namespaces = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.list_memory_records.call_args_list
+    }
+    assert "projects/cwdproj/reflections/" in namespaces
+    assert "projects/cwdproj/semantic/" in namespaces
+    assert "projects/testproj/reflections/" not in namespaces
+
+
+def test_session_bootstrap_returns_envelope_matching_sqlite_shape(
+    backend, mock_data_client
+) -> None:
     """Envelope must match the BootstrapResult shape the MCP handler at
     server.py:1398-1411 unwraps. Keys: additional_context, project, source,
     episode_id, episode_action, semantic_count, reflections_counts. In

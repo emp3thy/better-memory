@@ -12,9 +12,9 @@ from better_memory.storage.sqlite import SqliteBackend
 
 
 class _ConfigLike(Protocol):
-    """Structural type — the factory only reads storage_backend + agentcore_region.
+    """Structural type — the factory only reads storage_backend.
 
-    Declared as read-only properties so frozen dataclasses (the real Config and
+    Declared as a read-only property so frozen dataclasses (the real Config and
     test FakeConfigs) satisfy the Protocol — pyright treats a Protocol class
     attribute as read+write, which conflicts with frozen dataclasses' read-only
     fields.
@@ -22,9 +22,6 @@ class _ConfigLike(Protocol):
 
     @property
     def storage_backend(self) -> str: ...
-
-    @property
-    def agentcore_region(self) -> str: ...
 
 
 def _resolve_home() -> Path:
@@ -52,10 +49,16 @@ def build_backend(
         )
     if config.storage_backend == "agentcore":
         # Imports are local so sqlite-only deployments don't require boto3 /
-        # botocore to be installed (they're declared in the dev dependency
-        # group, not the runtime dependencies).
-        import boto3
-        from botocore.config import Config as BotoConfig
+        # botocore to be installed (they're declared in the optional
+        # `agentcore` extra, not the runtime dependencies).
+        try:
+            import boto3
+            from botocore.config import Config as BotoConfig
+        except ImportError as exc:
+            raise ModuleNotFoundError(
+                "boto3 is required for the agentcore storage backend. "
+                "Install it with: pip install 'better-memory[agentcore]'"
+            ) from exc
 
         from better_memory.storage.agentcore import AgentCoreBackend
         from better_memory.storage.agentcore_persistence import (
@@ -70,8 +73,11 @@ def build_backend(
                 f"to create the memory resources and persist their IDs."
             )
 
+        # Region is single-sourced from agentcore.json — the file that also
+        # carries the memory ids — so every client (server plane and hook
+        # plane) signs against the region the resources were created in.
         boto_config = BotoConfig(
-            region_name=config.agentcore_region,
+            region_name=ac_cfg.region,
             retries={"mode": "standard", "max_attempts": 5},
         )
         data_client = boto3.client("bedrock-agentcore", config=boto_config)

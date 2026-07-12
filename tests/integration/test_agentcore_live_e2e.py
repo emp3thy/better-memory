@@ -21,13 +21,52 @@ loop, and the refuse-to-clobber money-safety contract.
 
 E2 — ``e2e-live-smoke-retrieve-backend-roundtrip`` (rebuilt per both
 judges): (a) the shipped ``agentcore smoke`` 6-step data-plane loop against
-real AWS; (b) live MCP ``memory.retrieve`` through the real server — the
-one MCP data path actually wired to AgentCoreBackend; (c) direct
-``AgentCoreBackend.observe -> list_observations`` read-after-write with
-metadata survival. The author-round MCP observe->retrieve_observations
-round-trip was REMOVED: in agentcore mode those tools dispatch to local
-sqlite (the dispatch gap, design section 4 item 2), so it would greenwash
-AWS coverage forever.
+real AWS; (b) live MCP ``memory.retrieve`` through the real server under
+the onboarding configuration (agentcore.json + settings.json, no backend/
+region/id env vars — exactly what ``agentcore init`` leaves behind, per
+the onboarding-fix wave); (c) direct ``AgentCoreBackend.observe ->
+list_observations`` read-after-write with metadata survival. The MCP
+observe->retrieve_observations round-trip (non-tautological now that the
+dispatch layer is wired to AgentCoreBackend) is owned by the E3+ journey
+additions (2026-07-12-agentcore-journey-tests-design.md).
+
+E3-E7 — live onboarding-config journey additions (journey design section
+3, T3 tier). Every child home carries agentcore.json + settings.json and
+NO backend/region/id env vars — the shipped onboarding state:
+
+* E3 — MCP ``observe -> retrieve_observations`` round-trip (raw events are
+  promptly consistent) with zero local sqlite rows.
+* E4 — MCP semantic CRUD round-trip (observe -> retrieve -> update ->
+  delete; record-level operations are promptly consistent).
+* E5 — rating/credit against a REAL >= 40-char semantic record id (the
+  only live credit against a genuine AWS record id).
+* E6 — session_bootstrap + contextual_inject hooks reach AWS under the
+  onboarding config (well-formed envelopes; no hook_errors rows).
+* E7 — session_close Stop hook fires exactly one closure
+  CreateEvent(role=OTHER) with settings.json only, verified by a direct
+  ``list_events`` readback on the throwaway episodic memory.
+
+What the live tier deliberately SKIPS (journey design section 5):
+
+* **Async reflection extraction is not promptly assertable** — AWS's
+  built-in episodicMemoryStrategy extracts reflections MINUTES after
+  ``observe``, so no live scenario asserts an observed fact surfaces in
+  ``memory.retrieve`` buckets or bootstrap counts; E3 asserts
+  ``observe -> retrieve_observations`` (raw events) instead, and E2(b)'s
+  "buckets are exactly empty for fresh memories" contract stands.
+* **``record_use`` on an EXTRACTED reflection is not promptly testable**
+  (no reflections exist yet) — E5 credits a real SEMANTIC record instead,
+  created synchronously by ``semantic_observe``.
+* **Cross-session ``list_observations`` is out of scope** — ListEvents
+  requires a sessionId; each live test pins a unique per-run session id
+  so readback sees exactly its own events.
+
+Region single-source (fix plan item 5): run E3-E7 with
+``BETTER_MEMORY_TEST_AGENTCORE_REGION`` set to a NON-default region — the
+region env var is deleted, so a factory regression that signs the default
+region cross-regions the data plane and every call 404s. Live SigV4 region
+is not directly observable client-side; the assertion is indirect via
+request success.
 """
 
 from __future__ import annotations
@@ -36,11 +75,14 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import uuid
+from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -50,8 +92,9 @@ from better_memory.storage.agentcore_persistence import (
     load_agentcore_config,
     save_agentcore_config,
 )
+from tests.e2e._agentcore_env import write_backend_settings
 from tests.e2e._env import isolated_env
-from tests.e2e.conftest import mcp_session, text_of
+from tests.e2e.conftest import mcp_session, run_hook, text_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -181,13 +224,30 @@ def test_live_init_status_journey(
     request.addfinalizer(_cleanup)
 
     # --- init: provisions both memories, writes agentcore.json -------------
+    # no_activate=False mirrors the CLI default (--no-activate not passed):
+    # init also activates the backend by writing settings.json. argparse
+    # would supply the attribute automatically; a hand-built Namespace must
+    # carry every init flag or handle() AttributeErrors mid-journey.
     rc = agentcore_cli.handle(
         argparse.Namespace(
-            subcommand="init", home=str(bm_home), region=agentcore_region, force=False
+            subcommand="init",
+            home=str(bm_home),
+            region=agentcore_region,
+            force=False,
+            no_activate=False,
         )
     )
     assert rc == 0
     assert config_path.exists()
+
+    # Activation side effect (no_activate=False): settings.json persists the
+    # backend selection — the exact onboarding state init leaves behind.
+    settings_path = bm_home / "settings.json"
+    assert settings_path.exists()
+    assert (
+        json.loads(settings_path.read_text(encoding="utf-8"))["storage_backend"]
+        == "agentcore"
+    )
 
     cfg = load_agentcore_config(bm_home)
     assert cfg is not None
@@ -209,7 +269,11 @@ def test_live_init_status_journey(
     capsys.readouterr()  # drain init's progress output
     rc2 = agentcore_cli.handle(
         argparse.Namespace(
-            subcommand="init", home=str(bm_home), region=agentcore_region, force=False
+            subcommand="init",
+            home=str(bm_home),
+            region=agentcore_region,
+            force=False,
+            no_activate=False,
         )
     )
     captured = capsys.readouterr()
@@ -236,6 +300,31 @@ def test_live_init_status_journey(
     assert "episodic:" in status.stdout
     assert "semantic:" in status.stdout
     assert "ACTIVE" in status.stdout
+    # Activation is visible through status: backend resolved from the
+    # settings.json init just wrote (isolated_env strips any outer
+    # BETTER_MEMORY_STORAGE_BACKEND, so 'settings' is the only source).
+    assert "effective backend: agentcore (source: settings)" in status.stdout
+
+    # --- status with a corrupt settings.json: WARN, keep reporting ---------
+    # status is the diagnostic tool the operator reaches for when the config
+    # is broken — a corrupt settings.json must produce a WARN on stderr, not
+    # take the memory-state report down (cli/agentcore.py _handle_status).
+    settings_path.write_text("{not valid json", encoding="utf-8")
+    status_corrupt = subprocess.run(  # noqa: S603 — test harness, fixed argv
+        _cli_argv("agentcore", "status", "--home", str(bm_home)),
+        env=_live_env(proc_home),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert status_corrupt.returncode == 0, (
+        status_corrupt.stdout + status_corrupt.stderr
+    )
+    assert "WARN: could not resolve the effective backend" in status_corrupt.stderr
+    assert "effective backend:" not in status_corrupt.stdout
+    assert cfg.episodic.memory_id in status_corrupt.stdout
+    assert cfg.semantic.memory_id in status_corrupt.stdout
+    assert "ACTIVE" in status_corrupt.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -290,42 +379,29 @@ async def test_live_mcp_retrieve_wired_path(
 ) -> None:
     """E2(b): real MCP server boot with real creds; ``memory.retrieve`` live.
 
-    memory.retrieve is the ONE MCP data tool actually wired to
-    AgentCoreBackend (dispatch gap, design section 4 item 2), so this is the
-    only end-to-end MCP-through-AWS path that exists. It fires the
-    per-polarity ListMemoryRecords fan-out (reflections namespace +
-    metadataFilters) against the real service — live filter/namespace
-    validation the T2 fakes structurally cannot see. Fresh throwaway
-    memories hold no reflections (extraction is minutes-async and the smoke
-    leg's records live under the ``smoke`` actor's namespaces), so the
-    buckets are exactly empty.
+    Runs under the exact ONBOARDING configuration `agentcore init` leaves
+    behind (fix plan section 4 item 1): agentcore.json + settings.json in
+    the child home, NO backend/region/id env vars — the backend resolves
+    from settings.json and the region is single-sourced from
+    agentcore.json (a non-default test region makes a factory regression
+    404 loudly). It fires the per-polarity ListMemoryRecords fan-out
+    (reflections namespace + metadataFilters) against the real service —
+    live filter/namespace validation the T2 fakes structurally cannot see.
+    Fresh throwaway memories hold no reflections (extraction is
+    minutes-async and the smoke leg's records live under the ``smoke``
+    actor's namespaces), so the buckets are exactly empty.
     """
-    sem_record, epi_record = agentcore_throwaway_memories
     home = tmp_path / "home"
     home.mkdir()
     # isolated_env pins BETTER_MEMORY_HOME=<home>/.better-memory; the factory
-    # loads agentcore.json from there.
+    # loads agentcore.json from there and settings.json activates the
+    # backend without any env var.
     bm_home = home / ".better-memory"
     _write_throwaway_config(agentcore_throwaway_memories, agentcore_region, bm_home)
+    write_backend_settings(bm_home)
 
     env = _live_env(
         home,
-        BETTER_MEMORY_STORAGE_BACKEND="agentcore",
-        # EXPLICIT region: the runtime factory signs with env
-        # BETTER_MEMORY_AGENTCORE_REGION (default eu-west-2), NOT
-        # agentcore.json's region — the region split-brain (design section 4
-        # item 4, pinned by e2e-ac-region-split-brain-pin). Without this pin
-        # a non-default test region silently cross-regions the data plane.
-        BETTER_MEMORY_AGENTCORE_REGION=agentcore_region,
-        # FIXME(idvar-gate): config.py:293-301 requires both ID vars in
-        # agentcore mode but nothing consumes their values (IDs come from
-        # agentcore.json). Set to the REAL throwaway ids — never dummies in a
-        # live test, so if the product ever starts consuming them they still
-        # point at the right memories. Delete when the gate is fixed
-        # (together with tests/e2e/_agentcore_env.py's dummy vars and
-        # e2e-ac-neg-prehandshake-config-errors[idvar]).
-        BETTER_MEMORY_AGENTCORE_SEMANTIC_MEMORY_ID=sem_record.memory_id,
-        BETTER_MEMORY_AGENTCORE_EPISODIC_MEMORY_ID=epi_record.memory_id,
         # No dashes: actor ids derive from the project name.
         BETTER_MEMORY_PROJECT="bmintproj",
         CLAUDE_SESSION_ID=f"bm-int-{uuid.uuid4().hex[:8]}",
@@ -385,3 +461,400 @@ def test_live_backend_observe_metadata_survives_roundtrip(agentcore_backend) -> 
     # flattened back out of ListEvents — the AWS round-trip must preserve them.
     assert item.get("outcome") == "success"
     assert item.get("theme") == "integration"
+
+
+# ---------------------------------------------------------------------------
+# E3-E7 — live onboarding-config journey
+# (2026-07-12-agentcore-journey-tests-design.md, section 3 T3 tier)
+# ---------------------------------------------------------------------------
+
+#: Actor ids derive from BETTER_MEMORY_PROJECT — no dashes (see E2(b)).
+_JOURNEY_PROJECT = "bmintproj"
+
+
+def _onboarding_home(
+    tmp_path: Path, throwaway_memories: tuple, region: str
+) -> tuple[Path, Path]:
+    """A child home in the exact state ``agentcore init`` leaves behind:
+    agentcore.json (the throwaway memories) + settings.json activation.
+    Returns ``(home, bm_home)``."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bm_home = home / ".better-memory"
+    _write_throwaway_config(throwaway_memories, region, bm_home)
+    write_backend_settings(bm_home)
+    return home, bm_home
+
+
+def _journey_session_id() -> str:
+    """Unique per-run session id: ListEvents readback (current session
+    only) sees exactly this run's events."""
+    return f"bm-int-{uuid.uuid4().hex[:8]}"
+
+
+def _tool_json(result: Any) -> Any:
+    """Parse the single text content block of a successful tool call."""
+    content = result.content
+    assert not getattr(result, "isError", False), f"tool errored: {content!r}"
+    assert len(content) == 1, f"expected one content block: {content!r}"
+    return json.loads(text_of(content[0]))
+
+
+def _local_row_count(bm_home: Path, table: str) -> int:
+    """Rows in a local sqlite table; 0 when the file/table is absent."""
+    db = bm_home / "memory.db"
+    if not db.exists():
+        return 0
+    with closing(
+        sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    ) as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if table not in names:
+            return 0
+        (count,) = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608 — table from test constants
+    return int(count)
+
+
+async def test_live_e3_mcp_observe_retrieve_observations_roundtrip(
+    tmp_path: Path, agentcore_throwaway_memories, agentcore_region: str
+) -> None:
+    """E3: the non-tautological MCP write path the dispatch wiring enables
+    (fix plan section 4 item 2): ``memory.observe`` over MCP returns a real
+    AWS eventId and ``memory.retrieve_observations`` (raw events — promptly
+    consistent) reads exactly that event back with content/outcome/theme
+    surviving the round-trip. Zero rows land in the child home's local
+    ``observations`` table.
+
+    regression_caught: dispatch not wired → observe returns a local uuid
+    and writes a sqlite row; region single-sourcing broken → cross-region
+    404 (when run in a non-default region).
+    """
+    home, bm_home = _onboarding_home(
+        tmp_path, agentcore_throwaway_memories, agentcore_region
+    )
+    env = _live_env(
+        home,
+        BETTER_MEMORY_PROJECT=_JOURNEY_PROJECT,
+        CLAUDE_SESSION_ID=_journey_session_id(),
+    )
+    marker = f"bm-int-journey-{uuid.uuid4().hex[:8]}"
+
+    errlog_path = tmp_path / "e3-server.stderr"  # outside the fake home
+    with errlog_path.open("w", encoding="utf-8") as errlog:
+        async with mcp_session(
+            env, errlog=errlog, read_timeout=timedelta(seconds=90)
+        ) as session:
+            observed = _tool_json(
+                await session.call_tool(
+                    "memory.observe",
+                    {"content": marker, "outcome": "failure", "theme": "bug"},
+                )
+            )
+            event_id = observed["id"]
+            assert isinstance(event_id, str) and event_id
+
+            rows = _tool_json(
+                await session.call_tool(
+                    "memory.retrieve_observations", {"query": marker}
+                )
+            )
+            matches = [r for r in rows if r.get("content") == marker]
+            assert len(matches) == 1, (
+                f"expected exactly the marker event, got {len(matches)} "
+                f"matches among {len(rows)} rows"
+            )
+            assert matches[0]["id"] == event_id
+            assert matches[0].get("outcome") == "failure"
+            assert matches[0].get("theme") == "bug"
+
+    # Dispatch switched: nothing landed in local sqlite.
+    assert _local_row_count(bm_home, "observations") == 0
+
+
+async def test_live_e4_mcp_semantic_crud_roundtrip(
+    tmp_path: Path, agentcore_throwaway_memories, agentcore_region: str
+) -> None:
+    """E4: full MCP semantic round-trip against real AWS (fix plan section
+    4 item 3): observe → retrieve surfaces the record (project + general
+    UD-2 merge) → update changes the text → delete removes it. The record
+    LIST index is eventually consistent (~60s lag measured by the dialect
+    scout — aws_record_dialect.md section 3), so every retrieve step polls
+    with a bounded retry; writes themselves are synchronous. Zero local
+    ``semantic_memories`` rows.
+    """
+    home, bm_home = _onboarding_home(
+        tmp_path, agentcore_throwaway_memories, agentcore_region
+    )
+    env = _live_env(
+        home,
+        BETTER_MEMORY_PROJECT=_JOURNEY_PROJECT,
+        CLAUDE_SESSION_ID=_journey_session_id(),
+    )
+    marker = f"bm-int-sem-{uuid.uuid4().hex[:8]}"
+
+    def _mine(items: list, record_id: str) -> list:
+        return [i for i in items if i.get("id") == record_id]
+
+    errlog_path = tmp_path / "e4-server.stderr"
+    with errlog_path.open("w", encoding="utf-8") as errlog:
+        async with mcp_session(
+            env, errlog=errlog, read_timeout=timedelta(seconds=120)
+        ) as session:
+
+            async def _retrieve_until(
+                predicate, description: str, budget_s: float = 120.0
+            ) -> list:
+                """Poll semantic_retrieve until predicate(items) — the LIST
+                index lags writes by ~60s (dialect notes section 3)."""
+                deadline = asyncio.get_running_loop().time() + budget_s
+                while True:
+                    items = _tool_json(
+                        await session.call_tool("memory.semantic_retrieve", {})
+                    )
+                    if predicate(items):
+                        return items
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise AssertionError(
+                            f"{description} not observed within {budget_s}s: "
+                            f"{items!r}"
+                        )
+                    await asyncio.sleep(5)
+
+            created = _tool_json(
+                await session.call_tool(
+                    "memory.semantic_observe", {"content": marker}
+                )
+            )
+            record_id = created["id"]
+            # A genuine AWS memoryRecordId (>= 40 chars) — not a local uuid.
+            assert isinstance(record_id, str) and len(record_id) >= 40
+
+            listed = await _retrieve_until(
+                lambda items: len(_mine(items, record_id)) == 1,
+                "created record surfaced",
+            )
+            mine = _mine(listed, record_id)
+            assert mine[0]["content"] == marker
+            # Stable payload keys under the UD-2 merge contract.
+            assert {"project", "scope", "created_at", "updated_at"} <= set(mine[0])
+
+            updated_marker = f"{marker}-v2"
+            assert _tool_json(
+                await session.call_tool(
+                    "memory.semantic_update",
+                    {"id": record_id, "content": updated_marker},
+                )
+            ) == {"ok": True}
+            re_listed = await _retrieve_until(
+                lambda items: bool(
+                    _mine(items, record_id)
+                    and _mine(items, record_id)[0]["content"] == updated_marker
+                ),
+                "updated content surfaced",
+            )
+            assert len(_mine(re_listed, record_id)) == 1
+
+            assert _tool_json(
+                await session.call_tool(
+                    "memory.semantic_delete", {"id": record_id}
+                )
+            ) == {"ok": True}
+            await _retrieve_until(
+                lambda items: _mine(items, record_id) == [],
+                "deleted record gone from the index",
+            )
+
+    assert _local_row_count(bm_home, "semantic_memories") == 0
+
+
+async def test_live_e5_rating_credits_real_semantic_record_id(
+    tmp_path: Path, agentcore_throwaway_memories, agentcore_region: str
+) -> None:
+    """E5: the only live credit against a GENUINE >= 40-char AWS record id
+    (fix plan section 4 item 4): ``memory.apply_session_ratings`` with
+    class=cited performs the full-snapshot update (system
+    x-amz-agentcore-memory-* keys stripped — echoing them is a real AWS
+    400). The record is created synchronously by ``semantic_observe`` —
+    reflections are extraction-async and not promptly creditable.
+
+    Creates its own record (rather than reusing E4's) so the test is
+    order-independent; cleaned up via semantic_delete + the throwaway
+    memory teardown.
+    """
+    home, _bm_home = _onboarding_home(
+        tmp_path, agentcore_throwaway_memories, agentcore_region
+    )
+    env = _live_env(
+        home,
+        BETTER_MEMORY_PROJECT=_JOURNEY_PROJECT,
+        CLAUDE_SESSION_ID=_journey_session_id(),
+    )
+    marker = f"bm-int-rate-{uuid.uuid4().hex[:8]}"
+
+    errlog_path = tmp_path / "e5-server.stderr"
+    with errlog_path.open("w", encoding="utf-8") as errlog:
+        async with mcp_session(
+            env, errlog=errlog, read_timeout=timedelta(seconds=90)
+        ) as session:
+            record_id = _tool_json(
+                await session.call_tool(
+                    "memory.semantic_observe", {"content": marker}
+                )
+            )["id"]
+            assert isinstance(record_id, str) and len(record_id) >= 40
+
+            payload = _tool_json(
+                await session.call_tool(
+                    "memory.apply_session_ratings",
+                    {
+                        "ratings": [
+                            {"kind": "semantic", "id": record_id, "class": "cited"}
+                        ]
+                    },
+                )
+            )
+            # Sqlite-parity result shape (repair-wave payload parity).
+            assert payload["session_id"], payload
+            assert payload["applied"]["cited"] == 1, payload
+            assert sum(payload["skipped"].values()) == 0, payload
+            assert "failed" not in payload, payload
+
+            # Best-effort cleanup; teardown deletes the whole memory anyway.
+            await session.call_tool("memory.semantic_delete", {"id": record_id})
+
+
+def test_live_e6_bootstrap_and_inject_hooks_reach_aws(
+    tmp_path: Path, agentcore_throwaway_memories, agentcore_region: str
+) -> None:
+    """E6: the SessionStart bootstrap hook and the contextual_inject
+    UserPromptSubmit hook both reach AWS under the onboarding config (fix
+    plan section 4 item 7): well-formed envelopes, the bootstrap summary
+    rendered from real ListMemoryRecords responses (counts are empty for
+    fresh memories — extraction is minutes-async), and NO hook_errors rows
+    (the hooks' failure paths record-and-degrade; a clean home proves the
+    AWS path ran).
+    """
+    home, bm_home = _onboarding_home(
+        tmp_path, agentcore_throwaway_memories, agentcore_region
+    )
+    session_id = _journey_session_id()
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    env = _live_env(
+        home,
+        BETTER_MEMORY_PROJECT=_JOURNEY_PROJECT,
+        CLAUDE_SESSION_ID=session_id,
+        BETTER_MEMORY_CONTEXT_INJECT_MODE="userprompt",
+    )
+
+    rc, out, err = run_hook(
+        "better_memory.hooks.session_bootstrap",
+        {"source": "startup", "session_id": session_id, "cwd": str(proj_dir)},
+        env,
+    )
+    assert rc == 0, err
+    assert "Traceback" not in err
+    hso = json.loads(out)["hookSpecificOutput"]
+    assert hso["hookEventName"] == "SessionStart"
+    ctx = hso["additionalContext"]
+    # The AWS-rendered summary — the fallback directive would mean the
+    # backend path died and was swallowed.
+    assert "session bootstrap failed" not in ctx, ctx
+    assert "Reflections" in ctx
+    assert "Semantic memories:" in ctx
+
+    rc, out, err = run_hook(
+        "better_memory.hooks.contextual_inject",
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "how do I deploy with docker compose",
+            "session_id": session_id,
+            "cwd": str(proj_dir),
+        },
+        env,
+    )
+    assert rc == 0, err
+    assert "Traceback" not in err
+    envelope = json.loads(out)
+    assert envelope["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+
+    # Neither hook recorded a swallowed failure.
+    assert _local_row_count(bm_home, "hook_errors") == 0
+    assert _local_row_count(bm_home, "observations") == 0
+    assert _local_row_count(bm_home, "semantic_memories") == 0
+
+
+def test_live_e7_session_close_closure_with_settings_only(
+    tmp_path: Path, agentcore_throwaway_memories, agentcore_region: str
+) -> None:
+    """E7: the live version of hermetic J8 (fix plan section 4 item 6):
+    with settings.json only (no backend env var) the Stop hook fires
+    exactly one closure CreateEvent(role=OTHER) against the REAL episodic
+    memory — verified by a direct ``list_events`` readback on the unique
+    per-run session id — and writes the spool marker. The closure event
+    rides the throwaway memory's teardown.
+    """
+    import boto3
+    from botocore.config import Config as BotoConfig
+
+    home, bm_home = _onboarding_home(
+        tmp_path, agentcore_throwaway_memories, agentcore_region
+    )
+    session_id = _journey_session_id()
+    # The hook derives the closure actorId from the canonical project_name()
+    # resolution (repair-wave major 7) — BETTER_MEMORY_PROJECT wins here, so
+    # the closure lands under the SAME actor the MCP server uses.
+    proj_dir = tmp_path / "bmintclose"
+    proj_dir.mkdir()
+    env = _live_env(
+        home,
+        BETTER_MEMORY_PROJECT=_JOURNEY_PROJECT,
+        CLAUDE_SESSION_ID=session_id,
+    )
+
+    rc, out, err = run_hook(
+        "better_memory.hooks.session_close",
+        {
+            "session_id": session_id,
+            "cwd": str(proj_dir),
+            "hook_event_name": "Stop",
+        },
+        env,
+    )
+    assert rc == 0, err
+    assert out == ""
+    assert "Traceback" not in err
+
+    markers = sorted((bm_home / "spool").glob("*_session_end_*.json"))
+    assert len(markers) == 1, f"expected exactly one session_end marker: {markers}"
+    marker_body = json.loads(markers[0].read_text(encoding="utf-8"))
+    assert marker_body["event_type"] == "session_end"
+    # Closure succeeded → no hook_errors write → no memory.db at all.
+    assert not (bm_home / "memory.db").exists()
+
+    # Ground truth: exactly one role=OTHER closure event landed on the real
+    # episodic memory under this run's unique session id.
+    _sem_record, epi_record = agentcore_throwaway_memories
+    data = boto3.client(
+        "bedrock-agentcore",
+        config=BotoConfig(
+            region_name=agentcore_region,
+            retries={"mode": "standard", "max_attempts": 5},
+        ),
+    )
+    from better_memory.storage.session import resolve_actor_id
+
+    events = data.list_events(
+        memoryId=epi_record.memory_id,
+        actorId=resolve_actor_id(_JOURNEY_PROJECT),
+        sessionId=session_id,
+        includePayloads=True,
+        maxResults=10,
+    )["events"]
+    assert len(events) == 1, events
+    assert events[0]["payload"][0]["conversational"]["role"] == "OTHER"

@@ -40,12 +40,44 @@ Memory creation entered a terminal `FAILED` state. Check the AWS console for the
 
 In agentcore mode, the Stop hook emits a `CreateEvent(role=OTHER)` to tell the episodic strategy "this session is done, extract now." If episodic extraction is taking 15+ minutes instead of 1-3, check:
 
-- `~/.better-memory/agentcore.json` exists at session-close time (Stop hooks run in the same process; if `BETTER_MEMORY_HOME` is unset and the home directory isn't `~/.better-memory/`, the hook can't find the config).
+- The effective backend is actually `agentcore`: run `better-memory agentcore status` and read the `effective backend: <backend> (source: env|settings|default)` line. The hook resolves the backend exactly like the server — `BETTER_MEMORY_STORAGE_BACKEND` env var first, else `settings.json`, else `sqlite`. A stale `BETTER_MEMORY_STORAGE_BACKEND=sqlite` in your shell or `~/.claude.json` env block **overrides** the `settings.json` written by `init` — unset it or set it to `agentcore`.
+- `settings.json` carries `"storage_backend": "agentcore"`. `agentcore.json` existing on its own does **not** activate the closure — existence is not consent.
+- `~/.better-memory/settings.json` and `agentcore.json` exist at session-close time. Hooks don't receive the `BETTER_MEMORY_HOME` the installer puts into the MCP server's env block, so they fall back to `~/.better-memory` — if you ran `init --home <custom>`, the hook won't find either file there.
 - The IAM principal has `bedrock-agentcore:CreateEvent` permission.
 - The Stop hook's error log (`hook_errors` table in `memory.db` — or stdout if running interactively) shows no `session_close_agentcore` entries.
 
 Failure to fire is non-fatal; the episodic strategy still triggers eventually via 15-20 minute idle detection.
 
-## "Region mismatch" — events written but never extracted
+## `ModuleNotFoundError: boto3 is required for the agentcore storage backend`
 
-`init` writes the region to `agentcore.json`; the MCP server reads it from there and builds clients targeting that region. If you change region via `BETTER_MEMORY_AGENTCORE_REGION` mid-flight, you'll write events to the new region but `init`'s memories live in the old region. Either re-`init` in the new region or revert the env var.
+The full message is:
+
+```
+boto3 is required for the agentcore storage backend. Install it with: pip install 'better-memory[agentcore]'
+```
+
+The agentcore backend's AWS dependencies live in an optional extra so sqlite-only installs stay lean. Install the extra into the same environment the MCP server (or hook) runs from: `pip install 'better-memory[agentcore]'` or `uv pip install '.[agentcore]'`. Both the server factory and the Stop hook's lazy import raise this same hint.
+
+## `AgentCoreConfigError` — corrupt or unreadable `agentcore.json`
+
+Parse failures, a missing required field, a malformed `semantic`/`episodic` block, or an unsupported `schema_version` all raise `AgentCoreConfigError` naming the file, ending with:
+
+```
+Delete the file and re-run `better-memory agentcore init` (or use `--force`); existing AWS memories can be re-linked by hand-editing the file.
+```
+
+`init` without `--force` refuses to run while the file exists, so either delete it first or pass `--force`. Re-running `init` creates **new** AWS memories; if you want to keep the existing ones, fix the file by hand instead (schema in `better_memory/storage/agentcore_persistence.py`). The `schema_version` variant additionally notes the file may have been written by a newer better-memory.
+
+## Corrupt `settings.json`
+
+A malformed `settings.json` (or an invalid `storage_backend` value in it) raises a `ValueError` naming the file:
+
+```
+Fix or delete the file, or set BETTER_MEMORY_STORAGE_BACKEND to override it. It is written by `better-memory agentcore init`.
+```
+
+`better-memory agentcore status` survives this (it prints a `WARN` and keeps reporting), and re-running `init` rewrites the file. Hooks record the error to `hook_errors` and degrade to doing nothing rather than failing.
+
+## Region mismatch — events written but never extracted
+
+`init` writes the region to `agentcore.json`, and that file is the single source of truth: the MCP server's clients and the Stop hook's closure client all build against it, so the server and hooks can no longer disagree about region. To change region, re-run `init` in the new region (`--force`, or delete `agentcore.json` first) — or hand-edit `agentcore.json` if the memories genuinely live elsewhere. There is no region environment variable.
