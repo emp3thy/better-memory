@@ -394,11 +394,26 @@ def _handle_init(args: argparse.Namespace) -> int:
         )
     print()
     print("Next steps:")
-    print("  1. Restart Claude Code (or your MCP server) so it picks up the new backend")
-    print("  2. Run `better-memory agentcore status` to confirm the effective backend")
-    print("     and that both memories are ACTIVE")
-    print("  3. Run `better-memory agentcore smoke` to verify the AWS round-trip")
-    print("     (smoke validates AWS credentials and wire access, not MCP registration)")
+    if activate:
+        print(
+            "  1. Restart Claude Code (or your MCP server) so it picks up the new backend"
+        )
+        print(
+            "  2. Run `better-memory agentcore status` to confirm the effective backend"
+        )
+        print("     and that both memories are ACTIVE")
+        print("  3. Run `better-memory agentcore smoke` to verify the AWS round-trip")
+        print(
+            "     (smoke validates AWS credentials and wire access, not MCP registration)"
+        )
+    else:
+        print("  1. Activate when ready (see above) — no backend change was made yet")
+        print("  2. Run `better-memory agentcore status` to confirm both memories are")
+        print("     ACTIVE (the effective backend is unchanged until you activate)")
+        print("  3. Run `better-memory agentcore smoke` to verify the AWS round-trip")
+        print(
+            "     (smoke validates AWS credentials and wire access, not MCP registration)"
+        )
     return 0
 
 

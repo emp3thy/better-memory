@@ -416,6 +416,10 @@ def test_init_no_activate_skips_settings_write(tmp_path, monkeypatch, capsys) ->
     assert "--no-activate" in out
     assert "settings.json" in out
     assert "Export BETTER_MEMORY_STORAGE_BACKEND" not in out
+    # BugBot PR#79: next-steps must not contradict the skip message — no
+    # "picks up the new backend" restart instruction when nothing changed.
+    assert "picks up the new backend" not in out
+    assert "no backend change was made yet" in out
 
 
 def test_init_failure_path_does_not_write_settings(tmp_path, monkeypatch) -> None:
