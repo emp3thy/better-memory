@@ -28,6 +28,19 @@ from better_memory.mcp.handlers import (
     SemanticToolHandlers,
     SessionToolHandlers,
 )
+from better_memory.services.semantic import SemanticMemory
+
+
+def _sm(*, id: str, content: str, scope: str = "project") -> SemanticMemory:
+    """Build a SemanticMemory the agentcore semantic_list returns (§6.3)."""
+    return SemanticMemory(
+        id=id,
+        content=content,
+        project="projx",
+        scope=scope,
+        created_at="2026-06-01T00:00:00+00:00",
+        updated_at="2026-06-01T00:00:00+00:00",
+    )
 
 #: >= 40 chars — botocore's client-side validation floor for memoryRecordId.
 _RECORD_ID_40 = "refl-unit-" + "0" * 30
@@ -278,10 +291,13 @@ class TestSemanticHandlersRemoteBranch:
         """UD-2: two backend calls (project namespace + general namespace)
         merged, payload keeps the sqlite key set with None placeholders."""
 
-        def _semantic_list(**kwargs: Any) -> list[dict[str, Any]]:
+        def _semantic_list(**kwargs: Any) -> list[SemanticMemory]:
+            # §6.3: agentcore semantic_list returns SemanticMemory objects,
+            # matching the sqlite backend — the handler reads them via
+            # attribute access.
             if kwargs.get("scope_filter") == "general":
-                return [{"id": "g1", "content": "general fact", "scope": "general"}]
-            return [{"id": "p1", "content": "project fact", "scope": "project"}]
+                return [_sm(id="g1", content="general fact", scope="general")]
+            return [_sm(id="p1", content="project fact", scope="project")]
 
         remote.semantic_list = MagicMock(side_effect=_semantic_list)
         svc = MagicMock(name="SemanticMemoryService")
@@ -306,7 +322,7 @@ class TestSemanticHandlersRemoteBranch:
 
     async def test_semantic_retrieve_dedupes_duplicate_ids(self, remote) -> None:
         remote.semantic_list = MagicMock(
-            return_value=[{"id": "dup-1", "content": "same", "scope": "general"}]
+            return_value=[_sm(id="dup-1", content="same", scope="general")]
         )
         handlers = SemanticToolHandlers(semantic=MagicMock(), remote=remote)
         rows = _payload(await handlers.semantic_retrieve({}))

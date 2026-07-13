@@ -5,6 +5,7 @@ behavior. Integration tests against real AWS land in Plan 3."""
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -1105,8 +1106,9 @@ def test_semantic_list_with_search_uses_retrieve_memory_records(backend, mock_da
     }
     result = backend.semantic_list(search="uv")
     assert len(result) == 1
-    assert result[0]["id"] == "sm-1"
-    assert result[0]["content"] == "prefer uv"
+    # §6.3: semantic_list returns SemanticMemory objects, not dicts.
+    assert result[0].id == "sm-1"
+    assert result[0].content == "prefer uv"
 
 
 def test_semantic_list_without_search_uses_list_memory_records(backend, mock_data_client) -> None:
@@ -1137,7 +1139,7 @@ def test_semantic_list_scope_classification_normalizes_leading_slash(
         ]
     }
     result = backend.semantic_list()
-    scopes = {r["id"]: r["scope"] for r in result}
+    scopes = {r.id: r.scope for r in result}
     assert scopes == {
         "sm-slash-general": "general",
         "sm-slash-project": "project",
@@ -1456,3 +1458,398 @@ def test_session_bootstrap_returns_envelope_matching_sqlite_shape(
     assert result["episode_action"] == "opened"
     assert result["semantic_count"] == 0
     assert result["reflections_counts"] == {"do": 0, "dont": 0, "neutral": 0}
+
+
+# ===== T1: _parse_reflection_record body-first with metadata fallback =====
+
+
+def test_parse_reflection_extracted_record_unchanged(backend) -> None:
+    """INVARIANT (migration §1b): an AWS-extracted record — state in
+    metadata, NONE of the migration state keys in the body — parses exactly
+    as it did before the body-first change. Every field is asserted against
+    the pre-change computation (evidence_count = useful+missed;
+    polarity/status/counters from metadata; updated_at from createdAt)."""
+    import json
+
+    created = datetime(2026, 5, 24, 12, 0, 0, tzinfo=UTC)
+    rec = {
+        "memoryRecordId": "rec-extracted",
+        "content": {"text": json.dumps({
+            "title": "Extracted title",
+            "use_cases": "Applies when X",
+            "hints": "First hint. Second hint.",
+            "confidence": "0.8",
+            "tech": "python",
+            "phase": "build",
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": created,
+        "metadata": {
+            "polarity": {"stringValue": "dont"},
+            "status": {"stringValue": "active"},
+            "useful_count": {"numberValue": 4},
+            "missed_count": {"numberValue": 2},
+            "times_misled": {"numberValue": 1},
+            "overlooked_count": {"numberValue": 3},
+        },
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+
+    assert parsed == {
+        "id": "rec-extracted",
+        "title": "Extracted title",
+        "phase": "build",
+        "use_cases": "Applies when X",
+        "hints": ["First hint. Second hint."],
+        "confidence": 0.8,
+        "tech": "python",
+        # evidence_count computed from metadata useful(4)+missed(2)
+        "evidence_count": 6,
+        "useful_count": 4,
+        "times_misled": 1,
+        # updated_at derived from createdAt (no body updated_at, no sys key)
+        "updated_at": created.isoformat(),
+        "_overlooked_count": 3,
+        "_updated_at_ts": created.timestamp(),
+        "_polarity": "dont",
+        "_status": "active",
+    }
+
+
+def test_parse_reflection_body_state_record_uses_body(backend) -> None:
+    """A migrated record carries ALL reflection state in the JSON body and
+    an EMPTY metadata map. It must parse from the body: polarity/status,
+    useful_count/times_misled/times_overlooked counters, evidence_count and
+    updated_at all resolve body-first (§6.1/§6.2)."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-migrated",
+        "content": {"text": json.dumps({
+            "title": "Migrated title",
+            "use_cases": "Applies when Y",
+            "hints": ["Hint one.", "Hint two."],
+            "confidence": 0.9,
+            "tech": "rust",
+            "phase": "plan",
+            "evidence_count": 12,
+            "updated_at": "2026-06-01T09:30:00+00:00",
+            "polarity": "do",
+            "status": "promoted",
+            "useful_count": 7,
+            "times_misled": 2,
+            "times_overlooked": 5,
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        # No metadata map at all — migrated reflections carry none.
+        "metadata": {},
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+
+    # Body counters win over the (absent) metadata numberValues.
+    assert parsed["useful_count"] == 7
+    assert parsed["times_misled"] == 2
+    assert parsed["_overlooked_count"] == 5
+    # evidence_count taken from the body (NOT recomputed as useful+missed=7).
+    assert parsed["evidence_count"] == 12
+    # updated_at is the body ISO string, and it drives the ranking ts.
+    assert parsed["updated_at"] == "2026-06-01T09:30:00+00:00"
+    assert parsed["_updated_at_ts"] == datetime(
+        2026, 6, 1, 9, 30, tzinfo=UTC
+    ).timestamp()
+    # Bucket selector comes from the body polarity — CRITICAL for migrated
+    # records, which carry polarity nowhere else.
+    assert parsed["_polarity"] == "do"
+    assert parsed["_status"] == "promoted"
+
+
+def test_retrieve_buckets_migrated_record_by_body_polarity(
+    backend, mock_data_client
+) -> None:
+    """End-to-end through retrieve(): a body-state record with no metadata
+    lands in the bucket named by its BODY polarity and surfaces its body
+    counters — proving _fetch_reflection_buckets honors the body-first parse."""
+    import json
+
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [{
+                "memoryRecordId": "rec-migrated",
+                "content": {"text": json.dumps({
+                    "title": "Migrated", "use_cases": "u",
+                    "hints": ["h"], "confidence": 0.9,
+                    "polarity": "dont", "status": "active",
+                    "useful_count": 7, "times_misled": 2,
+                    "times_overlooked": 5, "evidence_count": 12,
+                    "updated_at": "2026-06-01T09:30:00+00:00",
+                })},
+                "namespaces": ["projects/testproj/reflections/"],
+                "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+                "metadata": {},
+            }]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+
+    assert [r["id"] for r in result["dont"]] == ["rec-migrated"]
+    assert result["do"] == []
+    assert result["neutral"] == []
+    refl = result["dont"][0]
+    assert refl["useful_count"] == 7
+    assert refl["evidence_count"] == 12
+    assert refl["updated_at"] == "2026-06-01T09:30:00+00:00"
+    # Internal helpers stripped from the public payload.
+    assert not any(k.startswith("_") for k in refl)
+
+
+# ===== T2: reflection rating on migrated (body-state) records =====
+#
+# AWS silently drops custom metadata on client-authored BASE records in the
+# episodic reflections namespace (design §1b), so batch_update metadata writes
+# are a no-op there. For migrated records (body carries source_backend=='sqlite')
+# the rating paths must read-modify-write the JSON CONTENT BODY instead
+# (content updates persist). AWS-extracted records (no marker) keep the
+# metadata path unchanged.
+
+
+def _make_migrated_reflection_record(rec_id: str, **body_overrides) -> dict:
+    """A migrated (SQLite-origin) reflection: all rating state in the JSON
+    content body, empty metadata (AWS drops it on client BASE records)."""
+    body = {
+        "title": "Migrated title",
+        "use_cases": "when X",
+        "hints": ["h1"],
+        "confidence": 0.8,
+        "tech": None,
+        "phase": "general",
+        "evidence_count": 3,
+        "updated_at": "2026-05-01T00:00:00+00:00",
+        "polarity": "do",
+        "status": "active",
+        "useful_count": 0,
+        "times_misled": 0,
+        "times_overlooked": 0,
+        "missed_count": 0,
+        "ignored_count": 0,
+        "last_credited_at": "2026-05-01T00:00:00+00:00",
+        "source_row_id": "42",
+        "source_backend": "sqlite",
+    }
+    body.update(body_overrides)
+    return {
+        "memoryRecord": {
+            "memoryRecordId": rec_id,
+            "content": {"text": json.dumps(body)},
+            "memoryStrategyId": "episodicReflections-qPr9876543",
+            "namespaces": ["projects/testproj/reflections/"],
+            "createdAt": datetime(2026, 5, 1, tzinfo=UTC),
+            # Empty — AWS drops the custom metadata map on client records.
+            "metadata": {},
+        }
+    }
+
+
+class _FakeEpisodicStore:
+    """Minimal in-memory bedrock-agentcore data client that PERSISTS content /
+    namespace updates, so a subsequent get_memory_record reflects them
+    (proves the migrated read-modify-write round-trips)."""
+
+    def __init__(self, record: dict) -> None:
+        self._record = record
+        self.update_calls: list[dict] = []
+
+    def get_memory_record(self, *, memoryId, memoryRecordId):  # noqa: N803
+        return self._record
+
+    def batch_update_memory_records(self, *, memoryId, records):  # noqa: N803
+        self.update_calls.append({"memoryId": memoryId, "records": records})
+        mr = self._record["memoryRecord"]
+        for r in records:
+            if "content" in r:
+                mr["content"] = r["content"]
+            if "namespaces" in r:
+                mr["namespaces"] = r["namespaces"]
+            if "metadata" in r:
+                mr["metadata"] = r["metadata"]
+        return {
+            "successfulRecords": [
+                {"memoryRecordId": records[0]["memoryRecordId"], "status": "SUCCEEDED"}
+            ],
+            "failedRecords": [],
+        }
+
+
+def _migrated_backend(ac_config, mock_control_client, record) -> AgentCoreBackend:
+    return AgentCoreBackend(
+        config=ac_config,
+        data_client=_FakeEpisodicStore(record),
+        control_client=mock_control_client,
+        session_id="test-session-xyz",
+        project="testproj",
+    )
+
+
+def test_t2_credit_one_migrated_rewrites_body_counter(
+    ac_config, mock_control_client
+) -> None:
+    record = _make_migrated_reflection_record("mig-1", useful_count=2)
+    backend = _migrated_backend(ac_config, mock_control_client, record)
+    fake = backend._data
+
+    result = backend.credit_one(
+        session_id="s", kind="reflection", id="mig-1", classification="cited"
+    )
+    assert result == {"applied": "cited", "skipped": None}
+
+    # It was a CONTENT update, NOT a metadata update.
+    sent = fake.update_calls[-1]["records"][0]
+    assert "content" in sent
+    assert "metadata" not in sent
+    assert fake.update_calls[-1]["memoryId"] == "mem-epi-def4567890"
+
+    body = json.loads(sent["content"]["text"])
+    assert body["useful_count"] == 3
+    assert body["source_backend"] == "sqlite"  # marker preserved
+    # last_credited_at refreshed in the BODY (not metadata).
+    assert isinstance(body["last_credited_at"], str)
+    assert body["last_credited_at"] != "2026-05-01T00:00:00+00:00"
+    # updated_at MUST NOT move on a rating: sqlite crediting never bumps
+    # reflections.updated_at, and the reader resolves it body-first (§6.2), so
+    # bumping here would corrupt age_days + the updated_at DESC tiebreak parity.
+    assert body["updated_at"] == "2026-05-01T00:00:00+00:00"
+
+    # Read-back through the reader reflects the bumped counter.
+    parsed = backend._parse_reflection_record(
+        fake.get_memory_record(memoryId="x", memoryRecordId="mig-1")["memoryRecord"]
+    )
+    assert parsed is not None
+    assert parsed["useful_count"] == 3
+
+
+def test_t2_credit_one_migrated_overlooked_bumps_times_overlooked(
+    ac_config, mock_control_client
+) -> None:
+    """classification 'overlooked' → metadata key overlooked_count, but in the
+    body it lands under the SQLite column name times_overlooked."""
+    record = _make_migrated_reflection_record("mig-o", times_overlooked=4)
+    backend = _migrated_backend(ac_config, mock_control_client, record)
+    fake = backend._data
+
+    result = backend.credit_one(
+        session_id="s", kind="reflection", id="mig-o", classification="overlooked"
+    )
+    assert result == {"applied": "overlooked", "skipped": None}
+
+    body = json.loads(fake.update_calls[-1]["records"][0]["content"]["text"])
+    assert body["times_overlooked"] == 5
+    assert "overlooked_count" not in body
+
+    parsed = backend._parse_reflection_record(
+        fake.get_memory_record(memoryId="x", memoryRecordId="mig-o")["memoryRecord"]
+    )
+    assert parsed is not None
+    assert parsed["_overlooked_count"] == 5
+
+
+def test_t2_record_use_migrated_success_rewrites_body(
+    ac_config, mock_control_client
+) -> None:
+    record = _make_migrated_reflection_record("mig-r", useful_count=1)
+    backend = _migrated_backend(ac_config, mock_control_client, record)
+    fake = backend._data
+
+    backend.record_use("mig-r", outcome="success")
+
+    sent = fake.update_calls[-1]["records"][0]
+    assert "content" in sent and "metadata" not in sent
+    body = json.loads(sent["content"]["text"])
+    assert body["useful_count"] == 2
+
+    parsed = backend._parse_reflection_record(
+        fake.get_memory_record(memoryId="x", memoryRecordId="mig-r")["memoryRecord"]
+    )
+    assert parsed is not None
+    assert parsed["useful_count"] == 2
+
+
+def test_t2_record_use_migrated_failure_bumps_missed_count_in_body(
+    ac_config, mock_control_client
+) -> None:
+    record = _make_migrated_reflection_record("mig-f", missed_count=0)
+    backend = _migrated_backend(ac_config, mock_control_client, record)
+    fake = backend._data
+
+    backend.record_use("mig-f", outcome="failure")
+
+    body = json.loads(fake.update_calls[-1]["records"][0]["content"]["text"])
+    assert body["missed_count"] == 1
+    assert body["useful_count"] == 0
+
+
+def test_t2_retire_reflection_migrated_rewrites_body_status(
+    ac_config, mock_control_client
+) -> None:
+    record = _make_migrated_reflection_record("mig-s")
+    backend = _migrated_backend(ac_config, mock_control_client, record)
+    fake = backend._data
+
+    backend.retire_reflection(reflection_id="mig-s")
+
+    sent = fake.update_calls[-1]["records"][0]
+    assert "content" in sent and "metadata" not in sent
+    # namespace move still applied via the namespaces field.
+    assert sent["namespaces"] == ["projects/testproj/retired/"]
+    body = json.loads(sent["content"]["text"])
+    assert body["status"] == "retired"
+
+    parsed = backend._parse_reflection_record(
+        fake.get_memory_record(memoryId="x", memoryRecordId="mig-s")["memoryRecord"]
+    )
+    assert parsed is not None
+    assert parsed["_status"] == "retired"
+
+
+def test_t2_credit_one_extracted_uses_metadata_path_unchanged(
+    backend, mock_data_client
+) -> None:
+    """AWS-extracted reflection (no source_backend marker) → the existing
+    metadata write path, NOT a content update."""
+    mock_data_client.get_memory_record.return_value = _make_record_response(
+        "ext-1", useful_count=2
+    )
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "ext-1", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    result = backend.credit_one(
+        session_id="s", kind="reflection", id="ext-1", classification="cited"
+    )
+    assert result == {"applied": "cited", "skipped": None}
+
+    sent = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
+    assert "metadata" in sent
+    assert "content" not in sent
+    assert sent["metadata"]["useful_count"]["numberValue"] == 3
+    assert set(sent["metadata"]["last_credited_at"]) == {"stringValue"}
+
+
+def test_t2_record_use_extracted_uses_metadata_path_unchanged(
+    backend, mock_data_client
+) -> None:
+    mock_data_client.get_memory_record.return_value = _make_record_response(
+        "ext-r", useful_count=1
+    )
+    mock_data_client.batch_update_memory_records.return_value = {
+        "successfulRecords": [{"memoryRecordId": "ext-r", "status": "SUCCEEDED"}],
+        "failedRecords": [],
+    }
+    backend.record_use("ext-r", outcome="success")
+
+    sent = mock_data_client.batch_update_memory_records.call_args.kwargs["records"][0]
+    assert "metadata" in sent
+    assert "content" not in sent
+    assert sent["metadata"]["useful_count"]["numberValue"] == 2

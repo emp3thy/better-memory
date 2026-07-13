@@ -39,6 +39,24 @@ EPISODIC_METADATA_SCHEMA: list[dict] = [
     {"key": "status", "type": "STRING"},
 ]
 
+# userPreference (semantic) memoryRecordSchema. Unlike the episodic schema
+# (which governs only AWS-EXTRACTED records), this top-level schema governs
+# CLIENT BASE writes: keys declared here are retained on create, survive
+# updates, and are listable; UNDECLARED keys (e.g. source_row_id) are silently
+# dropped by AWS (design §1b, proven live). The migration idempotency key
+# source_row_id therefore MUST be declared here or semantic reconcile-by-
+# source_row_id (design §3.2/§5.3) breaks — the migrator could not detect an
+# already-migrated row and would duplicate it on re-run.
+#
+# OPERATIONAL NOTE for the migrate/--provision path (T5): this schema is baked
+# into the userPreferenceMemoryStrategy block at CREATE_MEMORY time. A semantic
+# memory PROVISIONED BEFORE source_row_id was added here does NOT have it
+# declared, so client writes of source_row_id there are still dropped. Before
+# writing, the migrate/--provision path must guarantee the target's live schema
+# declares these keys — either widen it in place via update_memory_strategy
+# (widening the metadataSchema; verify AWS permits post-hoc schema extension —
+# unconfirmed as of §1b's open item) or re-provision a fresh semantic memory.
+# Fresh `init` provisions with this (correct) schema and needs no migration.
 SEMANTIC_METADATA_SCHEMA: list[dict] = [
     {"key": "useful_count", "type": "NUMBER"},
     {"key": "missed_count", "type": "NUMBER"},
@@ -47,6 +65,10 @@ SEMANTIC_METADATA_SCHEMA: list[dict] = [
     {"key": "overlooked_count", "type": "NUMBER"},
     {"key": "last_credited_at", "type": "STRING"},
     {"key": "status", "type": "STRING"},
+    # Migration idempotency key (design §3.2). STRING: it holds the SQLite row
+    # id. Not server-indexed (indexed keys are frozen at provision, §5.3) —
+    # reconcile scans it client-side.
+    {"key": "source_row_id", "type": "STRING"},
 ]
 
 INDEXED_KEYS: list[dict] = [

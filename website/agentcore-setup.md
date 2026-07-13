@@ -24,6 +24,7 @@ Narrow policy — `bedrock-agentcore` (data plane) + `bedrock-agentcore-control`
         "bedrock-agentcore-control:GetMemory",
         "bedrock-agentcore-control:ListMemories",
         "bedrock-agentcore-control:DeleteMemory",
+        "bedrock-agentcore-control:UpdateMemoryStrategy",
         "bedrock-agentcore:CreateEvent",
         "bedrock-agentcore:ListEvents",
         "bedrock-agentcore:BatchCreateMemoryRecords",
@@ -38,7 +39,7 @@ Narrow policy — `bedrock-agentcore` (data plane) + `bedrock-agentcore-control`
 }
 ```
 
-For tighter scoping, restrict `Resource` to the two memory ARNs after `init` writes them.
+For tighter scoping, restrict `Resource` to the two memory ARNs after `init` writes them. `UpdateMemoryStrategy` is only exercised by `better-memory agentcore migrate` — it widens an older semantic memory's schema so it declares `source_row_id` — and is not needed by `init`, `status`, or `smoke`; drop it if you never migrate.
 
 ## Initialise
 
@@ -74,6 +75,38 @@ better-memory agentcore smoke
 ```
 
 Drives a minimal observe → list_events → batch_create → list_records → batch_delete cycle. Exit 0 means the round-trip works end-to-end. Smoke validates AWS credentials and wire access, not MCP registration. This is the recommended ops check after any region or credential change.
+
+## Migrate existing memory (optional)
+
+`init` gives you empty AgentCore memories. If you already have sqlite memory worth carrying across, `better-memory agentcore migrate` bulk-copies it into the two AgentCore memories:
+
+```bash
+better-memory agentcore migrate --dry-run   # preview the plan, zero AWS calls
+better-memory agentcore migrate             # execute
+```
+
+It migrates two kinds by default (`--include reflections,semantic`):
+
+- **Reflections** → the episodic memory. All of a migrated reflection's state — the rating counters, its `status`, and the `source_row_id` used for de-duplication — lives in the record's **JSON content body**, not its metadata. (Cloud-extracted records store that state in record *metadata*; migrated reflections can't, because the built-in episodic strategy owns the metadata schema.)
+- **Semantic memories** → the semantic memory. Here `source_row_id` and the counters live in **declared metadata**, so migrate first ensures the semantic strategy schema declares `source_row_id` — widening it in place if needed — because AWS silently drops undeclared metadata keys on client writes.
+
+Migration is **idempotent**: a per-row ledger (the `agentcore_migration` table in `memory.db`) plus a reconcile-by-`source_row_id` scan means a re-run converges instead of duplicating. A crashed or partial run is safe to re-run; failed records are marked in the ledger and retried next time. Only one run at a time — a `<home>/agentcore_migration.lock` file guards against concurrent runs.
+
+Flags (read from the `migrate` argparse):
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Compute the plan and print create/update/skip/retire tallies without any AWS call. |
+| `--include <kinds>` | Comma list of kinds to migrate (default `reflections,semantic`). `observations` is accepted but **lossy and non-retrievable** — observation replay is not performed; they are treated as already distilled into reflections. |
+| `--restart` | Re-verify/upsert every eligible row, ignoring the ledger's `migrated` state. |
+| `--provision` | Create the target memories (or replace a missing / not-ACTIVE one) before migrating, instead of hard-erroring; persists any new IDs to `agentcore.json`. |
+| `--project <name>` | Limit migration to one project (plus `general`-scope rows). |
+| `--db <path>` | Source SQLite path (default `<home>/memory.db`). |
+| `--batch-size <n>` | Records per `BatchCreateMemoryRecords` call (default 25). |
+| `--verify` | Read one migrated record per kind back via `GetMemoryRecord` and diff it against SQLite. |
+| `--region <r>` / `--home <p>` | Region / home overrides (default: region from `agentcore.json`, home from `$BETTER_MEMORY_HOME`). |
+
+**Migration does not activate the backend.** `migrate` only writes records into AWS; it never touches `settings.json`. Activate separately with `init` (or by setting `storage_backend` yourself) — see [Initialise](#initialise). Exit codes: `0` all rows converged, `2` completed with some failed records (re-run to retry), `1` a configuration or setup error.
 
 ## What changes in agentcore mode
 
