@@ -15,6 +15,17 @@ import pytest
 from better_memory.storage import agentcore_migrate as m
 
 
+def _rr(row, **kw):
+    """build_reflection_record for an ACTIVE row, narrowed to non-None.
+
+    Active rows always build a record; only retired/superseded rows return
+    None (covered separately). Keeps pyright's optional-subscript analysis
+    happy without changing any test's behavior."""
+    rec = m.build_reflection_record(row, **kw)
+    assert rec is not None
+    return rec
+
+
 # --------------------------------------------------------------------------- #
 # Fixtures / row factories
 # --------------------------------------------------------------------------- #
@@ -77,7 +88,7 @@ def ledger_conn():
 # build_reflection_record — ALL state in the body, NO metadata
 # --------------------------------------------------------------------------- #
 def test_reflection_all_state_in_body_no_metadata():
-    rec = m.build_reflection_record(_reflection_row(), strategy_id="strat-episodic")
+    rec = _rr(_reflection_row(), strategy_id="strat-episodic")
 
     # No custom metadata map is emitted (AWS would silently drop it, §1b).
     assert "metadata" not in rec
@@ -101,22 +112,22 @@ def test_reflection_all_state_in_body_no_metadata():
 
 
 def test_reflection_namespace_project_vs_general():
-    proj = m.build_reflection_record(_reflection_row(), strategy_id="s")
+    proj = _rr(_reflection_row(), strategy_id="s")
     assert proj["namespaces"] == ["projects/better-memory/reflections/"]
 
-    gen = m.build_reflection_record(
+    gen = _rr(
         _reflection_row(scope="general"), strategy_id="s"
     )
     assert gen["namespaces"] == ["general/reflections/"]
 
 
 def test_reflection_status_remap():
-    a = m.build_reflection_record(
+    a = _rr(
         _reflection_row(status="pending_review"), strategy_id="s"
     )
     assert json.loads(a["content"]["text"])["status"] == "active"
 
-    b = m.build_reflection_record(
+    b = _rr(
         _reflection_row(status="confirmed"), strategy_id="s"
     )
     assert json.loads(b["content"]["text"])["status"] == "promoted"
@@ -132,8 +143,8 @@ def test_reflection_retired_and_superseded_skipped_on_create():
 
 
 def test_reflection_deterministic_request_identifier():
-    r1 = m.build_reflection_record(_reflection_row(), strategy_id="s")
-    r2 = m.build_reflection_record(
+    r1 = _rr(_reflection_row(), strategy_id="s")
+    r2 = _rr(
         _reflection_row(updated_at="2026-01-01T00:00:00+00:00"), strategy_id="s"
     )
     assert r1["requestIdentifier"] == "bm-reflection-refl-123"
@@ -142,7 +153,7 @@ def test_reflection_deterministic_request_identifier():
 
 def test_reflection_request_identifier_truncated_to_80():
     long_id = "x" * 200
-    rec = m.build_reflection_record(
+    rec = _rr(
         _reflection_row(id=long_id), strategy_id="s"
     )
     assert len(rec["requestIdentifier"]) == 80
@@ -222,11 +233,11 @@ def test_chunk_rejects_zero_batch_size():
 # canonical_content_hash — deterministic, timestamp-independent
 # --------------------------------------------------------------------------- #
 def test_content_hash_ignores_timestamp():
-    r1 = m.build_reflection_record(
+    r1 = _rr(
         _reflection_row(), strategy_id="s",
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
     )
-    r2 = m.build_reflection_record(
+    r2 = _rr(
         _reflection_row(), strategy_id="s",
         timestamp=datetime(2026, 12, 31, tzinfo=UTC),
     )
@@ -234,8 +245,8 @@ def test_content_hash_ignores_timestamp():
 
 
 def test_content_hash_changes_with_body():
-    base = m.build_reflection_record(_reflection_row(), strategy_id="s")
-    changed = m.build_reflection_record(
+    base = _rr(_reflection_row(), strategy_id="s")
+    changed = _rr(
         _reflection_row(confidence=0.1), strategy_id="s"
     )
     assert m.canonical_content_hash(base) != m.canonical_content_hash(changed)
@@ -245,8 +256,8 @@ def test_content_hash_excludes_memory_strategy_id():
     # The strategy id is a routing attribute filled in only after provisioning
     # (§5.2). Re-keying it MUST NOT change the hash, else the --provision path
     # forces a spurious update on every later run.
-    a = m.build_reflection_record(_reflection_row(), strategy_id="")
-    b = m.build_reflection_record(_reflection_row(), strategy_id="real-strat")
+    a = _rr(_reflection_row(), strategy_id="")
+    b = _rr(_reflection_row(), strategy_id="real-strat")
     assert a["memoryStrategyId"] != b["memoryStrategyId"]
     assert m.canonical_content_hash(a) == m.canonical_content_hash(b)
 

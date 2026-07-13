@@ -1726,6 +1726,7 @@ def test_t2_credit_one_migrated_rewrites_body_counter(
     parsed = backend._parse_reflection_record(
         fake.get_memory_record(memoryId="x", memoryRecordId="mig-1")["memoryRecord"]
     )
+    assert parsed is not None
     assert parsed["useful_count"] == 3
 
 
@@ -1750,6 +1751,7 @@ def test_t2_credit_one_migrated_overlooked_bumps_times_overlooked(
     parsed = backend._parse_reflection_record(
         fake.get_memory_record(memoryId="x", memoryRecordId="mig-o")["memoryRecord"]
     )
+    assert parsed is not None
     assert parsed["_overlooked_count"] == 5
 
 
@@ -1770,6 +1772,7 @@ def test_t2_record_use_migrated_success_rewrites_body(
     parsed = backend._parse_reflection_record(
         fake.get_memory_record(memoryId="x", memoryRecordId="mig-r")["memoryRecord"]
     )
+    assert parsed is not None
     assert parsed["useful_count"] == 2
 
 
@@ -1806,6 +1809,7 @@ def test_t2_retire_reflection_migrated_rewrites_body_status(
     parsed = backend._parse_reflection_record(
         fake.get_memory_record(memoryId="x", memoryRecordId="mig-s")["memoryRecord"]
     )
+    assert parsed is not None
     assert parsed["_status"] == "retired"
 
 
