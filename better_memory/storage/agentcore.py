@@ -55,6 +55,16 @@ _RATING_TO_COUNTER: dict[str, str] = {
     "overlooked": "overlooked_count",
 }
 
+# For migrated (SQLite-origin) reflection records, rating state lives in the
+# JSON content body under the SQLite column names (design §1b/§3.1). The
+# AgentCore metadata counter key `overlooked_count` is stored in the body under
+# the SQLite column name `times_overlooked`; every other counter key keeps the
+# same name in the body. Used to translate a metadata counter key to its body
+# field when read-modify-writing a migrated record's content.
+_COUNTER_KEY_TO_BODY_FIELD: dict[str, str] = {
+    "overlooked_count": "times_overlooked",
+}
+
 
 class AgentCoreBackend:
     """boto3-backed StorageBackend implementation."""
@@ -374,9 +384,29 @@ class AgentCoreBackend:
             body = {}
 
         metadata_raw = rec.get("metadata", {})
+        # Migrated (SQLite-origin) records carry all reflection state in the
+        # JSON content body; AWS-extracted records carry it in metadata (and
+        # never in the body). Every field below therefore resolves BODY-FIRST
+        # with a METADATA FALLBACK: a body without the key is exactly the
+        # AWS-extracted shape, so the fallback reproduces today's behavior
+        # byte-for-byte (no regression). See migration design §1b/§6.
+        body_dict: dict[str, Any] = body if isinstance(body, dict) else {}
 
         def _num(key: str) -> float:
             return float(metadata_raw.get(key, {}).get("numberValue", 0))
+
+        def _count_body_first(body_key: str, meta_key: str) -> int:
+            """Integer counter, body value preferred over metadata numberValue.
+
+            Body absent (or non-numeric) -> the existing metadata numberValue
+            path, preserving AWS-extracted-record behavior exactly."""
+            body_val = body_dict.get(body_key)
+            if body_val is not None:
+                try:
+                    return int(body_val)
+                except (TypeError, ValueError):
+                    pass
+            return int(_num(meta_key))
 
         tech_value: str | None = body.get("tech") if isinstance(body, dict) else None
         if tech_filter is not None and tech_value != tech_filter:
@@ -398,23 +428,64 @@ class AgentCoreBackend:
         except (TypeError, ValueError):
             confidence = 0.0
 
-        # Live dialect: NO updatedAt field exists on any record shape
-        # (createdAt only). Update recency lives in the system metadata key
-        # x-amz-agentcore-memory-updatedAt (dateTimeValue).
+        # updated_at, body-first (§6.2). Migrated records carry an ISO-8601
+        # string in the body; AWS-extracted records have NO updatedAt on the
+        # record shape (createdAt only) — recency lives in the system metadata
+        # key x-amz-agentcore-memory-updatedAt (dateTimeValue), falling back to
+        # createdAt. Body absent -> identical to the pre-migration path.
+        body_updated = body_dict.get("updated_at")
         sys_updated = metadata_raw.get(
             f"{_AGENTCORE_SYSTEM_METADATA_PREFIX}updatedAt", {}
         ).get("dateTimeValue")
-        updated_at = sys_updated or rec.get("updatedAt") or rec.get("createdAt")
-        updated_at_ts = updated_at.timestamp() if isinstance(updated_at, datetime) else 0.0
+        updated_at_raw = (
+            body_updated
+            or sys_updated
+            or rec.get("updatedAt")
+            or rec.get("createdAt")
+        )
+        if isinstance(updated_at_raw, datetime):
+            updated_at_value: str | None = updated_at_raw.isoformat()
+            updated_at_ts = updated_at_raw.timestamp()
+        elif isinstance(updated_at_raw, str):
+            updated_at_value = updated_at_raw
+            try:
+                updated_at_ts = datetime.fromisoformat(updated_at_raw).timestamp()
+            except ValueError:
+                updated_at_ts = 0.0
+        else:
+            updated_at_value = None
+            updated_at_ts = 0.0
 
         # Client-side bucketing inputs. Missing/unknown polarity buckets as
         # neutral and missing status parses as active — AgentCore's own
         # extraction strategy writes neither key, and those records must
         # still be retrievable (see _fetch_reflection_buckets).
-        polarity_value = metadata_raw.get("polarity", {}).get("stringValue")
+        # polarity is the bucket selector and is CRITICAL for migrated
+        # records — they carry it only in the body. Body-first, metadata
+        # fallback (AWS-extracted records carry neither -> neutral).
+        polarity_value = (
+            body_dict.get("polarity")
+            or metadata_raw.get("polarity", {}).get("stringValue")
+        )
         if polarity_value not in _POLARITIES:
             polarity_value = "neutral"
-        status_value = metadata_raw.get("status", {}).get("stringValue") or "active"
+        status_value = (
+            body_dict.get("status")
+            or metadata_raw.get("status", {}).get("stringValue")
+            or "active"
+        )
+
+        # evidence_count body-first (§6.1). Prefer the stored body value
+        # (migrated, synthesis-recomputed source count); else the existing
+        # computed metadata useful+missed fallback (AWS-extracted records).
+        body_ec = body_dict.get("evidence_count")
+        if body_ec is not None:
+            try:
+                evidence_count = int(body_ec)
+            except (TypeError, ValueError):
+                evidence_count = int(_num("useful_count")) + int(_num("missed_count"))
+        else:
+            evidence_count = int(_num("useful_count")) + int(_num("missed_count"))
 
         return {
             # Public shape — must match ReflectionSynthesisService.retrieve_reflections
@@ -427,15 +498,15 @@ class AgentCoreBackend:
             "hints": hints_list,
             "confidence": confidence,
             "tech": tech_value,
-            "evidence_count": int(_num("useful_count")) + int(_num("missed_count")),
-            "useful_count": int(_num("useful_count")),
-            "times_misled": int(_num("times_misled")),
-            "updated_at": (
-                updated_at.isoformat() if isinstance(updated_at, datetime) else None
-            ),
+            "evidence_count": evidence_count,
+            "useful_count": _count_body_first("useful_count", "useful_count"),
+            "times_misled": _count_body_first("times_misled", "times_misled"),
+            "updated_at": updated_at_value,
             # Internal ranking/bucketing helpers — stripped by
             # _fetch_reflection_buckets before the payload leaves the backend.
-            "_overlooked_count": int(_num("overlooked_count")),
+            "_overlooked_count": _count_body_first(
+                "times_overlooked", "overlooked_count"
+            ),
             "_updated_at_ts": updated_at_ts,
             "_polarity": polarity_value,
             "_status": status_value,
@@ -594,6 +665,79 @@ class AgentCoreBackend:
         snapshot.update(updates)
         return snapshot
 
+    @staticmethod
+    def _record_body(record: dict[str, Any]) -> dict[str, Any]:
+        """Parse a memory record's JSON content body into a dict.
+
+        Returns ``{}`` for non-JSON / non-object bodies. Migrated
+        (SQLite-origin) records carry ``source_backend='sqlite'`` here; the
+        rating paths use that marker to decide whether reflection state lives
+        in the content body (migrated) or in metadata (AWS-extracted)."""
+        text = record.get("content", {}).get("text", "")
+        try:
+            body = json.loads(text) if isinstance(text, str) else {}
+        except json.JSONDecodeError:
+            body = {}
+        return body if isinstance(body, dict) else {}
+
+    def _credit_body_counter(
+        self,
+        *,
+        memory_id: str,
+        record_id: str,
+        body: dict[str, Any],
+        counter_key: str,
+    ) -> dict[str, Any]:
+        """Read-modify-write a migrated record's JSON content BODY: bump the
+        counter, refresh ``last_credited_at``, and persist via a CONTENT update.
+
+        ``updated_at`` is deliberately NOT refreshed here. SQLite crediting
+        (``memory_rating.py``) bumps only the counter + ``last_*_at`` and never
+        ``reflections.updated_at``; because the reader resolves ``updated_at``
+        body-first (design §6.2), bumping it here would drift a migrated
+        reflection's synthesis-time ``updated_at`` forward on every rating,
+        corrupting ``age_days`` (relevant.py) and the ``updated_at DESC``
+        ranking tiebreak relative to the SQLite source — the exact parity §6.2
+        exists to preserve. ``_mutate_namespace_and_status`` DOES bump
+        ``updated_at`` on purpose: sqlite promote/retire bump it too, so that
+        path is correct parity; only rating must leave it untouched.
+
+        AWS silently drops the custom metadata map on client-authored BASE
+        records in the episodic reflections namespace (design §1b, proven
+        live), so a metadata write is a no-op there — rating state must live in
+        the content body, which DOES persist. The metadata counter key is
+        translated to its body field name (``overlooked_count`` →
+        ``times_overlooked``; all others unchanged).
+
+        Concurrency: last-writer-wins. ``body`` was just read via
+        ``get_memory_record`` (read-your-write), and the data plane exposes no
+        conditional / optimistic-concurrency update, so a concurrent crediter's
+        increment can be lost. Acceptable for the low-contention rating path
+        (design §1b, documented)."""
+        body_field = _COUNTER_KEY_TO_BODY_FIELD.get(counter_key, counter_key)
+        try:
+            current = int(body.get(body_field, 0) or 0)
+        except (TypeError, ValueError):
+            current = 0
+        now = datetime.now(UTC).isoformat()
+        new_body = dict(body)
+        new_body[body_field] = current + 1
+        # last_credited_at lives in the body for migrated records (design §1b).
+        # updated_at is intentionally left unchanged (see docstring / §6.2).
+        new_body["last_credited_at"] = now
+        return self._retry_on_transient_404(
+            lambda: self._data.batch_update_memory_records(
+                memoryId=memory_id,
+                records=[
+                    {
+                        "memoryRecordId": record_id,
+                        "timestamp": datetime.now(UTC),
+                        "content": {"text": json.dumps(new_body)},
+                    }
+                ],
+            )
+        )
+
     def record_use(
         self, observation_id: str, *, outcome: UseOutcome | None = None
     ) -> None:
@@ -603,9 +747,29 @@ class AgentCoreBackend:
             return
 
         record = self._get_record(observation_id)
-        metadata = record.get("metadata", {})
-
         counter_key = "useful_count" if outcome == "success" else "missed_count"
+
+        # Migrated (SQLite-origin) reflections carry rating state in the content
+        # body; a metadata write is silently dropped by AWS (design §1b).
+        # Read-modify-write the body instead. AWS-extracted records (no marker)
+        # keep the metadata path below unchanged.
+        body = self._record_body(record)
+        if body.get("source_backend") == "sqlite":
+            response = self._credit_body_counter(
+                memory_id=self._cfg.episodic.memory_id,
+                record_id=observation_id,
+                body=body,
+                counter_key=counter_key,
+            )
+            failed = response.get("failedRecords", [])
+            if failed:
+                raise RuntimeError(
+                    f"AgentCore record_use failed for {observation_id}: "
+                    f"{failed[0].get('errorMessage', 'unknown')}"
+                )
+            return
+
+        metadata = record.get("metadata", {})
         current_count = float(
             metadata.get(counter_key, {}).get("numberValue", 0)
         )
@@ -740,23 +904,107 @@ class AgentCoreBackend:
             )
 
         return [
-            {
-                "id": rec["memoryRecordId"],
-                "content": rec.get("content", {}).get("text", ""),
-                "namespaces": rec.get("namespaces", []),
-                # Live dialect: stored namespaces gain a leading slash
-                # ("/general/semantic/") — normalize before classifying or
-                # every read-back record misreports as project scope.
-                "scope": (
-                    "general"
-                    if (next(iter(rec.get("namespaces") or [""]), ""))
-                    .lstrip("/")
-                    .startswith("general/")
-                    else "project"
-                ),
-            }
+            self._semantic_summary_to_model(
+                rec, project=project or self._project
+            )
             for rec in response.get("memoryRecordSummaries", [])
         ]
+
+    def _semantic_summary_to_model(
+        self, rec: dict[str, Any], *, project: str
+    ) -> Any:
+        """Map a MemoryRecordSummary -> a SemanticMemory-shaped read model.
+
+        §6.3: relevant.py (retrieve_relevant) reads semantic memories via
+        ATTRIBUTE access (getattr(s, 'content'), getattr(s, 'useful_count'),
+        ...). Returning plain dicts made every getattr silently resolve to its
+        default ('' / 0), so agentcore-mode semantic memories never cleared the
+        min-hits floor and semantic injection was dead. Returning the same
+        SemanticMemory dataclass the SQLite read model returns (services/
+        semantic.py) fixes that: attribute access resolves to real content and
+        the declared metadata counters the migrator writes.
+
+        Counters come from the declared numberValue metadata keys
+        (useful_count / times_misled / overlooked_count → times_overlooked);
+        the collapsed rating timestamp comes from last_credited_at stringValue.
+        Absent metadata (AWS-extracted or freshly-created records) → zeroed
+        counters, never None."""
+        # Local import: the SemanticMemory read model lives in the services
+        # layer; importing at module scope would invert the storage→services
+        # layering. This is a lightweight frozen dataclass, imported lazily.
+        from better_memory.services.semantic import SemanticMemory
+
+        metadata = rec.get("metadata", {}) or {}
+
+        def _count(key: str) -> int:
+            raw = metadata.get(key, {})
+            if not isinstance(raw, dict):
+                return 0
+            try:
+                return int(raw.get("numberValue", 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        def _str_meta(key: str) -> str | None:
+            raw = metadata.get(key, {})
+            if isinstance(raw, dict):
+                return raw.get("stringValue")
+            return None
+
+        namespaces = rec.get("namespaces") or []
+        # Live dialect: stored namespaces gain a leading slash
+        # ("/general/semantic/") — normalize before classifying or every
+        # read-back record misreports as project scope.
+        first_ns = next(iter(namespaces or [""]), "")
+        scope = (
+            "general"
+            if first_ns.lstrip("/").startswith("general/")
+            else "project"
+        )
+
+        def _iso(value: Any) -> str | None:
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, str):
+                return value
+            return None
+
+        created_at = _iso(rec.get("createdAt")) or ""
+        # updated_at drives relevant.py age_days. Prefer the system-managed
+        # updatedAt (dateTimeValue), then the record's updatedAt/createdAt.
+        sys_updated = metadata.get(
+            f"{_AGENTCORE_SYSTEM_METADATA_PREFIX}updatedAt", {}
+        )
+        sys_updated_val = (
+            sys_updated.get("dateTimeValue")
+            if isinstance(sys_updated, dict)
+            else None
+        )
+        updated_at = (
+            _iso(sys_updated_val)
+            or _iso(rec.get("updatedAt"))
+            or created_at
+        )
+
+        # The three per-class rating timestamps collapsed to one
+        # last_credited_at on write (design §3.2); surface it on the
+        # useful-at slot as best-effort recency signal.
+        last_credited_at = _str_meta("last_credited_at")
+
+        return SemanticMemory(
+            id=rec["memoryRecordId"],
+            content=rec.get("content", {}).get("text", ""),
+            project=project,
+            scope=scope,
+            created_at=created_at,
+            updated_at=updated_at,
+            useful_count=_count("useful_count"),
+            last_useful_at=last_credited_at,
+            times_misled=_count("times_misled"),
+            last_misled_at=None,
+            times_overlooked=_count("overlooked_count"),
+            last_overlooked_at=None,
+        )
 
     def semantic_update_text(self, *, id: str, content: str) -> None:
         """Update the text of a semantic record. Metadata snapshot unchanged
@@ -890,8 +1138,42 @@ class AgentCoreBackend:
         new_status: str,
     ) -> None:
         """Shared helper: read current metadata, mutate namespace + status,
-        write back with full metadata snapshot."""
+        write back with full metadata snapshot.
+
+        Migrated (SQLite-origin) reflections carry status in the content body,
+        not metadata (design §1b) — a metadata status write is silently dropped
+        by AWS. For those records the status change is a body read-modify-write
+        (CONTENT update); the namespace move is still applied via the
+        ``namespaces`` field, which is not part of the dropped metadata map.
+        AWS-extracted records keep the metadata path below unchanged."""
         record = self._get_record(reflection_id)
+
+        body = self._record_body(record)
+        if body.get("source_backend") == "sqlite":
+            new_body = dict(body)
+            new_body["status"] = new_status
+            new_body["updated_at"] = datetime.now(UTC).isoformat()
+            response = self._retry_on_transient_404(
+                lambda: self._data.batch_update_memory_records(
+                    memoryId=self._cfg.episodic.memory_id,
+                    records=[
+                        {
+                            "memoryRecordId": reflection_id,
+                            "timestamp": datetime.now(UTC),
+                            "namespaces": new_namespaces,
+                            "content": {"text": json.dumps(new_body)},
+                        }
+                    ],
+                )
+            )
+            failed = response.get("failedRecords", [])
+            if failed:
+                raise RuntimeError(
+                    f"AgentCore reflection mutation failed for {reflection_id}: "
+                    f"{failed[0].get('errorMessage', 'unknown')}"
+                )
+            return
+
         metadata = record.get("metadata", {})
 
         updates: dict[str, dict[str, Any]] = {
@@ -1077,6 +1359,29 @@ class AgentCoreBackend:
         else:
             record = self._get_record(id)
             memory_id = self._cfg.episodic.memory_id
+
+        # Migrated (SQLite-origin) EPISODIC reflections carry rating state in
+        # the content body; a metadata write is silently dropped by AWS in the
+        # episodic reflections namespace (design §1b). Read-modify-write the
+        # body instead. Semantic migrated records use DECLARED metadata (the
+        # userPreference schema governs client writes — design §1b), so they
+        # stay on the metadata path below; AWS-extracted reflections likewise.
+        if kind != "semantic":
+            body = self._record_body(record)
+            if body.get("source_backend") == "sqlite":
+                response = self._credit_body_counter(
+                    memory_id=memory_id,
+                    record_id=id,
+                    body=body,
+                    counter_key=counter_key,
+                )
+                failed = response.get("failedRecords", [])
+                if failed:
+                    return {
+                        "applied": None,
+                        "skipped": failed[0].get("errorMessage", "unknown"),
+                    }
+                return {"applied": classification, "skipped": None}
 
         metadata = record.get("metadata", {})
         current = float(metadata.get(counter_key, {}).get("numberValue", 0))

@@ -46,6 +46,8 @@ import gzip
 import json
 import re
 import threading
+import time
+import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -237,6 +239,93 @@ def dialect_violation(
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Live-verified metadata RETENTION dialect (design §1b, three real-AWS probes
+# on 2026-07-12, acct 708306701628 eu-west-2, throwaway memories torn down;
+# evidence scratchpad/probe*_out.txt, memory ids c588ca1c…, 9bd09ba6…). Whether
+# a CLIENT-authored BASE record keeps its custom metadata is schema-gated by the
+# STRATEGY that owns the namespace — the fake models this so the migrate T2
+# suite is meaningful (a fake that retained everything could not prove that
+# reflection state MUST live in the body, nor that semantic MUST use declared
+# metadata):
+#
+#  * episodic reflections namespace (episodicMemoryStrategy): its schema under
+#    reflectionConfiguration.memoryRecordSchema governs only AWS-EXTRACTED
+#    records, so a client BASE write keeps NO custom metadata — the entire map
+#    is silently dropped (probe 1). Only the JSON content BODY round-trips, and
+#    a subsequent content-BODY update persists durably (probe 2, read-your-write
+#    GET).
+#  * userPreference semantic namespace: its TOP-LEVEL memoryRecordSchema DOES
+#    govern client BASE writes — keys DECLARED there are retained on create,
+#    survive updates, and are listable; UNDECLARED keys are silently dropped
+#    (probe 3).
+# --------------------------------------------------------------------------- #
+
+#: Keys the userPreference strategy DECLARES for client BASE writes — mirrors
+#: better_memory.cli._agentcore_strategies.SEMANTIC_METADATA_SCHEMA (the schema
+#: the migrator's --provision path guarantees before writing). Anything outside
+#: this set is dropped on the semantic namespace, exactly as real AWS does.
+_SEMANTIC_DECLARED_METADATA_KEYS = frozenset(
+    {
+        "useful_count",
+        "missed_count",
+        "ignored_count",
+        "times_misled",
+        "overlooked_count",
+        "last_credited_at",
+        "status",
+        "source_row_id",
+    }
+)
+
+#: Data-plane operations the opt-in record store serves statefully instead of
+#: from a canned response (create persists, update mutates, list/get read back).
+_RECORD_STORE_OPS = frozenset(
+    {
+        "BatchCreateMemoryRecords",
+        "BatchUpdateMemoryRecords",
+        "ListMemoryRecords",
+        "GetMemoryRecord",
+    }
+)
+
+#: memoryId is the first path segment after /memories/; GetMemoryRecord carries
+#: the record id after /memoryRecord/ (verified against the botocore requestUri
+#: templates loaded in _load_routes).
+_MEMORY_ID_RE = re.compile(r"/memories/([^/?]+)")
+_RECORD_ID_RE = re.compile(r"/memoryRecord/([^/?]+)")
+
+
+def _namespace_owning_strategy(namespaces: Any) -> str:
+    """Classify a record's namespace as ``'reflections'`` (episodic strategy) or
+    ``'semantic'`` (userPreference strategy) — the strategy whose schema gates
+    metadata retention. Live namespaces may gain a leading slash; normalize."""
+    first = (list(namespaces) or [""])[0].lstrip("/") if namespaces else ""
+    if "reflections/" in first or first.endswith("reflections"):
+        return "reflections"
+    if "semantic/" in first or first.endswith("semantic"):
+        return "semantic"
+    return "other"
+
+
+def gate_client_metadata(namespaces: Any, metadata: Any) -> dict[str, Any]:
+    """Apply the live-verified retention rule to a client BASE write's metadata
+    map: return only what the server would keep. Episodic reflections drop the
+    whole map; userPreference semantic keeps only DECLARED keys (design §1b)."""
+    if not isinstance(metadata, dict):
+        return {}
+    owner = _namespace_owning_strategy(namespaces)
+    if owner == "reflections":
+        return {}
+    if owner == "semantic":
+        return {
+            k: v
+            for k, v in metadata.items()
+            if k in _SEMANTIC_DECLARED_METADATA_KEYS
+        }
+    return dict(metadata)
+
+
 def _uri_to_regex(request_uri: str) -> re.Pattern[str]:
     """Compile a botocore ``requestUri`` (e.g. ``/memories/{memoryId}/events``)
     into an anchored path regex. ``{param}`` matches one path segment;
@@ -338,14 +427,30 @@ class RecordedRequest:
 
 
 class FakeAgentCore:
-    """Recording fake for both bedrock-agentcore planes. Context manager."""
+    """Recording fake for both bedrock-agentcore planes. Context manager.
 
-    def __init__(self) -> None:
+    Pass ``record_store=True`` to enable the opt-in STATEFUL record store: the
+    four data-plane record operations (``BatchCreate`` / ``BatchUpdate`` /
+    ``ListMemoryRecords`` / ``GetMemoryRecord``) then persist and read back real
+    records, applying the live-verified metadata-retention dialect
+    (:func:`gate_client_metadata`) so a full migrate → ``backend.retrieve()``
+    round-trip is exercised end-to-end. Default (``False``) preserves the pure
+    canned-response behavior the D1-D7 scenarios rely on."""
+
+    def __init__(self, *, record_store: bool = False) -> None:
         self._routes = _load_routes()
         self._known_ops = {name for name, _, _ in self._routes}
         self._responses: dict[str, Any] = {}
         self._lock = threading.Lock()
         self.requests: list[RecordedRequest] = []
+
+        # Opt-in stateful store: memoryId -> {memoryRecordId -> record dict}.
+        self._record_store_enabled = record_store
+        self._records: dict[str, dict[str, dict[str, Any]]] = {}
+        self._minted = 0
+        #: requestIdentifiers a create should reject with a failedRecords entry
+        #: (the injected partial-failure lever for the T2 resume test).
+        self.fail_on_create: set[str] = set()
 
         fake = self
 
@@ -400,9 +505,16 @@ class FakeAgentCore:
             return [r for r in self.requests if r.operation == operation]
 
     def clear(self) -> None:
-        """Drop all recorded requests (canned responses are kept)."""
+        """Drop all recorded requests (canned responses + stored records kept)."""
         with self._lock:
             self.requests.clear()
+
+    def stored_records(self, memory_id: str) -> list[dict[str, Any]]:
+        """Snapshot of the records persisted under ``memory_id`` (record-store
+        mode only). Metadata reflects the retention gate already applied on
+        write, so tests can assert the drop/retain contract directly."""
+        with self._lock:
+            return [dict(rec) for rec in self._records.get(memory_id, {}).values()]
 
     def close(self) -> None:
         self._server.shutdown()
@@ -450,19 +562,151 @@ class FakeAgentCore:
         override = dialect_violation(operation, body)
         if override is not None:
             status_code, payload = override
+        elif self._record_store_enabled and operation in _RECORD_STORE_OPS:
+            # Stateful record store: dialect already vetted the shape above, so
+            # anything reaching here is a request real AWS would accept.
+            status_code, payload = self._serve_record_store(operation, record)
         else:
             status_code = 200
             payload = self._responses.get(operation or "", {})
             if callable(payload):
                 payload = payload(record)
-        data = json.dumps(payload).encode("utf-8")
+        data = json.dumps(payload, default=str).encode("utf-8")
 
         handler.send_response(status_code)
-        if status_code == 400:
+        if status_code >= 400 and isinstance(payload, dict) and "__type" in payload:
             # botocore's rest-json error parser reads this header (and the
-            # __type body member) to raise ClientError ValidationException.
-            handler.send_header("x-amzn-ErrorType", "ValidationException")
+            # __type body member) to raise the matching ClientError (400
+            # ValidationException, 404 ResourceNotFoundException, ...).
+            handler.send_header("x-amzn-ErrorType", payload["__type"])
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
         handler.wfile.write(data)
+
+    # ----- opt-in stateful record store -----
+
+    def _mint_record_id(self) -> str:
+        """Mint a server-side id. Real AWS mints ``mem-<uuid>``; the
+        MemoryRecordId shape constrains it to /mem-[A-Za-z0-9-_]*/ length 40-50,
+        so short ids would be rejected client-side on any later GET/update."""
+        self._minted += 1
+        return f"mem-fake-{uuid.uuid4().hex}"[:50]  # 41 chars, in [40, 50]
+
+    @staticmethod
+    def _public_record(rec: dict[str, Any]) -> dict[str, Any]:
+        """A record dict trimmed to the wire members (drop None, keep only what
+        the MemoryRecordSummary / MemoryRecord shapes surface)."""
+        out: dict[str, Any] = {
+            "memoryRecordId": rec["memoryRecordId"],
+            "content": rec["content"],
+            "namespaces": rec["namespaces"],
+            "metadata": rec["metadata"],
+        }
+        if rec.get("memoryStrategyId"):
+            out["memoryStrategyId"] = rec["memoryStrategyId"]
+        if rec.get("createdAt") is not None:
+            out["createdAt"] = rec["createdAt"]
+        return out
+
+    def _serve_record_store(
+        self, operation: str, record: RecordedRequest
+    ) -> tuple[int, dict[str, Any]]:
+        memory_id_match = _MEMORY_ID_RE.search(record.path)
+        memory_id = memory_id_match.group(1) if memory_id_match else ""
+        body = record.body if isinstance(record.body, dict) else {}
+
+        with self._lock:
+            bucket = self._records.setdefault(memory_id, {})
+
+            if operation == "BatchCreateMemoryRecords":
+                successful: list[dict[str, Any]] = []
+                failed: list[dict[str, Any]] = []
+                now = time.time()
+                for rec in body.get("records") or []:
+                    req_id = rec.get("requestIdentifier", "")
+                    if req_id in self.fail_on_create:
+                        failed.append(
+                            {
+                                "requestIdentifier": req_id,
+                                "status": "FAILED",
+                                "errorCode": 500,
+                                "errorMessage": "injected failedRecords (fake)",
+                            }
+                        )
+                        continue
+                    rid = self._mint_record_id()
+                    namespaces = list(rec.get("namespaces") or [])
+                    bucket[rid] = {
+                        "memoryRecordId": rid,
+                        "content": rec.get("content") or {"text": ""},
+                        "namespaces": namespaces,
+                        "memoryStrategyId": rec.get("memoryStrategyId"),
+                        # Schema-gated retention — the crux (design §1b).
+                        "metadata": gate_client_metadata(
+                            namespaces, rec.get("metadata")
+                        ),
+                        "createdAt": now,
+                        "updatedAt": now,
+                    }
+                    successful.append(
+                        {
+                            "requestIdentifier": req_id,
+                            "memoryRecordId": rid,
+                            "status": "SUCCEEDED",
+                        }
+                    )
+                return 200, {
+                    "successfulRecords": successful,
+                    "failedRecords": failed,
+                }
+
+            if operation == "BatchUpdateMemoryRecords":
+                ok: list[dict[str, Any]] = []
+                bad: list[dict[str, Any]] = []
+                now = time.time()
+                for rec in body.get("records") or []:
+                    rid = rec.get("memoryRecordId")
+                    existing = bucket.get(rid)
+                    if existing is None:
+                        bad.append(
+                            {
+                                "memoryRecordId": rid,
+                                "status": "FAILED",
+                                "errorCode": 404,
+                                "errorMessage": "record not found",
+                            }
+                        )
+                        continue
+                    # Content-BODY updates persist durably (design §1b probe 2).
+                    if "content" in rec:
+                        existing["content"] = rec["content"]
+                    # Metadata updates re-apply the same retention gate.
+                    if "metadata" in rec:
+                        existing["metadata"] = gate_client_metadata(
+                            existing["namespaces"], rec["metadata"]
+                        )
+                    existing["updatedAt"] = now
+                    ok.append({"memoryRecordId": rid, "status": "SUCCEEDED"})
+                return 200, {"successfulRecords": ok, "failedRecords": bad}
+
+            if operation == "ListMemoryRecords":
+                target = str(body.get("namespace") or "").lstrip("/")
+                summaries = [
+                    self._public_record(rec)
+                    for rec in bucket.values()
+                    if target
+                    in {n.lstrip("/") for n in (rec.get("namespaces") or [])}
+                ]
+                return 200, {"memoryRecordSummaries": summaries, "nextToken": None}
+
+            # GetMemoryRecord — record id is the last path segment.
+            record_id_match = _RECORD_ID_RE.search(record.path)
+            rid = record_id_match.group(1) if record_id_match else ""
+            existing = bucket.get(rid)
+            if existing is None:
+                return 404, {
+                    "__type": "ResourceNotFoundException",
+                    "message": f"memory record {rid!r} not found",
+                }
+            return 200, {"memoryRecord": self._public_record(existing)}

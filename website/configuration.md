@@ -51,10 +51,11 @@ Under `BETTER_MEMORY_HOME`:
 
 ```
 .better-memory/
-├── memory.db              # observations, episodes, reflections, audit_log
+├── memory.db              # observations, episodes, reflections, audit_log (+ agentcore_migration ledger in agentcore mode)
 ├── knowledge.db           # FTS5 index over knowledge-base/
 ├── settings.json          # optional; persists storage_backend selection (written by `agentcore init`)
 ├── agentcore.json         # agentcore mode only: memory IDs + region (written by `agentcore init`)
+├── agentcore_migration.lock  # agentcore mode only: transient single-run lock held by `agentcore migrate`
 ├── spool/                 # hook payloads awaiting drain
 │   └── .quarantine/       # malformed payloads (not deleted; kept for debug)
 ├── state/                 # per-session context_seen_<session_id>.json files (contextual_inject dedup)

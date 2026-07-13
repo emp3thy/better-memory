@@ -77,16 +77,21 @@ class SemanticToolHandlers:
                 for record in self._remote.semantic_list(
                     project=project, scope_filter=scope_filter
                 ):
-                    record_id = record["id"]
+                    # semantic_list now returns SemanticMemory objects (§6.3),
+                    # matching the sqlite path below — attribute access, not
+                    # dict subscripting. created_at/updated_at stay None: the
+                    # stable UD-2 payload contract keeps agentcore semantic
+                    # rows key-identical to sqlite with placeholder timestamps.
+                    record_id = record.id
                     if record_id in seen:
                         continue
                     seen.add(record_id)
                     merged.append(
                         {
                             "id": record_id,
-                            "content": record.get("content", ""),
+                            "content": record.content,
                             "project": None,
-                            "scope": record.get("scope", "project"),
+                            "scope": record.scope,
                             "created_at": None,
                             "updated_at": None,
                         }

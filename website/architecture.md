@@ -41,6 +41,9 @@ flowchart LR
 | Closure events | N/A | `CreateEvent(role=OTHER)` from Stop hook |
 | Episode tracking | Local `episodes` table | Internal to AgentCore (sessionId) |
 | Exposure log (`record_exposures`) | Writes `session_memory_exposure` rows (sources `bootstrap` / `retrieve` / `contextual`) | No-op — no exposure log, so the end-of-session rating sweep has nothing to trigger on; rating flows through `memory.credit` (and direct `memory.apply_session_ratings` calls) |
+| Bulk import | N/A (clean start) | `better-memory agentcore migrate` copies existing sqlite reflections + semantic memories into AWS (idempotent, ledgered) |
+
+Migrating with `better-memory agentcore migrate` is distinct from activating: it only writes records to AWS and never flips `storage_backend`. A migrated reflection carries its rating counters, `status`, and `source_row_id` in the record's JSON **content body** — the built-in episodic strategy owns the metadata schema — whereas cloud-extracted records (and migrated semantic records) keep that state in record **metadata**. See [AgentCore setup > Migrate](agentcore-setup.md#migrate-existing-memory-optional).
 
 See [Configuration](configuration.md) for env vars and [AgentCore setup](agentcore-setup.md) for the agentcore path.
 
