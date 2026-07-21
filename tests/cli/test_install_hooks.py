@@ -108,11 +108,16 @@ class TestHookSpec:
         assert observer.matcher == "Write|Edit|Bash"
         assert observer.is_async is True
 
-    def test_session_close_is_stop_no_matcher_async(self) -> None:
+    def test_session_close_is_stop_no_matcher_sync_with_stdout(self) -> None:
+        # Stop must be SYNC with stdout attached: the rating sweep replies with
+        # a `decision: "block"` control-flow payload that Claude Code only
+        # honours from a blocking hook. Registered async, RATE_MEMORIES never
+        # forces a rating turn and nothing gets rated. See install_hooks.py.
         sc = next(s for s in _OUR_HOOKS if s.module.endswith("session_close"))
         assert sc.event == "Stop"
         assert sc.matcher is None
-        assert sc.is_async is True
+        assert sc.is_async is False
+        assert sc.needs_stdout is True
 
 
 from better_memory.cli.install_hooks import merge_settings_json
@@ -137,7 +142,8 @@ class TestMergeSettingsJson:
         assert len(stop) == 1
         assert "matcher" not in stop[0]
         assert "better_memory.hooks.session_close" in stop[0]["hooks"][0]["command"]
-        assert stop[0]["hooks"][0].get("async") is True
+        # Sync now — see test_session_close_is_stop_no_matcher_sync_with_stdout.
+        assert stop[0]["hooks"][0].get("async") is None
 
     def test_existing_user_postooluse_preserved(self) -> None:
         existing = {
@@ -296,10 +302,15 @@ class TestMergeSettingsJson:
         assert first == second
 
     def test_session_bootstrap_uses_venv_py_async_hooks_use_venv_pyw(self) -> None:
-        """Foreground bootstrap needs python.exe (stdout reaches Claude
-        Code); the two async hooks keep pythonw.exe so they don't flash
-        a console window on every tool call. setup.sh passes the same
-        path on non-Windows; the split only matters on Windows."""
+        """Foreground bootstrap + Stop need python.exe (stdout reaches Claude
+        Code); the one remaining async hook (PostToolUse observer) keeps
+        pythonw.exe so it doesn't flash a console window on every tool call.
+        setup.sh passes the same path on non-Windows; the split only matters
+        on Windows.
+
+        Stop moved to python.exe with this change: it returns a rating
+        `decision: "block"` payload that Claude Code only honours from a
+        blocking, stdout-attached hook."""
         out = merge_settings_json(
             {}, venv_py="/venv/python.exe", venv_pyw="/venv/pythonw.exe",
         )
@@ -311,7 +322,7 @@ class TestMergeSettingsJson:
         assert "pythonw.exe" in ptu_cmd
 
         stop_cmd = out["hooks"]["Stop"][0]["hooks"][0]["command"]
-        assert "pythonw.exe" in stop_cmd
+        assert "python.exe" in stop_cmd and "pythonw.exe" not in stop_cmd
 
     def test_default_venv_py_falls_back_to_venv_pyw(self) -> None:
         """Back-compat: callers that only pass venv_pyw get the old
@@ -607,9 +618,10 @@ def test_main_passes_venv_py_separately_to_settings_merge(
         f"SessionStart command must use python.exe, got: {ss_cmd!r}"
     )
 
-    # Sanity: async PostToolUse + Stop hooks should still use pythonw.exe.
+    # Sanity: the async PostToolUse observer still uses pythonw.exe.
     ptu_cmd = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
     assert "pythonw.exe" in ptu_cmd
 
+    # Stop moved to python.exe: its rating block payload needs stdout attached.
     stop_cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert "pythonw.exe" in stop_cmd
+    assert "python.exe" in stop_cmd and "pythonw.exe" not in stop_cmd

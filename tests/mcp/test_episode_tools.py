@@ -222,20 +222,29 @@ class TestRetrieveReturnsReflections:
         assert {r["title"] for r in result["dont"]} == {"Don't that"}
 
     def test_memory_retrieve_tool_schema_takes_filter_params(self):
-        """Tool schema should expose project/tech/phase/polarity, drop legacy params."""
+        """Tool schema should expose project/tech/phase/polarity + query.
+
+        ``query`` was dropped in Phase 6 when this tool was repointed from
+        observations to reflections, because reflections had no relevance
+        path — ranking was the popularity prior alone. It is back with real
+        semantics: BM25 over title/use_cases/hints, RRF-fused with that prior.
+        The observation-shaped filters stay gone; they never applied to
+        reflections and belong to memory.retrieve_observations.
+        """
         from better_memory.mcp.server import _tool_definitions
 
         tool = next(
             t for t in _tool_definitions() if t.name == "memory.retrieve"
         )
         props = tool.inputSchema["properties"]
-        # New filter params present.
+        # Filter params present.
         assert "project" in props
         assert "tech" in props
         assert "phase" in props
         assert "polarity" in props
-        # Legacy params removed.
-        assert "query" not in props
+        # Relevance param present.
+        assert "query" in props
+        # Observation-shaped params remain absent.
         assert "component" not in props
         assert "window" not in props
         assert "scope_path" not in props

@@ -55,7 +55,13 @@ class HookSpec:
 _OUR_HOOKS: tuple[HookSpec, ...] = (
     HookSpec("better_memory.hooks.session_bootstrap", "SessionStart", None,              False, True),
     HookSpec("better_memory.hooks.observer",          "PostToolUse",  "Write|Edit|Bash", True,  False),
-    HookSpec("better_memory.hooks.session_close",     "Stop",         None,              True,  False),
+    # Stop MUST be synchronous with stdout attached. The rating sweep replies with
+    # a `decision: "block"` payload (hooks/session_close.py) — a control-flow
+    # response that Claude Code only honours from a blocking hook. Registered
+    # async, the block is dropped and RATE_MEMORIES never forces a rating turn.
+    # Measured A/B on identical tasks: async => 0% of exposures rated;
+    # sync => 100% rated. See docs/decisions/stop-hook-must-be-sync.md.
+    HookSpec("better_memory.hooks.session_close",     "Stop",         None,              False, True),
     # Contextual injection: surface curated memories relevant to the current
     # prompt / tool-input. Sync + needs_stdout (reads additionalContext from
     # stdout). Gated at runtime by BETTER_MEMORY_CONTEXT_INJECT_MODE; both

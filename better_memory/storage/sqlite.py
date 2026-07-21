@@ -113,6 +113,7 @@ class SqliteBackend:
         polarity: str | None = None,
         limit_per_bucket: int | None = 20,
         track_exposure: bool = True,
+        query: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         return self._synthesis.retrieve_reflections(
             project=project or self._project,
@@ -121,6 +122,7 @@ class SqliteBackend:
             polarity=polarity,
             limit_per_bucket=limit_per_bucket,
             track_exposure=track_exposure,
+            query=query,
         )
 
     async def list_observations(

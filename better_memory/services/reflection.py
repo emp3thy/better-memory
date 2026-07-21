@@ -33,7 +33,25 @@ from datetime import datetime, timedelta
 
 from better_memory import _diag
 from better_memory._common import default_clock, env_session_id
-from better_memory.services.memory_rating import OVERLOOKED_RANKING_WEIGHT
+from better_memory.search.query import sanitize_fts5_query
+from better_memory.services.memory_rating import (
+    IGNORED_DEMOTION_FLOOR,
+    IGNORED_DEMOTION_WEIGHT,
+    OVERLOOKED_RANKING_WEIGHT,
+)
+
+# Dropped from relevance queries. These survive `sanitize_fts5_query` and the
+# >2-char filter, but appear in so many reflections that OR-matching on them
+# promotes generic rows over the ones that actually describe the task.
+_QUERY_STOPWORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "with", "that", "this", "from", "into", "when",
+    "what", "how", "why", "does", "did", "are", "was", "were", "have", "has",
+    "had", "not", "any", "all", "can", "should", "would", "could", "will",
+    "about", "before", "after", "then", "than", "there", "their", "them",
+    "you", "your", "its", "our", "out", "use", "using", "used", "get",
+    "make", "made", "want", "need", "like", "just", "some", "which", "who",
+    "where", "here", "over", "under", "each", "other", "same", "such",
+})
 
 
 def _later_ts(a: str | None, b: str | None) -> str | None:
@@ -1168,6 +1186,73 @@ class ReflectionSynthesisService:
         )
 
     # --------------------------------------------------------- retrieve_reflections
+    def _fuse_by_relevance(
+        self, rows: list, *, query: str, rrf_k: int = 60,
+    ) -> list:
+        """Re-order ``rows`` by RRF fusion of popularity rank and BM25 rank.
+
+        ``rows`` arrives in popularity order (``useful_count + 3*times_overlooked``,
+        then confidence, then recency). We compute a second ranking over the same
+        ids by BM25 relevance against ``reflection_fts`` (title / use_cases /
+        hints) and fuse the two with reciprocal rank fusion:
+
+            score(d) = 1/(k + pop_rank(d)) + 1/(k + rel_rank(d))
+
+        matching :mod:`better_memory.search.hybrid`. Rows the query does not
+        match keep only the popularity term, so relevance *promotes* without
+        ever discarding — a query that matches nothing degrades exactly to the
+        previous behaviour.
+
+        Tokens are OR-ed rather than AND-ed: ``sanitize_fts5_query`` joins bare
+        terms, which FTS5 reads as implicit AND, and a natural-language task
+        description almost never has every token present in one reflection.
+        """
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return rows
+
+        sanitized = sanitize_fts5_query(query)
+        tokens = [
+            t for t in sanitized.split()
+            if len(t) > 2 and t.lower() not in _QUERY_STOPWORDS
+        ]
+        if not tokens:
+            return rows
+        match_expr = " OR ".join(tokens)
+
+        placeholders = ",".join("?" for _ in ids)
+        try:
+            rel_rows = self._conn.execute(
+                f"""
+                SELECT r.id AS id, bm25(reflection_fts) AS bm
+                FROM reflection_fts
+                JOIN reflections r ON r.rowid = reflection_fts.rowid
+                WHERE reflection_fts MATCH ? AND r.id IN ({placeholders})
+                ORDER BY bm ASC
+                """,
+                [match_expr, *ids],
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Malformed MATCH expression despite sanitising, or the FTS table
+            # is absent on an old DB. Relevance is an enhancement, never a
+            # hard dependency — fall back to the popularity order.
+            return rows
+
+        if not rel_rows:
+            return rows
+
+        rel_rank = {r["id"]: i for i, r in enumerate(rel_rows)}
+        scored = []
+        for pop_rank, row in enumerate(rows):
+            score = 1.0 / (rrf_k + pop_rank)
+            rr = rel_rank.get(row["id"])
+            if rr is not None:
+                score += 1.0 / (rrf_k + rr)
+            scored.append((score, pop_rank, row))
+        # pop_rank breaks ties deterministically and keeps the fusion stable.
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return [row for _, _, row in scored]
+
     def retrieve_reflections(
         self,
         *,
@@ -1177,6 +1262,7 @@ class ReflectionSynthesisService:
         polarity: str | None = None,
         limit_per_bucket: int | None = 20,
         track_exposure: bool = True,
+        query: str | None = None,
     ) -> dict[str, list[dict]]:
         """Return reflections bucketed by polarity, ordered by confidence DESC.
 
@@ -1185,6 +1271,12 @@ class ReflectionSynthesisService:
         - ``tech``: matches same-tech rows OR cross-tech (tech IS NULL) rows.
         - ``phase``: optional exact match.
         - ``polarity``: optional exact match; non-matching buckets remain empty.
+        - ``query``: optional natural-language description of the task at hand.
+          When given, the filtered set is re-ordered by RRF fusion of the
+          popularity prior with a BM25 relevance ranking over
+          ``title / use_cases / hints`` (see :meth:`_fuse_by_relevance`).
+          Without it, ordering is the popularity prior alone — which returns
+          the same rows to every caller regardless of what they are doing.
         - ``limit_per_bucket``: cap each polarity bucket. Default 20 per spec §7.
           Pass ``None`` to disable the cap (returns every matching row per
           bucket); used by SessionBootstrapService which injects all
@@ -1221,7 +1313,14 @@ class ReflectionSynthesisService:
 
             where = " AND ".join(clauses)
             params.append(OVERLOOKED_RANKING_WEIGHT)
+            params.append(IGNORED_DEMOTION_WEIGHT)
+            params.append(IGNORED_DEMOTION_FLOOR)
             _diag.step(fn, "executing_select")
+            # The demotion term fires only for memories with no useful history
+            # at all, and only past the floor — see IGNORED_DEMOTION_FLOOR.
+            # Without it the ranking key has no negative term, so a memory that
+            # has been served 142 times and helped zero times sorts level with
+            # one that has never been served.
             rows = self._conn.execute(
                 f"""
                 SELECT id, title, phase, polarity, use_cases, hints,
@@ -1229,12 +1328,19 @@ class ReflectionSynthesisService:
                        times_misled, updated_at
                 FROM reflections
                 WHERE {where}
-                ORDER BY (useful_count + ? * times_overlooked) DESC,
+                ORDER BY (useful_count + ? * times_overlooked
+                          - ? * CASE WHEN useful_count = 0
+                                     THEN MAX(0, times_ignored - ?)
+                                     ELSE 0 END) DESC,
                          confidence DESC, updated_at DESC
                 """,
                 params,
             ).fetchall()
             _diag.step(fn, "select_done", n_rows=len(rows))
+
+            if query:
+                rows = self._fuse_by_relevance(rows, query=query)
+                _diag.step(fn, "relevance_fused", n_rows=len(rows))
 
             # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
             cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize

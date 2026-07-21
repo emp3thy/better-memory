@@ -154,14 +154,26 @@ def tool_definitions(
             name="memory.retrieve",
             description=(
                 "Retrieve reflections (do / dont / neutral lessons distilled "
-                "from prior observations) bucketed by polarity. Filter by "
-                "project, tech, phase, and polarity. For raw observation "
-                "lookup, use memory.retrieve_observations."
+                "from prior observations) bucketed by polarity. ALWAYS pass "
+                "`query` — a plain-language description of the task you are "
+                "about to do — or you get the same generic top-ranked lessons "
+                "every session regardless of what you are working on. Filter "
+                "further by project, tech, phase, and polarity. For raw "
+                "observation lookup, use memory.retrieve_observations."
             ),
             inputSchema={
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Plain-language description of the task at hand, "
+                            "e.g. 'changing how retention archives reflections'. "
+                            "Ranks results by relevance to this text fused with "
+                            "the usefulness prior."
+                        ),
+                    },
                     "project": {"type": "string"},
                     "tech": {"type": "string"},
                     "phase": {
@@ -174,6 +186,13 @@ def tool_definitions(
                     },
                     "limit_per_bucket": {"type": "integer"},
                 },
+                # `query` is deliberately NOT required. Making it mandatory
+                # would break every existing caller (and the start_episode /
+                # bootstrap internal paths) for a param whose absence degrades
+                # gracefully to the popularity order. The description urges it
+                # instead; the real usefulness gains come from the shortlist
+                # default and the ignored-history demotion, not from coercing
+                # a query on every call.
             },
         ),
         Tool(
