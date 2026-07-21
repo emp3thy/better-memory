@@ -1397,11 +1397,18 @@ class ReflectionSynthesisService:
                         _diag.step(
                             fn, "exposure_insert", n_ids=len(all_ids)
                         )
+                        # One row per (session, memory) — see
+                        # SessionBootstrapService.record_exposures for why
+                        # re-serves must not add rows.
                         self._conn.executemany(
-                            "INSERT OR IGNORE INTO session_memory_exposure "
+                            "INSERT INTO session_memory_exposure "
                             "(session_id, memory_kind, memory_id, exposed_at, source) "
-                            "VALUES (?, 'reflection', ?, ?, 'retrieve')",
-                            [(sid, rid, now) for rid in all_ids],
+                            "SELECT ?, 'reflection', ?, ?, 'retrieve' "
+                            "WHERE NOT EXISTS ("
+                            "  SELECT 1 FROM session_memory_exposure "
+                            "  WHERE session_id = ? AND memory_kind = 'reflection' "
+                            "    AND memory_id = ?)",
+                            [(sid, rid, now, sid, rid) for rid in all_ids],
                         )
                         _diag.step(fn, "exposure_commit")
                         self._conn.commit()

@@ -113,9 +113,12 @@ def test_full_rating_loop(conn, monkeypatch):
     )
 
     # ------------------------------------------------------------------
-    # 2) Mid-session: explicit retrieve calls add source='retrieve' rows.
-    #    CLAUDE_SESSION_ID is set (monkeypatched), so the exposure write
-    #    fires.  exposed_at = T1 ≠ T0, so the PK is distinct → 5 new rows.
+    # 2) Mid-session: explicit retrieve calls re-serve the same five
+    #    memories.  A session's exposures are a SET — the write path skips
+    #    memories already exposed in this session (whatever the source), so
+    #    the totals do not move.  (Before the dedup guard, exposed_at made
+    #    the PK distinct and each re-serve added a row, double-counting every
+    #    statistic over the raw table.)
     # ------------------------------------------------------------------
     refl = ReflectionSynthesisService(conn, clock=retrieve_clock)
     refl.retrieve_reflections(project="p")   # track_exposure=True (default)
@@ -131,15 +134,15 @@ def test_full_rating_loop(conn, monkeypatch):
     assert source_counts.get("bootstrap", 0) == 5, (
         f"Expected 5 bootstrap rows; got {source_counts}"
     )
-    assert source_counts.get("retrieve", 0) == 5, (
-        f"Expected 5 retrieve rows (3 refl + 2 sem); got {source_counts}"
+    assert source_counts.get("retrieve", 0) == 0, (
+        f"Re-serves must not add rows; got {source_counts}"
     )
 
     total = conn.execute(
         "SELECT COUNT(*) AS n FROM session_memory_exposure "
         "WHERE session_id='SESS-1'"
     ).fetchone()["n"]
-    assert total == 10, f"Expected 10 total exposure rows; got {total}"
+    assert total == 5, f"Expected 5 total exposure rows; got {total}"
 
     # ------------------------------------------------------------------
     # 3) Credit r1 (reflection, cited) and s1 (semantic, shaped) mid-session.
@@ -158,9 +161,8 @@ def test_full_rating_loop(conn, monkeypatch):
     assert s1_credit == {"applied": "shaped", "skipped": None}
 
     # ------------------------------------------------------------------
-    # 4) After credit_one, BOTH exposure rows for r1 (bootstrap AND retrieve)
-    #    are stamped with rated_at.  useful_count on the memory row is 1
-    #    (single bump, even though two rows were stamped).
+    # 4) After credit_one, r1's single exposure row is stamped with
+    #    rated_at and useful_count on the memory row is 1.
     # ------------------------------------------------------------------
     r1_useful = conn.execute(
         "SELECT useful_count FROM reflections WHERE id='r1'"
@@ -172,7 +174,7 @@ def test_full_rating_loop(conn, monkeypatch):
     ).fetchone()["useful_count"]
     assert s1_useful == 1, f"s1 useful_count should be 1; got {s1_useful}"
 
-    # All four rows for r1 + s1 are rated; the unrated set excludes them.
+    # The rows for r1 + s1 are rated; the unrated set excludes them.
     unrated_rows = conn.execute(
         "SELECT memory_kind, memory_id FROM session_memory_exposure "
         "WHERE session_id='SESS-1' AND rated_at IS NULL"
@@ -180,9 +182,9 @@ def test_full_rating_loop(conn, monkeypatch):
     unrated_ids = {(r["memory_kind"], r["memory_id"]) for r in unrated_rows}
     assert ("reflection", "r1") not in unrated_ids, "r1 should be fully rated"
     assert ("semantic", "s1") not in unrated_ids, "s1 should be fully rated"
-    # r2, r3, s2 each have 2 exposure rows (boot + retrieve) → 6 unrated rows.
-    assert len(unrated_rows) == 6, (
-        f"Expected 6 unrated rows (r2×2, r3×2, s2×2); got {len(unrated_rows)}"
+    # r2, r3, s2 each have exactly one exposure row → 3 unrated rows.
+    assert len(unrated_rows) == 3, (
+        f"Expected 3 unrated rows (r2, r3, s2); got {len(unrated_rows)}"
     )
 
     # ------------------------------------------------------------------
