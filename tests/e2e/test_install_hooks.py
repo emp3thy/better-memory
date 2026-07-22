@@ -713,3 +713,47 @@ def test_symlink_already_correct_is_noop(harness: InstallHarness) -> None:
     assert (after.st_ino, after.st_ctime_ns) == before_identity, (
         "already-correct symlink was recreated instead of no-op'd"
     )
+
+
+# --------------------------------- A7: junction at the skill-link path
+
+
+def test_junction_skill_link_is_recognised_and_skipped(
+    harness: InstallHarness,
+) -> None:
+    """A junction (mklink /J) pointing at the right skill source must be
+    treated as an already-correct link, not a real directory.
+
+    Junctions report ``is_symlink() == False`` but ``shutil.rmtree`` refuses
+    them, so the old dir-branch crashed the installer BEFORE the JSON writes
+    — a total install failure triggered by the very workaround (junctions
+    need no Developer Mode) a user on locked-down Windows would reach for.
+    """
+    if not hasattr(os.path, "isjunction"):
+        pytest.skip("os.path.isjunction requires Python 3.12+")
+
+    repo_skills = Path(__file__).resolve().parents[2] / ".claude" / "skills"
+    source = repo_skills / SKILL_NAMES[0]
+    skills_dir = harness.home / ".claude" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    junction = skills_dir / SKILL_NAMES[0]
+
+    proc = subprocess.run(  # noqa: S603 - fixed argv, test harness
+        ["cmd", "/c", "mklink", "/J", str(junction), str(source)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"cannot create junction here: {proc.stderr.strip()}")
+    assert os.path.isjunction(junction)
+
+    result = harness.run()
+    assert result.returncode == 0, result.stderr
+    assert "Cannot call rmtree" not in result.stderr
+
+    # Both configs written despite the pre-existing junction.
+    settings = json.loads(
+        (harness.home / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert_managed_shapes(settings)
+    # The junction survived untouched (it already pointed at the source).
+    assert os.path.isjunction(junction)
