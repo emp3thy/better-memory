@@ -244,10 +244,22 @@ def install_skill_symlinks() -> None:
         if not source.is_dir():
             continue
         link = user_skills_dir / skill_name
-        if link.is_symlink():
+        # Junctions (mklink /J — creatable without Developer Mode, so a
+        # plausible manual workaround for the symlink-privilege WARN below)
+        # report is_symlink() == False but ARE links: resolve() follows them
+        # and shutil.rmtree refuses them outright ("Cannot call rmtree on a
+        # symbolic link"), which used to crash the installer before the JSON
+        # writes — a total install failure. Treat them exactly like symlinks.
+        if link.is_symlink() or os.path.isjunction(link):
             if link.resolve() == source.resolve():
                 continue  # Already correct — nothing to do.
-            link.unlink()
+            try:
+                link.unlink()
+            except (OSError, PermissionError):
+                # Directory junctions on some Python/Windows combinations
+                # reject unlink(); rmdir removes the link itself and can
+                # never touch the target's contents.
+                os.rmdir(link)
         elif link.exists():
             if link.is_file():
                 link.unlink()
