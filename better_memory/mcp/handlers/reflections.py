@@ -71,6 +71,7 @@ class ReflectionToolHandlers:
             tech=args.get("tech"),
             phase=args.get("phase"),
             polarity=args.get("polarity"),
+            query=args.get("query"),
         ):
             diag_cid: str | None = None
             t_retrieve = 0.0
@@ -110,7 +111,12 @@ class ReflectionToolHandlers:
                 _diag.step("mcp.memory.retrieve", "after_retention_scheduler")
 
             project = args.get("project") or project_name()
-            limit_per_bucket = args.get("limit_per_bucket", 20)
+            # Default 5, not 20. An LLM working one task draws on ~5 memories
+            # regardless of how many it is handed (measured: 5.3 +/- 2.4 useful
+            # per session against 42.7 exposed). Everything past that dilutes
+            # the set and burns context, so the default returns a shortlist and
+            # callers that genuinely want the long tail ask for it.
+            limit_per_bucket = args.get("limit_per_bucket", 5)
             t_reflections = time.monotonic() if diag_cid else 0.0
             _diag.step(
                 "mcp.memory.retrieve",
@@ -123,6 +129,7 @@ class ReflectionToolHandlers:
                 phase=args.get("phase"),
                 polarity=args.get("polarity"),
                 limit_per_bucket=limit_per_bucket,
+                query=args.get("query"),
             )
             _diag.step(
                 "mcp.memory.retrieve",

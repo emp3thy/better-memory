@@ -90,6 +90,7 @@ class StorageBackend(Protocol):
         polarity: str | None = None,
         limit_per_bucket: int | None = 20,
         track_exposure: bool = True,
+        query: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Bucketed reflection retrieval, keyed by polarity (do / dont / neutral).
 
@@ -100,6 +101,12 @@ class StorageBackend(Protocol):
         sqlite mode ranks via SQL
         ORDER BY ``useful_count + 3 * times_overlooked DESC``, agentcore
         mode applies the same formula client-side over metadata counters).
+
+        ``query`` optionally supplies a natural-language description of the
+        task at hand. sqlite mode fuses a BM25 relevance ranking over
+        title / use_cases / hints into the popularity order via RRF; agentcore
+        mode ignores it. Omitting it yields the popularity order alone, which
+        is identical for every caller regardless of the work being done.
 
         This method is the canonical path for the MCP ``memory.retrieve``
         tool handler and the ``memory.start_episode`` handler in

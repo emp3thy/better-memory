@@ -215,6 +215,7 @@ class AgentCoreBackend:
         polarity: str | None = None,
         limit_per_bucket: int | None = 20,
         track_exposure: bool = True,
+        query: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Bucketed reflection retrieval matching ReflectionSynthesisService.retrieve_reflections.
 
@@ -227,6 +228,10 @@ class AgentCoreBackend:
         3*times_overlooked DESC, confidence DESC, updated_at DESC).
         Returns dict[polarity, list[reflection_dict]] in the same shape sqlite mode
         returns; the MCP memory.retrieve handler json-dumps this directly to Claude.
+
+        ``query`` is accepted for parity but no-op in agentcore mode — BM25
+        relevance fusion needs the local ``reflection_fts`` index, which has no
+        AgentCore equivalent. Ordering stays the popularity rule below.
 
         track_exposure is accepted for parity but no-op in agentcore mode —
         AgentCore has no session_memory_exposure table; exposure tracking is

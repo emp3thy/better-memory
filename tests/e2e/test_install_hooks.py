@@ -60,7 +60,10 @@ SKILL_NAMES = ("better-memory-synthesize", "rate-session-memories")
 EXPECTED_ENTRIES: dict[str, tuple[str, str, bool, str | None]] = {
     "SessionStart": ("better_memory.hooks.session_bootstrap", VENV_PY, False, None),
     "PostToolUse": ("better_memory.hooks.observer", VENV_PYW, True, "Write|Edit|Bash"),
-    "Stop": ("better_memory.hooks.session_close", VENV_PYW, True, None),
+    # Stop is sync + VENV_PY (stdout attached): its rating sweep returns a
+    # `decision: "block"` control-flow payload that only a blocking hook is
+    # honoured for. Async/pythonw => nothing ever gets rated.
+    "Stop": ("better_memory.hooks.session_close", VENV_PY, False, None),
     "UserPromptSubmit": ("better_memory.hooks.contextual_inject", VENV_PY, False, None),
     "PreToolUse": ("better_memory.hooks.contextual_inject", VENV_PY, False, "Skill|Task|Write"),
 }

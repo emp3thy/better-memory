@@ -387,7 +387,9 @@ class TestHeadlessDeclineCompletes:
         expected_interp = {
             ("SessionStart", "better_memory.hooks.session_bootstrap"): VENV_PY,
             ("PostToolUse", "better_memory.hooks.observer"): VENV_PYW,
-            ("Stop", "better_memory.hooks.session_close"): VENV_PYW,
+            # Sync + stdout-attached: the rating sweep's block payload only
+            # lands from a blocking hook. See install_hooks.py.
+            ("Stop", "better_memory.hooks.session_close"): VENV_PY,
             ("UserPromptSubmit", "better_memory.hooks.contextual_inject"): VENV_PY,
             ("PreToolUse", "better_memory.hooks.contextual_inject"): VENV_PY,
         }

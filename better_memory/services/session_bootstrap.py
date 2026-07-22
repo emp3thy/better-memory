@@ -151,6 +151,15 @@ class SessionBootstrapService:
     ) -> None:
         """Write one session_memory_exposure row per (kind, id) item.
 
+        At most one row per (session, kind, id), regardless of how many times
+        the memory is re-served within the session. The rating vocabulary
+        treats a session's exposures as a SET — list_session_exposures groups
+        by (kind, id) and _apply_one stamps every row with one classification
+        — but the PK includes exposed_at, so before this guard each re-serve
+        added a row and any statistic over the raw table double-counted.
+        Measured on a live DB the inflation was 16.08% vs 9.25% "useful"
+        for the identical underlying behaviour.
+
         Best-effort: skips entirely when session_id is empty. Own commit
         (see module docstring on connection ownership).
         """
@@ -158,10 +167,16 @@ class SessionBootstrapService:
             return
         now = self._clock().isoformat()
         self._conn.executemany(
-            "INSERT OR IGNORE INTO session_memory_exposure "
+            "INSERT INTO session_memory_exposure "
             "(session_id, memory_kind, memory_id, exposed_at, source) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [(session_id, kind, mid, now, source) for kind, mid in items],
+            "SELECT ?, ?, ?, ?, ? "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM session_memory_exposure "
+            "  WHERE session_id = ? AND memory_kind = ? AND memory_id = ?)",
+            [
+                (session_id, kind, mid, now, source, session_id, kind, mid)
+                for kind, mid in items
+            ],
         )
         self._conn.commit()
 

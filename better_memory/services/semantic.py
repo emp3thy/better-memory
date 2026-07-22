@@ -16,7 +16,11 @@ from datetime import datetime
 from uuid import uuid4
 
 from better_memory._common import default_clock, env_session_id
-from better_memory.services.memory_rating import OVERLOOKED_RANKING_WEIGHT
+from better_memory.services.memory_rating import (
+    IGNORED_DEMOTION_FLOOR,
+    IGNORED_DEMOTION_WEIGHT,
+    OVERLOOKED_RANKING_WEIGHT,
+)
 
 
 @dataclass(frozen=True)
@@ -240,10 +244,17 @@ class SemanticMemoryService:
             "times_overlooked, last_overlooked_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
-            "ORDER BY (useful_count + ? * times_overlooked) DESC, "
+            # Mirrors the reflections ranking, including the ignored-history
+            # demotion for memories with no useful history past the floor.
+            "ORDER BY (useful_count + ? * times_overlooked "
+            "          - ? * CASE WHEN useful_count = 0 "
+            "                     THEN MAX(0, times_ignored - ?) "
+            "                     ELSE 0 END) DESC, "
             "created_at DESC"
         )
         params.append(OVERLOOKED_RANKING_WEIGHT)
+        params.append(IGNORED_DEMOTION_WEIGHT)
+        params.append(IGNORED_DEMOTION_FLOOR)
         rows = self._conn.execute(sql, params).fetchall()
         results = [
             SemanticMemory(
@@ -279,11 +290,18 @@ class SemanticMemoryService:
                     pass
             elif results:
                 now = self._clock().isoformat()
+                # One row per (session, memory) — see
+                # SessionBootstrapService.record_exposures for why re-serves
+                # must not add rows.
                 self._conn.executemany(
-                    "INSERT OR IGNORE INTO session_memory_exposure "
+                    "INSERT INTO session_memory_exposure "
                     "(session_id, memory_kind, memory_id, exposed_at, source) "
-                    "VALUES (?, 'semantic', ?, ?, 'retrieve')",
-                    [(sid, m.id, now) for m in results],
+                    "SELECT ?, 'semantic', ?, ?, 'retrieve' "
+                    "WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM session_memory_exposure "
+                    "  WHERE session_id = ? AND memory_kind = 'semantic' "
+                    "    AND memory_id = ?)",
+                    [(sid, m.id, now, sid, m.id) for m in results],
                 )
                 self._conn.commit()
         return results
