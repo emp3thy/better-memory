@@ -68,3 +68,40 @@ def test_prose_style_valid_param_not_flagged():
     schemas = {"memory_retrieve": {"query"}}
     text = "call `memory_retrieve` with a `query` describing it"
     assert check_claude_md(text, schemas) == []
+
+
+# --- Round 3: schema-enum exemption + param-signal precision ---
+
+
+def test_bucket_line_with_enum_values_not_flagged():
+    # Real line: `do`/`dont`/`neutral` are memory_retrieve's polarity ENUM
+    # VALUES (documented return shape), not phantom parameters. No signal
+    # word on this line either, so the backtick branch wouldn't even fire —
+    # but the schema also carries the enum values as valid tokens as a
+    # second line of defense.
+    schemas = {"memory_retrieve": {"query", "do", "dont", "neutral"}}
+    text = (
+        "- `mcp__better-memory__memory_retrieve` with a broad `query` "
+        "describing the project or task area. Returns observations "
+        "bucketed by outcome (`do`, `dont`, `neutral`)."
+    )
+    assert check_claude_md(text, schemas) == []
+
+
+def test_identifier_mention_not_flagged():
+    schemas = {"memory_retrieve": {"query"}}
+    text = "memory_retrieve is called from `session_bootstrap` module"
+    assert check_claude_md(text, schemas) == []
+
+
+def test_docs_colon_not_flagged():
+    schemas = {"memory_retrieve": {"query"}}
+    text = "memory_retrieve docs: see https://x"
+    assert check_claude_md(text, schemas) == []
+
+
+def test_build_schemas_includes_enum_values():
+    schemas = build_schemas()
+    # memory.retrieve's `polarity` property has enum ["do", "dont", "neutral"].
+    for value in ("do", "dont", "neutral"):
+        assert value in schemas["memory_retrieve"]

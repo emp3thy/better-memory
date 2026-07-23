@@ -8,7 +8,16 @@ on unrelated words:
 - `word=` / `word:` — explicit parameter-usage syntax.
 - `` `word` `` — a backtick-quoted snake_case identifier, the shape real
   CLAUDE.md prose uses when enumerating params conversationally (e.g.
-  "optional `component` ... and `scope_path`").
+  "optional `component` ... and `scope_path`"). To avoid flagging plain
+  identifier mentions (e.g. "called from `session_bootstrap` module") this
+  branch only fires on lines that also carry a parameter-signal word (see
+  `_SIGNAL_WORDS`).
+
+The accepted-token set per tool is schema-derived, not just property
+names: enum *values* (e.g. `memory_retrieve`'s `polarity` enum
+`do`/`dont`/`neutral`) are valid tokens too — those are documented return
+shapes, not phantom parameters, and real CLAUDE.md prose legitimately
+backtick-quotes them right next to the tool name.
 """
 
 from __future__ import annotations
@@ -17,7 +26,15 @@ import re
 
 _PARAM_RE = re.compile(r"\b([a-z_][a-z0-9_]{2,})\s*[=:]")
 _BACKTICK_RE = re.compile(r"`([a-z_]{4,})`")
-_IGNORE = {"http", "https", "note", "example", "warning", "default"}
+_IGNORE = {"http", "https", "note", "example", "warning", "default", "docs"}
+
+# Words/phrases whose presence on a line signals "this backtick token is
+# being documented as a parameter", as opposed to a plain identifier or
+# module mention. Checked case-insensitively as substrings.
+_SIGNAL_WORDS = (
+    "optional", "parameter", "param", "pass", "passing", "tune",
+    "filter", "argument", "arg", "field", "defaults", "set ",
+)
 
 
 def build_schemas() -> dict[str, set[str]]:
@@ -25,9 +42,21 @@ def build_schemas() -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     for tool in tool_definitions():
         rendered = tool.name.replace(".", "_")
-        props = set((tool.inputSchema or {}).get("properties", {}).keys())
-        out[rendered] = props
+        properties = (tool.inputSchema or {}).get("properties", {}) or {}
+        tokens: set[str] = set()
+        for prop_name, spec in properties.items():
+            tokens.add(prop_name)
+            if isinstance(spec, dict):
+                enum_values = spec.get("enum")
+                if isinstance(enum_values, list):
+                    tokens.update(v for v in enum_values if isinstance(v, str))
+        out[rendered] = tokens
     return out
+
+
+def _has_signal_word(line: str) -> bool:
+    lowered = line.lower()
+    return any(word in lowered for word in _SIGNAL_WORDS)
 
 
 def check_claude_md(text: str, schemas: dict[str, set[str]]) -> list[str]:
@@ -40,7 +69,9 @@ def check_claude_md(text: str, schemas: dict[str, set[str]]) -> list[str]:
             valid: set[str] = set()
             for t in hit_tools:
                 valid |= schemas[t]
-            candidates = _PARAM_RE.findall(line) + _BACKTICK_RE.findall(line)
+            candidates = list(_PARAM_RE.findall(line))
+            if _has_signal_word(line):
+                candidates += _BACKTICK_RE.findall(line)
             seen: set[str] = set()
             for token in candidates:
                 if token in seen:
