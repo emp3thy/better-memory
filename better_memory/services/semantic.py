@@ -16,11 +16,6 @@ from datetime import datetime
 from uuid import uuid4
 
 from better_memory._common import default_clock, env_session_id
-from better_memory.services.memory_rating import (
-    IGNORED_DEMOTION_FLOOR,
-    IGNORED_DEMOTION_WEIGHT,
-    OVERLOOKED_RANKING_WEIGHT,
-)
 
 
 @dataclass(frozen=True)
@@ -244,17 +239,10 @@ class SemanticMemoryService:
             "times_overlooked, last_overlooked_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
-            # Mirrors the reflections ranking, including the ignored-history
-            # demotion for memories with no useful history past the floor.
-            "ORDER BY (useful_count + ? * times_overlooked "
-            "          - ? * CASE WHEN useful_count = 0 "
-            "                     THEN MAX(0, times_ignored - ?) "
-            "                     ELSE 0 END) DESC, "
-            "created_at DESC"
+            # Minimal bridge pending Task 3's Wilson-score rewrite of
+            # semantic.py ranking (mirrors reflection.py's Task 2 change).
+            "ORDER BY (useful_count) DESC, created_at DESC"
         )
-        params.append(OVERLOOKED_RANKING_WEIGHT)
-        params.append(IGNORED_DEMOTION_WEIGHT)
-        params.append(IGNORED_DEMOTION_FLOOR)
         rows = self._conn.execute(sql, params).fetchall()
         results = [
             SemanticMemory(

@@ -34,11 +34,7 @@ from datetime import datetime, timedelta
 from better_memory import _diag
 from better_memory._common import default_clock, env_session_id
 from better_memory.search.query import sanitize_fts5_query
-from better_memory.services.memory_rating import (
-    IGNORED_DEMOTION_FLOOR,
-    IGNORED_DEMOTION_WEIGHT,
-    OVERLOOKED_RANKING_WEIGHT,
-)
+from better_memory.services.scoring import wilson_lower_bound
 
 # Dropped from relevance queries. These survive `sanitize_fts5_query` and the
 # >2-char filter, but appear in so many reflections that OR-matching on them
@@ -298,6 +294,17 @@ def _parse_merge(item: object) -> MergeAction:
         target_id=_require_str(item, "target_id", what),
         justification=_require_str(item, "justification", what),
     )
+
+
+def _wilson_rated(row) -> int:
+    """Total rated exposures backing this memory's score."""
+    return (row["useful_count"] + row["times_overlooked"]
+            + row["times_ignored"])
+
+
+def _wilson_score(row) -> float:
+    positive = row["useful_count"] + row["times_overlooked"]
+    return wilson_lower_bound(positive, _wilson_rated(row))
 
 
 class ReflectionSynthesisService:
@@ -1312,31 +1319,26 @@ class ReflectionSynthesisService:
                 params.append(polarity)
 
             where = " AND ".join(clauses)
-            params.append(OVERLOOKED_RANKING_WEIGHT)
-            params.append(IGNORED_DEMOTION_WEIGHT)
-            params.append(IGNORED_DEMOTION_FLOOR)
             _diag.step(fn, "executing_select")
-            # The demotion term fires only for memories with no useful history
-            # at all, and only past the floor — see IGNORED_DEMOTION_FLOOR.
-            # Without it the ranking key has no negative term, so a memory that
-            # has been served 142 times and helped zero times sorts level with
-            # one that has never been served.
             rows = self._conn.execute(
                 f"""
                 SELECT id, title, phase, polarity, use_cases, hints,
                        confidence, tech, evidence_count, useful_count,
-                       times_misled, updated_at
+                       times_misled, times_overlooked, times_ignored,
+                       updated_at
                 FROM reflections
                 WHERE {where}
-                ORDER BY (useful_count + ? * times_overlooked
-                          - ? * CASE WHEN useful_count = 0
-                                     THEN MAX(0, times_ignored - ?)
-                                     ELSE 0 END) DESC,
-                         confidence DESC, updated_at DESC
                 """,
                 params,
             ).fetchall()
             _diag.step(fn, "select_done", n_rows=len(rows))
+
+            # Rank in Python: Wilson prior, then confidence, then recency.
+            # Chained stable sorts apply tiebreakers lowest-priority first.
+            rows = list(rows)
+            rows.sort(key=lambda r: r["updated_at"] or "", reverse=True)
+            rows.sort(key=lambda r: r["confidence"], reverse=True)
+            rows.sort(key=_wilson_score, reverse=True)
 
             if query:
                 rows = self._fuse_by_relevance(rows, query=query)
@@ -1360,6 +1362,8 @@ class ReflectionSynthesisService:
                     "evidence_count": r["evidence_count"],
                     "useful_count": r["useful_count"],
                     "times_misled": r["times_misled"],
+                    "times_overlooked": r["times_overlooked"],
+                    "times_ignored": r["times_ignored"],
                     "updated_at": r["updated_at"],
                 })
             _diag.step(
