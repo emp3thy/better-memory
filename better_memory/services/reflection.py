@@ -1332,7 +1332,7 @@ class ReflectionSynthesisService:
         """Re-order ``rows`` by RRF fusion of popularity rank, BM25 rank, and
         vector rank.
 
-        ``rows`` arrives in popularity order (``useful_count + 3*times_overlooked``,
+        ``rows`` arrives in Wilson-prior order (hit-rate lower bound,
         then confidence, then recency). We compute a second ranking over the same
         ids by BM25 relevance against ``reflection_fts`` (title / use_cases /
         hints), and (when ``query_vector`` is available) a third ranking by
@@ -1436,7 +1436,7 @@ class ReflectionSynthesisService:
         track_exposure: bool = True,
         query: str | None = None,
     ) -> dict[str, list[dict]]:
-        """Return reflections bucketed by polarity, ordered by confidence DESC.
+        """Return reflections bucketed by polarity, ordered by Wilson-prior then confidence.
 
         Filters:
         - ``project``: required.
@@ -1445,9 +1445,9 @@ class ReflectionSynthesisService:
         - ``polarity``: optional exact match; non-matching buckets remain empty.
         - ``query``: optional natural-language description of the task at hand.
           When given, the filtered set is re-ordered by RRF fusion of the
-          popularity prior with a BM25 relevance ranking over
+          Wilson-prior with a BM25 relevance ranking over
           ``title / use_cases / hints`` (see :meth:`_fuse_by_relevance`).
-          Without it, ordering is the popularity prior alone — which returns
+          Without it, ordering is the Wilson-prior alone — which returns
           the same rows to every caller regardless of what they are doing.
         - ``limit_per_bucket``: cap each polarity bucket. Default 20 per spec §7.
           Pass ``None`` to disable the cap (returns every matching row per
