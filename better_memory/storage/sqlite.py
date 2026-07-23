@@ -63,7 +63,6 @@ class SqliteBackend:
             project_resolver=self._project_resolver,
             episodes=self._episodes,
         )
-        self._semantic = SemanticMemoryService(memory_conn)
         self._reflection = ReflectionService(memory_conn)
         self._memory_rating = MemoryRatingService(memory_conn)
         self._session_bootstrap = SessionBootstrapService(memory_conn)
@@ -71,6 +70,7 @@ class SqliteBackend:
             SyncEmbedder(lambda: OllamaEmbedder(timeout=5.0, max_retries=1))
             if embedder is not None else None
         )
+        self._semantic = SemanticMemoryService(memory_conn, sync_embedder=sync_embedder)
         self._synthesis = ReflectionSynthesisService(
             memory_conn, sync_embedder=sync_embedder
         )

@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
+import sqlite_vec
+
 from better_memory._common import default_clock, env_session_id
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.scoring import wilson_lower_bound
 
 
@@ -54,9 +57,25 @@ class SemanticMemoryService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
+        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
+        self._sync_embedder = sync_embedder
+
+    def _store_embedding(self, memory_id: str, vector: list[float] | None) -> None:
+        if vector is None:
+            return
+        # DELETE+INSERT: vec0 tables historically mishandle UPSERT.
+        self._conn.execute(
+            "DELETE FROM semantic_embeddings WHERE memory_id = ?",
+            (memory_id,),
+        )
+        self._conn.execute(
+            "INSERT INTO semantic_embeddings (memory_id, embedding) "
+            "VALUES (?, ?)",
+            (memory_id, sqlite_vec.serialize_float32(vector)),
+        )
 
     def create(
         self, *, content: str, project: str, scope: str = "project"
@@ -77,6 +96,9 @@ class SemanticMemoryService:
             """,
             (memory_id, content, project, scope, now, now),
         )
+        if self._sync_embedder is not None:
+            self._store_embedding(
+                memory_id, self._sync_embedder.embed_text(content))
         self._conn.commit()
         return memory_id
 
@@ -96,6 +118,9 @@ class SemanticMemoryService:
             # ObservationService.set_outcome (better_memory/services/observation.py:435).
             self._conn.rollback()
             raise ValueError(f"semantic memory not found: {id}")
+        if self._sync_embedder is not None:
+            self._store_embedding(
+                id, self._sync_embedder.embed_text(content))
         self._conn.commit()
 
     def set_scope(self, *, id: str, scope: str) -> None:
@@ -173,6 +198,9 @@ class SemanticMemoryService:
                 "WHERE id = ?",
                 (now, observation_id),
             )
+            if self._sync_embedder is not None:
+                self._store_embedding(
+                    memory_id, self._sync_embedder.embed_text(row["content"]))
         except BaseException:
             self._conn.execute("ROLLBACK TO SAVEPOINT promote_observation")
             self._conn.execute("RELEASE SAVEPOINT promote_observation")

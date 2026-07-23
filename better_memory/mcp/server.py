@@ -231,7 +231,7 @@ def create_server() -> tuple[
     reflections = ReflectionSynthesisService(memory_conn, sync_embedder=sync_embedder)
     retention = RetentionService(conn=memory_conn)
     memory_rating = MemoryRatingService(memory_conn)
-    semantic = SemanticMemoryService(memory_conn)
+    semantic = SemanticMemoryService(memory_conn, sync_embedder=sync_embedder)
     session_bootstrap = SessionBootstrapService(memory_conn)
 
     knowledge = KnowledgeService(
