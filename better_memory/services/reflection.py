@@ -31,8 +31,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import sqlite_vec
+
 from better_memory import _diag
 from better_memory._common import default_clock, env_session_id
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.scoring import wilson_lower_bound
 
@@ -48,6 +51,11 @@ _QUERY_STOPWORDS: frozenset[str] = frozenset({
     "make", "made", "want", "need", "like", "just", "some", "which", "who",
     "where", "here", "over", "under", "each", "other", "same", "such",
 })
+
+
+def _embedding_source_text(title: str, use_cases: str, hints: list[str]) -> str:
+    """What gets embedded for a reflection: the discriminating text."""
+    return "\n".join([title, use_cases, *hints])
 
 
 def _later_ts(a: str | None, b: str | None) -> str | None:
@@ -332,9 +340,26 @@ class ReflectionSynthesisService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
+        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
+        self._sync_embedder = sync_embedder
+
+    def _store_embedding(self, reflection_id: str, vector: list[float] | None) -> None:
+        if vector is None:
+            return
+        # DELETE+INSERT: vec0 tables historically mishandle UPSERT.
+        self._conn.execute(
+            "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
+            (reflection_id,),
+        )
+        self._conn.execute(
+            "INSERT INTO reflection_embeddings (reflection_id, embedding) "
+            "VALUES (?, ?)",
+            (reflection_id, sqlite_vec.serialize_float32(vector)),
+        )
+
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
         # Mirror EpisodeService.start_foreground / ObservationService.create
@@ -785,6 +810,14 @@ class ReflectionSynthesisService:
                 [now, *valid_sources],
             )
 
+            if self._sync_embedder is not None:
+                self._store_embedding(
+                    reflection_id,
+                    self._sync_embedder.embed_text(_embedding_source_text(
+                        action.title, action.use_cases, action.hints,
+                    )),
+                )
+
     def _derive_new_reflection_scope(
         self, source_obs_ids: list[str]
     ) -> str:
@@ -844,8 +877,8 @@ class ReflectionSynthesisService:
             # leftover from a prior iteration.
             now = self._clock().isoformat()
             row = self._conn.execute(
-                "SELECT hints, confidence, status FROM reflections "
-                "WHERE id = ?",
+                "SELECT title, use_cases, hints, confidence, status "
+                "FROM reflections WHERE id = ?",
                 (action.reflection_id,),
             ).fetchone()
             if row is None:
@@ -928,6 +961,17 @@ class ReflectionSynthesisService:
                         now,
                         action.reflection_id,
                     ),
+                )
+
+            if self._sync_embedder is not None:
+                final_use_cases = (action.rewrite_use_cases
+                                   if action.rewrite_use_cases is not None
+                                   else row["use_cases"])
+                self._store_embedding(
+                    action.reflection_id,
+                    self._sync_embedder.embed_text(_embedding_source_text(
+                        row["title"], final_use_cases, merged_hints,
+                    )),
                 )
 
     # ------------------------------------------------------------- _apply_merge
@@ -1050,6 +1094,14 @@ class ReflectionSynthesisService:
                     now,
                     action.target_id,
                 ),
+            )
+
+            # Target text is untouched by merge (counters/evidence only), so
+            # no re-embed; drop the superseded source's vector so it stops
+            # competing for kNN slots.
+            self._conn.execute(
+                "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
+                (action.source_id,),
             )
 
     # ------------------------------------------------------------ _apply_ignore

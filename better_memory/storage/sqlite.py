@@ -25,6 +25,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.episode import EpisodeService
 from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.observation import ObservationService
@@ -65,7 +67,13 @@ class SqliteBackend:
         self._reflection = ReflectionService(memory_conn)
         self._memory_rating = MemoryRatingService(memory_conn)
         self._session_bootstrap = SessionBootstrapService(memory_conn)
-        self._synthesis = ReflectionSynthesisService(memory_conn)
+        sync_embedder = (
+            SyncEmbedder(lambda: OllamaEmbedder(timeout=5.0, max_retries=1))
+            if embedder is not None else None
+        )
+        self._synthesis = ReflectionSynthesisService(
+            memory_conn, sync_embedder=sync_embedder
+        )
 
     # ----- Capability flags -----
 

@@ -62,6 +62,7 @@ from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.mcp._util import resolve_session_id as _resolve_session_id
 from better_memory.mcp.handlers import (
     EpisodeToolHandlers,
@@ -180,6 +181,14 @@ def create_server() -> tuple[
         # memory.retrieve will succeed on their next call without a restart.
         _probe_ollama(config.ollama_host)
 
+    # Fresh short-timeout embedder per bridge call (loop-bound client);
+    # shared instance so the breaker state is process-wide.
+    sync_embedder: SyncEmbedder | None = None
+    if embedder is not None:
+        sync_embedder = SyncEmbedder(
+            lambda: OllamaEmbedder(timeout=5.0, max_retries=1)
+        )
+
     # Concurrency invariant: the memory-side services below
     # (EpisodeService, ObservationService, ReflectionSynthesisService,
     # RetentionService, SpoolService, SemanticMemoryService,
@@ -219,7 +228,7 @@ def create_server() -> tuple[
     # Reflection synthesis is driven by the IDE-LLM via two MCP tools
     # (memory.synthesize_next_get_context / _apply). The service no
     # longer holds a chat client.
-    reflections = ReflectionSynthesisService(memory_conn)
+    reflections = ReflectionSynthesisService(memory_conn, sync_embedder=sync_embedder)
     retention = RetentionService(conn=memory_conn)
     memory_rating = MemoryRatingService(memory_conn)
     semantic = SemanticMemoryService(memory_conn)
