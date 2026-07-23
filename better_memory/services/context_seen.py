@@ -6,7 +6,9 @@ table) and cheap: one small JSON file per session under
 degrades to "nothing seen".
 
 File format: ``context_seen_<session_id>.json`` ->
-``{"turn": int, "seen": {"<kind>:<id>": last_injected_turn}}``.
+``{"turn": int, "seen": {"<kind>:<id>": last_injected_turn},
+"pretool_fired": bool}``. ``pretool_fired`` latches PreToolUse to one real
+firing per session (see :meth:`SeenStore.pretool_fired`).
 """
 from __future__ import annotations
 
@@ -34,7 +36,11 @@ class SeenStore:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             if isinstance(raw, dict) and isinstance(raw.get("seen"), dict):
-                return {"turn": int(raw.get("turn") or 0), "seen": raw["seen"]}
+                return {
+                    "turn": int(raw.get("turn") or 0),
+                    "seen": raw["seen"],
+                    "pretool_fired": bool(raw.get("pretool_fired")),
+                }
         except BaseException:  # noqa: BLE001 - corrupt/missing -> empty
             pass
         return {"turn": 0, "seen": {}}
@@ -68,6 +74,13 @@ class SeenStore:
         turn = int(self._data.get("turn") or 0)
         for kind, id_ in ids:
             self._data["seen"][_key(kind, id_)] = turn
+        self._save()
+
+    def pretool_fired(self) -> bool:
+        return bool(self._data.get("pretool_fired"))
+
+    def mark_pretool_fired(self) -> None:
+        self._data["pretool_fired"] = True
         self._save()
 
 

@@ -67,9 +67,12 @@ _OUR_HOOKS: tuple[HookSpec, ...] = (
     # stdout). Gated at runtime by BETTER_MEMORY_CONTEXT_INJECT_MODE; both
     # events install and the mode no-ops whichever isn't selected.
     HookSpec("better_memory.hooks.contextual_inject", "UserPromptSubmit", None, False, True),
-    HookSpec(
-        "better_memory.hooks.contextual_inject", "PreToolUse", "Skill|Task|Write", False, True
-    ),
+    # Matcher is None (unscoped = all tools) rather than a tool-name
+    # alternation: the hook's per-session PreToolUse latch (SeenStore
+    # .pretool_fired/.mark_pretool_fired) makes an unscoped matcher cheap —
+    # only the first PreToolUse event per session does real work; every
+    # later one short-circuits on the state file before touching the DB.
+    HookSpec("better_memory.hooks.contextual_inject", "PreToolUse", None, False, True),
 )
 
 # Module paths that are no longer registered but may be present in users'

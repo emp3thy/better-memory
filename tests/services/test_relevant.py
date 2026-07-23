@@ -217,6 +217,25 @@ class TestCapsAndDegradation:
         assert [m.id for m in out] == ["r1"]
 
 
+@pytest.mark.parametrize("blank_query", ["", "   ", "\t\n"])
+def test_blank_query_returns_empty(conn, blank_query):
+    # DirectedEmbedder with no trigger args maps EVERY text to the same
+    # unit vector, so it would match anything if the vec leg were reached --
+    # the point is that a contentless query short-circuits before that.
+    title = "Retention archives by confidence"
+    emb = DirectedEmbedder()
+    _seed_reflection(conn, "r1", title=title)
+    _embed_reflection(conn, "r1", emb._vec(title))
+    sync_embedder = SyncEmbedder(lambda: emb)
+    backend = _backend(conn, sync_embedder=sync_embedder)
+    out = retrieve_relevant(
+        backend, query=blank_query, project="p",
+        conn=conn, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
+    )
+    assert out == []
+    assert emb.calls == []
+
+
 def test_returns_relevantmemory(conn):
     _seed_reflection(conn, "r1", title="Retention archives by confidence")
     backend = _backend(conn)

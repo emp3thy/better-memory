@@ -159,7 +159,11 @@ def test_second_run_suppressed_by_seen_store(bm_home, monkeypatch, capsys):
 
 
 def test_below_floor_injects_nothing(bm_home, monkeypatch, capsys):
-    _seed_reflection(bm_home, "refl-widget-only-4", title="widget playbook")
+    # No BM25 overlap (zero shared tokens with the prompt), no vec leg
+    # (embeddings_backend=sqlite by default -> sync_embedder is None), and
+    # conn is present so the keyword fallback never kicks in either: no
+    # evidence on any leg -> no injection.
+    _seed_reflection(bm_home, "refl-zebra-flamingo-4", title="zebra flamingo unrelated topic")
     res = _run(
         {"hook_event_name": "UserPromptSubmit", "prompt": "deploy the widget service now",
          "cwd": ".", "session_id": "sess-4"},
@@ -256,3 +260,49 @@ def test_exposure_write_failure_does_not_block_injection(bm_home, monkeypatch, c
     )
     ctx = res["hookSpecificOutput"]["additionalContext"]
     assert "refl-widget-deploy-6" in ctx
+
+
+def test_pretool_fires_once_per_session(bm_home, monkeypatch, capsys):
+    """Second PreToolUse in the same session hits the latch: empty
+    additionalContext, and contextual_fired_pretool is bumped only once."""
+    _seed_reflection(bm_home, "refl-widget-deploy-7", title="widget deploy playbook")
+    payload = {
+        "hook_event_name": "PreToolUse", "tool_name": "Skill",
+        "tool_input": {"skill": "deploy the widget service now"},
+        "cwd": ".", "session_id": "sess-7",
+    }
+    first = _run(payload, monkeypatch, capsys)
+    assert first["hookSpecificOutput"]["additionalContext"] != ""
+    assert _diag_value(bm_home, "contextual_fired_pretool") == 1
+
+    second = _run(payload, monkeypatch, capsys)
+    assert second["hookSpecificOutput"]["additionalContext"] == ""
+    assert _diag_value(bm_home, "contextual_fired_pretool") == 1
+
+
+def test_userprompt_unaffected_by_pretool_latch(bm_home, monkeypatch, capsys):
+    """The PreToolUse latch must not suppress UserPromptSubmit injections,
+    even after a PreToolUse event has already fired in the same session.
+
+    The PreToolUse payload deliberately shares no evidence with the seeded
+    reflection (no BM25/vec/keyword match) so it latches without injecting or
+    marking anything seen -- isolating the latch from the unrelated
+    SeenStore dedup mechanism, which would otherwise also explain a second
+    empty result.
+    """
+    _seed_reflection(bm_home, "refl-widget-deploy-8", title="widget deploy playbook")
+    session_id = "sess-8"
+    pretool_payload = {
+        "hook_event_name": "PreToolUse", "tool_name": "Bash",
+        "tool_input": {"command": "zebra flamingo unrelated topic"},
+        "cwd": ".", "session_id": session_id,
+    }
+    first = _run(pretool_payload, monkeypatch, capsys)  # fires and latches PreToolUse
+    assert first["hookSpecificOutput"]["additionalContext"] == ""
+
+    prompt_payload = {
+        "hook_event_name": "UserPromptSubmit", "prompt": "deploy the widget service now",
+        "cwd": ".", "session_id": session_id,
+    }
+    res = _run(prompt_payload, monkeypatch, capsys)
+    assert res["hookSpecificOutput"]["additionalContext"] != ""

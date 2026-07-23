@@ -234,6 +234,11 @@ class Config:
     context_reinject_turns: int
     inject_mode: Literal["deferred", "legacy"]
     context_vec_floor: float
+    # NOTE: context_min_hits is DEPRECATED. The three-leg evidence-gated
+    # scorer in services/relevant.py (BM25 / vector cosine / keyword-hit
+    # fallback) replaced the old pure keyword-hits floor; contextual_inject.py
+    # no longer reads this field. Kept for back-compat with any external
+    # BETTER_MEMORY_CONTEXT_MIN_HITS overrides that still resolve here.
 
 
 _DEFAULT_CONTEXT_INJECT_MODE = "both"

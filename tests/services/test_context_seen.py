@@ -64,3 +64,15 @@ def test_missing_state_dir_never_raises(tmp_path):
     s = SeenStore(tmp_path / "does-not-exist-yet", "sess-1")
     assert s.bump_turn() == 1  # creates the dir
     s.mark_seen([("reflection", "r1")])
+
+
+class TestPretoolLatch:
+    def test_defaults_false_then_persists(self, tmp_path):
+        s = SeenStore(tmp_path, "sess")
+        assert s.pretool_fired() is False
+        s.mark_pretool_fired()
+        assert SeenStore(tmp_path, "sess").pretool_fired() is True
+
+    def test_corrupt_state_means_not_fired(self, tmp_path):
+        (tmp_path / "context_seen_sess.json").write_text("{", encoding="utf-8")
+        assert SeenStore(tmp_path, "sess").pretool_fired() is False

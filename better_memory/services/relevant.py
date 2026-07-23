@@ -176,6 +176,9 @@ def retrieve_relevant(
     Never raises -- any backend/leg failure degrades that leg to "absent"
     rather than propagating.
     """
+    if not (query or "").strip():
+        return []
+
     _now = (now or (lambda: datetime.now(UTC)))()
 
     try:
