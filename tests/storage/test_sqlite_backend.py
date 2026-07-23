@@ -54,6 +54,33 @@ def test_sqlite_backend_satisfies_protocol(backend) -> None:
     assert isinstance(backend, StorageBackend)
 
 
+def test_sqlite_backend_shares_caller_sync_embedder(memory_conn) -> None:
+    """Regression for PR #83: SqliteBackend must NOT build its own
+    SyncEmbedder for _semantic/_synthesis — it must reuse the caller's
+    instance so the circuit breaker is process-wide, not split in two."""
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[0.0] * 768)
+    sentinel_sync_embedder = MagicMock(name="sentinel-sync-embedder")
+
+    backend = SqliteBackend(
+        memory_conn=memory_conn,
+        embedder=embedder,
+        sync_embedder=sentinel_sync_embedder,
+        session_id="test-session",
+        project="testproj",
+    )
+
+    assert backend._synthesis._sync_embedder is sentinel_sync_embedder
+    assert backend._semantic._sync_embedder is sentinel_sync_embedder
+
+
+def test_sqlite_backend_sync_embedder_defaults_to_none(backend) -> None:
+    """When the caller passes no sync_embedder (default), the backend must
+    not silently construct its own — both services stay None."""
+    assert backend._synthesis._sync_embedder is None
+    assert backend._semantic._sync_embedder is None
+
+
 def test_sqlite_backend_implements_hot_path_methods(backend) -> None:
     """Task 3 surface check: every hot-path method is present and callable."""
     for name in ("observe", "retrieve", "list_observations", "record_use"):

@@ -44,6 +44,48 @@ def test_synthesis_tools_skipped_when_capability_false() -> None:
     assert "memory.synthesize_next_apply" not in tool_names
 
 
+async def test_create_server_shares_one_sync_embedder_with_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Regression for PR #83: create_server must build exactly ONE
+    SyncEmbedder and hand it to both the top-level services (reflections/
+    semantic) and build_backend (so SqliteBackend's internal _synthesis/
+    _semantic reuse it) — not construct a second, independent instance
+    with its own circuit breaker."""
+    home = tmp_path / "bm"
+    home.mkdir()
+    (home / "knowledge-base").mkdir()
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "ollama")
+    monkeypatch.setenv("OLLAMA_HOST", "http://does-not-exist.invalid:1")
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+
+    import better_memory.mcp.server as server_mod
+
+    created: list[Any] = []
+    real_sync_embedder = server_mod.SyncEmbedder
+
+    class _TrackingSyncEmbedder(real_sync_embedder):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(server_mod, "SyncEmbedder", _TrackingSyncEmbedder)
+
+    from better_memory.storage import SqliteBackend
+
+    server, cleanup, ctx = server_mod.create_server()
+    try:
+        assert len(created) == 1, (
+            f"expected exactly one process-wide SyncEmbedder, got {len(created)}"
+        )
+        assert isinstance(ctx.backend, SqliteBackend)
+        assert ctx.backend._synthesis._sync_embedder is created[0]
+        assert ctx.backend._semantic._sync_embedder is created[0]
+    finally:
+        await cleanup()
+
+
 def test_create_server_returns_three_tuple_with_backend(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

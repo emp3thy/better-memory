@@ -86,6 +86,26 @@ def test_build_backend_returns_sqlite_for_sqlite_config(memory_conn) -> None:
     assert isinstance(backend, StorageBackend)
 
 
+def test_build_backend_forwards_sync_embedder_to_sqlite_backend(memory_conn) -> None:
+    """Regression for PR #83: build_backend must pass the caller's
+    process-wide SyncEmbedder through to SqliteBackend rather than letting
+    SqliteBackend construct its own — otherwise the circuit breaker splits
+    into an independent instance per backend build."""
+    cfg = _config()
+    sentinel_sync_embedder = MagicMock(name="sentinel-sync-embedder")
+    backend = build_backend(
+        config=cfg,
+        memory_conn=memory_conn,
+        embedder=MagicMock(),
+        sync_embedder=sentinel_sync_embedder,
+        session_id="s",
+        project="p",
+    )
+    assert isinstance(backend, SqliteBackend)
+    assert backend._synthesis._sync_embedder is sentinel_sync_embedder
+    assert backend._semantic._sync_embedder is sentinel_sync_embedder
+
+
 def test_build_backend_raises_for_unknown(memory_conn) -> None:
     cfg = _config(storage_backend="bogus")
     with pytest.raises(ValueError, match="unknown storage_backend"):

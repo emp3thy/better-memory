@@ -9,6 +9,12 @@ Held state:
 - ``embedder`` — forwarded to ObservationService. May be ``None`` for the
   sqlite (FTS5) embeddings backend, which indexes via DB triggers instead
   of a Python embedder.
+- ``sync_embedder`` — caller-owned ``SyncEmbedder`` forwarded to
+  ``SemanticMemoryService`` / ``ReflectionSynthesisService`` as-is. The
+  backend does NOT construct its own — it must be the same process-wide
+  instance the caller (e.g. ``mcp/server.py``) built, so its circuit
+  breaker state is shared across the write-path tools and this backend's
+  ``retrieve``/``semantic`` methods rather than split into two breakers.
 - ``session_id`` — used for episode lookups, ratings, exposures. ``None``
   means "defer resolution to env-var fallback at first write"
   (ObservationService re-resolves from ``CLAUDE_SESSION_ID`` /
@@ -25,8 +31,6 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.episode import EpisodeService
 from better_memory.services.memory_rating import MemoryRatingService
 from better_memory.services.observation import ObservationService
@@ -47,6 +51,7 @@ class SqliteBackend:
         *,
         memory_conn: sqlite3.Connection,
         embedder: Any = None,
+        sync_embedder: Any = None,
         session_id: str | None,
         project: str,
     ) -> None:
@@ -66,10 +71,6 @@ class SqliteBackend:
         self._reflection = ReflectionService(memory_conn)
         self._memory_rating = MemoryRatingService(memory_conn)
         self._session_bootstrap = SessionBootstrapService(memory_conn)
-        sync_embedder = (
-            SyncEmbedder(lambda: OllamaEmbedder(timeout=5.0, max_retries=1))
-            if embedder is not None else None
-        )
         self._semantic = SemanticMemoryService(memory_conn, sync_embedder=sync_embedder)
         self._synthesis = ReflectionSynthesisService(
             memory_conn, sync_embedder=sync_embedder

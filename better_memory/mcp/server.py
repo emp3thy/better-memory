@@ -221,6 +221,7 @@ def create_server() -> tuple[
         config=config,
         memory_conn=memory_conn,
         embedder=embedder,
+        sync_embedder=sync_embedder,
         session_id=startup_session_id,
         project=startup_project,
     )
