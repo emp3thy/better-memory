@@ -90,22 +90,28 @@ def main(argv: list[str] | None = None) -> None:
     config = get_config()
     db = Path(args.home) / "memory.db" if args.home else config.memory_db
     conn = connect(db)
-    apply_migrations(conn)
-
-    if config.embeddings_backend != "ollama":
-        print("embeddings backend is not ollama; nothing to backfill")
-        return
-
-    embedder = OllamaEmbedder()
     try:
-        stats = backfill(conn, embedder)
+        apply_migrations(conn)
+
+        if config.embeddings_backend != "ollama":
+            print("embeddings backend is not ollama; nothing to backfill")
+            return
+
+        embedder = OllamaEmbedder()
+        try:
+            stats = backfill(conn, embedder)
+        finally:
+            try:
+                asyncio.run(embedder.aclose())
+            except Exception:
+                pass
+        print(f"backfilled reflections={stats['reflections']} "
+              f"semantics={stats['semantics']} skipped={stats['skipped']}")
+        if stats["skipped"]:
+            print("warning: some rows skipped (Ollama unreachable?); "
+                  "re-run later or let retrieve self-heal them", file=sys.stderr)
     finally:
-        asyncio.run(embedder.aclose())
-    print(f"backfilled reflections={stats['reflections']} "
-          f"semantics={stats['semantics']} skipped={stats['skipped']}")
-    if stats["skipped"]:
-        print("warning: some rows skipped (Ollama unreachable?); "
-              "re-run later or let retrieve self-heal them", file=sys.stderr)
+        conn.close()
 
 
 if __name__ == "__main__":
