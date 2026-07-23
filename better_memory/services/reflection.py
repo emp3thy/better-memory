@@ -296,6 +296,12 @@ def _parse_merge(item: object) -> MergeAction:
     )
 
 
+#: A memory with fewer than this many rated exposures is "untested": its
+#: Wilson score is statistically meaningless, so it competes for the
+#: reserved exploration slot instead of the proven slots.
+EXPLORATION_RATED_FLOOR = 3
+
+
 def _wilson_rated(row) -> int:
     """Total rated exposures backing this memory's score."""
     return (row["useful_count"] + row["times_overlooked"]
@@ -1260,6 +1266,24 @@ class ReflectionSynthesisService:
         scored.sort(key=lambda t: (-t[0], t[1]))
         return [row for _, _, row in scored]
 
+    def _bucket_item(self, r) -> dict:
+        """Convert one reflections row into the dict shape returned to callers."""
+        return {
+            "id": r["id"],
+            "title": r["title"],
+            "phase": r["phase"],
+            "use_cases": r["use_cases"],
+            "hints": json.loads(r["hints"]),
+            "confidence": r["confidence"],
+            "tech": r["tech"],
+            "evidence_count": r["evidence_count"],
+            "useful_count": r["useful_count"],
+            "times_misled": r["times_misled"],
+            "times_overlooked": r["times_overlooked"],
+            "times_ignored": r["times_ignored"],
+            "updated_at": r["updated_at"],
+        }
+
     def retrieve_reflections(
         self,
         *,
@@ -1345,27 +1369,35 @@ class ReflectionSynthesisService:
                 _diag.step(fn, "relevance_fused", n_rows=len(rows))
 
             # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
+            # reserve: only worth reserving an exploration slot when there's room for
+            # at least one proven row alongside it (cap < 2 means the untested row
+            # would consume the entire bucket).
             cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize
+            reserve = limit_per_bucket is not None and cap >= 2
             buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
+            by_polarity: dict[str, list] = {"do": [], "dont": [], "neutral": []}
             for r in rows:
-                bucket = buckets[r["polarity"]]
-                if len(bucket) >= cap:
+                by_polarity[r["polarity"]].append(r)
+            for polarity, group in by_polarity.items():
+                if not reserve:
+                    buckets[polarity] = [self._bucket_item(r) for r in group[:cap]]
                     continue
-                bucket.append({
-                    "id": r["id"],
-                    "title": r["title"],
-                    "phase": r["phase"],
-                    "use_cases": r["use_cases"],
-                    "hints": json.loads(r["hints"]),
-                    "confidence": r["confidence"],
-                    "tech": r["tech"],
-                    "evidence_count": r["evidence_count"],
-                    "useful_count": r["useful_count"],
-                    "times_misled": r["times_misled"],
-                    "times_overlooked": r["times_overlooked"],
-                    "times_ignored": r["times_ignored"],
-                    "updated_at": r["updated_at"],
-                })
+                tested_idx = [i for i, r in enumerate(group)
+                              if _wilson_rated(r) >= EXPLORATION_RATED_FLOOR]
+                untested_idx = [i for i, r in enumerate(group)
+                                if _wilson_rated(r) < EXPLORATION_RATED_FLOOR]
+                chosen = tested_idx[: cap - 1]
+                if untested_idx:
+                    chosen.append(untested_idx[0])
+                if len(chosen) < cap:               # top up from the remainder
+                    taken = set(chosen)
+                    for i in range(len(group)):
+                        if len(chosen) >= cap:
+                            break
+                        if i not in taken:
+                            chosen.append(i)
+                chosen.sort()                        # preserve ranked order
+                buckets[polarity] = [self._bucket_item(group[i]) for i in chosen]
             _diag.step(
                 fn, "bucketed",
                 do=len(buckets["do"]), dont=len(buckets["dont"]),
