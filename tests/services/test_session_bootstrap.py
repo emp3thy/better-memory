@@ -521,3 +521,140 @@ def test_list_session_exposures_empty_session_id_returns_none_envelope(conn) -> 
     svc = SessionBootstrapService(conn)
     result = svc.list_session_exposures(session_id="")
     assert result == {"session_id": None, "exposures": []}
+
+
+# ---------------------------------------------------------------------------
+# Task 6: deferred bootstrap mode.
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredBootstrap:
+    def test_deferred_renders_general_semantics_and_index_only(
+        self, conn, git_repo: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
+        proj = git_repo.name
+
+        _seed_semantic(conn, content="general-fact-one", project="anyproj", scope="general")
+        _seed_semantic(conn, content="general-fact-two", project="otherproj", scope="general")
+        _seed_semantic(conn, content="project-fact-one", project=proj, scope="project")
+        _seed_semantic(conn, content="project-fact-two", project=proj, scope="project")
+        _seed_semantic(conn, content="project-fact-three", project=proj, scope="project")
+        for i in range(4):
+            _seed_reflection(
+                conn, project=proj, polarity="do", scope="project", title=f"refl-title-{i}",
+            )
+
+        svc = SessionBootstrapService(conn)
+        text = svc.bootstrap(
+            source="startup", session_id="sess-deferred-1", cwd=git_repo,
+        ).additional_context
+
+        assert "general-fact-one" in text
+        assert "general-fact-two" in text
+        assert "project-fact-one" not in text
+        assert "project-fact-two" not in text
+        assert "project-fact-three" not in text
+        assert "refl-title-0" not in text
+        assert "knows 4 reflections + 5 semantic memories" in text
+
+    def test_deferred_exposes_only_general_semantics(
+        self, conn, git_repo: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
+        proj = git_repo.name
+
+        gen_ids = [
+            _seed_semantic(conn, content="general-a", project="anyproj", scope="general"),
+            _seed_semantic(conn, content="general-b", project="otherproj", scope="general"),
+        ]
+        _seed_semantic(conn, content="proj-a", project=proj, scope="project")
+        _seed_semantic(conn, content="proj-b", project=proj, scope="project")
+        _seed_reflection(conn, project=proj, polarity="do", scope="project")
+
+        svc = SessionBootstrapService(conn)
+        svc.bootstrap(source="startup", session_id="sess-deferred-2", cwd=git_repo)
+
+        rows = conn.execute(
+            "SELECT memory_kind, memory_id, source FROM session_memory_exposure "
+            "WHERE session_id = ?",
+            ("sess-deferred-2",),
+        ).fetchall()
+        exposed = {(r["memory_kind"], r["memory_id"]) for r in rows}
+        assert exposed == {("semantic", gid) for gid in gen_ids}
+        assert all(r["source"] == "bootstrap" for r in rows)
+
+    def test_legacy_mode_byte_identical(
+        self, tmp_path: Path, git_repo: Path, monkeypatch
+    ) -> None:
+        from uuid import UUID
+
+        proj = git_repo.name
+        fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+        fixed_uuid = UUID("a" * 32)
+
+        monkeypatch.setattr(
+            "better_memory.services.episode.uuid4", lambda: fixed_uuid,
+        )
+
+        def make_conn(name: str):
+            db = tmp_path / name
+            c = connect(db)
+            apply_migrations(c, migrations_dir=_MIGRATIONS)
+            return c
+
+        # Explicit ids + a fixed timestamp (rather than the _seed_* helpers,
+        # which mint a random uuid per call) so the two conns render
+        # byte-identical text — only the inject_mode env var differs.
+        fixed_ts = "2026-01-01T00:00:00+00:00"
+
+        def seed(c) -> None:
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("1" * 32, "proj-fact", proj, "project", fixed_ts, fixed_ts),
+            )
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("2" * 32, "gen-fact", "anyproj", "general", fixed_ts, fixed_ts),
+            )
+            c.execute(
+                "INSERT INTO reflections "
+                "(id, title, project, tech, phase, polarity, use_cases, hints, "
+                " confidence, status, evidence_count, created_at, updated_at, scope) "
+                "VALUES (?, 'refl-a', ?, NULL, 'implementation', 'do', 'uc', ?, 0.9, "
+                " 'confirmed', 1, ?, ?, 'project')",
+                ("3" * 32, proj, json.dumps(["h"]), fixed_ts, fixed_ts),
+            )
+            c.commit()
+
+        monkeypatch.delenv("BETTER_MEMORY_INJECT_MODE", raising=False)
+        conn_unset = make_conn("unset.db")
+        seed(conn_unset)
+        svc_unset = SessionBootstrapService(conn_unset, clock=lambda: fixed_now)
+        text_unset = svc_unset.bootstrap(
+            source="startup", session_id="sess-same", cwd=git_repo,
+        ).additional_context
+
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "legacy")
+        conn_legacy = make_conn("legacy.db")
+        seed(conn_legacy)
+        svc_legacy = SessionBootstrapService(conn_legacy, clock=lambda: fixed_now)
+        text_legacy = svc_legacy.bootstrap(
+            source="startup", session_id="sess-same", cwd=git_repo,
+        ).additional_context
+
+        assert text_unset == text_legacy
+
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
+        conn_deferred = make_conn("deferred.db")
+        seed(conn_deferred)
+        svc_deferred = SessionBootstrapService(conn_deferred, clock=lambda: fixed_now)
+        text_deferred = svc_deferred.bootstrap(
+            source="startup", session_id="sess-same", cwd=git_repo,
+        ).additional_context
+
+        assert text_deferred != text_unset

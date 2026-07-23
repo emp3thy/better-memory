@@ -257,6 +257,51 @@ class SessionBootstrapService:
             "neutral": len(buckets["neutral"]),
         }
 
+        from better_memory.config import get_config as _get_config_deferred
+
+        if _get_config_deferred().inject_mode == "deferred":
+            general_only = [m for m in semantic if m.scope == "general"]
+            deferred_now = self._clock()
+            n_refl = sum(reflections_counts.values())
+            n_sem = semantic_count
+            index_line = (
+                f"better-memory knows {n_refl} reflections + {n_sem} semantic "
+                "memories for this project; relevant ones will surface as you "
+                "work - or ask via memory_retrieve with a task query."
+            )
+            deferred_sections: list[str] = [
+                _render_header(
+                    project=project,
+                    source=coerced_source,
+                    action=action,
+                    episode_id=episode_id,
+                ),
+            ]
+            deferred_sem_section, deferred_semantic_ids = _render_semantic_full(
+                general_only, deferred_now,
+            )
+            if deferred_sem_section:
+                deferred_sections.append(deferred_sem_section)
+            deferred_sections.append(index_line)
+            deferred_sections.append("---")
+            deferred_sections.append(_FOOTER)
+
+            self._record_exposure(
+                session_id=session_id,
+                reflection_ids=[],
+                semantic_ids=deferred_semantic_ids,
+            )
+
+            return BootstrapResult(
+                additional_context="\n\n".join(deferred_sections),
+                project=project,
+                source=coerced_source,
+                episode_id=episode_id,
+                episode_action=action,
+                semantic_count=semantic_count,
+                reflections_counts=reflections_counts,
+            )
+
         if self._top_n is not None:
             top_n = self._top_n
         else:
