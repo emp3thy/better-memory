@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from better_memory.async_bridge import run_async_in_worker
@@ -38,12 +39,14 @@ class SyncEmbedder:
         clock: Callable[[], float] = time.monotonic,
         cooldown: float = _DEFAULT_COOLDOWN,
         timeout: float = _WORKER_TIMEOUT,
+        down_state_file: Path | None = None,
     ) -> None:
         self._factory = factory
         self._clock = clock
         self._cooldown = cooldown
         self._timeout = timeout
         self._down_until = 0.0
+        self._down_file = down_state_file
 
     def embed_text(self, text: str) -> list[float] | None:
         return self._run(lambda emb: emb.embed(text))
@@ -55,6 +58,8 @@ class SyncEmbedder:
         if self._factory is None:
             return None
         if self._clock() < self._down_until:
+            return None
+        if self._down_file is not None and self._file_down():
             return None
 
         factory = self._factory
@@ -72,4 +77,22 @@ class SyncEmbedder:
             return run_async_in_worker(_go, timeout=self._timeout)
         except Exception:
             self._down_until = self._clock() + self._cooldown
+            self._write_down_file()
             return None
+
+    def _file_down(self) -> bool:
+        try:
+            until = float(self._down_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            return False
+        return time.time() < until
+
+    def _write_down_file(self) -> None:
+        if self._down_file is None:
+            return
+        try:
+            self._down_file.parent.mkdir(parents=True, exist_ok=True)
+            self._down_file.write_text(
+                str(time.time() + self._cooldown), encoding="utf-8")
+        except Exception:
+            pass
