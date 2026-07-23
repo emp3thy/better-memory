@@ -43,8 +43,8 @@ Every observation has an `outcome`: `success`, `failure`, or `neutral`.
   `failure` when the evidence exists RIGHT NOW (tests ran, approach
   reverted, user confirmed).
 - For decisions whose outcome is not yet provable, write `neutral`,
-  keep the returned id, and close the loop later with `record_use`
-  once validation arrives.
+  keep the returned id, and close the loop later with
+  `memory_record_use` once validation arrives.
 - Record failures at the same cadence as successes — the `dont` bucket
   depends on it.
 
@@ -52,15 +52,16 @@ Every observation has an `outcome`: `success`, `failure`, or `neutral`.
 
 When a retrieved memory shapes your work — you quote it, follow its
 guidance, or it misleads you — credit it with a one-line evidence
-statement when a memory shapes your work. Do this as you go rather
-than batching it at session end; anything left uncredited is caught by
-the end-of-session sweep, but fresh-context credit is more reliable.
+statement. Do this as you go rather than batching it at session end;
+anything left uncredited is caught by the end-of-session sweep, but
+fresh-context credit is more reliable.
 
 ## Session-start reconciliation
 
-After the mandatory better-memory retrieve at session start, check for
-episodes left open by prior sessions. Each unclosed episode carries a
-goal, project, tech, and start time.
+At session start, after the mandatory `knowledge_list` call and before
+task-specific `memory_retrieve` calls begin, check for episodes left
+open by prior sessions. Each unclosed episode carries a goal, project,
+tech, and start time.
 
 **For each returned episode**, prompt the user in chat:
 
