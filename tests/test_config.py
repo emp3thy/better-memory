@@ -603,3 +603,33 @@ def test_injection_knobs_invalid_raises(monkeypatch):
     monkeypatch.setenv("BETTER_MEMORY_CONTEXT_MIN_HITS", "-1")
     with pytest.raises(ValueError):
         get_config()
+
+
+class TestInjectModeConfig:
+    def test_default_is_legacy(self, monkeypatch):
+        monkeypatch.delenv("BETTER_MEMORY_INJECT_MODE", raising=False)
+        assert get_config().inject_mode == "legacy"
+
+    def test_deferred_selected(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
+        assert get_config().inject_mode == "deferred"
+
+    def test_unknown_coerces_to_legacy(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "yolo")
+        assert get_config().inject_mode == "legacy"
+
+
+class TestVecFloorConfig:
+    def test_default(self, monkeypatch):
+        monkeypatch.delenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", raising=False)
+        assert get_config().context_vec_floor == 0.55
+
+    def test_override_and_clamp(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", "0.7")
+        assert get_config().context_vec_floor == 0.7
+        monkeypatch.setenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", "1.7")
+        assert get_config().context_vec_floor == 1.0
+
+    def test_malformed_falls_back(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", "high")
+        assert get_config().context_vec_floor == 0.55
