@@ -16,6 +16,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from better_memory._common import default_clock, env_session_id
+from better_memory.services.scoring import wilson_lower_bound
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,8 @@ class SemanticMemory:
     last_misled_at: str | None = None
     times_overlooked: int = 0
     last_overlooked_at: str | None = None
+    times_ignored: int = 0
+    last_ignored_at: str | None = None
 
 
 _VALID_SCOPES = ("project", "general")
@@ -195,7 +198,8 @@ class SemanticMemoryService:
         track_exposure: bool = True,
     ) -> list[SemanticMemory]:
         """Project rows + general-scope rows from any project, ordered by
-        useful_count DESC then created_at DESC (newest first as tiebreaker).
+        Wilson lower bound of the hit rate DESC, then created_at DESC
+        (newest first) as tiebreaker for equal scores.
 
         Args:
             project: project key for project-scope filtering.
@@ -236,12 +240,11 @@ class SemanticMemoryService:
         sql = (
             "SELECT id, content, project, scope, created_at, updated_at, "
             "useful_count, last_useful_at, times_misled, last_misled_at, "
-            "times_overlooked, last_overlooked_at "
+            "times_overlooked, last_overlooked_at, "
+            "times_ignored, last_ignored_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
-            # Minimal bridge pending Task 3's Wilson-score rewrite of
-            # semantic.py ranking (mirrors reflection.py's Task 2 change).
-            "ORDER BY (useful_count) DESC, created_at DESC"
+            "ORDER BY created_at DESC"
         )
         rows = self._conn.execute(sql, params).fetchall()
         results = [
@@ -255,9 +258,21 @@ class SemanticMemoryService:
                 last_misled_at=r["last_misled_at"],
                 times_overlooked=r["times_overlooked"] or 0,
                 last_overlooked_at=r["last_overlooked_at"],
+                times_ignored=r["times_ignored"] or 0,
+                last_ignored_at=r["last_ignored_at"],
             )
             for r in rows
         ]
+        # Rank by Wilson lower bound of the hit rate (useful + overlooked
+        # positives over rated exposures); stable sort keeps created_at DESC
+        # as the tiebreaker for equal scores (incl. all-zero/never-rated).
+        results.sort(
+            key=lambda m: wilson_lower_bound(
+                m.useful_count + m.times_overlooked,
+                m.useful_count + m.times_overlooked + m.times_ignored,
+            ),
+            reverse=True,
+        )
         # Best-effort exposure tracking — see spec §5.2.1.
         # track_exposure=False is used by SessionBootstrapService.bootstrap,
         # which manages its own exposure write via _record_exposure.

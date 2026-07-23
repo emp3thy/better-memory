@@ -569,3 +569,29 @@ class TestUsefulMisledFields:
         assert row.times_misled == 0
         assert row.last_useful_at is None
         assert row.last_misled_at is None
+
+
+class TestSemanticWilsonRanking:
+    def test_hit_rate_beats_raw_count(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn)
+        a = svc.create(content="workhorse", project="p")
+        b = svc.create(content="newcomer", project="p")
+        conn.execute(
+            "UPDATE semantic_memories SET useful_count=67, times_ignored=125 WHERE id=?", (a,))
+        conn.execute(
+            "UPDATE semantic_memories SET useful_count=3, times_ignored=1 WHERE id=?", (b,))
+        conn.commit()
+        ids = [m.id for m in svc.list_for_project(project="p", track_exposure=False)]
+        assert ids == [b, a]
+
+    def test_never_rated_sorts_by_recency_at_bottom(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn)
+        rated = svc.create(content="rated", project="p")
+        conn.execute(
+            "UPDATE semantic_memories SET useful_count=1, times_ignored=1 WHERE id=?", (rated,))
+        conn.commit()
+        unrated = svc.create(content="unrated", project="p")
+        ids = [m.id for m in svc.list_for_project(project="p", track_exposure=False)]
+        assert ids == [rated, unrated]
