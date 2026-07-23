@@ -81,18 +81,22 @@ class SyncEmbedder:
             return None
 
     def _file_down(self) -> bool:
+        down = self._down_file
+        if down is None:
+            return False
         try:
-            until = float(self._down_file.read_text(encoding="utf-8").strip())
+            until = float(down.read_text(encoding="utf-8").strip())
         except Exception:
             return False
         return time.time() < until
 
     def _write_down_file(self) -> None:
-        if self._down_file is None:
+        down = self._down_file
+        if down is None:
             return
         try:
-            self._down_file.parent.mkdir(parents=True, exist_ok=True)
-            self._down_file.write_text(
+            down.parent.mkdir(parents=True, exist_ok=True)
+            down.write_text(
                 str(time.time() + self._cooldown), encoding="utf-8")
         except Exception:
             pass
