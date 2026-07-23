@@ -11,7 +11,7 @@ on unrelated words:
   "optional `component` ... and `scope_path`"). To avoid flagging plain
   identifier mentions (e.g. "called from `session_bootstrap` module") this
   branch only fires on lines that also carry a parameter-signal word (see
-  `_SIGNAL_WORDS`).
+  `_SIGNAL_RE`).
 
 The accepted-token set per tool is schema-derived, not just property
 names: enum *values* (e.g. `memory_retrieve`'s `polarity` enum
@@ -28,12 +28,15 @@ _PARAM_RE = re.compile(r"\b([a-z_][a-z0-9_]{2,})\s*[=:]")
 _BACKTICK_RE = re.compile(r"`([a-z_]{4,})`")
 _IGNORE = {"http", "https", "note", "example", "warning", "default", "docs"}
 
-# Words/phrases whose presence on a line signals "this backtick token is
-# being documented as a parameter", as opposed to a plain identifier or
-# module mention. Checked case-insensitively as substrings.
-_SIGNAL_WORDS = (
-    "optional", "parameter", "param", "pass", "passing", "tune",
-    "filter", "argument", "arg", "field", "defaults", "set ",
+# Words whose presence on a line signal "this backtick token is being
+# documented as a parameter", as opposed to a plain identifier or module
+# mention. Matched case-insensitively on word boundaries — a naive
+# substring check would match "set" inside "reset"/"preset"/"subset".
+# "field" and "defaults" were dropped: both false-positived on unrelated
+# backticked identifiers and no incident fixture depends on either.
+_SIGNAL_RE = re.compile(
+    r"\b(optional|parameter|param|pass|passing|tune|filter|argument|arg|set)\b",
+    re.IGNORECASE,
 )
 
 
@@ -55,8 +58,7 @@ def build_schemas() -> dict[str, set[str]]:
 
 
 def _has_signal_word(line: str) -> bool:
-    lowered = line.lower()
-    return any(word in lowered for word in _SIGNAL_WORDS)
+    return _SIGNAL_RE.search(line) is not None
 
 
 def check_claude_md(text: str, schemas: dict[str, set[str]]) -> list[str]:

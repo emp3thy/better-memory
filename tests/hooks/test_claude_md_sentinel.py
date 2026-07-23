@@ -105,3 +105,22 @@ def test_build_schemas_includes_enum_values():
     # memory.retrieve's `polarity` property has enum ["do", "dont", "neutral"].
     for value in ("do", "dont", "neutral"):
         assert value in schemas["memory_retrieve"]
+
+
+# --- Round 4: word-boundary signal matching, trimmed signal list ---
+
+
+def test_set_inside_reset_not_a_signal_word():
+    # Substring matching would have matched "set" inside "reset"; word
+    # boundaries must not.
+    schemas = {"memory_retrieve": {"query"}}
+    text = "reset the `cache` before calling `memory_retrieve` again"
+    assert check_claude_md(text, schemas) == []
+
+
+def test_field_no_longer_a_signal_word():
+    # "field" was dropped from the signal list — a backticked identifier
+    # near a "field" mention must not be flagged.
+    schemas = {"memory_retrieve": {"query"}}
+    text = "after calling `memory_retrieve`, edit the `hints` field in the UI drawer"
+    assert check_claude_md(text, schemas) == []
