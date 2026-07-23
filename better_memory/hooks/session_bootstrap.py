@@ -114,6 +114,23 @@ def main() -> None:
                     source=source, session_id=session_id, cwd=Path(cwd_str),
                 )
             rendered = result.additional_context
+
+        try:
+            claude_md_path = Path.home() / ".claude" / "CLAUDE.md"
+            if claude_md_path.is_file():
+                from better_memory.hooks._claude_md_sentinel import (
+                    build_schemas,
+                    check_claude_md,
+                )
+
+                claude_md_text = claude_md_path.read_text(
+                    encoding="utf-8", errors="ignore",
+                )
+                sentinel_warnings = check_claude_md(claude_md_text, build_schemas())
+                if sentinel_warnings:
+                    rendered = rendered + "\n\n" + sentinel_warnings[0]
+        except BaseException:  # noqa: BLE001 — sentinel is best-effort
+            pass
     except BaseException as exc:  # noqa: BLE001
         try:
             record_hook_error(hook_name="session_bootstrap", exc=exc)

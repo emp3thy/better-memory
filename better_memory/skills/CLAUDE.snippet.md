@@ -9,52 +9,58 @@ This project uses better-memory for persistent AI knowledge.
 - Validation arrives (evidence in hand) → read `better_memory/skills/memory-feedback.md`
 - Session ending → read `better_memory/skills/session-close.md`
 
-### Memory outcomes — the evidence-in-hand rule
+### Retrieval
+
+When you begin a task, call `memory_retrieve` with a `query` describing
+it. Do not do broad no-query retrieval at session start; memories
+surface contextually as you work.
+
+`memory_retrieve` returns distilled **reflections** — generalised
+lessons from prior observations — bucketed by polarity: `do`, `dont`,
+and `neutral`. Treat `dont` as a hard constraint list: do not repeat
+approaches that live there.
+
+For raw observation lookup — e.g. citing a specific past event or
+hunting for an exact prior decision — use `memory_retrieve_observations`
+instead. With a free-text query, results are ranked by hybrid search;
+without one, they're ordered newest-first.
+
+### Knowledge
+
+At the start of a session, call `knowledge_list` to see what curated
+knowledge is indexed for this project. Call `knowledge_search` when the
+current task may be covered by curated documentation rather than raw
+memory.
+
+### Recording — the evidence-in-hand rule
+
+At a decision point, record with a concise factual summary, an explicit
+outcome, and component/theme tags where they apply.
 
 Every observation has an `outcome`: `success`, `failure`, or `neutral`.
 
-- **Default to `neutral`** at observe time. Only claim `success` or `failure` when the evidence exists RIGHT NOW (tests ran, approach reverted, user confirmed).
-- For decisions whose outcome is not yet provable, write `neutral`, keep the returned id, and close the loop later with `memory.record_use(id, outcome=...)` once validation arrives.
-- Record failures at the same cadence as successes — the `dont` bucket depends on it.
+- **Default to `neutral`** at observe time. Only claim `success` or
+  `failure` when the evidence exists RIGHT NOW (tests ran, approach
+  reverted, user confirmed).
+- For decisions whose outcome is not yet provable, write `neutral`,
+  keep the returned id, and close the loop later with `record_use`
+  once validation arrives.
+- Record failures at the same cadence as successes — the `dont` bucket
+  depends on it.
 
-### Retrieval buckets
+### Crediting memories you use
 
-`memory.retrieve` returns `{do, dont, neutral}` — distilled **reflections**
-(generalised lessons from prior observations), bucketed by polarity. Each
-bucket lists items with `{id, title, phase, use_cases, hints, confidence,
-tech, evidence_count}`, ordered by `confidence DESC, updated_at DESC`,
-capped at 20 per bucket.
-
-Treat `dont` as a hard constraint list: do not repeat approaches that
-live there.
-
-For raw observation lookup (e.g. citing specific past events), use
-`memory.retrieve_observations(project?, episode_id?, component?, theme?,
-outcome?, query?, limit?)`. With `query`, results are ranked by hybrid
-search; without, ordered newest-first.
-
-### MCP tools
-
-- `memory.observe(content, component?, theme?, trigger_type?, outcome?, tech?)`
-- `memory.retrieve(project?, tech?, phase?, polarity?, limit_per_bucket?)` — reflections, bucketed by polarity
-- `memory.retrieve_observations(project?, episode_id?, component?, theme?, outcome?, query?, limit?)` — raw observations
-- `memory.record_use(id, outcome?)`
-- `memory.credit(kind, id, class)` — **opportunistic per-tool-use rating.** When you actively use a memory retrieved this session (quote it, follow its guidance, or it misled you), call this immediately. Class is `cited`/`shaped`/`misled` (NOT `ignored`). The session-end sweep catches anything you don't credit, defaulting to `ignored`. Credit-as-you-go survives compaction.
-- `memory.list_session_exposures()` / `memory.apply_session_ratings(ratings)` — end-of-session sweep tooling used by the `rate-session-memories` skill.
-- `memory.start_episode(goal, tech?)` — declares a goal; returns `{episode_id, reflections}`
-- `memory.close_episode(outcome, summary?, close_reason?)` — closes the active episode
-- `memory.reconcile_episodes()` — list unclosed episodes from prior sessions
-- `memory.list_episodes(project?, outcome?, only_open?)` — episodes for UI/inspection
-- `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` — apply spec §9 retention: flip stale observations to `status='archived'` per the three rules (linked-only-to-retired-reflection, consumed_without_reflection, no_outcome episode), optionally prune archived rows older than `prune_age_days`. Reflections are never auto-deleted. User-invoked; no auto-scheduling.
-- `knowledge.search(query, project?)`
-- `knowledge.list(project?)`
+When a retrieved memory shapes your work — you quote it, follow its
+guidance, or it misleads you — credit it with a one-line evidence
+statement when a memory shapes your work. Do this as you go rather
+than batching it at session end; anything left uncredited is caught by
+the end-of-session sweep, but fresh-context credit is more reliable.
 
 ## Session-start reconciliation
 
-After the mandatory better-memory retrieve at session start, call
-`memory.reconcile_episodes()` to check for episodes left open by prior
-sessions. The tool returns a list of unclosed episodes, each with
-`episode_id`, `project`, `tech`, `goal`, and `started_at`.
+After the mandatory better-memory retrieve at session start, check for
+episodes left open by prior sessions. Each unclosed episode carries a
+goal, project, tech, and start time.
 
 **For each returned episode**, prompt the user in chat:
 
@@ -65,8 +71,8 @@ sessions. The tool returns a list of unclosed episodes, each with
 >
 > How did it end? (success / abandoned / partial / no_outcome / continuing)
 
-Apply the user's answer via `memory.close_episode(outcome=..., summary=...)`
-— EXCEPT for `continuing`, which is a no-op at the service layer (the
+Apply the user's answer by closing the episode with that outcome —
+EXCEPT for `continuing`, which is a no-op at the service layer (the
 episode stays open and subsequent observations bind to it). If the user
 ignores the prompt or proceeds without answering, default to `abandoned`
 — it still feeds synthesis as a negative signal, so nothing is lost.
@@ -119,16 +125,12 @@ including absence, is a no-op.
 ### Plan-complete close
 
 When the `superpowers:executing-plans` workflow (or any equivalent
-multi-step plan run) finishes, close the active episode directly:
-
-```
-memory.close_episode(outcome="success", close_reason="plan_complete")
-```
+multi-step plan run) finishes, close the active episode directly with
+outcome `success` and close reason `plan_complete`.
 
 Do this INSTEAD of the commit trailer if the final commit of the plan
 doesn't itself map 1:1 to the plan's goal (e.g. the plan comprises
 several logically-separate commits and the final one isn't the
 "completion" commit). If the last commit of the plan already carries
 `Closes-Episode: true`, the plan-complete call is a no-op (the episode
-is already closed) — still safe to call; the drain layer swallows the
-no-active-episode ValueError.
+is already closed) — still safe to call.
