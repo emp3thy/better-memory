@@ -61,23 +61,6 @@ _VALID_KINDS: set[str] = {"reflection", "semantic"}
 _VALID_CLASSES: set[str] = {"cited", "shaped", "ignored", "misled", "overlooked"}
 _CREDIT_CLASSES: set[str] = {"cited", "shaped", "misled", "overlooked"}
 
-# Retrieval-ranking weight for the `overlooked` class. One `overlooked`
-# rating contributes this many points to a memory's rank score — the same
-# unit as one `useful_count`. Per issue #60, an overlooked memory should
-# rank harder than a cited one. Imported by reflection.py and semantic.py.
-OVERLOOKED_RANKING_WEIGHT = 3
-
-# Demotion for memories that keep being served and keep not mattering.
-# A memory is only demoted once it has been ignored in at least
-# IGNORED_DEMOTION_FLOOR distinct sessions AND has never been useful — one or
-# two ignores say nothing (the task simply wasn't relevant that day), but a
-# double-digit run of them with no hits is the memory telling you it does not
-# belong in the default set. Memories with any useful history are never
-# demoted, however often they are also ignored: the best-performing memory on
-# the live DB is ignored in 125 of the 192 sessions it appears in.
-IGNORED_DEMOTION_FLOOR = 10
-IGNORED_DEMOTION_WEIGHT = 1
-
 
 class MemoryRatingService:
     """Writes useful_count / times_misled on reflections + semantic memories,

@@ -738,9 +738,9 @@ def test_junction_skill_link_is_recognised_and_skipped(
     skills_dir.mkdir(parents=True, exist_ok=True)
     junction = skills_dir / SKILL_NAMES[0]
 
-    proc = subprocess.run(  # noqa: S603 - fixed argv, test harness
+    proc = _spawn(
+        harness.env,
         ["cmd", "/c", "mklink", "/J", str(junction), str(source)],
-        capture_output=True, text=True,
     )
     if proc.returncode != 0:
         pytest.skip(f"cannot create junction here: {proc.stderr.strip()}")

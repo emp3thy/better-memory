@@ -101,6 +101,35 @@ that were written while `sqlite` was active (no embedding was computed
 for them); a future `memory.reindex` MCP tool can backfill if that
 half-state becomes a problem.
 
+### Reflection and semantic-memory embeddings
+
+Reflections and semantic memories get their own vectors, written at
+write time rather than lazily at query time: `ReflectionSynthesisService`
+embeds a reflection when synthesis creates or augments it, `ReflectionService`
+re-embeds on `update_text`, and the semantic-memory service does the
+same on `memory.semantic_observe` and its update path. All of these go
+through `SyncEmbedder` (`better_memory/embeddings/sync_embed.py`), a
+synchronous facade over the Ollama embedder that is best-effort by
+design: any failure opens a 60-second circuit breaker (`_DEFAULT_COOLDOWN`)
+during which every embed call returns `None` immediately instead of
+retrying against a dead Ollama. A missing vector is never treated as an
+error - callers just drop the vector leg from ranking and fall back to
+the Wilson + BM25 order above.
+
+Two mechanisms cover rows left without a vector - historical rows
+predating this feature, or rows written during a breaker outage:
+
+- **Lazy self-heal on retrieve.** Each `memory.retrieve` call embeds up
+  to 20 reflections missing a vector before ranking (`SELF_HEAL_BATCH_CAP`
+  in `better_memory/services/reflection.py`) - capped so a cold corpus
+  can't turn one retrieve call into an unbounded batch of Ollama calls.
+- **`python -m better_memory.cli.backfill_embeddings`.** A one-shot,
+  idempotent CLI that embeds every reflection and semantic memory still
+  missing a vector, in batches of 50. Intended to run once after
+  deploying the migration that adds the embedding tables, so the
+  historical corpus is searchable immediately instead of waiting for
+  retrieval traffic to heal it row by row.
+
 ## Reinforcement
 
 Each observation and reflection has a `reinforcement_score` that decays slowly over time and is updated by validated use:
@@ -139,11 +168,25 @@ captures whether memories actually shaped Claude's work:
    (`cited` / `shaped` / `ignored` / `misled` / `overlooked`). Only on the second Stop
    fire — after ratings land — does the hook drop the `session_end`
    marker into the spool.
-4. **Aggregation** — `useful_count` / `times_overlooked` / `times_misled`
-   columns on reflections and semantic memories accumulate. Retrieval
-   queries `ORDER BY (useful_count + 3 × times_overlooked) DESC` so
-   memories that proved themselves — or that the user had to recover —
-   surface first.
+4. **Ranking** - `useful_count` / `times_overlooked` / `times_misled` /
+   `times_ignored` columns on reflections and semantic memories
+   accumulate, and retrieval ranks each bucket by a Wilson score lower
+   bound (95% CI) on the proportion of rated exposures that were
+   positive: `(useful_count + times_overlooked) / (useful_count +
+   times_overlooked + times_ignored)`, computed in
+   `better_memory/services/scoring.py`. Ties break on confidence, then
+   recency. A memory with fewer than 3 rated exposures has a
+   statistically meaningless score (pinned to 0), so instead of losing
+   outright to proven rows it competes for a reserved exploration
+   slot: the last slot of each polarity bucket (when the bucket cap
+   allows at least 2 entries) is set aside for the highest-ranked
+   under-rated memory, if one exists. When `memory.retrieve` is called
+   with a `query`, this Wilson-ranked list is re-fused with a BM25
+   relevance ranking (title / use_cases / hints) and a vector-kNN
+   ranking via the same Reciprocal Rank Fusion used for observations --
+   a three-leg RRF of Wilson rank, BM25 rank, and vector rank -- so a
+   query that matches nothing on either extra leg degrades exactly to
+   the Wilson-only order.
 
 The management UI's Reflections and Semantic tabs surface useful /
 overlooked / misled badges per row, and `/diagnostics` exposes recent

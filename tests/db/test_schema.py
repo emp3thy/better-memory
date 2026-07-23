@@ -228,6 +228,7 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
         expected_initial = [
             "0001", "0002", "0003", "0004", "0005",
             "0006", "0007", "0008", "0009", "0010", "0011",
+            "0012", "0013", "0014",
         ]
         assert versions[: len(expected_initial)] == expected_initial
         # Subsequent migrations are appended; idempotency is the property
@@ -785,3 +786,16 @@ def test_idx_episodes_pending_synth_partial_index_exists(tmp_memory_db: Path) ->
         ).fetchall()
         assert len(rows) == 1
         assert "synthesized_at IS NULL" in rows[0][1]
+
+
+def test_0014_semantic_embeddings_table(tmp_memory_db: Path) -> None:
+    """Migration 0014 creates the semantic_embeddings vec0 virtual table."""
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn)
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='semantic_embeddings'"
+        ).fetchone()
+        assert row is not None
+    finally:
+        conn.close()

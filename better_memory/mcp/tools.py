@@ -189,9 +189,9 @@ def tool_definitions(
                 # `query` is deliberately NOT required. Making it mandatory
                 # would break every existing caller (and the start_episode /
                 # bootstrap internal paths) for a param whose absence degrades
-                # gracefully to the popularity order. The description urges it
+                # gracefully to the Wilson-prior. The description urges it
                 # instead; the real usefulness gains come from the shortlist
-                # default and the ignored-history demotion, not from coercing
+                # default and the Wilson-score confidence boost, not from coercing
                 # a query on every call.
             },
         ),

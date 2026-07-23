@@ -9,6 +9,12 @@ Held state:
 - ``embedder`` — forwarded to ObservationService. May be ``None`` for the
   sqlite (FTS5) embeddings backend, which indexes via DB triggers instead
   of a Python embedder.
+- ``sync_embedder`` — caller-owned ``SyncEmbedder`` forwarded to
+  ``SemanticMemoryService`` / ``ReflectionSynthesisService`` as-is. The
+  backend does NOT construct its own — it must be the same process-wide
+  instance the caller (e.g. ``mcp/server.py``) built, so its circuit
+  breaker state is shared across the write-path tools and this backend's
+  ``retrieve``/``semantic`` methods rather than split into two breakers.
 - ``session_id`` — used for episode lookups, ratings, exposures. ``None``
   means "defer resolution to env-var fallback at first write"
   (ObservationService re-resolves from ``CLAUDE_SESSION_ID`` /
@@ -45,6 +51,7 @@ class SqliteBackend:
         *,
         memory_conn: sqlite3.Connection,
         embedder: Any = None,
+        sync_embedder: Any = None,
         session_id: str | None,
         project: str,
     ) -> None:
@@ -61,11 +68,13 @@ class SqliteBackend:
             project_resolver=self._project_resolver,
             episodes=self._episodes,
         )
-        self._semantic = SemanticMemoryService(memory_conn)
         self._reflection = ReflectionService(memory_conn)
         self._memory_rating = MemoryRatingService(memory_conn)
         self._session_bootstrap = SessionBootstrapService(memory_conn)
-        self._synthesis = ReflectionSynthesisService(memory_conn)
+        self._semantic = SemanticMemoryService(memory_conn, sync_embedder=sync_embedder)
+        self._synthesis = ReflectionSynthesisService(
+            memory_conn, sync_embedder=sync_embedder
+        )
 
     # ----- Capability flags -----
 

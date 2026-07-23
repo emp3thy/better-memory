@@ -98,14 +98,14 @@ class StorageBackend(Protocol):
         use_cases, hints (list[str]), confidence (float), tech,
         evidence_count, useful_count, times_misled, updated_at}``. Sync —
         no embedder call (reflections are pre-extracted in both backends;
-        sqlite mode ranks via SQL
-        ORDER BY ``useful_count + 3 * times_overlooked DESC``, agentcore
-        mode applies the same formula client-side over metadata counters).
+        sqlite mode ranks by Wilson lower bound on (useful+overlooked)/rated,
+        computed in Python; agentcore mode applies the legacy linear formula
+        client-side over metadata counters).
 
         ``query`` optionally supplies a natural-language description of the
         task at hand. sqlite mode fuses a BM25 relevance ranking over
-        title / use_cases / hints into the popularity order via RRF; agentcore
-        mode ignores it. Omitting it yields the popularity order alone, which
+        title / use_cases / hints into the Wilson-prior via RRF; agentcore
+        mode ignores it. Omitting it yields the Wilson-prior alone, which
         is identical for every caller regardless of the work being done.
 
         This method is the canonical path for the MCP ``memory.retrieve``

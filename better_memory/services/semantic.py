@@ -15,12 +15,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
+import sqlite_vec
+
 from better_memory._common import default_clock, env_session_id
-from better_memory.services.memory_rating import (
-    IGNORED_DEMOTION_FLOOR,
-    IGNORED_DEMOTION_WEIGHT,
-    OVERLOOKED_RANKING_WEIGHT,
-)
+from better_memory.embeddings.sync_embed import SyncEmbedder
+from better_memory.services.scoring import wilson_lower_bound
 
 
 @dataclass(frozen=True)
@@ -39,6 +38,8 @@ class SemanticMemory:
     last_misled_at: str | None = None
     times_overlooked: int = 0
     last_overlooked_at: str | None = None
+    times_ignored: int = 0
+    last_ignored_at: str | None = None
 
 
 _VALID_SCOPES = ("project", "general")
@@ -56,9 +57,25 @@ class SemanticMemoryService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
+        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
+        self._sync_embedder = sync_embedder
+
+    def _store_embedding(self, memory_id: str, vector: list[float] | None) -> None:
+        if vector is None:
+            return
+        # DELETE+INSERT: vec0 tables historically mishandle UPSERT.
+        self._conn.execute(
+            "DELETE FROM semantic_embeddings WHERE memory_id = ?",
+            (memory_id,),
+        )
+        self._conn.execute(
+            "INSERT INTO semantic_embeddings (memory_id, embedding) "
+            "VALUES (?, ?)",
+            (memory_id, sqlite_vec.serialize_float32(vector)),
+        )
 
     def create(
         self, *, content: str, project: str, scope: str = "project"
@@ -79,6 +96,9 @@ class SemanticMemoryService:
             """,
             (memory_id, content, project, scope, now, now),
         )
+        if self._sync_embedder is not None:
+            self._store_embedding(
+                memory_id, self._sync_embedder.embed_text(content))
         self._conn.commit()
         return memory_id
 
@@ -98,6 +118,9 @@ class SemanticMemoryService:
             # ObservationService.set_outcome (better_memory/services/observation.py:435).
             self._conn.rollback()
             raise ValueError(f"semantic memory not found: {id}")
+        if self._sync_embedder is not None:
+            self._store_embedding(
+                id, self._sync_embedder.embed_text(content))
         self._conn.commit()
 
     def set_scope(self, *, id: str, scope: str) -> None:
@@ -175,6 +198,9 @@ class SemanticMemoryService:
                 "WHERE id = ?",
                 (now, observation_id),
             )
+            if self._sync_embedder is not None:
+                self._store_embedding(
+                    memory_id, self._sync_embedder.embed_text(row["content"]))
         except BaseException:
             self._conn.execute("ROLLBACK TO SAVEPOINT promote_observation")
             self._conn.execute("RELEASE SAVEPOINT promote_observation")
@@ -200,7 +226,8 @@ class SemanticMemoryService:
         track_exposure: bool = True,
     ) -> list[SemanticMemory]:
         """Project rows + general-scope rows from any project, ordered by
-        useful_count DESC then created_at DESC (newest first as tiebreaker).
+        Wilson lower bound of the hit rate DESC, then created_at DESC
+        (newest first) as tiebreaker for equal scores.
 
         Args:
             project: project key for project-scope filtering.
@@ -241,20 +268,12 @@ class SemanticMemoryService:
         sql = (
             "SELECT id, content, project, scope, created_at, updated_at, "
             "useful_count, last_useful_at, times_misled, last_misled_at, "
-            "times_overlooked, last_overlooked_at "
+            "times_overlooked, last_overlooked_at, "
+            "times_ignored, last_ignored_at "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
-            # Mirrors the reflections ranking, including the ignored-history
-            # demotion for memories with no useful history past the floor.
-            "ORDER BY (useful_count + ? * times_overlooked "
-            "          - ? * CASE WHEN useful_count = 0 "
-            "                     THEN MAX(0, times_ignored - ?) "
-            "                     ELSE 0 END) DESC, "
-            "created_at DESC"
+            "ORDER BY created_at DESC"
         )
-        params.append(OVERLOOKED_RANKING_WEIGHT)
-        params.append(IGNORED_DEMOTION_WEIGHT)
-        params.append(IGNORED_DEMOTION_FLOOR)
         rows = self._conn.execute(sql, params).fetchall()
         results = [
             SemanticMemory(
@@ -267,9 +286,21 @@ class SemanticMemoryService:
                 last_misled_at=r["last_misled_at"],
                 times_overlooked=r["times_overlooked"] or 0,
                 last_overlooked_at=r["last_overlooked_at"],
+                times_ignored=r["times_ignored"] or 0,
+                last_ignored_at=r["last_ignored_at"],
             )
             for r in rows
         ]
+        # Rank by Wilson lower bound of the hit rate (useful + overlooked
+        # positives over rated exposures); stable sort keeps created_at DESC
+        # as the tiebreaker for equal scores (incl. all-zero/never-rated).
+        results.sort(
+            key=lambda m: wilson_lower_bound(
+                m.useful_count + m.times_overlooked,
+                m.useful_count + m.times_overlooked + m.times_ignored,
+            ),
+            reverse=True,
+        )
         # Best-effort exposure tracking — see spec §5.2.1.
         # track_exposure=False is used by SessionBootstrapService.bootstrap,
         # which manages its own exposure write via _record_exposure.

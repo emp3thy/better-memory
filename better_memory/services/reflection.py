@@ -31,14 +31,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import sqlite_vec
+
 from better_memory import _diag
 from better_memory._common import default_clock, env_session_id
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.search.query import sanitize_fts5_query
-from better_memory.services.memory_rating import (
-    IGNORED_DEMOTION_FLOOR,
-    IGNORED_DEMOTION_WEIGHT,
-    OVERLOOKED_RANKING_WEIGHT,
-)
+from better_memory.services.scoring import wilson_lower_bound
 
 # Dropped from relevance queries. These survive `sanitize_fts5_query` and the
 # >2-char filter, but appear in so many reflections that OR-matching on them
@@ -52,6 +51,37 @@ _QUERY_STOPWORDS: frozenset[str] = frozenset({
     "make", "made", "want", "need", "like", "just", "some", "which", "who",
     "where", "here", "over", "under", "each", "other", "same", "such",
 })
+
+
+def _embedding_source_text(title: str, use_cases: str, hints: list[str]) -> str:
+    """What gets embedded for a reflection: the discriminating text."""
+    return "\n".join([title, use_cases, *hints])
+
+
+def _write_reflection_embedding(
+    conn: sqlite3.Connection,
+    reflection_id: str,
+    vector: list[float] | None,
+) -> None:
+    """DELETE+INSERT the vec0 row for one reflection's embedding.
+
+    Shared by :class:`ReflectionSynthesisService` (synthesis writes) and
+    :class:`ReflectionService` (UI-driven ``update_text`` writes) so both
+    write paths keep ``reflection_embeddings`` in sync with the
+    reflection's current title/use_cases/hints. DELETE+INSERT rather than
+    UPSERT because vec0 tables historically mishandle UPSERT.
+    """
+    if vector is None:
+        return
+    conn.execute(
+        "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
+        (reflection_id,),
+    )
+    conn.execute(
+        "INSERT INTO reflection_embeddings (reflection_id, embedding) "
+        "VALUES (?, ?)",
+        (reflection_id, sqlite_vec.serialize_float32(vector)),
+    )
 
 
 def _later_ts(a: str | None, b: str | None) -> str | None:
@@ -300,6 +330,27 @@ def _parse_merge(item: object) -> MergeAction:
     )
 
 
+#: Max embeddings written per retrieve call by the lazy self-heal. Keeps
+#: worst-case added latency bounded; cli.backfill_embeddings is the bulk path.
+SELF_HEAL_BATCH_CAP = 20
+
+#: A memory with fewer than this many rated exposures is "untested": its
+#: Wilson score is statistically meaningless, so it competes for the
+#: reserved exploration slot instead of the proven slots.
+EXPLORATION_RATED_FLOOR = 3
+
+
+def _wilson_rated(row) -> int:
+    """Total rated exposures backing this memory's score."""
+    return (row["useful_count"] + row["times_overlooked"]
+            + row["times_ignored"])
+
+
+def _wilson_score(row) -> float:
+    positive = row["useful_count"] + row["times_overlooked"]
+    return wilson_lower_bound(positive, _wilson_rated(row))
+
+
 class ReflectionSynthesisService:
     """Orchestrates pre-start synthesis: load, prompt, parse, apply, return.
 
@@ -319,9 +370,15 @@ class ReflectionSynthesisService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
+        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
+        self._sync_embedder = sync_embedder
+
+    def _store_embedding(self, reflection_id: str, vector: list[float] | None) -> None:
+        _write_reflection_embedding(self._conn, reflection_id, vector)
+
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
         # Mirror EpisodeService.start_foreground / ObservationService.create
@@ -772,6 +829,14 @@ class ReflectionSynthesisService:
                 [now, *valid_sources],
             )
 
+            if self._sync_embedder is not None:
+                self._store_embedding(
+                    reflection_id,
+                    self._sync_embedder.embed_text(_embedding_source_text(
+                        action.title, action.use_cases, action.hints,
+                    )),
+                )
+
     def _derive_new_reflection_scope(
         self, source_obs_ids: list[str]
     ) -> str:
@@ -831,8 +896,8 @@ class ReflectionSynthesisService:
             # leftover from a prior iteration.
             now = self._clock().isoformat()
             row = self._conn.execute(
-                "SELECT hints, confidence, status FROM reflections "
-                "WHERE id = ?",
+                "SELECT title, use_cases, hints, confidence, status "
+                "FROM reflections WHERE id = ?",
                 (action.reflection_id,),
             ).fetchone()
             if row is None:
@@ -915,6 +980,17 @@ class ReflectionSynthesisService:
                         now,
                         action.reflection_id,
                     ),
+                )
+
+            if self._sync_embedder is not None:
+                final_use_cases = (action.rewrite_use_cases
+                                   if action.rewrite_use_cases is not None
+                                   else row["use_cases"])
+                self._store_embedding(
+                    action.reflection_id,
+                    self._sync_embedder.embed_text(_embedding_source_text(
+                        row["title"], final_use_cases, merged_hints,
+                    )),
                 )
 
     # ------------------------------------------------------------- _apply_merge
@@ -1037,6 +1113,14 @@ class ReflectionSynthesisService:
                     now,
                     action.target_id,
                 ),
+            )
+
+            # Target text is untouched by merge (counters/evidence only), so
+            # no re-embed; drop the superseded source's vector so it stops
+            # competing for kNN slots.
+            self._conn.execute(
+                "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
+                (action.source_id,),
             )
 
     # ------------------------------------------------------------ _apply_ignore
@@ -1186,22 +1270,81 @@ class ReflectionSynthesisService:
         )
 
     # --------------------------------------------------------- retrieve_reflections
-    def _fuse_by_relevance(
-        self, rows: list, *, query: str, rrf_k: int = 60,
-    ) -> list:
-        """Re-order ``rows`` by RRF fusion of popularity rank and BM25 rank.
+    def _heal_missing_embeddings(self, rows) -> None:
+        """Embed up to SELF_HEAL_BATCH_CAP candidates that lack vectors.
 
-        ``rows`` arrives in popularity order (``useful_count + 3*times_overlooked``,
+        Historical rows and write-time failures repair themselves on their
+        first relevant retrieval. Entirely best-effort; one embed_batch call.
+        """
+        if self._sync_embedder is None or not rows:
+            return
+        ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" for _ in ids)
+        have = {
+            row[0] for row in self._conn.execute(
+                f"SELECT reflection_id FROM reflection_embeddings "
+                f"WHERE reflection_id IN ({placeholders})", ids,
+            )
+        }
+        todo = [r for r in rows if r["id"] not in have][:SELF_HEAL_BATCH_CAP]
+        if not todo:
+            return
+        texts = [
+            _embedding_source_text(r["title"], r["use_cases"],
+                                   json.loads(r["hints"]))
+            for r in todo
+        ]
+        vectors = self._sync_embedder.embed_batch(texts)
+        if vectors is None:
+            return
+        for r, vec in zip(todo, vectors):
+            self._store_embedding(r["id"], vec)
+        self._conn.commit()
+
+    def _vec_ranks(self, query_vector, candidate_ids) -> dict[str, int]:
+        """reflection_id -> vec rank (0 = closest) among the candidates.
+
+        sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` — no
+        extra predicates — so fetch top-k then filter, exactly as
+        search/hybrid.py:_vec_candidates does.
+        """
+        if query_vector is None or not candidate_ids:
+            return {}
+        try:
+            knn = self._conn.execute(
+                "SELECT reflection_id FROM reflection_embeddings "
+                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vector),
+                 max(len(candidate_ids), 50)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        wanted = set(candidate_ids)
+        out: dict[str, int] = {}
+        for row in knn:
+            if row[0] in wanted:
+                out[row[0]] = len(out)
+        return out
+
+    def _fuse_by_relevance(
+        self, rows: list, *, query: str, query_vector=None, rrf_k: int = 60,
+    ) -> list:
+        """Re-order ``rows`` by RRF fusion of popularity rank, BM25 rank, and
+        vector rank.
+
+        ``rows`` arrives in Wilson-prior order (hit-rate lower bound,
         then confidence, then recency). We compute a second ranking over the same
         ids by BM25 relevance against ``reflection_fts`` (title / use_cases /
-        hints) and fuse the two with reciprocal rank fusion:
+        hints), and (when ``query_vector`` is available) a third ranking by
+        vector distance against ``reflection_embeddings``, then fuse all
+        available legs with reciprocal rank fusion:
 
-            score(d) = 1/(k + pop_rank(d)) + 1/(k + rel_rank(d))
+            score(d) = 1/(k + pop_rank(d)) + 1/(k + rel_rank(d)) + 1/(k + vec_rank(d))
 
-        matching :mod:`better_memory.search.hybrid`. Rows the query does not
-        match keep only the popularity term, so relevance *promotes* without
-        ever discarding — a query that matches nothing degrades exactly to the
-        previous behaviour.
+        matching :mod:`better_memory.search.hybrid`. Rows a given leg does not
+        match keep only the other terms, so relevance *promotes* without ever
+        discarding — a query that matches nothing on any leg degrades exactly
+        to the previous behaviour.
 
         Tokens are OR-ed rather than AND-ed: ``sanitize_fts5_query`` joins bare
         terms, which FTS5 reads as implicit AND, and a natural-language task
@@ -1216,42 +1359,71 @@ class ReflectionSynthesisService:
             t for t in sanitized.split()
             if len(t) > 2 and t.lower() not in _QUERY_STOPWORDS
         ]
-        if not tokens:
-            return rows
-        match_expr = " OR ".join(tokens)
-
-        placeholders = ",".join("?" for _ in ids)
-        try:
-            rel_rows = self._conn.execute(
-                f"""
-                SELECT r.id AS id, bm25(reflection_fts) AS bm
-                FROM reflection_fts
-                JOIN reflections r ON r.rowid = reflection_fts.rowid
-                WHERE reflection_fts MATCH ? AND r.id IN ({placeholders})
-                ORDER BY bm ASC
-                """,
-                [match_expr, *ids],
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # Malformed MATCH expression despite sanitising, or the FTS table
-            # is absent on an old DB. Relevance is an enhancement, never a
-            # hard dependency — fall back to the popularity order.
-            return rows
-
-        if not rel_rows:
-            return rows
+        rel_rows = []
+        if tokens:
+            match_expr = " OR ".join(tokens)
+            placeholders = ",".join("?" for _ in ids)
+            try:
+                rel_rows = self._conn.execute(
+                    f"""
+                    SELECT r.id AS id, bm25(reflection_fts) AS bm
+                    FROM reflection_fts
+                    JOIN reflections r ON r.rowid = reflection_fts.rowid
+                    WHERE reflection_fts MATCH ? AND r.id IN ({placeholders})
+                    ORDER BY bm ASC
+                    """,
+                    [match_expr, *ids],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Malformed MATCH expression despite sanitising, or the FTS
+                # table is absent on an old DB. Relevance is an enhancement,
+                # never a hard dependency.
+                rel_rows = []
 
         rel_rank = {r["id"]: i for i, r in enumerate(rel_rows)}
+        vec_rank = self._vec_ranks(query_vector, ids)
+
+        if not rel_rank and not vec_rank:
+            return rows
+
         scored = []
         for pop_rank, row in enumerate(rows):
             score = 1.0 / (rrf_k + pop_rank)
             rr = rel_rank.get(row["id"])
             if rr is not None:
                 score += 1.0 / (rrf_k + rr)
-            scored.append((score, pop_rank, row))
-        # pop_rank breaks ties deterministically and keeps the fusion stable.
-        scored.sort(key=lambda t: (-t[0], t[1]))
-        return [row for _, _, row in scored]
+            vr = vec_rank.get(row["id"])
+            if vr is not None:
+                score += 1.0 / (rrf_k + vr)
+            # RRF sums are symmetric: a row with (pop_rank=a, vec_rank=b) ties
+            # exactly with one at (pop_rank=b, vec_rank=a). Break such ties
+            # toward the closer semantic match (lower vec_rank) before
+            # falling back to pop_rank — otherwise a strong vec-only match
+            # (this method's whole point) can lose a coin-flip tie to a
+            # popularity-only row. vec_rank absent (no embedder/no vec leg)
+            # collapses to sys.maxsize for every row, so the tiebreak is a
+            # no-op and behaviour matches the shipped two-leg fusion exactly.
+            scored.append((score, vr if vr is not None else sys.maxsize, pop_rank, row))
+        scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+        return [row for _, _, _, row in scored]
+
+    def _bucket_item(self, r) -> dict:
+        """Convert one reflections row into the dict shape returned to callers."""
+        return {
+            "id": r["id"],
+            "title": r["title"],
+            "phase": r["phase"],
+            "use_cases": r["use_cases"],
+            "hints": json.loads(r["hints"]),
+            "confidence": r["confidence"],
+            "tech": r["tech"],
+            "evidence_count": r["evidence_count"],
+            "useful_count": r["useful_count"],
+            "times_misled": r["times_misled"],
+            "times_overlooked": r["times_overlooked"],
+            "times_ignored": r["times_ignored"],
+            "updated_at": r["updated_at"],
+        }
 
     def retrieve_reflections(
         self,
@@ -1264,7 +1436,7 @@ class ReflectionSynthesisService:
         track_exposure: bool = True,
         query: str | None = None,
     ) -> dict[str, list[dict]]:
-        """Return reflections bucketed by polarity, ordered by confidence DESC.
+        """Return reflections bucketed by polarity, ordered by Wilson-prior then confidence.
 
         Filters:
         - ``project``: required.
@@ -1273,9 +1445,9 @@ class ReflectionSynthesisService:
         - ``polarity``: optional exact match; non-matching buckets remain empty.
         - ``query``: optional natural-language description of the task at hand.
           When given, the filtered set is re-ordered by RRF fusion of the
-          popularity prior with a BM25 relevance ranking over
+          Wilson-prior with a BM25 relevance ranking over
           ``title / use_cases / hints`` (see :meth:`_fuse_by_relevance`).
-          Without it, ordering is the popularity prior alone — which returns
+          Without it, ordering is the Wilson-prior alone — which returns
           the same rows to every caller regardless of what they are doing.
         - ``limit_per_bucket``: cap each polarity bucket. Default 20 per spec §7.
           Pass ``None`` to disable the cap (returns every matching row per
@@ -1312,56 +1484,68 @@ class ReflectionSynthesisService:
                 params.append(polarity)
 
             where = " AND ".join(clauses)
-            params.append(OVERLOOKED_RANKING_WEIGHT)
-            params.append(IGNORED_DEMOTION_WEIGHT)
-            params.append(IGNORED_DEMOTION_FLOOR)
             _diag.step(fn, "executing_select")
-            # The demotion term fires only for memories with no useful history
-            # at all, and only past the floor — see IGNORED_DEMOTION_FLOOR.
-            # Without it the ranking key has no negative term, so a memory that
-            # has been served 142 times and helped zero times sorts level with
-            # one that has never been served.
             rows = self._conn.execute(
                 f"""
                 SELECT id, title, phase, polarity, use_cases, hints,
                        confidence, tech, evidence_count, useful_count,
-                       times_misled, updated_at
+                       times_misled, times_overlooked, times_ignored,
+                       updated_at
                 FROM reflections
                 WHERE {where}
-                ORDER BY (useful_count + ? * times_overlooked
-                          - ? * CASE WHEN useful_count = 0
-                                     THEN MAX(0, times_ignored - ?)
-                                     ELSE 0 END) DESC,
-                         confidence DESC, updated_at DESC
                 """,
                 params,
             ).fetchall()
             _diag.step(fn, "select_done", n_rows=len(rows))
 
+            # Rank in Python: Wilson prior, then confidence, then recency.
+            # Chained stable sorts apply tiebreakers lowest-priority first.
+            rows = list(rows)
+            rows.sort(key=lambda r: r["updated_at"] or "", reverse=True)
+            rows.sort(key=lambda r: r["confidence"], reverse=True)
+            rows.sort(key=_wilson_score, reverse=True)
+
             if query:
-                rows = self._fuse_by_relevance(rows, query=query)
+                self._heal_missing_embeddings(rows)
+                query_vector = (
+                    self._sync_embedder.embed_text(query)
+                    if self._sync_embedder is not None else None
+                )
+                rows = self._fuse_by_relevance(
+                    rows, query=query, query_vector=query_vector,
+                )
                 _diag.step(fn, "relevance_fused", n_rows=len(rows))
 
             # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
+            # reserve: only worth reserving an exploration slot when there's room for
+            # at least one proven row alongside it (cap < 2 means the untested row
+            # would consume the entire bucket).
             cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize
+            reserve = limit_per_bucket is not None and cap >= 2
             buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
+            by_polarity: dict[str, list] = {"do": [], "dont": [], "neutral": []}
             for r in rows:
-                bucket = buckets[r["polarity"]]
-                if len(bucket) >= cap:
+                by_polarity[r["polarity"]].append(r)
+            for polarity, group in by_polarity.items():
+                if not reserve:
+                    buckets[polarity] = [self._bucket_item(r) for r in group[:cap]]
                     continue
-                bucket.append({
-                    "id": r["id"],
-                    "title": r["title"],
-                    "phase": r["phase"],
-                    "use_cases": r["use_cases"],
-                    "hints": json.loads(r["hints"]),
-                    "confidence": r["confidence"],
-                    "tech": r["tech"],
-                    "evidence_count": r["evidence_count"],
-                    "useful_count": r["useful_count"],
-                    "times_misled": r["times_misled"],
-                    "updated_at": r["updated_at"],
-                })
+                tested_idx = [i for i, r in enumerate(group)
+                              if _wilson_rated(r) >= EXPLORATION_RATED_FLOOR]
+                untested_idx = [i for i, r in enumerate(group)
+                                if _wilson_rated(r) < EXPLORATION_RATED_FLOOR]
+                chosen = tested_idx[: cap - 1]
+                if untested_idx:
+                    chosen.append(untested_idx[0])
+                if len(chosen) < cap:               # top up from the remainder
+                    taken = set(chosen)
+                    for i in range(len(group)):
+                        if len(chosen) >= cap:
+                            break
+                        if i not in taken:
+                            chosen.append(i)
+                chosen.sort()                        # preserve ranked order
+                buckets[polarity] = [self._bucket_item(group[i]) for i in chosen]
             _diag.step(
                 fn, "bucketed",
                 do=len(buckets["do"]), dont=len(buckets["dont"]),
@@ -1442,9 +1626,11 @@ class ReflectionService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
+        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
+        self._sync_embedder = sync_embedder
 
     def confirm(self, *, reflection_id: str) -> None:
         """pending_review → confirmed; no-op on confirmed; raise on retired/superseded."""
@@ -1507,6 +1693,12 @@ class ReflectionService:
         Blocked on retired/superseded — once a reflection has left the
         active set, mutating its text would silently change the audit
         trail.
+
+        Re-embeds when constructed with a ``sync_embedder``: the vector
+        indexes ``title + use_cases + hints`` (see
+        ``_embedding_source_text``), so editing use_cases/hints without
+        refreshing the vector would leave a stale embedding pointing at
+        superseded text. No-op when ``sync_embedder`` is ``None``.
         """
         if not use_cases or not use_cases.strip():
             raise ValueError("use_cases must not be empty")
@@ -1519,7 +1711,8 @@ class ReflectionService:
         if not hint_list:
             raise ValueError("hints must not be empty")
         row = self._conn.execute(
-            "SELECT status FROM reflections WHERE id = ?", (reflection_id,)
+            "SELECT title, status FROM reflections WHERE id = ?",
+            (reflection_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"Reflection not found: {reflection_id}")
@@ -1534,6 +1727,14 @@ class ReflectionService:
             "WHERE id = ?",
             (use_cases, json.dumps(hint_list), now, reflection_id),
         )
+        if self._sync_embedder is not None:
+            _write_reflection_embedding(
+                self._conn,
+                reflection_id,
+                self._sync_embedder.embed_text(_embedding_source_text(
+                    row["title"], use_cases, hint_list,
+                )),
+            )
         self._conn.commit()
 
     def promote_to_general(self, *, reflection_id: str) -> None:

@@ -474,6 +474,101 @@ class TestSemanticRowRatingStat:
         assert "rating-overlooked" in body
 
 
+class TestSemanticEmbeddingWiring:
+    """UI create/update routes must embed, not just MCP-driven writes.
+
+    The shared `client` fixture pins BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite
+    (see tests/ui/conftest.py) so ordinary route tests don't depend on a
+    live Ollama instance. These tests build their own app with an explicit
+    fake sync_embedder to prove the wiring — app.py passes
+    app.extensions["sync_embedder"] into every SemanticMemoryService(...)
+    construction site.
+    """
+
+    def _make_client(self, tmp_db: Path, fake_embedder):
+        from unittest.mock import patch as _patch
+
+        from better_memory.embeddings.sync_embed import SyncEmbedder
+        from better_memory.ui.app import create_app
+
+        app = create_app(
+            start_watchdog=False, db_path=tmp_db,
+            sync_embedder=SyncEmbedder(lambda: fake_embedder),
+        )
+        app.config["TESTING"] = True
+        self._timer_patch = _patch("better_memory.ui.app.threading.Timer")
+        self._timer_patch.start()
+        return app.test_client()
+
+    def _vec_count(self, tmp_db: Path) -> int:
+        # sqlite_vec's vec0 virtual table needs its extension loaded — a
+        # bare sqlite3.connect() raises "no such module: vec0". Use the
+        # project's connect() helper, which loads it.
+        from better_memory.db.connection import connect as _connect
+
+        conn = _connect(tmp_db)
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM semantic_embeddings"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_create_writes_semantic_embedding_row(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from better_memory.ui import app as app_module
+        from tests.services._embedding_fakes import FakeEmbedder
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        fake = FakeEmbedder()
+        client = self._make_client(tmp_db, fake)
+        try:
+            response = client.post(
+                "/semantic",
+                data={"content": "new rule", "scope": "general"},
+                headers={"Origin": "http://localhost"},
+            )
+            assert response.status_code == 200
+        finally:
+            self._timer_patch.stop()
+
+        assert self._vec_count(tmp_db) == 1
+        assert fake.calls == ["new rule"]
+
+    def test_update_reembeds_semantic_memory(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import sqlite3
+
+        from better_memory.ui import app as app_module
+        from tests.services._embedding_fakes import FakeEmbedder
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        with sqlite3.connect(tmp_db) as seed_conn:
+            seed_conn.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) VALUES "
+                "('m1','old text','proj-a','project',"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+            )
+            seed_conn.commit()
+
+        fake = FakeEmbedder()
+        client = self._make_client(tmp_db, fake)
+        try:
+            response = client.post(
+                "/semantic/m1/update", data={"content": "new text"},
+                headers={"Origin": "http://localhost"},
+            )
+            assert response.status_code == 200
+        finally:
+            self._timer_patch.stop()
+
+        assert self._vec_count(tmp_db) == 1  # replaced, not duplicated
+        assert fake.calls == ["new text"]
+
+
 class TestSemanticUpdate:
     def test_update_changes_content(
         self, client: FlaskClient, tmp_db: Path,
