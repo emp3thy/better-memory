@@ -4,7 +4,7 @@
 
 **Goal:** Replace popularity ranking with a Wilson-score prior + exploration slot, and add reflection/semantic embeddings with three-leg RRF query fusion.
 
-**Architecture:** SQL keeps filtering; ranking moves to Python (`services/scoring.py`). The Ollama embedder is threaded into `ReflectionSynthesisService` and `SemanticMemoryService`; sync code reaches it through `async_bridge.run_async_in_worker`. Query relevance fuses prior rank + BM25 rank + vec-kNN rank via RRF. Everything embedding-related is best-effort and degrades to today's BM25-only behaviour.
+**Architecture:** SQL keeps filtering; ranking moves to Python (`services/scoring.py`). Sync services reach Ollama through a new `SyncEmbedder` (fresh embedder per bridge-worker call — `httpx.AsyncClient` is loop-bound — with a 60s circuit breaker). Query relevance fuses prior rank + BM25 rank + vec-kNN rank via RRF. Every embedding path is best-effort and degrades to the shipped BM25-only behaviour.
 
 **Tech Stack:** Python 3.12, sqlite + sqlite-vec (vec0), FTS5, Ollama `nomic-embed-text` (768-dim), pytest.
 
@@ -12,14 +12,29 @@
 
 ## Global Constraints
 
-- Branch: `feat/retrieval-quality` (exists; spec committed as `604fb79`).
-- Test command: `./.venv/Scripts/python.exe -m pytest <path> -v` from repo root (full suite: `./.venv/Scripts/python.exe -m pytest tests -q`, ~10 min, integration deselected by default).
-- Typecheck: `./.venv/Scripts/python.exe -m pyright` must stay at 0 errors.
-- Every Ollama touchpoint: best-effort, catch `Exception`, never raise into caller.
-- `sqlite3.Connection` is bound to its creating thread — embeddings may be computed on the bridge worker thread, but ALL DB reads/writes stay on the caller thread.
-- Ruff line length 100.
-- Website sync guardrail (conf 1.0 reflection): `website/index.md` / `website/architecture.md` prose must match tool behaviour changes in the same PR.
-- Commit after every task, message style `feat(scope): ...` / `test(scope): ...`, footer `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Branch: `feat/retrieval-quality` (exists; spec `604fb79`).
+- Test command: `./.venv/Scripts/python.exe -m pytest <path> -v` from repo root (full suite: `./.venv/Scripts/python.exe -m pytest tests -q`).
+- Typecheck: `./.venv/Scripts/python.exe -m pyright` stays at 0 errors.
+- Every Ollama touchpoint: best-effort, never raises into the caller.
+- `sqlite3.Connection` is thread-bound: embeds happen on the bridge worker; ALL DB I/O stays on the caller thread.
+- Vector serialisation is `sqlite_vec.serialize_float32(vector)` everywhere (the proven call from `observation.py:206`); `db/connection.py` loads the extension on every connect, so vec0 works in tests and CLI without ceremony.
+- `async_bridge.run_async_in_worker(coro_factory, *, timeout=None)` takes a **factory invoked inside the worker thread** — resources must be constructed inside it.
+- Ruff line length 100. Website-sync guardrail applies (conf 1.0 reflection).
+- Commit after every task; footer `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+
+## Verified-against-source facts (do not re-derive)
+
+| Fact | Where verified |
+|---|---|
+| `sqlite_vec.serialize_float32` is the vec0 write format | `services/observation.py:206` |
+| kNN SQL: `WHERE embedding MATCH ? AND k = ? ORDER BY distance`, then filter ids in Python (no extra predicates allowed) | `search/hybrid.py:274-296` |
+| Deleting vec0 rows is routine | `services/retention.py:250` |
+| `OllamaEmbedder.__init__` builds `httpx.AsyncClient` immediately; client is loop-bound; ctor does NOT contact Ollama; `aclose()` closes owned clients | `embeddings/ollama.py:52-107` |
+| `run_async_in_worker` signature + fresh-loop-per-call semantics | `async_bridge.py:27-60` |
+| `_apply_new` writes title/use_cases/hints from `NewAction` fields directly | `reflection.py:718-775` |
+| `_apply_augment` SELECTs only `hints, confidence, status` today; UPDATE branches on `rewrite_use_cases`; title never changes | `reflection.py:817-919` |
+| `_apply_merge` changes NO text on the target (counters/evidence only); source becomes `superseded` | `reflection.py:1000-1040` |
+| Action dataclasses: `NewAction(title, phase, polarity, use_cases, hints, tech, confidence, source_observation_ids)` etc. | `reflection.py:153-180` |
 
 ---
 
@@ -30,7 +45,7 @@
 - Test: `tests/services/test_scoring.py`
 
 **Interfaces:**
-- Produces: `wilson_lower_bound(positive: int, n: int, z: float = 1.96) -> float` — 0.0 when `n == 0`; never negative. Consumed by Tasks 2, 3, 4.
+- Produces: `wilson_lower_bound(positive: int, n: int, z: float = 1.96) -> float` — 0.0 when `n == 0`; clamped to [0, 1]. Consumed by Tasks 2, 3, 4.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -142,15 +157,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 2: Reflections ranked by Wilson score
 
 **Files:**
-- Modify: `better_memory/services/reflection.py` (retrieve_reflections, ~lines 1256-1400)
-- Modify: `better_memory/services/memory_rating.py` (delete `IGNORED_DEMOTION_FLOOR`, `IGNORED_DEMOTION_WEIGHT`, `OVERLOOKED_RANKING_WEIGHT`)
-- Modify: `tests/services/test_useful_count_ranking.py`
-- Delete: `tests/services/test_ignored_demotion.py` (superseded — its scenarios move to the new test file)
+- Modify: `better_memory/services/reflection.py` (retrieve_reflections ~1256-1400)
+- Modify: `better_memory/services/memory_rating.py` (delete the three ranking constants)
+- Delete: `tests/services/test_ignored_demotion.py`, `tests/services/test_useful_count_ranking.py` (both pin the superseded ordering; scenarios covered below)
 - Test: `tests/services/test_wilson_ranking.py`
 
 **Interfaces:**
-- Consumes: `wilson_lower_bound` from Task 1.
-- Produces: `retrieve_reflections` rows now include `times_overlooked` and `times_ignored`; SQL no longer orders; Python sorts by `(wilson DESC, confidence DESC, updated_at DESC)`. `_wilson_rated(row) -> int` and `_wilson_score(row) -> float` module-level helpers in `reflection.py` — Task 4 reuses `_wilson_rated` for the untested test.
+- Consumes: `wilson_lower_bound` (Task 1).
+- Produces: rows include `times_overlooked` + `times_ignored`; SQL no longer orders; Python sorts `(wilson DESC, confidence DESC, updated_at DESC)`. Module helpers `_wilson_rated(row) -> int`, `_wilson_score(row) -> float` (Task 4 reuses `_wilson_rated`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -202,11 +216,6 @@ def _ids(conn, **kw):
     return [r["id"] for r in svc.retrieve_reflections(project="p", **kw)["do"]]
 
 
-class TestWilsonRanking:
-    def test_hit_rate_beats_raw_count(self):
-        pass  # replaced below — see class body
-
-    
 class TestWilsonOrdering:
     def test_hit_rate_beats_raw_count(self, conn):
         _seed(conn, "r-workhorse", useful=67, ignored=125)      # 67/192 ~ 0.28
@@ -248,27 +257,21 @@ class TestWilsonOrdering:
             assert not hasattr(mr, name), f"{name} should be deleted"
 ```
 
-Delete the placeholder `TestWilsonRanking` class (editing artifact) before running; keep only `TestWilsonOrdering`.
-
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/services/test_wilson_ranking.py -v`
-Expected: FAIL — ordering assertions (current code ranks r-workhorse first) and `test_demotion_constants_are_gone`.
+Expected: FAIL — ordering assertions and `test_demotion_constants_are_gone`.
 
 - [ ] **Step 3: Implement**
 
-In `better_memory/services/reflection.py`:
-
-3a. Replace the import of the deleted constants (top of file):
+3a. Imports in `reflection.py` — replace the constants import with:
 
 ```python
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.scoring import wilson_lower_bound
 ```
 
-(remove the `from better_memory.services.memory_rating import (IGNORED_DEMOTION_FLOOR, ...)` block).
-
-3b. Add module-level helpers directly above `class ReflectionSynthesisService`:
+3b. Module helpers above the service class:
 
 ```python
 def _wilson_rated(row) -> int:
@@ -282,11 +285,9 @@ def _wilson_score(row) -> float:
     return wilson_lower_bound(positive, _wilson_rated(row))
 ```
 
-3c. In `retrieve_reflections`, replace the SELECT (drop the demotion params and ORDER BY; add the two counter columns; sort in Python):
+3c. In `retrieve_reflections`: delete the two demotion `params.append(...)` lines; SELECT gains `times_overlooked, times_ignored`; ORDER BY removed; Python sort after fetch:
 
 ```python
-            where = " AND ".join(clauses)
-            _diag.step(fn, "executing_select")
             rows = self._conn.execute(
                 f"""
                 SELECT id, title, phase, polarity, use_cases, hints,
@@ -308,23 +309,19 @@ def _wilson_score(row) -> float:
             rows.sort(key=_wilson_score, reverse=True)
 ```
 
-(`params` no longer receives the two demotion appends — delete those lines too.)
-
-3d. The bucket-fill loop and `_fuse_by_relevance` call stay as they are, but the bucket dicts must carry the new counters — extend the `bucket.append({...})` literal with:
+3d. Bucket item dicts gain the two counters:
 
 ```python
                     "times_overlooked": r["times_overlooked"],
                     "times_ignored": r["times_ignored"],
 ```
 
-In `better_memory/services/memory_rating.py`: delete the `OVERLOOKED_RANKING_WEIGHT`, `IGNORED_DEMOTION_FLOOR`, `IGNORED_DEMOTION_WEIGHT` constants and their comment blocks.
-
-In `tests/services/test_useful_count_ranking.py`: this file pins the OLD ordering (`useful_count` beats confidence regardless of ignores). Rewrite its two assertions to the Wilson contract or delete the file if fully covered by `test_wilson_ranking.py` — it is fully covered; delete it. Also delete `tests/services/test_ignored_demotion.py` (scenarios live on in `test_proven_dead_weight_sinks_below_modest_performer` + `test_demotion_constants_are_gone`).
+3e. `memory_rating.py`: delete `OVERLOOKED_RANKING_WEIGHT`, `IGNORED_DEMOTION_FLOOR`, `IGNORED_DEMOTION_WEIGHT` and their comments. Delete the two superseded test files.
 
 - [ ] **Step 4: Run the affected tests**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/services/test_wilson_ranking.py tests/services/test_reflection_query_relevance.py tests/services/test_reflection_retrieve_fields.py tests/mcp -q`
-Expected: all pass (query-relevance tests still pass — fusion consumes the new ordering transparently).
+Expected: all pass.
 
 - [ ] **Step 5: Commit**
 
@@ -340,14 +337,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 3: Semantic memories ranked by Wilson score
 
 **Files:**
-- Modify: `better_memory/services/semantic.py` (list_for_project SELECT/ORDER, ~lines 237-260; imports ~19-23; SemanticMemory dataclass)
-- Test: `tests/services/test_semantic.py` (add class; existing tests keep passing)
+- Modify: `better_memory/services/semantic.py` (imports ~19-23; dataclass ~26-42; list_for_project ~237-260)
+- Test: `tests/services/test_semantic.py` (append class)
 
 **Interfaces:**
 - Consumes: `wilson_lower_bound` (Task 1).
-- Produces: `SemanticMemory` dataclass gains `times_ignored: int = 0`; `list_for_project` ordered by `(wilson DESC, created_at DESC)`.
+- Produces: `SemanticMemory` gains `times_ignored: int = 0`, `last_ignored_at: str | None = None`; `list_for_project` ordered `(wilson DESC, created_at DESC)`.
 
-- [ ] **Step 1: Write the failing test** (append to `tests/services/test_semantic.py`, reusing that file's existing fixtures/helpers for creating memories — check its seed helper name before writing):
+- [ ] **Step 1: Write the failing test** — append to `tests/services/test_semantic.py`, reusing its existing `conn` fixture/helpers (read the file's fixture name first; monkeypatch the service clock if creation timestamps collide, as neighbouring tests there do):
 
 ```python
 class TestSemanticWilsonRanking:
@@ -374,21 +371,12 @@ class TestSemanticWilsonRanking:
         assert ids == [rated, unrated]
 ```
 
-(Adapt the fixture name to the file's existing `conn` fixture; if creation timestamps collide within the test, monkeypatch the service clock as neighbouring tests in that file do.)
-
 - [ ] **Step 2: Run to verify failure**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/services/test_semantic.py -v -k Wilson`
-Expected: FAIL (current order puts the 67-count row first; `times_ignored` not selected).
+Expected: FAIL.
 
-- [ ] **Step 3: Implement**
-
-In `better_memory/services/semantic.py`:
-
-- Imports: replace the three-constant import block with `from better_memory.services.scoring import wilson_lower_bound`.
-- `SemanticMemory` dataclass: add `times_ignored: int = 0` and `last_ignored_at: str | None = None` after the overlooked fields.
-- `list_for_project` SQL: add `times_ignored, last_ignored_at` to the SELECT column list; replace the ORDER BY block and its three `params.append(...)` lines with plain `"ORDER BY created_at DESC"` (recency pre-sort; final order applied in Python).
-- After `rows = self._conn.execute(sql, params).fetchall()` build `results` as now (passing the two new fields into the dataclass), then sort:
+- [ ] **Step 3: Implement** — imports: `from better_memory.services.scoring import wilson_lower_bound` (drop the old constants import); dataclass fields added; SELECT gains `times_ignored, last_ignored_at`; ORDER BY block + its `params.append` lines replaced with `"ORDER BY created_at DESC"`; after building `results`:
 
 ```python
         results.sort(
@@ -400,9 +388,9 @@ In `better_memory/services/semantic.py`:
         )
 ```
 
-(Stable sort preserves the SQL `created_at DESC` order inside equal scores.)
+(Stable sort keeps `created_at DESC` inside equal scores.)
 
-- [ ] **Step 4: Run the semantic + bootstrap tests**
+- [ ] **Step 4: Run**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/services/test_semantic.py tests/services/test_session_bootstrap.py -q`
 Expected: all pass.
@@ -421,12 +409,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 4: Exploration slot
 
 **Files:**
-- Modify: `better_memory/services/reflection.py` (bucket-fill loop in retrieve_reflections)
+- Modify: `better_memory/services/reflection.py` (bucket-fill in retrieve_reflections)
 - Test: `tests/services/test_exploration_slot.py`
 
 **Interfaces:**
-- Consumes: `_wilson_rated` (Task 2). Untested ≡ `_wilson_rated(row) < 3` — the constant lives as `EXPLORATION_RATED_FLOOR = 3` in `reflection.py`.
-- Produces: per-bucket shortlist = up to `cap-1` best tested rows + the best untested row (fused/ranked order), when both kinds exist. `cap is None` (bootstrap) ⇒ no reservation.
+- Consumes: `_wilson_rated` (Task 2). `EXPLORATION_RATED_FLOOR = 3` constant in `reflection.py`.
+- Produces: per bucket, up to `cap-1` tested rows + best untested row (ranked order); no untested ⇒ plain fill; `cap None` ⇒ no reservation. `_bucket_item(self, r) -> dict` extracted so both fill paths share the dict literal.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -518,11 +506,11 @@ class TestExplorationSlot:
 - [ ] **Step 2: Run to verify failure**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/services/test_exploration_slot.py -v`
-Expected: `test_last_slot_goes_to_best_untested` and `test_two_ratings_is_still_untested_three_is_not` FAIL (untested rows sort last today and never enter a full bucket).
+Expected: `test_last_slot_goes_to_best_untested` and `test_two_ratings_is_still_untested_three_is_not` FAIL.
 
 - [ ] **Step 3: Implement**
 
-In `reflection.py`, add near `_wilson_score`:
+Constant near `_wilson_score`:
 
 ```python
 #: A memory with fewer than this many rated exposures is "untested": its
@@ -531,74 +519,40 @@ In `reflection.py`, add near `_wilson_score`:
 EXPLORATION_RATED_FLOOR = 3
 ```
 
-Replace the bucket-fill loop (currently: iterate `rows`, append until `cap`) with:
+Extract the existing `bucket.append({...})` literal into `_bucket_item(self, r) -> dict` (now including the Task 2 counters). Replace the fill loop with the two-pass version (`rows` is already in final ranked order — Wilson sort, then optional fusion — so "best untested" = first untested in `rows`; index-based selection avoids `in`-list identity comparisons entirely):
 
 ```python
             cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize
             reserve = limit_per_bucket is not None and cap >= 2
             buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
-            # rows is in final ranked order (Wilson sort, then optional
-            # relevance fusion). Untested rows keep that order too — the
-            # first untested row in `rows` is the most query-relevant one.
-            explorers: dict[str, dict] = {}
-            for r in rows:
-                bucket = buckets[r["polarity"]]
-                untested = _wilson_rated(r) < EXPLORATION_RATED_FLOOR
-                if reserve and untested and r["polarity"] not in explorers:
-                    explorers[r["polarity"]] = self._bucket_item(r)
-                    continue
-                if len(bucket) >= (cap - 1 if reserve else cap):
-                    continue
-                bucket.append(self._bucket_item(r))
-            # Fill the reserved slot: best untested if one exists, else the
-            # next proven row that was displaced by the reservation.
-            if reserve:
-                for polarity, bucket in buckets.items():
-                    if polarity in explorers:
-                        bucket.append(explorers[polarity])
-                    else:
-                        continue
-```
-
-Then handle the no-untested case: the loop above under-fills by one when no untested row exists for a bucket. Implement precisely by two passes instead if clearer — the contract the tests pin is:
-
-1. `cap-1` best tested rows in ranked order,
-2. slot `cap` = best untested if any, else next best tested,
-3. `cap None` ⇒ plain fill, no reservation.
-
-A clean two-pass implementation (preferred — use this one):
-
-```python
-            cap = limit_per_bucket if limit_per_bucket is not None else sys.maxsize
-            reserve = limit_per_bucket is not None and cap >= 2
-            buckets = {"do": [], "dont": [], "neutral": []}
             by_polarity: dict[str, list] = {"do": [], "dont": [], "neutral": []}
             for r in rows:
                 by_polarity[r["polarity"]].append(r)
             for polarity, group in by_polarity.items():
-                bucket = buckets[polarity]
                 if not reserve:
-                    bucket.extend(self._bucket_item(r) for r in group[:cap])
+                    buckets[polarity] = [self._bucket_item(r) for r in group[:cap]]
                     continue
-                tested = [r for r in group
-                          if _wilson_rated(r) >= EXPLORATION_RATED_FLOOR]
-                untested = [r for r in group
-                            if _wilson_rated(r) < EXPLORATION_RATED_FLOOR]
-                chosen = tested[: cap - 1]
-                if untested:
-                    chosen.append(untested[0])
-                remaining = [r for r in group if r not in chosen]
-                chosen.extend(remaining[: cap - len(chosen)])
-                bucket.extend(self._bucket_item(r) for r in chosen)
+                tested_idx = [i for i, r in enumerate(group)
+                              if _wilson_rated(r) >= EXPLORATION_RATED_FLOOR]
+                untested_idx = [i for i, r in enumerate(group)
+                                if _wilson_rated(r) < EXPLORATION_RATED_FLOOR]
+                chosen = tested_idx[: cap - 1]
+                if untested_idx:
+                    chosen.append(untested_idx[0])
+                if len(chosen) < cap:               # top up from the remainder
+                    taken = set(chosen)
+                    for i in range(len(group)):
+                        if len(chosen) >= cap:
+                            break
+                        if i not in taken:
+                            chosen.append(i)
+                chosen.sort()                        # preserve ranked order
+                buckets[polarity] = [self._bucket_item(group[i]) for i in chosen]
 ```
 
-Extract the existing `bucket.append({...})` dict literal into a method `_bucket_item(self, r) -> dict` so both call sites share it (it now includes the Task 2 counter fields).
+Update the `_diag.step(fn, "bucketed", ...)` counts to read from the new dict.
 
-Note: `sqlite3.Row` supports `in`-list identity checks because each row object is unique per fetch — `r not in chosen` compares identity, which is correct here (same objects from one fetch).
-
-Update the `_diag.step(fn, "bucketed", ...)` call to follow the new loop.
-
-- [ ] **Step 4: Run the reflection test files**
+- [ ] **Step 4: Run**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/services/test_exploration_slot.py tests/services/test_wilson_ranking.py tests/services/test_reflection_query_relevance.py tests/services/test_reflection.py tests/services/test_reflection_retrieve_fields.py -q`
 Expected: all pass.
@@ -618,12 +572,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `better_memory/db/migrations/0014_semantic_embeddings.sql`
-- Test: append to `tests/db/test_schema.py` (follow that file's existing per-migration test style — read it first and mirror the newest migration's test)
+- Test: append to `tests/db/test_schema.py` (mirror the newest migration's existing test style)
 
 **Interfaces:**
-- Produces: vec0 table `semantic_embeddings(memory_id TEXT PRIMARY KEY, embedding FLOAT[768])`, consumed by Tasks 7-9.
+- Produces: vec0 table `semantic_embeddings(memory_id TEXT PRIMARY KEY, embedding FLOAT[768])`. Consumed by Tasks 8-10.
 
-- [ ] **Step 1: Write the failing test** (mirroring the file's existing pattern — a test that applies migrations to a fresh DB and asserts the table exists):
+- [ ] **Step 1: Write the failing test**
 
 ```python
 def test_0014_semantic_embeddings_table(tmp_memory_db):
@@ -639,7 +593,7 @@ def test_0014_semantic_embeddings_table(tmp_memory_db):
 - [ ] **Step 2: Run to verify failure**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/db -q -k 0014`
-Expected: FAIL — table absent.
+Expected: FAIL.
 
 - [ ] **Step 3: Write the migration**
 
@@ -661,7 +615,7 @@ CREATE VIRTUAL TABLE semantic_embeddings USING vec0(
 - [ ] **Step 4: Run**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/db -q`
-Expected: all pass (including any schema-drift tests — if one hardcodes the migration count/list, update it).
+Expected: all pass (update any migration-count fixture if one exists).
 
 - [ ] **Step 5: Commit**
 
@@ -674,17 +628,240 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Embedder in ReflectionSynthesisService — write-path embedding
+### Task 6: SyncEmbedder — bridge + fresh-embedder-per-call + circuit breaker
 
 **Files:**
-- Modify: `better_memory/services/reflection.py` (ctor line ~317; `_apply_new` ~718, `_apply_augment` ~817, `_apply_merge` ~921)
-- Modify: `better_memory/mcp/server.py:222` (pass embedder)
-- Modify: `better_memory/storage/sqlite.py:68` (pass embedder — its ctor already receives one for observations; check the field name, likely `self._embedder` or the ctor arg)
+- Create: `better_memory/embeddings/sync_embed.py`
+- Create: `tests/services/_embedding_fakes.py`
+- Test: `tests/embeddings/test_sync_embed.py`
+
+**Interfaces:**
+- Consumes: `run_async_in_worker` (factory semantics), any object with async `embed(text)` / `embed_batch(texts)` and optional async `aclose()`.
+- Produces: `SyncEmbedder(factory, *, clock=time.monotonic, cooldown=60.0, timeout=15.0)` with `embed_text(text) -> list[float] | None` and `embed_batch(texts) -> list[list[float]] | None`. Any failure opens a `cooldown`-second breaker during which calls return None instantly. Consumed by Tasks 7, 8, 9.
+
+**Why fresh-embedder-per-call:** `OllamaEmbedder.__init__` builds an `httpx.AsyncClient`, and AsyncClient is bound to the event loop that first uses it (recorded project gotcha). `run_async_in_worker` creates a fresh loop per call, so the coroutine must construct its own embedder inside the worker and close it there. Construction is cheap and does not contact Ollama (`ollama.py` docstring).
+
+- [ ] **Step 1: Write the fakes + failing tests**
+
+```python
+# tests/services/_embedding_fakes.py
+"""Shared fake embedder for embedding-path tests."""
+from __future__ import annotations
+
+
+class FakeEmbedder:
+    def __init__(self, fail: bool = False):
+        self.calls: list = []
+        self.closed = 0
+        self.fail = fail
+
+    async def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
+        if self.fail:
+            raise RuntimeError("ollama down")
+        return [0.1] * 768
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        if self.fail:
+            raise RuntimeError("ollama down")
+        return [[0.1] * 768 for _ in texts]
+
+    async def aclose(self) -> None:
+        self.closed += 1
+```
+
+```python
+# tests/embeddings/test_sync_embed.py
+"""SyncEmbedder: sync facade over the async embedder for thread-bound code.
+
+Fresh embedder per call (loop-bound AsyncClient), closed in the worker;
+60s circuit breaker so an Ollama outage costs one stall per cooldown
+window instead of one per call.
+"""
+from __future__ import annotations
+
+from better_memory.embeddings.sync_embed import SyncEmbedder
+from tests.services._embedding_fakes import FakeEmbedder
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class TestSyncEmbedder:
+    def test_embed_text_returns_vector_and_closes_embedder(self):
+        fake = FakeEmbedder()
+        s = SyncEmbedder(lambda: fake)
+        vec = s.embed_text("hello")
+        assert vec is not None and len(vec) == 768
+        assert fake.calls == ["hello"]
+        assert fake.closed == 1
+
+    def test_embed_batch_returns_vectors(self):
+        fake = FakeEmbedder()
+        s = SyncEmbedder(lambda: fake)
+        out = s.embed_batch(["a", "b"])
+        assert out is not None and len(out) == 2
+
+    def test_failure_returns_none_and_opens_breaker(self):
+        fake = FakeEmbedder(fail=True)
+        clock = FakeClock()
+        s = SyncEmbedder(lambda: fake, clock=clock)
+        assert s.embed_text("x") is None
+        assert fake.calls == ["x"]
+        # Breaker open: the embedder is not touched again.
+        assert s.embed_text("y") is None
+        assert fake.calls == ["x"]
+
+    def test_breaker_closes_after_cooldown(self):
+        clock = FakeClock()
+        calls = []
+
+        class FlakyThenGood(FakeEmbedder):
+            async def embed(self, text):
+                calls.append(text)
+                if len(calls) == 1:
+                    raise RuntimeError("down")
+                return [0.1] * 768
+
+        s = SyncEmbedder(FlakyThenGood, clock=clock, cooldown=60.0)
+        assert s.embed_text("first") is None
+        clock.t += 61.0
+        assert s.embed_text("second") is not None
+        assert calls == ["first", "second"]
+
+    def test_none_factory_disables_everything(self):
+        s = SyncEmbedder(None)
+        assert s.embed_text("x") is None
+        assert s.embed_batch(["x"]) is None
+
+    def test_embedder_without_aclose_is_fine(self):
+        class Bare:
+            async def embed(self, text):
+                return [0.1] * 768
+
+        s = SyncEmbedder(Bare)
+        assert s.embed_text("x") is not None
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `./.venv/Scripts/python.exe -m pytest tests/embeddings/test_sync_embed.py -v`
+Expected: FAIL — module not found. (Create `tests/embeddings/__init__.py` if the directory is new.)
+
+- [ ] **Step 3: Implement**
+
+```python
+# better_memory/embeddings/sync_embed.py
+"""Sync facade over the async embedder, for thread-bound sync services.
+
+Two hazards this class exists to contain:
+
+1. ``httpx.AsyncClient`` is bound to the event loop that first uses it,
+   and ``run_async_in_worker`` runs a fresh loop per call — so the
+   embedder must be CONSTRUCTED inside the worker coroutine and closed
+   there. The factory is invoked per call; ``OllamaEmbedder`` construction
+   is cheap and contacts nothing.
+2. Retrieval must never hang on a dead Ollama. Any failure opens a
+   circuit breaker: for ``cooldown`` seconds every call returns ``None``
+   immediately. Worst case is one bounded stall per cooldown window.
+
+Returns ``None`` on every failure path — callers treat a missing vector
+as "no vec leg", never as an error.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+from typing import Any
+
+from better_memory.async_bridge import run_async_in_worker
+
+#: Bridge-level hard stop. The wiring uses OllamaEmbedder(timeout=5.0,
+#: max_retries=1), so a healthy-but-slow call ends well inside this; the
+#: bridge timeout is the backstop against pathological hangs.
+_WORKER_TIMEOUT = 15.0
+_DEFAULT_COOLDOWN = 60.0
+
+
+class SyncEmbedder:
+    def __init__(
+        self,
+        factory: Callable[[], Any] | None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        cooldown: float = _DEFAULT_COOLDOWN,
+        timeout: float = _WORKER_TIMEOUT,
+    ) -> None:
+        self._factory = factory
+        self._clock = clock
+        self._cooldown = cooldown
+        self._timeout = timeout
+        self._down_until = 0.0
+
+    def embed_text(self, text: str) -> list[float] | None:
+        return self._run(lambda emb: emb.embed(text))
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        return self._run(lambda emb: emb.embed_batch(texts))
+
+    def _run(self, op: Callable[[Any], Any]):
+        if self._factory is None:
+            return None
+        if self._clock() < self._down_until:
+            return None
+
+        factory = self._factory
+
+        async def _go():
+            emb = factory()
+            try:
+                return await op(emb)
+            finally:
+                aclose = getattr(emb, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+
+        try:
+            return run_async_in_worker(_go, timeout=self._timeout)
+        except Exception:
+            self._down_until = self._clock() + self._cooldown
+            return None
+```
+
+- [ ] **Step 4: Run**
+
+Run: `./.venv/Scripts/python.exe -m pytest tests/embeddings/test_sync_embed.py -v`
+Expected: 6 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add better_memory/embeddings/sync_embed.py tests/embeddings tests/services/_embedding_fakes.py
+git commit -m "feat(embeddings): SyncEmbedder — bridge facade with fresh-per-call embedder and 60s breaker
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: Reflection write-path embedding
+
+**Files:**
+- Modify: `better_memory/services/reflection.py` (ctor ~317; `_apply_new` ~718; `_apply_augment` ~817; `_apply_merge` ~921)
+- Modify: `better_memory/mcp/server.py` (~172-230: build `SyncEmbedder`, pass to services)
+- Modify: `better_memory/storage/sqlite.py:68` (same)
 - Test: `tests/services/test_reflection_embedding_write.py`
 
 **Interfaces:**
-- Consumes: `OllamaEmbedder.embed(text) -> list[float]` (async), `run_async_in_worker` from `better_memory.async_bridge`.
-- Produces: `ReflectionSynthesisService(conn, *, clock=None, embedder=None)`; `_embed_text(self, text) -> list[float] | None` (sync, best-effort); `_embedding_source_text(title, use_cases, hints) -> str` module function; embeddings written to `reflection_embeddings` on new/augment/merge. Tasks 8-9 reuse `_embed_text` and `_embedding_source_text`.
+- Consumes: `SyncEmbedder` (Task 6), `sqlite_vec.serialize_float32`.
+- Produces: `ReflectionSynthesisService(conn, *, clock=None, sync_embedder=None)`; module function `_embedding_source_text(title, use_cases, hints) -> str`; method `_store_embedding(reflection_id, vector | None)`. Embedding written on new + augment; merge deletes the superseded source's row (target text does not change — verified). Wiring: `server.py` builds ONE shared `SyncEmbedder(lambda: OllamaEmbedder(timeout=5.0, max_retries=1))` when `config.embeddings_backend == "ollama"`, else `None`, and passes it to both this service and Task 8's; `storage/sqlite.py` mirrors this using the embedder presence it already knows about.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -693,8 +870,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 """Synthesis writes reflection embeddings, best-effort.
 
 reflection_embeddings sat at 0 rows from migration 0002 until this change:
-the write path simply never embedded. Ollama failures must never block
-synthesis — a missing embedding degrades retrieval to BM25, nothing more.
+the write path simply never embedded. Failures must never block synthesis.
 """
 from __future__ import annotations
 
@@ -704,26 +880,12 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.embeddings.ollama import EmbeddingError
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.reflection import (
     ReflectionSynthesisService,
     _embedding_source_text,
 )
-
-
-class FakeEmbedder:
-    def __init__(self, fail=False):
-        self.calls: list[str] = []
-        self.fail = fail
-
-    async def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        if self.fail:
-            raise EmbeddingError("ollama down")
-        return [0.1] * 768
-
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [await self.embed(t) for t in texts]
+from tests.services._embedding_fakes import FakeEmbedder
 
 
 @pytest.fixture
@@ -740,57 +902,26 @@ def _vec_count(conn):
     return conn.execute("SELECT COUNT(*) FROM reflection_embeddings").fetchone()[0]
 
 
-class TestEmbeddingSourceText:
-    def test_joins_title_use_cases_hints(self):
-        text = _embedding_source_text("T", "when X", ["h1", "h2"])
-        assert text == "T\nwhen X\nh1\nh2"
-
-
-class TestWritePathEmbedding:
-    def test_embed_text_none_embedder_returns_none(self, conn):
-        svc = ReflectionSynthesisService(conn)
-        assert svc._embed_text("anything") is None
-
-    def test_embed_text_failure_returns_none(self, conn):
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder(fail=True))
-        assert svc._embed_text("anything") is None
-
-    def test_embed_text_success_returns_vector(self, conn):
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder())
-        vec = svc._embed_text("anything")
-        assert vec is not None and len(vec) == 768
+def test_embedding_source_text_joins_fields():
+    assert _embedding_source_text("T", "when X", ["h1", "h2"]) == "T\nwhen X\nh1\nh2"
 ```
 
-Plus one integration-style test per apply path. The apply methods take action
-dataclasses — read `_apply_new`'s signature and the `NewAction` dataclass
-(`reflection.py` ~line 136) first, then write:
+Then one test per apply path. **Concrete instruction:** open
+`tests/services/test_reflection_writes.py`, copy its working setup for
+driving `_apply_new` / `_apply_augment` / `_apply_merge` (episode + observation
+seeding and action construction) verbatim into this file, then assert:
 
-```python
-class TestApplyPathsEmbed:
-    def test_apply_new_writes_embedding_row(self, conn):
-        fake = FakeEmbedder()
-        svc = ReflectionSynthesisService(conn, embedder=fake)
-        # Construct the minimal NewAction the codebase defines (check
-        # dataclass fields; fill required ones only) and call _apply_new
-        # via the public apply_decision path used by synthesize tests —
-        # mirror tests/services/test_reflection_writes.py setup.
-        ...
-        assert _vec_count(conn) == 1
-        assert fake.calls  # source text was embedded
-
-    def test_apply_new_with_failing_embedder_still_writes_reflection(self, conn):
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder(fail=True))
-        ...
-        assert _vec_count(conn) == 0   # no embedding
-        # reflection row exists — synthesis unaffected
-```
-
-**Concrete instruction for the `...`:** copy the action-construction and
-`apply_decision` invocation verbatim from the nearest existing test in
-`tests/services/test_reflection_writes.py` (it exercises `_apply_new` /
-augment / merge already); add the embedder kwarg and the two assertions.
-Do the same for augment (asserts a second `fake.calls` entry after augment)
-and merge (embedding row for the merge target).
+- new: `_vec_count(conn) == 1` and the fake recorded one embed whose text
+  contains the action's title;
+- new with `SyncEmbedder(lambda: FakeEmbedder(fail=True))`: reflection row
+  exists, `_vec_count(conn) == 0`;
+- augment: `_vec_count` still 1 for that id and the fake recorded a second
+  embed containing the appended hint;
+- merge: after merging source→target, the SOURCE's embedding row is gone
+  (`SELECT COUNT(*) FROM reflection_embeddings WHERE reflection_id = source_id`
+  is 0) and the fake recorded NO new embed for the target (target text
+  unchanged — verified against `_apply_merge`, which updates counters only);
+- no `sync_embedder` passed: `_vec_count(conn) == 0`, everything else works.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -799,7 +930,11 @@ Expected: FAIL — `_embedding_source_text` import error.
 
 - [ ] **Step 3: Implement**
 
-In `reflection.py`:
+Module bits in `reflection.py`:
+
+```python
+import sqlite_vec
+```
 
 ```python
 def _embedding_source_text(title: str, use_cases: str, hints: list[str]) -> str:
@@ -815,33 +950,23 @@ Ctor:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
-        embedder: Any = None,
+        sync_embedder: "SyncEmbedder | None" = None,
     ) -> None:
         self._conn = conn
         self._clock = clock or default_clock
-        self._embedder = embedder
+        self._sync_embedder = sync_embedder
 ```
 
-Sync bridge helper (method):
+(import `SyncEmbedder` under `TYPE_CHECKING` or directly — direct is fine,
+no cycle: `embeddings.sync_embed` imports only `async_bridge`.)
+
+Store helper (method):
 
 ```python
-    def _embed_text(self, text: str) -> list[float] | None:
-        """Best-effort sync embedding. None embedder / any failure -> None.
-
-        The embed call runs on the bridge worker thread; the DB write that
-        consumes the vector stays on the caller thread (sqlite3 conns are
-        thread-bound).
-        """
-        if self._embedder is None:
-            return None
-        try:
-            return run_async_in_worker(self._embedder.embed(text))
-        except Exception:
-            return None
-
     def _store_embedding(self, reflection_id: str, vector: list[float] | None) -> None:
         if vector is None:
             return
+        # DELETE+INSERT: vec0 tables historically mishandle UPSERT.
         self._conn.execute(
             "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
             (reflection_id,),
@@ -849,35 +974,72 @@ Sync bridge helper (method):
         self._conn.execute(
             "INSERT INTO reflection_embeddings (reflection_id, embedding) "
             "VALUES (?, ?)",
-            (reflection_id, _serialize_vector(vector)),
+            (reflection_id, sqlite_vec.serialize_float32(vector)),
         )
 ```
 
-For `_serialize_vector`, reuse whatever `ObservationService.create` does at
-`observation.py:204-210` to insert into `observation_embeddings` (it already
-solves vec0 serialisation — likely `sqlite_vec.serialize_float32` or a JSON
-string; copy that exact call, import from the same place). DELETE+INSERT
-rather than INSERT OR REPLACE because vec0 virtual tables historically
-mishandle UPSERT.
+Call sites (all inside the existing transactions):
 
-Imports: `from better_memory.async_bridge import run_async_in_worker` and
-`from typing import Any` (if not present).
-
-Call sites — at the end of the row-write in each of `_apply_new`,
-`_apply_augment`, `_apply_merge` (inside their existing transaction, after
-the reflection row is written, before commit):
+- `_apply_new`, after the `reflection_sources` inserts:
 
 ```python
-        self._store_embedding(
-            reflection_id,
-            self._embed_text(_embedding_source_text(title, use_cases, hints)),
+            if self._sync_embedder is not None:
+                self._store_embedding(
+                    reflection_id,
+                    self._sync_embedder.embed_text(_embedding_source_text(
+                        action.title, action.use_cases, action.hints,
+                    )),
+                )
+```
+
+- `_apply_augment`: extend the row SELECT to
+  `"SELECT title, use_cases, hints, confidence, status FROM reflections WHERE id = ?"`,
+  and after the UPDATE:
+
+```python
+            if self._sync_embedder is not None:
+                final_use_cases = (action.rewrite_use_cases
+                                   if action.rewrite_use_cases is not None
+                                   else row["use_cases"])
+                self._store_embedding(
+                    action.reflection_id,
+                    self._sync_embedder.embed_text(_embedding_source_text(
+                        row["title"], final_use_cases, merged_hints,
+                    )),
+                )
+```
+
+- `_apply_merge`: after the source's `superseded` UPDATE:
+
+```python
+            # Target text is untouched by merge (counters/evidence only), so
+            # no re-embed; drop the superseded source's vector so it stops
+            # competing for kNN slots.
+            self._conn.execute(
+                "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
+                (action.source_id,),
+            )
+```
+
+Wiring — `server.py` after the embedder block (~line 178):
+
+```python
+    from better_memory.embeddings.sync_embed import SyncEmbedder
+
+    sync_embedder: SyncEmbedder | None = None
+    if embedder is not None:
+        # Fresh short-timeout embedder per bridge call (loop-bound client);
+        # shared instance so the breaker state is process-wide.
+        sync_embedder = SyncEmbedder(
+            lambda: OllamaEmbedder(timeout=5.0, max_retries=1)
         )
 ```
 
-(with the local variable names each method actually has — augment/merge
-re-read the post-edit title/use_cases/hints they just wrote).
-
-Wiring: `server.py:222` → `ReflectionSynthesisService(memory_conn, embedder=embedder)`; `storage/sqlite.py:68` → pass the embedder SqliteBackend already holds for observations (check its ctor field name and thread it).
+then `ReflectionSynthesisService(memory_conn, sync_embedder=sync_embedder)` at
+line ~222. `storage/sqlite.py:68`: build the same `SyncEmbedder` from the
+embedder the backend already receives (`sync_embedder = SyncEmbedder(lambda:
+OllamaEmbedder(timeout=5.0, max_retries=1)) if embedder is not None else None`)
+and pass it. Move imports to module top per house style.
 
 - [ ] **Step 4: Run**
 
@@ -888,25 +1050,25 @@ Expected: all pass.
 
 ```bash
 git add -A
-git commit -m "feat(embeddings): reflections embedded at synthesis write time, best-effort
+git commit -m "feat(embeddings): reflections embedded at synthesis write time via SyncEmbedder
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 7: Embedder in SemanticMemoryService
+### Task 8: Semantic write-path embedding
 
 **Files:**
-- Modify: `better_memory/services/semantic.py` (ctor ~54; `create` ~63; `update_text` ~85; `create_from_observation` ~125)
-- Modify: instantiation sites — grep `SemanticMemoryService(` in `better_memory/mcp/server.py` and `better_memory/storage/sqlite.py`, pass `embedder=`
+- Modify: `better_memory/services/semantic.py` (ctor; `create`; `update_text`; `create_from_observation`)
+- Modify: instantiation sites (grep `SemanticMemoryService(` in `mcp/server.py` + `storage/sqlite.py`; pass `sync_embedder=` from Task 7's shared instance)
 - Test: `tests/services/test_semantic_embedding_write.py`
 
 **Interfaces:**
-- Consumes: bridge + serialisation exactly as Task 6 (duplicate `_embed_text`/`_store_embedding` shape into this service, table `semantic_embeddings`, PK `memory_id`; source text = the memory's `content`).
-- Produces: `SemanticMemoryService(conn, *, clock=None, embedder=None)`; embeddings written on `create`, `update_text`, `create_from_observation`.
+- Consumes: `SyncEmbedder` (Task 6). Source text = the memory's `content`. Table `semantic_embeddings(memory_id, embedding)` (Task 5).
+- Produces: `SemanticMemoryService(conn, *, clock=None, sync_embedder=None)` with a private `_store_embedding(memory_id, vector | None)` mirroring Task 7's (DELETE+INSERT).
 
-- [ ] **Step 1: Write the failing tests** (same FakeEmbedder — move it to `tests/services/_embedding_fakes.py` and import from both test files):
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/services/test_semantic_embedding_write.py
@@ -918,6 +1080,7 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.semantic import SemanticMemoryService
 from tests.services._embedding_fakes import FakeEmbedder
 
@@ -939,37 +1102,58 @@ def _vec_count(conn):
 class TestSemanticEmbeddingWrite:
     def test_create_embeds_content(self, conn):
         fake = FakeEmbedder()
-        svc = SemanticMemoryService(conn, embedder=fake)
+        svc = SemanticMemoryService(conn, sync_embedder=SyncEmbedder(lambda: fake))
         svc.create(content="the fact", project="p")
         assert _vec_count(conn) == 1
         assert fake.calls == ["the fact"]
 
     def test_update_text_reembeds(self, conn):
         fake = FakeEmbedder()
-        svc = SemanticMemoryService(conn, embedder=fake)
+        svc = SemanticMemoryService(conn, sync_embedder=SyncEmbedder(lambda: fake))
         mid = svc.create(content="v1", project="p")
         svc.update_text(id=mid, content="v2")
         assert _vec_count(conn) == 1          # replaced, not duplicated
         assert fake.calls == ["v1", "v2"]
 
     def test_failure_never_blocks_create(self, conn):
-        svc = SemanticMemoryService(conn, embedder=FakeEmbedder(fail=True))
+        svc = SemanticMemoryService(
+            conn, sync_embedder=SyncEmbedder(lambda: FakeEmbedder(fail=True)))
         mid = svc.create(content="the fact", project="p")
-        assert mid                              # row created
+        assert mid
         assert _vec_count(conn) == 0
 
     def test_no_embedder_no_rows(self, conn):
         svc = SemanticMemoryService(conn)
         svc.create(content="the fact", project="p")
         assert _vec_count(conn) == 0
+
+    def test_promote_from_observation_embeds(self, conn):
+        # create_from_observation needs an active observation row — seed the
+        # minimal one (mirror the seeding used in test_semantic.py's promote
+        # tests; copy that helper).
+        ...
 ```
+
+Replace the final `...` by copying the observation-seeding lines from the
+existing promote test in `tests/services/test_semantic.py`, then assert
+`_vec_count(conn) == 1`.
 
 - [ ] **Step 2: Run to verify failure**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/services/test_semantic_embedding_write.py -v`
-Expected: FAIL — ctor rejects `embedder` kwarg.
+Expected: FAIL — ctor rejects `sync_embedder`.
 
-- [ ] **Step 3: Implement** — mirror Task 6 exactly in `semantic.py` (ctor kwarg, `_embed_text`, `_store_embedding` targeting `semantic_embeddings(memory_id, ...)`, calls at the end of `create`, `update_text`, `create_from_observation` before their commits). Wire instantiation sites.
+- [ ] **Step 3: Implement** — ctor kwarg + `import sqlite_vec` + `_store_embedding` (same shape as Task 7, table `semantic_embeddings`, column `memory_id`); at the end of `create`, `update_text`, and `create_from_observation` (before each `commit`):
+
+```python
+        if self._sync_embedder is not None:
+            self._store_embedding(
+                memory_id, self._sync_embedder.embed_text(content))
+```
+
+(using each method's local names — in `create_from_observation` the content
+is `row["content"]` and the id is the new `memory_id`). Wire both
+instantiation sites with the shared `sync_embedder`.
 
 - [ ] **Step 4: Run**
 
@@ -980,22 +1164,22 @@ Expected: all pass.
 
 ```bash
 git add -A
-git commit -m "feat(embeddings): semantic memories embedded on create/update, best-effort
+git commit -m "feat(embeddings): semantic memories embedded on create/update via SyncEmbedder
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 8: Three-leg fusion + lazy self-heal in retrieve
+### Task 9: Three-leg fusion + lazy self-heal
 
 **Files:**
-- Modify: `better_memory/services/reflection.py` (`_fuse_by_relevance` ~1189; `retrieve_reflections` query path)
+- Modify: `better_memory/services/reflection.py` (`_fuse_by_relevance`; `retrieve_reflections` query branch)
 - Test: `tests/services/test_vec_fusion.py`
 
 **Interfaces:**
-- Consumes: `_embed_text` (Task 6), `reflection_embeddings` rows (Task 6), `sanitize_fts5_query` (existing).
-- Produces: `_fuse_by_relevance(rows, *, query, rrf_k=60)` unchanged signature, now internally three-leg; self-heal constant `SELF_HEAL_BATCH_CAP = 20`.
+- Consumes: `self._sync_embedder` (Task 7), `_embedding_source_text`, `_store_embedding`, `sqlite_vec.serialize_float32`.
+- Produces: `_fuse_by_relevance(rows, *, query, query_vector=None, rrf_k=60)`; `SELF_HEAL_BATCH_CAP = 20`; `_heal_missing_embeddings(rows)`; `_vec_ranks(query_vector, candidate_ids) -> dict[str, int]`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1003,9 +1187,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 # tests/services/test_vec_fusion.py
 """Query fusion gains a vector leg; missing embeddings self-heal on retrieve.
 
-Degradation contract: no embedder / Ollama down / row unembedded -> exactly
-the two-leg (prior + BM25) behaviour that shipped in #81. The vec leg only
-ever promotes.
+Degradation contract: no embedder / breaker open / row unembedded -> exactly
+the two-leg (prior + BM25) behaviour that shipped in #81.
 """
 from __future__ import annotations
 
@@ -1015,6 +1198,7 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.reflection import ReflectionSynthesisService
 from tests.services._embedding_fakes import FakeEmbedder
 
@@ -1042,39 +1226,42 @@ def _seed(conn, rid, *, title, useful=0, ignored=0):
 
 
 class DirectedEmbedder(FakeEmbedder):
-    """Embeds query and one target title to the same vector; noise elsewhere."""
+    """Maps texts containing any trigger phrase to one vector; noise else.
 
-    def __init__(self, match_text: str):
+    Lets a test make the query and one reflection 'semantically identical'
+    while sharing zero tokens — isolating the vec leg from BM25.
+    """
+
+    def __init__(self, *triggers: str):
         super().__init__()
-        self.match_text = match_text
+        self.triggers = triggers
 
-    async def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        if self.match_text in text:
+    def _vec(self, text: str) -> list[float]:
+        if any(t in text for t in self.triggers):
             return [1.0] + [0.0] * 767
         return [0.0, 1.0] + [0.0] * 766
 
+    async def embed(self, text):
+        self.calls.append(text)
+        return self._vec(text)
+
+    async def embed_batch(self, texts):
+        self.calls.append(list(texts))
+        return [self._vec(t) for t in texts]
+
+
+def _svc(conn, embedder):
+    return ReflectionSynthesisService(
+        conn, sync_embedder=SyncEmbedder(lambda: embedder))
+
 
 class TestVecFusion:
-    def test_semantically_close_row_promoted_without_token_overlap(self, conn):
-        # Query wording shares no tokens with the target title: BM25 misses,
-        # the vec leg must carry it.
+    def test_semantic_match_promoted_without_token_overlap(self, conn):
         _seed(conn, "r-target", title="Stdout handling on win32 interpreters")
         _seed(conn, "r-noise-1", title="Unrelated advice alpha", useful=5, ignored=1)
         _seed(conn, "r-noise-2", title="Unrelated advice beta", useful=4, ignored=1)
-        emb = DirectedEmbedder("Stdout handling")
-        # pretend the query is 'semantically identical' to the target:
-        emb.match_text_query = True
-
-        class QueryDirectedEmbedder(DirectedEmbedder):
-            async def embed(self, text):
-                self.calls.append(text)
-                if "console output" in text or self.match_text in text:
-                    return [1.0] + [0.0] * 767
-                return [0.0, 1.0] + [0.0] * 766
-
-        emb = QueryDirectedEmbedder("Stdout handling")
-        svc = ReflectionSynthesisService(conn, embedder=emb)
+        emb = DirectedEmbedder("Stdout handling", "console output")
+        svc = _svc(conn, emb)
         ids = [r["id"] for r in svc.retrieve_reflections(
             project="p", query="console output disappears on windows",
         )["do"]]
@@ -1085,11 +1272,11 @@ class TestVecFusion:
         svc = ReflectionSynthesisService(conn)
         ids = [r["id"] for r in svc.retrieve_reflections(
             project="p", query="retention")["do"]]
-        assert ids == ["r-a"]                    # BM25-only path still works
+        assert ids == ["r-a"]
 
     def test_embedder_failure_degrades_silently(self, conn):
         _seed(conn, "r-a", title="Retention thresholds", useful=1)
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder(fail=True))
+        svc = _svc(conn, FakeEmbedder(fail=True))
         ids = [r["id"] for r in svc.retrieve_reflections(
             project="p", query="retention")["do"]]
         assert ids == ["r-a"]
@@ -1099,7 +1286,7 @@ class TestSelfHeal:
     def test_unembedded_candidates_healed_on_query_retrieve(self, conn):
         _seed(conn, "r-a", title="Alpha")
         _seed(conn, "r-b", title="Beta")
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder())
+        svc = _svc(conn, FakeEmbedder())
         svc.retrieve_reflections(project="p", query="anything at all")
         n = conn.execute("SELECT COUNT(*) FROM reflection_embeddings").fetchone()[0]
         assert n == 2
@@ -1108,26 +1295,26 @@ class TestSelfHeal:
         from better_memory.services.reflection import SELF_HEAL_BATCH_CAP
         for i in range(SELF_HEAL_BATCH_CAP + 5):
             _seed(conn, f"r-{i:03}", title=f"Title {i}")
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder())
+        svc = _svc(conn, FakeEmbedder())
         svc.retrieve_reflections(project="p", query="anything")
         n = conn.execute("SELECT COUNT(*) FROM reflection_embeddings").fetchone()[0]
         assert n == SELF_HEAL_BATCH_CAP
 
-    def test_no_query_no_heal(self, conn):
+    def test_no_query_no_heal_and_no_embed_calls(self, conn):
         _seed(conn, "r-a", title="Alpha")
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder())
+        fake = FakeEmbedder()
+        svc = _svc(conn, fake)
         svc.retrieve_reflections(project="p")
         n = conn.execute("SELECT COUNT(*) FROM reflection_embeddings").fetchone()[0]
         assert n == 0
+        assert fake.calls == []
 
     def test_heal_failure_silent(self, conn):
         _seed(conn, "r-a", title="Alpha")
-        svc = ReflectionSynthesisService(conn, embedder=FakeEmbedder(fail=True))
+        svc = _svc(conn, FakeEmbedder(fail=True))
         rows = svc.retrieve_reflections(project="p", query="anything")
-        assert rows["do"]                        # retrieval unaffected
+        assert rows["do"]
 ```
-
-Clean the first test before running: keep only the `QueryDirectedEmbedder` version (the earlier `emb` assignments are editing artifacts — delete them).
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1136,43 +1323,44 @@ Expected: `SELF_HEAL_BATCH_CAP` import error; promotion test fails.
 
 - [ ] **Step 3: Implement**
 
-In `reflection.py`:
+Constant:
 
 ```python
 #: Max embeddings written per retrieve call by the lazy self-heal. Keeps
-#: worst-case added latency bounded (~cap x embed time on first call after
-#: a backlog); the CLI backfill is the bulk path.
+#: worst-case added latency bounded; cli.backfill_embeddings is the bulk path.
 SELF_HEAL_BATCH_CAP = 20
 ```
 
-In `retrieve_reflections`, in the `if query:` branch, before fusion:
+Query branch in `retrieve_reflections`:
 
 ```python
             if query:
                 self._heal_missing_embeddings(rows)
-                query_vector = self._embed_text(query)
+                query_vector = (
+                    self._sync_embedder.embed_text(query)
+                    if self._sync_embedder is not None else None
+                )
                 rows = self._fuse_by_relevance(
                     rows, query=query, query_vector=query_vector,
                 )
                 _diag.step(fn, "relevance_fused", n_rows=len(rows))
 ```
 
-New methods:
+Methods:
 
 ```python
     def _heal_missing_embeddings(self, rows) -> None:
         """Embed up to SELF_HEAL_BATCH_CAP candidates that lack vectors.
 
-        Historical rows (embedding written before the write-path existed)
-        and write-time failures repair themselves on their first relevant
-        retrieval. Entirely best-effort.
+        Historical rows and write-time failures repair themselves on their
+        first relevant retrieval. Entirely best-effort; one embed_batch call.
         """
-        if self._embedder is None or not rows:
+        if self._sync_embedder is None or not rows:
             return
         ids = [r["id"] for r in rows]
         placeholders = ",".join("?" for _ in ids)
         have = {
-            r[0] for r in self._conn.execute(
+            row[0] for row in self._conn.execute(
                 f"SELECT reflection_id FROM reflection_embeddings "
                 f"WHERE reflection_id IN ({placeholders})", ids,
             )
@@ -1181,57 +1369,53 @@ New methods:
         if not todo:
             return
         texts = [
-            _embedding_source_text(
-                r["title"], r["use_cases"], json.loads(r["hints"]),
-            )
+            _embedding_source_text(r["title"], r["use_cases"],
+                                   json.loads(r["hints"]))
             for r in todo
         ]
-        try:
-            vectors = run_async_in_worker(self._embedder.embed_batch(texts))
-        except Exception:
+        vectors = self._sync_embedder.embed_batch(texts)
+        if vectors is None:
             return
         for r, vec in zip(todo, vectors):
             self._store_embedding(r["id"], vec)
         self._conn.commit()
 
     def _vec_ranks(self, query_vector, candidate_ids) -> dict[str, int]:
-        """reflection_id -> vec rank (0 = closest) among the candidates."""
+        """reflection_id -> vec rank (0 = closest) among the candidates.
+
+        sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` — no
+        extra predicates — so fetch top-k then filter, exactly as
+        search/hybrid.py:_vec_candidates does.
+        """
         if query_vector is None or not candidate_ids:
             return {}
         try:
-            rows = self._conn.execute(
+            knn = self._conn.execute(
                 "SELECT reflection_id FROM reflection_embeddings "
                 "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (_serialize_vector(query_vector), max(len(candidate_ids), 50)),
+                (sqlite_vec.serialize_float32(query_vector),
+                 max(len(candidate_ids), 50)),
             ).fetchall()
         except sqlite3.OperationalError:
             return {}
         wanted = set(candidate_ids)
         out: dict[str, int] = {}
-        for r in rows:
-            if r[0] in wanted:
-                out[r[0]] = len(out)
+        for row in knn:
+            if row[0] in wanted:
+                out[row[0]] = len(out)
         return out
 ```
 
-(sqlite-vec kNN cannot take extra predicates — fetch top-k then filter to
-candidates, same workaround documented in `search/hybrid.py:262-299`.)
-
-`_fuse_by_relevance` gains the vec leg — signature `(self, rows, *, query, query_vector=None, rrf_k=60)`; after building `rel_rank` (BM25), add:
-
-```python
-        vec_rank = self._vec_ranks(query_vector, ids)
-```
-
-and in the scoring loop:
+`_fuse_by_relevance`: signature gains `query_vector=None`; after the BM25
+`rel_rank` dict is built add `vec_rank = self._vec_ranks(query_vector, ids)`;
+bail out unchanged only when BOTH `rel_rows` empty AND `vec_rank` empty; in
+the scoring loop add:
 
 ```python
             vr = vec_rank.get(row["id"])
             if vr is not None:
                 score += 1.0 / (rrf_k + vr)
 ```
-
-Bail-out condition changes: currently returns rows unchanged when BM25 finds nothing; now return unchanged only when BOTH `rel_rows` and `vec_rank` are empty.
 
 - [ ] **Step 4: Run**
 
@@ -1242,24 +1426,24 @@ Expected: all pass.
 
 ```bash
 git add -A
-git commit -m "feat(retrieval): three-leg RRF fusion (prior + BM25 + vec) with lazy embedding self-heal
+git commit -m "feat(retrieval): three-leg RRF fusion (prior + BM25 + vec) with lazy self-heal
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 9: Backfill CLI
+### Task 10: Backfill CLI
 
 **Files:**
 - Create: `better_memory/cli/backfill_embeddings.py`
 - Test: `tests/cli/test_backfill_embeddings.py`
 
 **Interfaces:**
-- Consumes: `_embedding_source_text` (Task 6), services' `_store_embedding` shape (duplicated locally — the CLI writes directly, it is a maintenance tool).
-- Produces: `python -m better_memory.cli.backfill_embeddings [--home PATH]` — embeds every active reflection and semantic memory missing a vector; prints `backfilled reflections=N semantics=M skipped=K`; exit 0 even when Ollama is down (prints a warning, backfills nothing).
+- Consumes: `_embedding_source_text` (Task 7), `sqlite_vec.serialize_float32`, any embedder with async `embed_batch` + optional `aclose`.
+- Produces: `backfill(conn, embedder) -> dict` (single event loop, one embedder, `aclose` by `main`); `python -m better_memory.cli.backfill_embeddings [--home PATH]`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/cli/test_backfill_embeddings.py
@@ -1269,9 +1453,9 @@ from pathlib import Path
 
 import pytest
 
+from better_memory.cli.backfill_embeddings import backfill
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.cli.backfill_embeddings import backfill
 from tests.services._embedding_fakes import FakeEmbedder
 
 
@@ -1285,18 +1469,27 @@ def conn(tmp_memory_db: Path):
         c.close()
 
 
-def test_backfills_reflections_and_semantics(conn):
+def _seed_reflection(conn, rid, status="pending_review"):
     conn.execute(
         """INSERT INTO reflections (id, title, project, phase, polarity,
-           use_cases, hints, confidence, created_at, updated_at)
-           VALUES ('r1', 'T', 'p', 'general', 'do', 'uc', '[]', 0.5,
-                   '2026-01-01', '2026-01-01')""")
+           use_cases, hints, confidence, created_at, updated_at, status)
+           VALUES (?, 'T', 'p', 'general', 'do', 'uc', '[]', 0.5,
+                   '2026-01-01', '2026-01-01', ?)""", (rid, status))
+    conn.commit()
+
+
+def _seed_semantic(conn, sid):
     conn.execute(
         """INSERT INTO semantic_memories (id, content, project, scope,
            created_at, updated_at)
-           VALUES ('s1', 'fact', 'p', 'project', '2026-01-01', '2026-01-01')""")
+           VALUES (?, 'fact', 'p', 'project', '2026-01-01', '2026-01-01')""",
+        (sid,))
     conn.commit()
 
+
+def test_backfills_reflections_and_semantics(conn):
+    _seed_reflection(conn, "r1")
+    _seed_semantic(conn, "s1")
     stats = backfill(conn, FakeEmbedder())
     assert stats == {"reflections": 1, "semantics": 1, "skipped": 0}
     assert conn.execute("SELECT COUNT(*) FROM reflection_embeddings").fetchone()[0] == 1
@@ -1304,36 +1497,20 @@ def test_backfills_reflections_and_semantics(conn):
 
 
 def test_idempotent(conn):
-    conn.execute(
-        """INSERT INTO reflections (id, title, project, phase, polarity,
-           use_cases, hints, confidence, created_at, updated_at)
-           VALUES ('r1', 'T', 'p', 'general', 'do', 'uc', '[]', 0.5,
-                   '2026-01-01', '2026-01-01')""")
-    conn.commit()
+    _seed_reflection(conn, "r1")
     fake = FakeEmbedder()
     backfill(conn, fake)
-    stats = backfill(conn, fake)
-    assert stats == {"reflections": 0, "semantics": 0, "skipped": 0}
+    assert backfill(conn, fake) == {"reflections": 0, "semantics": 0, "skipped": 0}
 
 
 def test_retired_reflections_skipped(conn):
-    conn.execute(
-        """INSERT INTO reflections (id, title, project, phase, polarity,
-           use_cases, hints, confidence, created_at, updated_at, status)
-           VALUES ('r1', 'T', 'p', 'general', 'do', 'uc', '[]', 0.5,
-                   '2026-01-01', '2026-01-01', 'retired')""")
-    conn.commit()
-    stats = backfill(conn, FakeEmbedder())
-    assert stats == {"reflections": 0, "semantics": 0, "skipped": 0}
+    _seed_reflection(conn, "r1", status="retired")
+    assert backfill(conn, FakeEmbedder()) == {
+        "reflections": 0, "semantics": 0, "skipped": 0}
 
 
 def test_embed_failure_counted_as_skipped(conn):
-    conn.execute(
-        """INSERT INTO reflections (id, title, project, phase, polarity,
-           use_cases, hints, confidence, created_at, updated_at)
-           VALUES ('r1', 'T', 'p', 'general', 'do', 'uc', '[]', 0.5,
-                   '2026-01-01', '2026-01-01')""")
-    conn.commit()
+    _seed_reflection(conn, "r1")
     stats = backfill(conn, FakeEmbedder(fail=True))
     assert stats == {"reflections": 0, "semantics": 0, "skipped": 1}
 ```
@@ -1356,6 +1533,9 @@ Run at deploy after migration 0014:
 Idempotent: only rows missing a vector are embedded. The lazy self-heal in
 memory.retrieve covers stragglers afterwards; this exists so the historical
 corpus doesn't wait to be retrieved before becoming searchable.
+
+One event loop and one embedder for the whole job (the embedder's
+httpx.AsyncClient is loop-bound); batches of 50 per HTTP request.
 """
 
 from __future__ import annotations
@@ -1366,12 +1546,13 @@ import json
 import sys
 from pathlib import Path
 
+import sqlite_vec
+
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.services.reflection import (
-    _embedding_source_text,
-    _serialize_vector,
-)
+from better_memory.services.reflection import _embedding_source_text
+
+_BATCH = 50
 
 
 def backfill(conn, embedder) -> dict[str, int]:
@@ -1382,34 +1563,43 @@ def backfill(conn, embedder) -> dict[str, int]:
            WHERE r.status IN ('pending_review', 'confirmed')
              AND r.id NOT IN (SELECT reflection_id FROM reflection_embeddings)"""
     ).fetchall()
-    for r in refl:
-        text = _embedding_source_text(r["title"], r["use_cases"],
-                                      json.loads(r["hints"]))
-        try:
-            vec = asyncio.run(embedder.embed(text))
-        except Exception:
-            stats["skipped"] += 1
-            continue
-        conn.execute(
-            "INSERT INTO reflection_embeddings (reflection_id, embedding) "
-            "VALUES (?, ?)", (r["id"], _serialize_vector(vec)))
-        stats["reflections"] += 1
-
     sems = conn.execute(
         """SELECT id, content FROM semantic_memories
            WHERE id NOT IN (SELECT memory_id FROM semantic_embeddings)"""
     ).fetchall()
-    for s in sems:
-        try:
-            vec = asyncio.run(embedder.embed(s["content"]))
-        except Exception:
-            stats["skipped"] += 1
-            continue
-        conn.execute(
-            "INSERT INTO semantic_embeddings (memory_id, embedding) "
-            "VALUES (?, ?)", (s["id"], _serialize_vector(vec)))
-        stats["semantics"] += 1
 
+    jobs = [
+        ("reflections", "reflection_embeddings", "reflection_id", r["id"],
+         _embedding_source_text(r["title"], r["use_cases"],
+                                json.loads(r["hints"])))
+        for r in refl
+    ] + [
+        ("semantics", "semantic_embeddings", "memory_id", s["id"], s["content"])
+        for s in sems
+    ]
+
+    async def _embed_all() -> list[list[list[float]] | None]:
+        out = []
+        for i in range(0, len(jobs), _BATCH):
+            texts = [j[4] for j in jobs[i:i + _BATCH]]
+            try:
+                out.append(await embedder.embed_batch(texts))
+            except Exception:
+                out.append(None)
+        return out
+
+    batches = asyncio.run(_embed_all()) if jobs else []
+
+    for bi, vectors in enumerate(batches):
+        chunk = jobs[bi * _BATCH:(bi + 1) * _BATCH]
+        if vectors is None:
+            stats["skipped"] += len(chunk)
+            continue
+        for (kind, table, col, row_id, _), vec in zip(chunk, vectors):
+            conn.execute(
+                f"INSERT INTO {table} ({col}, embedding) VALUES (?, ?)",
+                (row_id, sqlite_vec.serialize_float32(vec)))
+            stats[kind] += 1
     conn.commit()
     return stats
 
@@ -1432,7 +1622,11 @@ def main(argv: list[str] | None = None) -> None:
         print("embeddings backend is not ollama; nothing to backfill")
         return
 
-    stats = backfill(conn, OllamaEmbedder())
+    embedder = OllamaEmbedder()
+    try:
+        stats = backfill(conn, embedder)
+    finally:
+        asyncio.run(embedder.aclose())
     print(f"backfilled reflections={stats['reflections']} "
           f"semantics={stats['semantics']} skipped={stats['skipped']}")
     if stats["skipped"]:
@@ -1444,9 +1638,11 @@ if __name__ == "__main__":
     main()
 ```
 
-Note: `asyncio.run` per item is fine here — standalone process, no running
-loop, and the N≈150 corpus embeds in seconds. FakeEmbedder's `embed` is a
-plain coroutine, so `asyncio.run` works in tests too.
+Note on `aclose` after `asyncio.run(backfill...)`: the embedder's client was
+used on the loop inside `backfill`'s `asyncio.run`, which is closed by then;
+`aclose` on a second loop is the documented-acceptable teardown for httpx
+(close only releases resources). If it raises, wrap in try/except — teardown
+is best-effort.
 
 - [ ] **Step 4: Run**
 
@@ -1464,32 +1660,16 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 10: Website sync, typecheck, full suite
+### Task 11: Website sync, typecheck, full suite
 
 **Files:**
-- Modify: `website/index.md` (tools showcase — memory.retrieve description: task-conditioned, Wilson-ranked, semantic fusion)
-- Modify: `website/architecture.md` (ranking prose: replace popularity/demotion description with Wilson + exploration + three-leg fusion; add embeddings lifecycle para)
-- Modify: `website/configuration.md` — only if it documents ranking constants (grep `OVERLOOKED` / `DEMOTION`; remove if present; no new env vars were added)
+- Modify: `website/index.md`, `website/architecture.md`, `website/configuration.md` (only where stale)
 
-**Interfaces:** none — prose.
-
-- [ ] **Step 1: Grep for stale prose**
-
-Run: `grep -rn "useful_count\|OVERLOOKED\|DEMOTION\|popularity" website/ | head -20`
-
-- [ ] **Step 2: Update each hit** to describe: Wilson lower bound on (useful+overlooked)/rated; reserved exploration slot; embeddings written at synthesis + self-heal + backfill CLI; three-leg RRF. Keep each edit to the paragraph that is actually wrong — no rewrites beyond the stale claims.
-
-- [ ] **Step 3: Typecheck**
-
-Run: `./.venv/Scripts/python.exe -m pyright`
-Expected: 0 errors
-
-- [ ] **Step 4: Full suite**
-
-Run: `./.venv/Scripts/python.exe -m pytest tests -q`
-Expected: everything passes (~1500 tests). Fix any straggler that pinned old ordering before proceeding.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 1:** `grep -rn "useful_count\|OVERLOOKED\|DEMOTION\|popularity" website/ | head -20`
+- [ ] **Step 2:** Update each stale paragraph: Wilson lower bound on (useful+overlooked)/rated; exploration slot; embeddings at synthesis + self-heal + backfill CLI; three-leg RRF; 60s breaker. Edit only what is wrong.
+- [ ] **Step 3:** `./.venv/Scripts/python.exe -m pyright` → 0 errors.
+- [ ] **Step 4:** `./.venv/Scripts/python.exe -m pytest tests -q` → all pass; fix stragglers pinning old ordering.
+- [ ] **Step 5:**
 
 ```bash
 git add website
@@ -1500,15 +1680,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 11: A/B validation gate, PR, babysit
+### Task 12: A/B validation gate (48 sessions), PR, babysit
 
 **Files:**
-- Modify: `C:/Users/gethi/source/autoresearch/memuse-260721-run/runner.py` (add arm `A8`: `spec["code"] = str(WT)` equivalent pointing at this branch — copy the `A6` arm, change the code path to the main repo checkout on `feat/retrieval-quality`)
-- No repo files.
+- Modify: `C:/Users/gethi/source/autoresearch/memuse-260721-run/runner.py` (add arm `A8`)
 
-**Interfaces:** gate = distinct useful% from 24 sessions not statistically below 22.96% (two-proportion z-test, α=0.05, one re-run allowed on borderline).
+**Interfaces:** gate = distinct useful% from 48 sessions not statistically below 62/270 (22.96%); one-sided two-proportion z at α=0.05; one re-run on borderline; fail-twice = stop, no PR.
 
-- [ ] **Step 1: Point the harness at this branch.** In `runner.py` `arm_spec`, add:
+- [ ] **Step 1:** Add arm:
 
 ```python
     elif arm == "A8":
@@ -1516,9 +1695,9 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
         spec["code"] = str(MAIN_REPO)
 ```
 
-Confirm `git -C C:/Users/gethi/source/better-memory branch --show-current` prints `feat/retrieval-quality` before launching — the arm runs whatever that checkout has.
+Confirm `git -C C:/Users/gethi/source/better-memory branch --show-current` → `feat/retrieval-quality` before launching.
 
-- [ ] **Step 2: Refresh the sandbox base DB** (new schema needed):
+- [ ] **Step 2:** Refresh sandbox base DB (new schema):
 
 ```bash
 cd C:/Users/gethi/source/autoresearch/memuse-260721-run
@@ -1531,23 +1710,15 @@ sqlite3.connect(f"file:{src}?mode=ro", uri=True).execute("VACUUM INTO ?", (dst,)
 EOF
 ```
 
-- [ ] **Step 3: Run the arm**
+- [ ] **Step 3:** `python runner.py --arm A8 --repeats 4 --timeout 420 > logs-A8.txt 2>&1` (48 sessions, ~4h, ~$80; background; strip-and-retry 429 rows).
 
-```bash
-python runner.py --arm A8 --repeats 2 --timeout 420 > logs-A8.txt 2>&1
-```
-
-(24 sessions, ~2h, ~$40. Run in background; strip-and-retry any 429 rows as done previously.)
-
-- [ ] **Step 4: Evaluate the gate**
+- [ ] **Step 4:** Gate:
 
 ```bash
 python analyze.py --arms A6,A8
 python - <<'EOF'
-# two-proportion z-test: A8 distinct vs 22.96% baseline (62/270)
 import math
-# fill from analyze output:
-u8, n8 = USEFUL_A8, EXPOSED_A8
+u8, n8 = USEFUL_A8, EXPOSED_A8          # fill from analyze distinct columns
 p1, n1 = 62/270, 270
 p2 = u8/n8
 p = (62 + u8) / (n1 + n8)
@@ -1557,32 +1728,13 @@ print("GATE:", "PASS" if z > -1.645 else "FAIL (one re-run allowed)")
 EOF
 ```
 
-Gate: PASS ⇒ proceed. FAIL twice ⇒ stop, report, do not open the PR.
-
-- [ ] **Step 5: PR + babysit**
-
-```bash
-cd C:/Users/gethi/source/better-memory
-git push -u origin feat/retrieval-quality
-gh pr create --title "feat(retrieval): Wilson prior, exploration slot, embeddings + vec fusion" --body "<summary: spec link, A/B numbers from step 4, migration 0014, backfill CLI deploy note>
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)"
-```
-
-Babysit loop (as PR #81/#82): poll `statusCheckRollup` + unresolved `reviewThreads`; fix findings; when CLEAN + zero threads → `gh pr merge --squash --delete-branch`; then run migration + backfill on live:
-
-```bash
-git checkout main && git pull origin main
-./.venv/Scripts/python.exe -m better_memory.cli.backfill_embeddings
-```
-
-(migration 0014 applies on the MCP server's next start; backfill after it — if the table is missing, `apply_migrations` in the CLI's `main` creates it first, so this ordering is safe.)
+- [ ] **Step 5:** PASS → push, `gh pr create` (body: spec link, A/B numbers, migration 0014 + backfill deploy note, footer `🤖 Generated with [Claude Code](https://claude.com/claude-code)`), babysit to squash-merge, then on main: `./.venv/Scripts/python.exe -m better_memory.cli.backfill_embeddings`.
 
 ---
 
 ## Self-review notes
 
-- Spec §1-§3 covered by Tasks 1-9; §"Delivery A" gate by Task 11; website guardrail by Task 10. Spec §4 (evidence) and §5 (docs/sentinel) are PR-B / PR-C — separate plans, deliberately absent here.
-- Two test snippets contain flagged editing artifacts with explicit cleanup instructions (Task 2 placeholder class, Task 8 first test) — the implementer deletes the marked lines; both are called out inline.
-- Task 6's apply-path tests reference `tests/services/test_reflection_writes.py` for the action-construction boilerplate rather than inventing dataclass fields that may drift — the implementer copies the file's existing working setup.
-- `_serialize_vector` is defined by copying the exact serialisation used at `observation.py:204-210`; Tasks 8, 9 import it from `reflection.py`.
+- Every previously-assumed integration point is now pinned in the "Verified-against-source facts" table; Tasks 6-10 contain only calls whose signatures were read from source this session.
+- The two prior plan bugs (coroutine-vs-factory; loop-bound AsyncClient) are structurally prevented by `SyncEmbedder` — no other code touches the bridge.
+- Merge-path embedding deliberately does NOT re-embed the target (text unchanged, verified) — a reviewer questioning that finds the rationale in Task 7's test and comment.
+- Remaining sub-95 item: Task 12 (92%) — irreducible sampling noise, mitigated by n=48 and the statistical gate; accepted by user 2026-07-23.
