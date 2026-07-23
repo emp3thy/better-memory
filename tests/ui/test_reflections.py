@@ -380,6 +380,57 @@ class TestReflectionEdit:
         assert response.status_code == 409
 
 
+class TestReflectionEditEmbeddingWiring:
+    """UI edit route must re-embed, not just the synthesis write path.
+
+    The shared `client` fixture pins BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite
+    (see tests/ui/conftest.py) so ordinary route tests don't depend on a
+    live Ollama instance. These tests build their own app with an explicit
+    fake sync_embedder to prove the wiring — app.py passes
+    app.extensions["sync_embedder"] into ReflectionService's constructor,
+    and ReflectionService.update_text re-embeds title+use_cases+hints.
+    """
+
+    def test_edit_writes_reflection_embedding_row(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import patch as _patch
+
+        from better_memory.embeddings.sync_embed import SyncEmbedder
+        from better_memory.ui import app as app_module
+        from better_memory.ui.app import create_app
+        from tests.services._embedding_fakes import FakeEmbedder
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", title="Existing")
+
+        fake = FakeEmbedder()
+        app = create_app(
+            start_watchdog=False, db_path=tmp_db,
+            sync_embedder=SyncEmbedder(lambda: fake),
+        )
+        app.config["TESTING"] = True
+        with _patch("better_memory.ui.app.threading.Timer"):
+            with app.test_client() as client:
+                response = client.post(
+                    "/reflections/r-1/edit",
+                    data={"use_cases": "new uc", "hints": "new h"},
+                    headers={"Origin": "http://localhost"},
+                )
+        assert response.status_code == 200
+
+        conn = connect(tmp_db)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM reflection_embeddings "
+                "WHERE reflection_id = 'r-1'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 1
+        assert fake.calls == ["Existing\nnew uc\nnew h"]
+
+
 class TestReflectionPromote:
     def test_promotes_project_pending(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch

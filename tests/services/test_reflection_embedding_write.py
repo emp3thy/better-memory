@@ -18,6 +18,7 @@ from better_memory.services.reflection import (
     AugmentAction,
     MergeAction,
     NewAction,
+    ReflectionService,
     ReflectionSynthesisService,
     _embedding_source_text,
 )
@@ -232,6 +233,93 @@ class TestApplyAugmentEmbedding:
         assert _vec_count(conn) == 1
         assert len(fake.calls) == 1
         assert "new-hint" in fake.calls[0]
+
+
+class TestReflectionServiceUpdateTextEmbedding:
+    """ReflectionService.update_text is the UI-facing edit path.
+
+    Editing use_cases/hints changes the discriminating text a stored
+    vector indexes (title + use_cases + hints, see
+    `_embedding_source_text`); without a re-embed here the vector goes
+    stale the moment the UI edits a reflection.
+    """
+
+    def test_update_text_reembeds(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p",
+            title="Existing", use_cases="old uc", hints='["old-hint"]',
+        )
+        conn.commit()
+
+        fake = FakeEmbedder()
+        svc = ReflectionService(
+            conn, clock=fixed_clock, sync_embedder=SyncEmbedder(lambda: fake),
+        )
+        svc.update_text(reflection_id="r1", use_cases="new uc", hints="new-hint")
+
+        assert _vec_count(conn) == 1
+        assert len(fake.calls) == 1
+        assert fake.calls[0] == _embedding_source_text(
+            "Existing", "new uc", ["new-hint"]
+        )
+
+    def test_update_text_replaces_not_duplicates_vec_row(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p",
+            title="Existing", use_cases="old uc", hints='["old-hint"]',
+        )
+        conn.commit()
+        import sqlite_vec
+        conn.execute(
+            "INSERT INTO reflection_embeddings (reflection_id, embedding) "
+            "VALUES (?, ?)",
+            ("r1", sqlite_vec.serialize_float32([0.0] * 768)),
+        )
+        conn.commit()
+        assert _vec_count(conn) == 1
+
+        fake = FakeEmbedder()
+        svc = ReflectionService(
+            conn, clock=fixed_clock, sync_embedder=SyncEmbedder(lambda: fake),
+        )
+        svc.update_text(reflection_id="r1", use_cases="new uc", hints="new-hint")
+
+        assert _vec_count(conn) == 1  # replaced, not duplicated
+
+    def test_update_text_works_without_sync_embedder(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p",
+            title="Existing", use_cases="old uc", hints='["old-hint"]',
+        )
+        conn.commit()
+
+        svc = ReflectionService(conn, clock=fixed_clock)  # no sync_embedder
+        svc.update_text(reflection_id="r1", use_cases="new uc", hints="new-hint")
+
+        row = conn.execute(
+            "SELECT use_cases FROM reflections WHERE id = 'r1'"
+        ).fetchone()
+        assert row["use_cases"] == "new uc"
+        assert _vec_count(conn) == 0
+
+    def test_no_embed_row_when_embedder_fails(self, conn, fixed_clock):
+        _insert_reflection(
+            conn, refl_id="r1", project="p",
+            title="Existing", use_cases="old uc", hints='["old-hint"]',
+        )
+        conn.commit()
+
+        svc = ReflectionService(
+            conn, clock=fixed_clock,
+            sync_embedder=SyncEmbedder(lambda: FakeEmbedder(fail=True)),
+        )
+        svc.update_text(reflection_id="r1", use_cases="new uc", hints="new-hint")
+
+        row = conn.execute(
+            "SELECT use_cases FROM reflections WHERE id = 'r1'"
+        ).fetchone()
+        assert row["use_cases"] == "new uc"
+        assert _vec_count(conn) == 0
 
 
 class TestApplyMergeEmbedding:

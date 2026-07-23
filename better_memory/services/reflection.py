@@ -58,6 +58,32 @@ def _embedding_source_text(title: str, use_cases: str, hints: list[str]) -> str:
     return "\n".join([title, use_cases, *hints])
 
 
+def _write_reflection_embedding(
+    conn: sqlite3.Connection,
+    reflection_id: str,
+    vector: list[float] | None,
+) -> None:
+    """DELETE+INSERT the vec0 row for one reflection's embedding.
+
+    Shared by :class:`ReflectionSynthesisService` (synthesis writes) and
+    :class:`ReflectionService` (UI-driven ``update_text`` writes) so both
+    write paths keep ``reflection_embeddings`` in sync with the
+    reflection's current title/use_cases/hints. DELETE+INSERT rather than
+    UPSERT because vec0 tables historically mishandle UPSERT.
+    """
+    if vector is None:
+        return
+    conn.execute(
+        "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
+        (reflection_id,),
+    )
+    conn.execute(
+        "INSERT INTO reflection_embeddings (reflection_id, embedding) "
+        "VALUES (?, ?)",
+        (reflection_id, sqlite_vec.serialize_float32(vector)),
+    )
+
+
 def _later_ts(a: str | None, b: str | None) -> str | None:
     """Return the later of two ISO-8601 timestamps, treating NULL as -inf.
 
@@ -347,18 +373,7 @@ class ReflectionSynthesisService:
         self._sync_embedder = sync_embedder
 
     def _store_embedding(self, reflection_id: str, vector: list[float] | None) -> None:
-        if vector is None:
-            return
-        # DELETE+INSERT: vec0 tables historically mishandle UPSERT.
-        self._conn.execute(
-            "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
-            (reflection_id,),
-        )
-        self._conn.execute(
-            "INSERT INTO reflection_embeddings (reflection_id, embedding) "
-            "VALUES (?, ?)",
-            (reflection_id, sqlite_vec.serialize_float32(vector)),
-        )
+        _write_reflection_embedding(self._conn, reflection_id, vector)
 
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
@@ -1530,9 +1545,11 @@ class ReflectionService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
+        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
+        self._sync_embedder = sync_embedder
 
     def confirm(self, *, reflection_id: str) -> None:
         """pending_review → confirmed; no-op on confirmed; raise on retired/superseded."""
@@ -1595,6 +1612,12 @@ class ReflectionService:
         Blocked on retired/superseded — once a reflection has left the
         active set, mutating its text would silently change the audit
         trail.
+
+        Re-embeds when constructed with a ``sync_embedder``: the vector
+        indexes ``title + use_cases + hints`` (see
+        ``_embedding_source_text``), so editing use_cases/hints without
+        refreshing the vector would leave a stale embedding pointing at
+        superseded text. No-op when ``sync_embedder`` is ``None``.
         """
         if not use_cases or not use_cases.strip():
             raise ValueError("use_cases must not be empty")
@@ -1607,7 +1630,8 @@ class ReflectionService:
         if not hint_list:
             raise ValueError("hints must not be empty")
         row = self._conn.execute(
-            "SELECT status FROM reflections WHERE id = ?", (reflection_id,)
+            "SELECT title, status FROM reflections WHERE id = ?",
+            (reflection_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"Reflection not found: {reflection_id}")
@@ -1622,6 +1646,14 @@ class ReflectionService:
             "WHERE id = ?",
             (use_cases, json.dumps(hint_list), now, reflection_id),
         )
+        if self._sync_embedder is not None:
+            _write_reflection_embedding(
+                self._conn,
+                reflection_id,
+                self._sync_embedder.embed_text(_embedding_source_text(
+                    row["title"], use_cases, hint_list,
+                )),
+            )
         self._conn.commit()
 
     def promote_to_general(self, *, reflection_id: str) -> None:
