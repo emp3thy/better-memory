@@ -330,6 +330,10 @@ def _parse_merge(item: object) -> MergeAction:
     )
 
 
+#: Max embeddings written per retrieve call by the lazy self-heal. Keeps
+#: worst-case added latency bounded; cli.backfill_embeddings is the bulk path.
+SELF_HEAL_BATCH_CAP = 20
+
 #: A memory with fewer than this many rated exposures is "untested": its
 #: Wilson score is statistically meaningless, so it competes for the
 #: reserved exploration slot instead of the proven slots.
@@ -1266,22 +1270,81 @@ class ReflectionSynthesisService:
         )
 
     # --------------------------------------------------------- retrieve_reflections
+    def _heal_missing_embeddings(self, rows) -> None:
+        """Embed up to SELF_HEAL_BATCH_CAP candidates that lack vectors.
+
+        Historical rows and write-time failures repair themselves on their
+        first relevant retrieval. Entirely best-effort; one embed_batch call.
+        """
+        if self._sync_embedder is None or not rows:
+            return
+        ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" for _ in ids)
+        have = {
+            row[0] for row in self._conn.execute(
+                f"SELECT reflection_id FROM reflection_embeddings "
+                f"WHERE reflection_id IN ({placeholders})", ids,
+            )
+        }
+        todo = [r for r in rows if r["id"] not in have][:SELF_HEAL_BATCH_CAP]
+        if not todo:
+            return
+        texts = [
+            _embedding_source_text(r["title"], r["use_cases"],
+                                   json.loads(r["hints"]))
+            for r in todo
+        ]
+        vectors = self._sync_embedder.embed_batch(texts)
+        if vectors is None:
+            return
+        for r, vec in zip(todo, vectors):
+            self._store_embedding(r["id"], vec)
+        self._conn.commit()
+
+    def _vec_ranks(self, query_vector, candidate_ids) -> dict[str, int]:
+        """reflection_id -> vec rank (0 = closest) among the candidates.
+
+        sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` — no
+        extra predicates — so fetch top-k then filter, exactly as
+        search/hybrid.py:_vec_candidates does.
+        """
+        if query_vector is None or not candidate_ids:
+            return {}
+        try:
+            knn = self._conn.execute(
+                "SELECT reflection_id FROM reflection_embeddings "
+                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vector),
+                 max(len(candidate_ids), 50)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        wanted = set(candidate_ids)
+        out: dict[str, int] = {}
+        for row in knn:
+            if row[0] in wanted:
+                out[row[0]] = len(out)
+        return out
+
     def _fuse_by_relevance(
-        self, rows: list, *, query: str, rrf_k: int = 60,
+        self, rows: list, *, query: str, query_vector=None, rrf_k: int = 60,
     ) -> list:
-        """Re-order ``rows`` by RRF fusion of popularity rank and BM25 rank.
+        """Re-order ``rows`` by RRF fusion of popularity rank, BM25 rank, and
+        vector rank.
 
         ``rows`` arrives in popularity order (``useful_count + 3*times_overlooked``,
         then confidence, then recency). We compute a second ranking over the same
         ids by BM25 relevance against ``reflection_fts`` (title / use_cases /
-        hints) and fuse the two with reciprocal rank fusion:
+        hints), and (when ``query_vector`` is available) a third ranking by
+        vector distance against ``reflection_embeddings``, then fuse all
+        available legs with reciprocal rank fusion:
 
-            score(d) = 1/(k + pop_rank(d)) + 1/(k + rel_rank(d))
+            score(d) = 1/(k + pop_rank(d)) + 1/(k + rel_rank(d)) + 1/(k + vec_rank(d))
 
-        matching :mod:`better_memory.search.hybrid`. Rows the query does not
-        match keep only the popularity term, so relevance *promotes* without
-        ever discarding — a query that matches nothing degrades exactly to the
-        previous behaviour.
+        matching :mod:`better_memory.search.hybrid`. Rows a given leg does not
+        match keep only the other terms, so relevance *promotes* without ever
+        discarding — a query that matches nothing on any leg degrades exactly
+        to the previous behaviour.
 
         Tokens are OR-ed rather than AND-ed: ``sanitize_fts5_query`` joins bare
         terms, which FTS5 reads as implicit AND, and a natural-language task
@@ -1296,42 +1359,53 @@ class ReflectionSynthesisService:
             t for t in sanitized.split()
             if len(t) > 2 and t.lower() not in _QUERY_STOPWORDS
         ]
-        if not tokens:
-            return rows
-        match_expr = " OR ".join(tokens)
-
-        placeholders = ",".join("?" for _ in ids)
-        try:
-            rel_rows = self._conn.execute(
-                f"""
-                SELECT r.id AS id, bm25(reflection_fts) AS bm
-                FROM reflection_fts
-                JOIN reflections r ON r.rowid = reflection_fts.rowid
-                WHERE reflection_fts MATCH ? AND r.id IN ({placeholders})
-                ORDER BY bm ASC
-                """,
-                [match_expr, *ids],
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # Malformed MATCH expression despite sanitising, or the FTS table
-            # is absent on an old DB. Relevance is an enhancement, never a
-            # hard dependency — fall back to the popularity order.
-            return rows
-
-        if not rel_rows:
-            return rows
+        rel_rows = []
+        if tokens:
+            match_expr = " OR ".join(tokens)
+            placeholders = ",".join("?" for _ in ids)
+            try:
+                rel_rows = self._conn.execute(
+                    f"""
+                    SELECT r.id AS id, bm25(reflection_fts) AS bm
+                    FROM reflection_fts
+                    JOIN reflections r ON r.rowid = reflection_fts.rowid
+                    WHERE reflection_fts MATCH ? AND r.id IN ({placeholders})
+                    ORDER BY bm ASC
+                    """,
+                    [match_expr, *ids],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Malformed MATCH expression despite sanitising, or the FTS
+                # table is absent on an old DB. Relevance is an enhancement,
+                # never a hard dependency.
+                rel_rows = []
 
         rel_rank = {r["id"]: i for i, r in enumerate(rel_rows)}
+        vec_rank = self._vec_ranks(query_vector, ids)
+
+        if not rel_rank and not vec_rank:
+            return rows
+
         scored = []
         for pop_rank, row in enumerate(rows):
             score = 1.0 / (rrf_k + pop_rank)
             rr = rel_rank.get(row["id"])
             if rr is not None:
                 score += 1.0 / (rrf_k + rr)
-            scored.append((score, pop_rank, row))
-        # pop_rank breaks ties deterministically and keeps the fusion stable.
-        scored.sort(key=lambda t: (-t[0], t[1]))
-        return [row for _, _, row in scored]
+            vr = vec_rank.get(row["id"])
+            if vr is not None:
+                score += 1.0 / (rrf_k + vr)
+            # RRF sums are symmetric: a row with (pop_rank=a, vec_rank=b) ties
+            # exactly with one at (pop_rank=b, vec_rank=a). Break such ties
+            # toward the closer semantic match (lower vec_rank) before
+            # falling back to pop_rank — otherwise a strong vec-only match
+            # (this method's whole point) can lose a coin-flip tie to a
+            # popularity-only row. vec_rank absent (no embedder/no vec leg)
+            # collapses to sys.maxsize for every row, so the tiebreak is a
+            # no-op and behaviour matches the shipped two-leg fusion exactly.
+            scored.append((score, vr if vr is not None else sys.maxsize, pop_rank, row))
+        scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+        return [row for _, _, _, row in scored]
 
     def _bucket_item(self, r) -> dict:
         """Convert one reflections row into the dict shape returned to callers."""
@@ -1432,7 +1506,14 @@ class ReflectionSynthesisService:
             rows.sort(key=_wilson_score, reverse=True)
 
             if query:
-                rows = self._fuse_by_relevance(rows, query=query)
+                self._heal_missing_embeddings(rows)
+                query_vector = (
+                    self._sync_embedder.embed_text(query)
+                    if self._sync_embedder is not None else None
+                )
+                rows = self._fuse_by_relevance(
+                    rows, query=query, query_vector=query_vector,
+                )
                 _diag.step(fn, "relevance_fused", n_rows=len(rows))
 
             # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
