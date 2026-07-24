@@ -229,6 +229,11 @@ def retrieve_relevant(
                 "hits": kw_hits if (in_bm or fallback_ok) else 0,
                 "bm_rank": bm.get(r_id),
                 "vec_rank": vec_r.get(r_id),
+                # storage.protocol.retrieve guarantees times_overlooked/
+                # times_ignored on both backends (sqlite columns; agentcore
+                # copies its internal overlooked counter and hardcodes
+                # ignored=0 — see storage/agentcore.py::_parse_reflection_record).
+                # The .get(...) defaults below are defensive, not load-bearing.
                 "wilson": _wilson_for(
                     int(r.get("useful_count") or 0),
                     int(r.get("times_overlooked") or 0),
