@@ -514,50 +514,102 @@ def test_retrieve_parses_reflection_json_content(backend, mock_data_client) -> N
     assert not any(key.startswith("_") for key in refl), refl
 
 
-def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) -> None:
-    """Ranking matches sqlite: useful_count + 3*times_overlooked DESC,
-    confidence DESC, updated_at DESC."""
+def _wilson_ranking_record(rec_id: str, *, useful: int, ignored: int, overlooked: int = 0) -> dict:
+    """A record with only status/polarity metadata plus the three Wilson
+    inputs set — the rest default to 0."""
     import json
-    def make_record(rec_id: str, useful: int, overlooked: int) -> dict:
-        return {
-            "memoryRecordId": rec_id,
-            "content": {"text": json.dumps({
-                "title": rec_id, "use_cases": "u", "hints": "h", "confidence": "0.9",
-            })},
-            "memoryStrategyId": "x",
-            "namespaces": ["projects/testproj/reflections/"],
-            "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
-            "metadata": {
-                "polarity": {"stringValue": "do"},
-                "useful_count": {"numberValue": useful},
-                "missed_count": {"numberValue": 0},
-                "ignored_count": {"numberValue": 0},
-                "times_misled": {"numberValue": 0},
-                "overlooked_count": {"numberValue": overlooked},
-                "status": {"stringValue": "active"},
-            },
-        }
+    return {
+        "memoryRecordId": rec_id,
+        "content": {"text": json.dumps({
+            "title": rec_id, "use_cases": "u", "hints": "h", "confidence": "0.9",
+        })},
+        "memoryStrategyId": "x",
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {
+            "polarity": {"stringValue": "do"},
+            "useful_count": {"numberValue": useful},
+            "missed_count": {"numberValue": 0},
+            "ignored_count": {"numberValue": ignored},
+            "times_misled": {"numberValue": 0},
+            "overlooked_count": {"numberValue": overlooked},
+            "status": {"stringValue": "active"},
+        },
+    }
 
+
+def test_retrieve_ranks_by_shared_wilson_ordering(backend, mock_data_client) -> None:
+    """Ranking matches the shared Wilson ordering (services/scoring.py):
+    wilson_lower_bound(useful+overlooked, useful+overlooked+ignored) DESC,
+    confidence DESC, updated_at DESC — replacing the legacy
+    useful + 3*overlooked heuristic.
+
+    Same counters as tests/services/test_wilson_ranking.py's
+    test_hit_rate_beats_raw_count: a high-volume-but-lower-hit-rate
+    'workhorse' (67 useful / 125 ignored, ~0.28 raw hit rate) loses to a
+    'newcomer' with a higher hit rate on far less evidence (3 useful /
+    1 ignored, ~0.30 raw hit rate) — literal parity with the sqlite test's
+    newcomer-beats-workhorse assertion. Both are past EXPLORATION_RATED_FLOOR
+    (rated >= 3), so the exploration slot never interferes with this
+    ordering."""
     def stub(**kwargs):
         if kwargs["namespace"] == "projects/testproj/reflections/":
-            # high-rank: useful=10 -> score 10
-            # mid-rank:  useful=2, overlooked=3 -> score 2 + 9 = 11
-            # low-rank:  useful=0, overlooked=0 -> score 0
             return {"memoryRecordSummaries": [
-                make_record("low", useful=0, overlooked=0),
-                make_record("high-via-useful", useful=10, overlooked=0),
-                make_record("highest-via-overlooked", useful=2, overlooked=3),
+                _wilson_ranking_record("r-workhorse", useful=67, ignored=125),
+                _wilson_ranking_record("r-newcomer", useful=3, ignored=1),
             ]}
         return {"memoryRecordSummaries": []}
 
     mock_data_client.list_memory_records.side_effect = stub
-    result = backend.retrieve(project="testproj")
-    do_titles = [r["title"] for r in result["do"]]
-    # Score = useful_count + 3*times_overlooked
-    # highest-via-overlooked: 2 + 9 = 11
-    # high-via-useful:        10 + 0 = 10
-    # low:                    0 + 0 = 0
-    assert do_titles == ["highest-via-overlooked", "high-via-useful", "low"]
+    result = backend.retrieve(project="testproj", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["r-newcomer", "r-workhorse"]
+
+
+def test_retrieve_exploration_slot_surfaces_untested_reflection(
+    backend, mock_data_client
+) -> None:
+    """Exploration slot (reflection.py parity): with limit_per_bucket cap=3
+    and 4 candidates — 3 proven (rated >= EXPLORATION_RATED_FLOOR) ranked
+    below-cap plus 1 untested (rated < 3) — the untested reflection takes
+    the reserved last slot instead of being dropped."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("proven-3", useful=10, ignored=5),
+                _wilson_ranking_record("untested", useful=1, ignored=0),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj", limit_per_bucket=3, track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert len(do_ids) == 3
+    assert do_ids == ["proven-1", "proven-2", "untested"]
+
+
+def test_retrieve_exploration_slot_all_proven_when_no_untested(
+    backend, mock_data_client
+) -> None:
+    """No untested candidate in the bucket -> the reserved slot is simply
+    filled from the remainder in ranked order; all returned rows are
+    proven."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("proven-3", useful=10, ignored=5),
+                _wilson_ranking_record("proven-4", useful=5, ignored=5),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj", limit_per_bucket=3, track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["proven-1", "proven-2", "proven-3"]
 
 
 def _reflection_summary(
@@ -2108,3 +2160,78 @@ def test_list_session_exposures_empty_session_id_truly_unresolvable(
     )
     result = backend.list_session_exposures(session_id="")
     assert result == {"session_id": None, "exposures": []}
+
+
+# ===== Task 4: retrieve-path exposures (source='retrieve', via_exploration) =====
+
+
+def test_retrieve_records_exposures_with_exploration_tag(
+    backend_with_local_conn, local_conn, mock_data_client
+) -> None:
+    """retrieve() writes source='retrieve' exposure rows for every returned
+    reflection id when a local ledger is available; the reflection that took
+    the reserved exploration slot is tagged via_exploration=1."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("untested", useful=1, ignored=0),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend_with_local_conn.retrieve(project="testproj", limit_per_bucket=3)
+    assert [r["id"] for r in result["do"]] == ["proven-1", "proven-2", "untested"]
+
+    rows = local_conn.execute(
+        "SELECT memory_id, source, via_exploration FROM session_memory_exposure "
+        "WHERE session_id = 'test-session-xyz' ORDER BY memory_id"
+    ).fetchall()
+    by_id = {r["memory_id"]: r for r in rows}
+    assert set(by_id) == {"proven-1", "proven-2", "untested"}
+    assert all(r["source"] == "retrieve" for r in rows)
+    assert by_id["untested"]["via_exploration"] == 1
+    assert by_id["proven-1"]["via_exploration"] == 0
+    assert by_id["proven-2"]["via_exploration"] == 0
+
+
+def test_retrieve_without_local_conn_writes_nothing_and_buckets_unaffected(
+    backend, mock_data_client
+) -> None:
+    """No local_conn wired (the default `backend` fixture) — retrieve must
+    not raise, must write no exposure rows (there's no ledger to write to),
+    and must return buckets identical to the local-ledger case."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    assert [r["id"] for r in result["do"]] == ["proven-1"]
+
+
+def test_retrieve_track_exposure_false_writes_nothing(
+    backend_with_local_conn, local_conn, mock_data_client
+) -> None:
+    """track_exposure=False suppresses the retrieve-path exposure write even
+    though a local ledger is available — mirrors sqlite's track_exposure
+    contract (used by callers, e.g. session bootstrap, that manage their own
+    exposure tracking)."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend_with_local_conn.retrieve(project="testproj", track_exposure=False)
+    assert [r["id"] for r in result["do"]] == ["proven-1"]
+    row = local_conn.execute(
+        "SELECT COUNT(*) AS n FROM session_memory_exposure"
+    ).fetchone()
+    assert row["n"] == 0

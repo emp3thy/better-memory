@@ -37,6 +37,7 @@ else:
         class _ClientError(Exception):
             response: dict[str, Any]
 
+from better_memory.services.scoring import wilson_lower_bound
 from better_memory.storage.agentcore_persistence import AgentCoreConfig
 from better_memory.storage.protocol import Outcome, UseOutcome
 from better_memory.storage.session import (
@@ -46,7 +47,6 @@ from better_memory.storage.session import (
 )
 
 _POLARITIES: tuple[str, str, str] = ("do", "dont", "neutral")
-_OVERLOOKED_RANKING_WEIGHT = 3  # mirrors better_memory/services/memory_rating.py:71
 _AGENTCORE_SYSTEM_METADATA_PREFIX = "x-amz-agentcore-memory-"
 _RATING_TO_COUNTER: dict[str, str] = {
     "cited": "useful_count",
@@ -236,28 +236,76 @@ class AgentCoreBackend:
         ``project = ? OR scope = 'general'`` clause), parse JSON content,
         bucket by polarity CLIENT-SIDE (live AWS rejects ``polarity`` as a
         metadata filter key — only the CreateMemory indexedKeys are legal),
-        rank via the sqlite ordering rule (useful_count +
-        3*times_overlooked DESC, confidence DESC, updated_at DESC).
+        rank via the SHARED Wilson ordering (``services/scoring.py``):
+        ``wilson_lower_bound(useful+overlooked, useful+overlooked+ignored)``
+        DESC, confidence DESC, updated_at DESC — identical formula/tiebreaks
+        to sqlite's ``ReflectionSynthesisService.retrieve_reflections``,
+        including its per-bucket reserved exploration slot for under-rated
+        candidates (``EXPLORATION_RATED_FLOOR``).
         Returns dict[polarity, list[reflection_dict]] in the same shape sqlite mode
         returns; the MCP memory.retrieve handler json-dumps this directly to Claude.
 
         ``query`` is accepted for parity but no-op in agentcore mode — BM25
         relevance fusion needs the local ``reflection_fts`` index, which has no
-        AgentCore equivalent. Ordering stays the popularity rule below.
+        AgentCore equivalent. Ordering stays the Wilson rule above.
 
-        track_exposure is accepted for parity but no-op in agentcore mode —
-        AgentCore has no session_memory_exposure table; exposure tracking is
-        not part of the agentcore-mode rating model.
+        track_exposure: when True (default) and a local exposure ledger is
+        available (``self._local_conn`` — see ``record_exposures``), writes
+        a ``source='retrieve'`` row per returned reflection id, tagging the
+        slot-taker(s) as ``via_exploration``. Best-effort: never raises, and
+        never affects the returned buckets. Set False to suppress (mirrors
+        sqlite's ``track_exposure`` contract, used by callers that manage
+        their own exposure tracking).
         """
         actor_id = resolve_actor_id(project or self._project)
         effective_limit = limit_per_bucket if limit_per_bucket is not None else 20
-        return self._fetch_reflection_buckets(
+        exploration_ids: set[str] = set()
+        buckets = self._fetch_reflection_buckets(
             actor_id=actor_id,
             limit_per_bucket=effective_limit,
             tech=tech,
             phase=phase,
             polarity=polarity if polarity in _POLARITIES else None,
+            exploration_ids=exploration_ids,
         )
+        if track_exposure:
+            self._record_retrieve_exposures(buckets, exploration_ids)
+        return buckets
+
+    def _record_retrieve_exposures(
+        self,
+        buckets: dict[str, list[dict[str, Any]]],
+        exploration_ids: set[str],
+    ) -> None:
+        """Best-effort ``source='retrieve'`` exposure write to the local
+        ledger (see ``record_exposures``'s docstring for the shared-ledger
+        rationale). No-op when no local ledger is wired or no session id
+        resolves; never raises and never affects the returned buckets."""
+        if self._local_conn is None:
+            return
+        try:
+            sid = self._require_session_id("retrieve")
+        except ValueError:
+            return
+        if not sid:
+            return
+        all_ids = [r["id"] for bucket in buckets.values() for r in bucket]
+        if not all_ids:
+            return
+        try:
+            from better_memory.services import exposure_log
+
+            exposure_log.record(
+                self._local_conn,
+                session_id=sid,
+                items=[("reflection", rid) for rid in all_ids],
+                source="retrieve",
+                now=datetime.now(UTC).isoformat(),
+                exploration_ids=frozenset(exploration_ids),
+            )
+            self._local_conn.commit()
+        except Exception:  # noqa: BLE001 - exposures must never block retrieve
+            pass
 
     def _fetch_reflection_buckets(
         self,
@@ -267,6 +315,7 @@ class AgentCoreBackend:
         tech: str | None = None,
         phase: str | None = None,
         polarity: str | None = None,
+        exploration_ids: set[str] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Two-namespace reflection fan-out shared by retrieve() and
         session_bootstrap().
@@ -294,6 +343,13 @@ class AgentCoreBackend:
         records must still be retrievable. Dedup by record id across the
         two calls (a just-promoted record can appear in both while the
         list index lags), project namespace winning.
+
+        Ranking: shared Wilson ordering (``services/scoring.py``) with the
+        same per-bucket exploration slot as sqlite's
+        ``ReflectionSynthesisService.retrieve_reflections`` — see the sort
+        loop below. ``exploration_ids``, when passed, is populated in place
+        with the id of every reflection that took the reserved slot in any
+        bucket (used by ``retrieve()`` to tag exposure rows).
         """
         project_ns = resolve_namespace(actor_id, "reflections")
         general_ns = resolve_namespace("general", "reflections")
@@ -362,21 +418,77 @@ class AgentCoreBackend:
                 seen_ids.add(parsed["id"])
                 buckets[bucket].append(parsed)
 
+        # Local import: EXPLORATION_RATED_FLOOR lives in the reflection
+        # synthesis service (services/reflection.py), which pulls in
+        # sqlite_vec and friends — keep that off agentcore's module-level
+        # import path (mirrors the local exposure_log imports elsewhere in
+        # this class).
+        from better_memory.services.reflection import EXPLORATION_RATED_FLOOR
+
+        # Only worth reserving an exploration slot when there's room for at
+        # least one proven row alongside it — mirrors reflection.py's own
+        # `reserve` gate (cap < 2 means the untested row would consume the
+        # entire bucket).
+        reserve = limit_per_bucket >= 2
+
         for bucket_name, items in buckets.items():
-            # Sqlite ordering: (useful_count + 3*times_overlooked) DESC,
-            # confidence DESC, updated_at DESC.
+            # Shared Wilson ordering (services/scoring.py): the lower bound
+            # of the Wilson score interval on useful+overlooked / rated,
+            # then confidence, then recency — identical formula/tiebreaks to
+            # sqlite's ReflectionSynthesisService.retrieve_reflections.
             items.sort(
                 key=lambda r: (
-                    -(r["useful_count"] + _OVERLOOKED_RANKING_WEIGHT * r["_overlooked_count"]),
+                    -wilson_lower_bound(
+                        r["useful_count"] + r["times_overlooked"],
+                        r["useful_count"] + r["times_overlooked"] + r["times_ignored"],
+                    ),
                     -r["confidence"],
                     -r["_updated_at_ts"],
                 )
             )
+
+            if not reserve:
+                chosen = items[:limit_per_bucket]
+            else:
+                # Two-pass fill (reflection.py parity): cap-1 best TESTED
+                # rows in ranked order, one reserved slot for the best
+                # UNTESTED row (rated < EXPLORATION_RATED_FLOOR) if any,
+                # else top up from the remainder — preserving ranked order
+                # via an index sort at the end.
+                def _rated(r: dict[str, Any]) -> int:
+                    return (
+                        r["useful_count"] + r["times_overlooked"]
+                        + r["times_ignored"]
+                    )
+
+                tested_idx = [
+                    i for i, r in enumerate(items)
+                    if _rated(r) >= EXPLORATION_RATED_FLOOR
+                ]
+                untested_idx = [
+                    i for i, r in enumerate(items)
+                    if _rated(r) < EXPLORATION_RATED_FLOOR
+                ]
+                chosen_idx = tested_idx[: limit_per_bucket - 1]
+                if untested_idx:
+                    chosen_idx.append(untested_idx[0])
+                    if exploration_ids is not None:
+                        exploration_ids.add(items[untested_idx[0]]["id"])
+                if len(chosen_idx) < limit_per_bucket:  # top up from the remainder
+                    taken = set(chosen_idx)
+                    for i in range(len(items)):
+                        if len(chosen_idx) >= limit_per_bucket:
+                            break
+                        if i not in taken:
+                            chosen_idx.append(i)
+                chosen_idx.sort()  # preserve ranked order
+                chosen = [items[i] for i in chosen_idx]
+
             # Strip the internal ranking/bucketing helpers — the payload
             # must be key-identical to the sqlite reflection dicts.
             buckets[bucket_name] = [
                 {k: v for k, v in r.items() if not k.startswith("_")}
-                for r in items[:limit_per_bucket]
+                for r in chosen
             ]
         return buckets
 
