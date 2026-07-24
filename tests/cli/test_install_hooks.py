@@ -94,7 +94,7 @@ class TestHookSpec:
         ups = next(s for s in ci if s.event == "UserPromptSubmit")
         assert ups.matcher is None and ups.is_async is False and ups.needs_stdout is True
         ptu = next(s for s in ci if s.event == "PreToolUse")
-        assert ptu.matcher == "Skill|Task|Write" and ptu.needs_stdout is True
+        assert ptu.matcher is None and ptu.needs_stdout is True
 
     def test_session_bootstrap_is_session_start_event_no_matcher(self) -> None:
         sb = next(s for s in _OUR_HOOKS if s.module.endswith("session_bootstrap"))

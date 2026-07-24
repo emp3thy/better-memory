@@ -120,7 +120,10 @@ Spawn or reuse the management UI. Returns `{"url": "...", "reused": bool}`.
 
 ### `memory.session_bootstrap`
 
-Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Reflections are retrieved up to 20 per polarity bucket (`do` / `dont` / `neutral`), ranked by Wilson-prior lower bound on hit-rate, ties by confidence. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5; general-scope semantic memories always render in full) are shown in full — the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` restores the legacy full dump). Mirrors what the SessionStart hook does; callable manually for recovery, testing, or post-`/clear` re-injection.
+Open or reuse a session episode and inject curated context as `additionalContext` markdown. Mirrors what the SessionStart hook does; callable manually for recovery, testing, or post-`/clear` re-injection. Shape depends on `BETTER_MEMORY_INJECT_MODE` (see [Architecture](architecture.md#injection-strategies)):
+
+- **`legacy`** (default) -- project + general semantic memories and reflections. Reflections are retrieved up to 20 per polarity bucket (`do` / `dont` / `neutral`), ranked by Wilson-prior lower bound on hit-rate, ties by confidence. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5; general-scope semantic memories always render in full) are shown in full -- the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` renders everything in full).
+- **`deferred`** -- general-scope semantic memories in full plus a single index line; project-scoped semantic memories and reflections are not rendered and surface only via the contextual channel or `memory.retrieve` / `memory.retrieve_observations`.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|

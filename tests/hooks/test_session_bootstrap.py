@@ -336,6 +336,14 @@ def test_agentcore_mode_does_not_open_sqlite_connection(
     proj.mkdir()
     monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    # Hermetic against the CLAUDE.md drift sentinel: point Path.home() at an
+    # empty dir so no real ~/.claude/CLAUDE.md is picked up (the sentinel
+    # skips silently when the file is missing) and the exact-equality
+    # assertion below on the remote backend's passthrough context holds
+    # regardless of the machine's real CLAUDE.md contents.
+    no_home = tmp_path / "no-home"
+    monkeypatch.setenv("USERPROFILE", str(no_home))
+    monkeypatch.setenv("HOME", str(no_home))
 
     connect_calls: list = []
     monkeypatch.setattr(

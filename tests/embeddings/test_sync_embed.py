@@ -72,3 +72,37 @@ class TestSyncEmbedder:
 
         s = SyncEmbedder(Bare)
         assert s.embed_text("x") is not None
+
+
+class TestFilePersistedCooldown:
+    def test_failure_writes_down_file_and_second_instance_skips(self, tmp_path):
+        down = tmp_path / "embed_down_until"
+        fake = FakeEmbedder(fail=True)
+        s1 = SyncEmbedder(lambda: fake, down_state_file=down)
+        assert s1.embed_text("x") is None
+        assert down.exists()
+        # Fresh instance = fresh hook process. Must skip without touching
+        # the embedder.
+        fake2 = FakeEmbedder()
+        s2 = SyncEmbedder(lambda: fake2, down_state_file=down)
+        assert s2.embed_text("y") is None
+        assert fake2.calls == []
+
+    def test_expired_down_file_allows_embedding(self, tmp_path):
+        down = tmp_path / "embed_down_until"
+        down.write_text("1.0", encoding="utf-8")          # epoch 1970 — expired
+        fake = FakeEmbedder()
+        s = SyncEmbedder(lambda: fake, down_state_file=down)
+        assert s.embed_text("x") is not None
+
+    def test_corrupt_down_file_is_ignored(self, tmp_path):
+        down = tmp_path / "embed_down_until"
+        down.write_text("not-a-number", encoding="utf-8")
+        fake = FakeEmbedder()
+        s = SyncEmbedder(lambda: fake, down_state_file=down)
+        assert s.embed_text("x") is not None
+
+    def test_no_file_param_keeps_old_behaviour(self):
+        fake = FakeEmbedder()
+        s = SyncEmbedder(lambda: fake)
+        assert s.embed_text("x") is not None

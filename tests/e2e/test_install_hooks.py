@@ -65,7 +65,7 @@ EXPECTED_ENTRIES: dict[str, tuple[str, str, bool, str | None]] = {
     # honoured for. Async/pythonw => nothing ever gets rated.
     "Stop": ("better_memory.hooks.session_close", VENV_PY, False, None),
     "UserPromptSubmit": ("better_memory.hooks.contextual_inject", VENV_PY, False, None),
-    "PreToolUse": ("better_memory.hooks.contextual_inject", VENV_PY, False, "Skill|Task|Write"),
+    "PreToolUse": ("better_memory.hooks.contextual_inject", VENV_PY, False, None),
 }
 
 

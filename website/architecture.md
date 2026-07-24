@@ -58,18 +58,24 @@ See [Configuration](configuration.md) for env vars and [AgentCore setup](agentco
 
 ## Injection strategies
 
-better-memory gets memory in front of Claude two ways: a slimmed-down dump at session start, and targeted mid-session injection keyed to what Claude is actually doing.
+better-memory gets memory in front of Claude two ways: a dump at session start, and targeted mid-session injection keyed to what Claude is actually doing.
 
-**Bootstrap (SessionStart).** `SessionBootstrapService.bootstrap` (`better_memory/services/session_bootstrap.py`) renders project-scoped semantic memories and reflections in full only up to `BETTER_MEMORY_BOOTSTRAP_TOP_N` per set (default 5; general-scope semantic memories are always shown in full, uncapped). The remainder collapses into a one-line `### Index (not expanded - retrieve on demand)` section plus a footer affordance pointing at `memory.retrieve` / `memory.retrieve_observations`. Semantic memory ids in the rendered output are the full ids (not truncated), each stamped with an age suffix (`(Nd old)`). Setting `BETTER_MEMORY_BOOTSTRAP_TOP_N=0` disables slimming and renders everything in full (legacy behavior).
+**Bootstrap (SessionStart).** Governed by `BETTER_MEMORY_INJECT_MODE` (`legacy` | `deferred`; default `legacy`):
 
-**Contextual injection (UserPromptSubmit / PreToolUse).** The `contextual_inject` hook (`better_memory/hooks/contextual_inject.py`) scores the same curated memory set against the current prompt (UserPromptSubmit) or tool name + input (PreToolUse, matcher `Skill|Task|Write`) via `retrieve_relevant` (`better_memory/services/relevant.py`):
+- **`legacy`** (default, byte-identical to pre-deferred-injection behavior). `SessionBootstrapService.bootstrap` (`better_memory/services/session_bootstrap.py`) renders project-scoped semantic memories and reflections in full only up to `BETTER_MEMORY_BOOTSTRAP_TOP_N` per set (default 5; general-scope semantic memories are always shown in full, uncapped). The remainder collapses into a one-line `### Index (not expanded - retrieve on demand)` section plus a footer affordance pointing at `memory.retrieve` / `memory.retrieve_observations`. Semantic memory ids in the rendered output are the full ids (not truncated), each stamped with an age suffix (`(Nd old)`). Setting `BETTER_MEMORY_BOOTSTRAP_TOP_N=0` disables slimming and renders everything in full.
+- **`deferred`**. SessionStart renders only general-scope semantic memories in full, plus a single index line ("better-memory knows N reflections + M semantic memories for this project; relevant ones will surface as you work - or ask via memory_retrieve with a task query"). Project-scoped semantic memories and all reflections are not dumped at session start; they surface exclusively through the contextual channel below, or on demand via `memory.retrieve` / `memory.retrieve_observations`.
 
-- Keywords are extracted from the query (lowercased, tokenised, stopwords and <3-char tokens dropped).
-- Each candidate's score is `(distinct keyword hits + title hits) × activation`, where activation grows with `useful_count` and confidence and is halved when a memory has misled more often than it has helped.
-- Candidates below `BETTER_MEMORY_CONTEXT_MIN_HITS` distinct hits are dropped; survivors are ranked by score and capped to `BETTER_MEMORY_CONTEXT_MAX_ITEMS`.
-- A per-session `SeenStore` (`better_memory/services/context_seen.py`, JSON file at `<home>/state/context_seen_<session_id>.json`) deduplicates memories already injected this session. `BETTER_MEMORY_CONTEXT_REINJECT_TURNS=0` (default) means a memory is injected at most once per session; a positive value allows re-injection after that many turns have passed since it was last shown. A "turn" here is one firing of the `contextual_inject` hook, not one user prompt-response cycle: each user prompt is a turn, and in mode `both` each matched tool call (`Skill`, `Task`, `Write`) is a separate turn too.
+**CLAUDE.md drift sentinel (SessionStart only).** After bootstrap renders, `hooks/session_bootstrap.py` best-effort-scans the user's `~/.claude/CLAUDE.md` for parameter tokens documented next to a better-memory tool name and flags any the live MCP tool schema does not recognize (`better_memory/hooks/_claude_md_sentinel.py`; schema built from `mcp/tools.py`, so it tracks future tool changes automatically). The accepted-token set per tool is schema-derived, not just its property names: enum *values* (e.g. `memory_retrieve`'s `polarity` values `do` / `dont` / `neutral`) count as valid tokens too, since real CLAUDE.md prose legitimately backtick-quotes them next to the tool name -- this avoids false-positiving on documented return shapes. At most one warning line is appended to bootstrap's `additionalContext` per session; the check is silent when clean, and any exception is swallowed, so the sentinel can never block or degrade injection. It runs only on the SessionStart bootstrap path, not on the contextual channel. Alongside the sentinel, `better_memory/skills/CLAUDE.snippet.md` was rewritten to behavioural instructions only ("pass a task-describing query when you begin a task", "credit with evidence") and never enumerates parameter names or types, so the canonical snippet itself can no longer drift into the failure mode the sentinel exists to catch.
+
+**Contextual injection (UserPromptSubmit / PreToolUse).** The `contextual_inject` hook (`better_memory/hooks/contextual_inject.py`) scores the curated memory set (semantic + reflections) against the current prompt (UserPromptSubmit, fires on every prompt) or tool name + input (PreToolUse, matcher now unscoped -- every tool call, not a fixed allowlist) via `retrieve_relevant` (`better_memory/services/relevant.py`), a three-leg evidence-gated scorer:
+
+- A memory injects only when it clears an evidence gate: a BM25 match against `reflection_fts` (title / use_cases / hints), or a vector cosine similarity >= `BETTER_MEMORY_CONTEXT_VEC_FLOOR` (default `0.55`) against its embedding. No evidence, no injection -- a memory with neither leg present is silently dropped, however popular it is.
+- The Wilson lower-bound prior on rated exposures (see [Self-rating loop](#self-rating-loop)) never qualifies a memory by itself; among qualifiers it only ranks, via reciprocal rank fusion together with whichever of the BM25/vector ranks are present. Popularity forcing irrelevant injections into context was the old failure mode the gate exists to close.
+- A keyword-hit fallback (>= 2 distinct hits) applies only where the BM25/vector legs are structurally unavailable: for reflections, when there is no raw sqlite `conn` (agentcore mode); for semantic memories -- which have no FTS substrate at all -- whenever no query vector could be produced (no embedder configured, or the Ollama embed call is in cooldown). `BETTER_MEMORY_CONTEXT_MIN_HITS` is **deprecated**: `contextual_inject` no longer reads it, superseded by the evidence gate above.
+- Because PreToolUse now matches every tool, a per-session latch (`SeenStore.pretool_fired` / `mark_pretool_fired`, `better_memory/services/context_seen.py`) runs the full retrieval path at most once per session for PreToolUse; every later PreToolUse event in the session short-circuits on the latch state before touching the DB or the embedder. UserPromptSubmit is unaffected by the latch and fires on every prompt.
+- Survivors are capped to `BETTER_MEMORY_CONTEXT_MAX_ITEMS`, then filtered through a per-session `SeenStore` (`better_memory/services/context_seen.py`, JSON file at `<home>/state/context_seen_<session_id>.json`) that deduplicates memories already injected this session. `BETTER_MEMORY_CONTEXT_REINJECT_TURNS=0` (default) means a memory is injected at most once per session; a positive value allows re-injection after that many turns have passed since it was last shown. A "turn" here is one firing of the `contextual_inject` hook, not one user prompt-response cycle: each user prompt is a turn, and each PreToolUse latch-firing is a turn too (subsequent latched-out PreToolUse events do not bump the turn counter).
 - Survivors render as a `<project-memory source="better-memory">` XML block in `additionalContext`, one entry per item with its kind, id, confidence, `useful_count`, and age, a `dont`-polarity item prefixed `Known pitfall -- do this instead:`, and a footer inviting `memory_credit(kind, id, 'cited'|'shaped'|'misled')` when an entry actually helped or misled.
-- Survivors are logged to `session_memory_exposure` with `source='contextual'` (best-effort; a write failure never blocks injection) and counted in `rating_diagnostics` (`contextual_fired_userprompt`, `contextual_fired_pretool`, `contextual_injected`, `contextual_suppressed_floor`, `contextual_suppressed_dedup`). These counters are per-firing, not per-item: a firing that injects one or several memories still increments `contextual_injected` by exactly 1.
+- Survivors are logged to `session_memory_exposure` with `source='contextual'` (best-effort; a write failure never blocks injection) and counted in `rating_diagnostics` (`contextual_fired_userprompt`, `contextual_fired_pretool`, `contextual_injected`, `contextual_suppressed_floor`, `contextual_suppressed_dedup`). These counters are per-firing, not per-item: a firing that injects one or several memories still increments `contextual_injected` by exactly 1. `contextual_suppressed_floor` now means "no candidate cleared the evidence gate", not "below the old keyword-hits floor".
 
 Gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE` (`userprompt` / `pretool` / `both` / `off`). The hook never raises and always exits 0 — failures are swallowed and logged to `hook_errors`, with no `additionalContext` emitted on that turn.
 
@@ -112,7 +118,12 @@ through `SyncEmbedder` (`better_memory/embeddings/sync_embed.py`), a
 synchronous facade over the Ollama embedder that is best-effort by
 design: any failure opens a 60-second circuit breaker (`_DEFAULT_COOLDOWN`)
 during which every embed call returns `None` immediately instead of
-retrying against a dead Ollama. A missing vector is never treated as an
+retrying against a dead Ollama. In `contextual_inject`, that cooldown is
+additionally persisted to a state file (`<home>/state/embed_down_until`)
+so an Ollama outage is paid for once, not once per hook process -- every
+`contextual_inject` invocation started while the file's deadline is still
+in the future skips the embed call outright instead of re-discovering the
+outage itself. A missing vector is never treated as an
 error - callers just drop the vector leg from ranking and fall back to
 the Wilson + BM25 order above.
 
@@ -180,7 +191,12 @@ captures whether memories actually shaped Claude's work:
    outright to proven rows it competes for a reserved exploration
    slot: the last slot of each polarity bucket (when the bucket cap
    allows at least 2 entries) is set aside for the highest-ranked
-   under-rated memory, if one exists. When `memory.retrieve` is called
+   under-rated memory, if one exists. That serve is tagged
+   `via_exploration=1` on its `session_memory_exposure` row (migration
+   `0015_via_exploration.sql`) -- it's an investment the ranker makes to
+   earn the memory a rating, not a relevance claim, so it is excluded
+   from the headline usefulness metric while still being rated normally
+   through the same self-rating loop. When `memory.retrieve` is called
    with a `query`, this Wilson-ranked list is re-fused with a BM25
    relevance ranking (title / use_cases / hints) and a vector-kNN
    ranking via the same Reciprocal Rank Fusion used for observations --

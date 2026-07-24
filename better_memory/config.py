@@ -232,6 +232,13 @@ class Config:
     context_min_hits: int
     context_max_items: int
     context_reinject_turns: int
+    inject_mode: Literal["deferred", "legacy"]
+    context_vec_floor: float
+    # NOTE: context_min_hits is DEPRECATED. The three-leg evidence-gated
+    # scorer in services/relevant.py (BM25 / vector cosine / keyword-hit
+    # fallback) replaced the old pure keyword-hits floor; contextual_inject.py
+    # no longer reads this field. Kept for back-compat with any external
+    # BETTER_MEMORY_CONTEXT_MIN_HITS overrides that still resolve here.
 
 
 _DEFAULT_CONTEXT_INJECT_MODE = "both"
@@ -258,6 +265,22 @@ def _resolve_embeddings_backend() -> Literal["ollama", "sqlite"]:
             f"{_VALID_EMBEDDINGS_BACKENDS}, got {raw!r}"
         )
     return raw  # type: ignore[return-value]
+
+
+def _resolve_inject_mode() -> Literal["deferred", "legacy"]:
+    raw = (os.environ.get("BETTER_MEMORY_INJECT_MODE") or "legacy").strip().lower()
+    # Fail-safe: anything unrecognised means today's behaviour.
+    return "deferred" if raw == "deferred" else "legacy"
+
+
+def _resolve_vec_floor() -> float:
+    raw = os.environ.get("BETTER_MEMORY_CONTEXT_VEC_FLOOR")
+    if raw is None:
+        return 0.55
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return 0.55
 
 
 def _read_settings_storage_backend(home: Path) -> str | None:
@@ -355,4 +378,6 @@ def get_config() -> Config:
         context_min_hits=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_MIN_HITS", 2),
         context_max_items=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_MAX_ITEMS", 3),
         context_reinject_turns=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_REINJECT_TURNS", 0),
+        inject_mode=_resolve_inject_mode(),
+        context_vec_floor=_resolve_vec_floor(),
     )

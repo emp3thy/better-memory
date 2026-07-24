@@ -1507,6 +1507,11 @@ def test_parse_reflection_extracted_record_unchanged(backend) -> None:
         # evidence_count computed from metadata useful(4)+missed(2)
         "evidence_count": 6,
         "useful_count": 4,
+        # times_overlooked mirrors _overlooked_count (metadata overlooked_count=3).
+        "times_overlooked": 3,
+        # AgentCore has no exposure/rating sweep, so times_ignored is always 0
+        # (PR #84 review: this is the true recorded signal, not a corruption).
+        "times_ignored": 0,
         "times_misled": 1,
         # updated_at derived from createdAt (no body updated_at, no sys key)
         "updated_at": created.isoformat(),
@@ -1553,6 +1558,10 @@ def test_parse_reflection_body_state_record_uses_body(backend) -> None:
     assert parsed["useful_count"] == 7
     assert parsed["times_misled"] == 2
     assert parsed["_overlooked_count"] == 5
+    # Public times_overlooked mirrors the internal counter; times_ignored
+    # is always 0 on agentcore (no exposure/rating sweep to derive it from).
+    assert parsed["times_overlooked"] == 5
+    assert parsed["times_ignored"] == 0
     # evidence_count taken from the body (NOT recomputed as useful+missed=7).
     assert parsed["evidence_count"] == 12
     # updated_at is the body ISO string, and it drives the ranking ts.
@@ -1602,6 +1611,10 @@ def test_retrieve_buckets_migrated_record_by_body_polarity(
     assert refl["useful_count"] == 7
     assert refl["evidence_count"] == 12
     assert refl["updated_at"] == "2026-06-01T09:30:00+00:00"
+    # times_overlooked/times_ignored must survive to the public payload —
+    # the Wilson prior in services/relevant.py reads both keys directly.
+    assert refl["times_overlooked"] == 5
+    assert refl["times_ignored"] == 0
     # Internal helpers stripped from the public payload.
     assert not any(k.startswith("_") for k in refl)
 

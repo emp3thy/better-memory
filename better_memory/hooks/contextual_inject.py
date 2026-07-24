@@ -2,18 +2,20 @@
 current prompt or tool-input. Gated by BETTER_MEMORY_CONTEXT_INJECT_MODE
 (userprompt | pretool | both | off). Never raises; always exits 0.
 
-Candidates are scored via retrieve_relevant and must clear a min-hits floor
-(cfg.context_min_hits) and fit within a max-items cap (cfg.context_max_items).
-A per-session SeenStore dedups injected memories across turns within a run
-(cfg.context_reinject_turns controls re-injection after N turns). Survivors
-are recorded as 'contextual' exposures (best-effort; a write failure never
-blocks injection) and counted in rating_diagnostics for observability
-(contextual_fired_userprompt/pretool, contextual_injected,
+Candidates are scored via retrieve_relevant's three-leg evidence gate (BM25 /
+vector cosine / keyword-hit fallback — see services/relevant.py) and capped
+at cfg.context_max_items. A per-session SeenStore dedups injected memories
+across turns within a run (cfg.context_reinject_turns controls re-injection
+after N turns). Survivors are recorded as 'contextual' exposures (best-effort;
+a write failure never blocks injection) and counted in rating_diagnostics for
+observability (contextual_fired_userprompt/pretool, contextual_injected,
 contextual_suppressed_floor, contextual_suppressed_dedup).
 
-NOTE: whether PreToolUse fires for the built-in Skill/Task tools is
-environment-dependent (see the plan's Task 0 probe); UserPromptSubmit is the
-reliable trigger.
+PreToolUse is latched to one real firing per session (SeenStore.pretool_fired
+/ mark_pretool_fired): the installed matcher is unscoped (all tools), so
+without the latch every tool call would re-run the full retrieval path.
+Later PreToolUse events in the same session short-circuit on the state file
+before any DB/embedder work. UserPromptSubmit is unaffected by the latch.
 """
 from __future__ import annotations
 
@@ -26,12 +28,22 @@ from pathlib import Path
 
 from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
+from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.hooks._error_log import record_hook_error
 from better_memory.services.context_seen import SeenStore, prune_stale
 from better_memory.services.relevant import format_relevant, retrieve_relevant
 from better_memory.storage import build_backend
 
 _MAX_STDIN_BYTES = 1_000_000
+
+
+class _SkipInjection(Exception):
+    """Module-local sentinel: PreToolUse latch already fired this session.
+
+    Caught explicitly (never via the outer BaseException guard) to leave
+    ``rendered = ""`` without treating the skip as an error.
+    """
 
 
 def _bump_diagnostic(conn, cfg, metric: str) -> None:
@@ -95,6 +107,10 @@ def main() -> None:
             state_dir = cfg.home / "state"
             prune_stale(state_dir, now=datetime.now(UTC))
             seen = SeenStore(state_dir, session_id)
+            if event == "PreToolUse":
+                if seen.pretool_fired():
+                    raise _SkipInjection()  # module-local sentinel; caught below
+                seen.mark_pretool_fired()
             seen.bump_turn()
             conn_ctx = (
                 closing(connect(cfg.memory_db))
@@ -114,9 +130,17 @@ def main() -> None:
                     session_id=session_id or None,
                     project=project,
                 )
+                sync_embedder = None
+                if cfg.embeddings_backend == "ollama":
+                    sync_embedder = SyncEmbedder(
+                        lambda: OllamaEmbedder(timeout=5.0, max_retries=1),
+                        down_state_file=cfg.home / "state" / "embed_down_until",
+                    )
                 items = retrieve_relevant(
                     backend, query=query, project=project,
-                    min_hits=cfg.context_min_hits,
+                    conn=conn,
+                    sync_embedder=sync_embedder,
+                    vec_floor=cfg.context_vec_floor,
                     max_items=cfg.context_max_items,
                 )
                 had_candidates = bool(items)
@@ -145,6 +169,8 @@ def main() -> None:
                     _bump_diagnostic(conn, cfg, "contextual_suppressed_dedup")
                 else:
                     _bump_diagnostic(conn, cfg, "contextual_suppressed_floor")
+    except _SkipInjection:
+        rendered = ""
     except BaseException as exc:  # noqa: BLE001
         try:
             record_hook_error(hook_name="contextual_inject", exc=exc)

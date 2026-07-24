@@ -492,10 +492,13 @@ class AgentCoreBackend:
         else:
             evidence_count = int(_num("useful_count")) + int(_num("missed_count"))
 
+        overlooked_count = _count_body_first("times_overlooked", "overlooked_count")
+
         return {
             # Public shape — must match ReflectionSynthesisService.retrieve_reflections
             # return: {id, title, phase, use_cases, hints (list), confidence (float),
-            #          tech, evidence_count, useful_count, times_misled, updated_at}
+            #          tech, evidence_count, useful_count, times_overlooked,
+            #          times_ignored, times_misled, updated_at}
             "id": rec["memoryRecordId"],
             "title": body.get("title", "") if isinstance(body, dict) else "",
             "phase": phase_value,
@@ -505,13 +508,23 @@ class AgentCoreBackend:
             "tech": tech_value,
             "evidence_count": evidence_count,
             "useful_count": _count_body_first("useful_count", "useful_count"),
+            # Copied from the internal ranking counter below so the Wilson
+            # prior in services/relevant.py sees the real overlooked count
+            # instead of silently defaulting to 0 (PR #84 review).
+            "times_overlooked": overlooked_count,
+            # AgentCore has no exposure/rating sweep, so "ignored" (shown
+            # but never rated) is never tracked here — 0 is the true
+            # recorded signal, not a stand-in for a missing feature. The
+            # Wilson prior therefore degrades to a monotone function of
+            # (useful_count + times_overlooked) on this backend, which is
+            # equivalent to the pre-existing popularity ordering below, not
+            # a corruption of it.
+            "times_ignored": 0,
             "times_misled": _count_body_first("times_misled", "times_misled"),
             "updated_at": updated_at_value,
             # Internal ranking/bucketing helpers — stripped by
             # _fetch_reflection_buckets before the payload leaves the backend.
-            "_overlooked_count": _count_body_first(
-                "times_overlooked", "overlooked_count"
-            ),
+            "_overlooked_count": overlooked_count,
             "_updated_at_ts": updated_at_ts,
             "_polarity": polarity_value,
             "_status": status_value,
@@ -933,7 +946,13 @@ class AgentCoreBackend:
         (useful_count / times_misled / overlooked_count → times_overlooked);
         the collapsed rating timestamp comes from last_credited_at stringValue.
         Absent metadata (AWS-extracted or freshly-created records) → zeroed
-        counters, never None."""
+        counters, never None.
+
+        times_ignored is deliberately not populated here: agentcore has no
+        exposure/rating sweep to derive it from, so it falls through to the
+        SemanticMemory dataclass default of 0 — the true recorded signal,
+        not a corruption of it (mirrors the reflection-dict handling in
+        _parse_reflection_record above)."""
         # Local import: the SemanticMemory read model lives in the services
         # layer; importing at module scope would invert the storage→services
         # layering. This is a lightweight frozen dataclass, imported lazily.

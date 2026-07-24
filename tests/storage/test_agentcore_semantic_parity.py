@@ -195,8 +195,8 @@ def test_relevant_reads_agentcore_semantic_counters_and_content(
     """End-to-end §6.3 proof: retrieve_relevant over the agentcore backend
     surfaces the real content + non-zero useful_count. Before the fix,
     semantic_list returned dicts and getattr(s,'content') / getattr(s,
-    'useful_count') defaulted to '' / 0, so this memory would never score
-    above the min-hits floor and semantic injection was dead."""
+    'useful_count') defaulted to '' / 0, so this memory would never clear
+    the keyword-fallback evidence gate and semantic injection was dead."""
     # No reflections; semantic namespace has one strongly-matching memory.
     mock_data_client.list_memory_records.return_value = {
         "memoryRecordSummaries": [
@@ -210,7 +210,6 @@ def test_relevant_reads_agentcore_semantic_counters_and_content(
         backend,
         query="uv pip python",
         project="testproj",
-        min_hits=2,
         now=lambda: datetime(2026, 7, 13, tzinfo=UTC),
     )
     assert len(out) == 1

@@ -799,3 +799,11 @@ def test_0014_semantic_embeddings_table(tmp_memory_db: Path) -> None:
         assert row is not None
     finally:
         conn.close()
+
+
+def test_0015_via_exploration_column(tmp_memory_db):
+    conn = connect(tmp_memory_db)
+    apply_migrations(conn)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(session_memory_exposure)")]
+    assert "via_exploration" in cols
+    conn.close()

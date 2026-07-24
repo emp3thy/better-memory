@@ -96,7 +96,12 @@ class StorageBackend(Protocol):
 
         Each bucket is a list of reflection dicts: ``{id, title, phase,
         use_cases, hints (list[str]), confidence (float), tech,
-        evidence_count, useful_count, times_misled, updated_at}``. Sync —
+        evidence_count, useful_count, times_overlooked, times_ignored,
+        times_misled, updated_at}``. ``times_overlooked`` and
+        ``times_ignored`` feed the Wilson-lower-bound prior in
+        ``services/relevant.py``; both backends guarantee the keys are
+        present, but agentcore's ``times_ignored`` is always ``0`` (it has
+        no exposure/rating sweep to derive it from). Sync —
         no embedder call (reflections are pre-extracted in both backends;
         sqlite mode ranks by Wilson lower bound on (useful+overlooked)/rated,
         computed in Python; agentcore mode applies the legacy linear formula

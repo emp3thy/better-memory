@@ -397,9 +397,13 @@ class TestHeadlessDeclineCompletes:
         for key, interp in entries.items():
             assert Path(interp) == expected_interp[key], (key, interp)
         assert matchers[("PostToolUse", "better_memory.hooks.observer")] == "Write|Edit|Bash"
+        # Unscoped (matcher None -> no `matcher` key in the group), mirroring
+        # how SessionStart/Stop assert: the PreToolUse latch in the hook
+        # (SeenStore.pretool_fired/mark_pretool_fired) makes an all-tools
+        # matcher cheap -- only the first PreToolUse event per session does
+        # real work.
         assert (
-            matchers[("PreToolUse", "better_memory.hooks.contextual_inject")]
-            == "Skill|Task|Write"
+            matchers[("PreToolUse", "better_memory.hooks.contextual_inject")] is None
         )
 
     def test_all_writes_landed_under_tmp(self, decline_run: SetupRun) -> None:

@@ -1524,6 +1524,7 @@ class ReflectionSynthesisService:
             reserve = limit_per_bucket is not None and cap >= 2
             buckets: dict[str, list[dict]] = {"do": [], "dont": [], "neutral": []}
             by_polarity: dict[str, list] = {"do": [], "dont": [], "neutral": []}
+            exploration_ids: set[str] = set()
             for r in rows:
                 by_polarity[r["polarity"]].append(r)
             for polarity, group in by_polarity.items():
@@ -1537,6 +1538,7 @@ class ReflectionSynthesisService:
                 chosen = tested_idx[: cap - 1]
                 if untested_idx:
                     chosen.append(untested_idx[0])
+                    exploration_ids.add(group[untested_idx[0]]["id"])
                 if len(chosen) < cap:               # top up from the remainder
                     taken = set(chosen)
                     for i in range(len(group)):
@@ -1586,13 +1588,15 @@ class ReflectionSynthesisService:
                         # re-serves must not add rows.
                         self._conn.executemany(
                             "INSERT INTO session_memory_exposure "
-                            "(session_id, memory_kind, memory_id, exposed_at, source) "
-                            "SELECT ?, 'reflection', ?, ?, 'retrieve' "
+                            "(session_id, memory_kind, memory_id, exposed_at, "
+                            " source, via_exploration) "
+                            "SELECT ?, 'reflection', ?, ?, 'retrieve', ? "
                             "WHERE NOT EXISTS ("
                             "  SELECT 1 FROM session_memory_exposure "
                             "  WHERE session_id = ? AND memory_kind = 'reflection' "
                             "    AND memory_id = ?)",
-                            [(sid, rid, now, sid, rid) for rid in all_ids],
+                            [(sid, rid, now, 1 if rid in exploration_ids else 0,
+                              sid, rid) for rid in all_ids],
                         )
                         _diag.step(fn, "exposure_commit")
                         self._conn.commit()

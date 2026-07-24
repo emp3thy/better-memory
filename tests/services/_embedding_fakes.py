@@ -22,3 +22,30 @@ class FakeEmbedder:
 
     async def aclose(self) -> None:
         self.closed += 1
+
+
+class DirectedEmbedder(FakeEmbedder):
+    """Maps texts containing any trigger phrase to one vector; noise else.
+
+    Lets a test make the query and one reflection/semantic memory
+    'semantically identical' while sharing zero tokens -- isolating the
+    vec leg from BM25/keyword matching. Shared here (was previously
+    private to test_vec_fusion.py) so any embedding-path test can use it.
+    """
+
+    def __init__(self, *triggers: str):
+        super().__init__()
+        self.triggers = triggers
+
+    def _vec(self, text: str) -> list[float]:
+        if any(t in text for t in self.triggers):
+            return [1.0] + [0.0] * 767
+        return [0.0, 1.0] + [0.0] * 766
+
+    async def embed(self, text):
+        self.calls.append(text)
+        return self._vec(text)
+
+    async def embed_batch(self, texts):
+        self.calls.append(list(texts))
+        return [self._vec(t) for t in texts]

@@ -1,22 +1,50 @@
 """Relevance filter over the curated memory set (semantic + reflections).
 
-Fetches the small, already-ranked sets through the StorageBackend abstraction
-(works on sqlite AND agentcore) and scores them against a query using
-hits x activation: distinct whole-word keyword hits (title hits count double)
-multiplied by an activation factor built from useful_count and confidence,
-halved when a memory has misled more often than it has helped. Items below
-a min-hits floor are dropped; the remainder is ranked by score and capped
-to max_items. Pure-Python; no embeddings, no new schema.
+Three-leg evidence-gated scorer, replacing the old pure-keyword
+hits-x-activation model: a memory injects only when it has positive
+relevance EVIDENCE --
+
+- BM25 match against ``reflection_fts`` (title / use_cases / hints), or
+- vector cosine similarity >= ``vec_floor`` against its embedding, or
+- (only when the vec/FTS legs are structurally unavailable -- no sqlite
+  ``conn``, or no embedder for semantics) a keyword-hit floor as a
+  degraded fallback.
+
+The Wilson lower-bound prior (see ``services.scoring``) never qualifies a
+memory by itself -- it only RANKS among qualifiers via reciprocal rank
+fusion (RRF), alongside the BM25 and vector ranks. Popularity forcing
+irrelevant injections was the old failure mode (13% useful as bootstrap);
+the gate exists specifically to close it.
+
+Fetches the small, already-ranked sets through the StorageBackend
+abstraction (works on sqlite AND agentcore); the BM25/vec legs additionally
+require a raw sqlite ``conn`` (agentcore passes ``conn=None`` and degrades
+to the keyword fallback for reflections).
 """
 from __future__ import annotations
 
 import math
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import sqlite_vec
+
+from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.keywords import count_keyword_hits, extract_keywords
+from better_memory.services.scoring import wilson_lower_bound
+
+#: Keyword-hit floor used only when the FTS/vec legs are structurally
+#: unavailable (no sqlite conn for reflections; no query vector, or no
+#: sqlite conn, for semantics -- which have no FTS substrate at all and
+#: whose vec leg needs a conn even when the embedder itself is healthy).
+_FALLBACK_MIN_HITS = 2
+
+#: Reciprocal rank fusion constant, matching search/hybrid.py and
+#: ReflectionSynthesisService._fuse_by_relevance.
+_RRF_K = 60
 
 
 @dataclass
@@ -44,13 +72,88 @@ def _age_days(iso_ts: str | None, now: datetime) -> int | None:
     return max(0, (now - ts).days)
 
 
-def _activation(*, useful_count: int, times_misled: int, confidence: float | None) -> float:
-    act = (1.0 + 0.2 * math.log1p(max(0, useful_count)))
-    if confidence is not None:
-        act *= max(0.1, float(confidence))
-    if times_misled > useful_count:
-        act *= 0.5
-    return act
+def _bm25_qualifiers(conn: sqlite3.Connection | None, query: str) -> dict[str, int]:
+    """reflection_id -> BM25 rank (0 best) for reflections matching query."""
+    sanitized = sanitize_fts5_query(query)
+    tokens = [t for t in sanitized.split() if len(t) > 2]
+    if not tokens or conn is None:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT r.id, bm25(reflection_fts) AS bm "
+            "FROM reflection_fts JOIN reflections r ON r.rowid = reflection_fts.rowid "
+            "WHERE reflection_fts MATCH ? ORDER BY bm ASC",
+            (" OR ".join(tokens),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {row[0]: i for i, row in enumerate(rows)}
+
+
+def _vec_qualifiers(
+    conn: sqlite3.Connection | None,
+    table: str,
+    id_col: str,
+    query_vector: list[float] | None,
+    vec_floor: float,
+) -> dict[str, int]:
+    """id -> vec rank for rows within the cosine floor.
+
+    Vectors are unit-norm, so cosine >= c  <=>  L2 distance <= sqrt(2*(1-c)).
+
+    Step 3a probe (2026-07-23, sqlite-vec as vendored in this repo's
+    .venv): a vec0 kNN query for [1,0,0,0] against a stored [0,1,0,0] row
+    returned ``distance=1.4142135381698608`` -- sqrt(2) at float32
+    precision, not 2.0. Confirms sqlite-vec's ``distance`` column is plain
+    L2 distance, NOT squared L2. The floor comparison below is against the
+    plain (unsquared) distance only; the squared-distance branch that a
+    defensive dual-check would need is dead code and has been omitted.
+    """
+    if conn is None or query_vector is None:
+        return {}
+    max_dist = math.sqrt(2.0 * (1.0 - vec_floor))
+    try:
+        rows = conn.execute(
+            f"SELECT {id_col}, distance FROM {table} "
+            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (sqlite_vec.serialize_float32(query_vector), 50),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out: dict[str, int] = {}
+    for row in rows:
+        if float(row[1]) <= max_dist:
+            out[row[0]] = len(out)
+    return out
+
+
+def _wilson_for(useful: int, overlooked: int, ignored: int) -> float:
+    positive = useful + overlooked
+    n = useful + overlooked + ignored
+    return wilson_lower_bound(positive, n)
+
+
+def _rrf_score(candidates: list[dict]) -> list[tuple[float, dict]]:
+    """RRF-fuse the Wilson prior with the BM25/vec ranks already stashed
+    on each candidate dict (``bm_rank`` / ``vec_rank``, ``None`` if absent).
+
+    The prior rank is computed fresh here (desc by Wilson score) rather
+    than carried in, since it only makes sense relative to the other
+    qualifiers in this same candidate set.
+    """
+    order_by_wilson = sorted(range(len(candidates)), key=lambda i: -candidates[i]["wilson"])
+    prior_rank = {candidates[i]["id"]: rank for rank, i in enumerate(order_by_wilson)}
+
+    scored: list[tuple[float, dict]] = []
+    for c in candidates:
+        present_ranks = [prior_rank[c["id"]]]
+        if c["bm_rank"] is not None:
+            present_ranks.append(c["bm_rank"])
+        if c["vec_rank"] is not None:
+            present_ranks.append(c["vec_rank"])
+        score = sum(1.0 / (_RRF_K + rank) for rank in present_ranks)
+        scored.append((score, c))
+    return scored
 
 
 def retrieve_relevant(
@@ -58,76 +161,131 @@ def retrieve_relevant(
     *,
     query: str,
     project: str,
-    min_hits: int = 2,
+    conn: sqlite3.Connection | None = None,
+    sync_embedder: Any = None,
+    vec_floor: float = 0.55,
     max_items: int = 3,
     include_neutral: bool = False,
     now: Callable[[], datetime] | None = None,
 ) -> list[RelevantMemory]:
-    """Score curated memories against the query; return top max_items whose
-    distinct-keyword hits >= min_hits, ordered by score desc. Never raises."""
-    keywords = extract_keywords(query)
-    if not keywords:
-        return []
-    _now = (now or (lambda: datetime.now(UTC)))()
+    """Gate + rank curated memories (semantic + reflections) for ``query``.
 
-    out: list[RelevantMemory] = []
+    A memory is returned only if it clears the evidence gate: a BM25 match,
+    a vector cosine >= ``vec_floor``, or (only when that leg is structurally
+    unavailable, e.g. ``conn=None`` as in agentcore mode, or no query
+    vector) a keyword-hit fallback. Among qualifiers, ranking is RRF
+    over the Wilson prior plus whichever of BM25/vec ranks are present.
+    Never raises -- any backend/leg failure degrades that leg to "absent"
+    rather than propagating.
+    """
+    if not (query or "").strip():
+        return []
+
+    _now = (now or (lambda: datetime.now(UTC)))()
 
     try:
         buckets = backend.retrieve(project=project, track_exposure=False)
     except Exception:  # noqa: BLE001 - degrade to no reflections
         buckets = {}
+    try:
+        semantic = backend.semantic_list(project=project, track_exposure=False)
+    except Exception:  # noqa: BLE001 - degrade to no semantic
+        semantic = []
+
+    bm = _bm25_qualifiers(conn, query)
+    qvec = sync_embedder.embed_text(query) if sync_embedder is not None else None
+    vec_r = _vec_qualifiers(conn, "reflection_embeddings", "reflection_id", qvec, vec_floor)
+    vec_s = _vec_qualifiers(conn, "semantic_embeddings", "memory_id", qvec, vec_floor)
+    keywords = extract_keywords(query)     # fallback evidence only
+
+    fts_unavailable = conn is None
+
+    refl_candidates: list[dict] = []
     order = ["do", "dont"] + (["neutral"] if include_neutral else [])
     for bucket in order:
         for r in buckets.get(bucket, []) or []:
+            r_id = str(r.get("id"))
             title = str(r.get("title") or "")
             body = " ".join(
                 [str(r.get("use_cases") or "")]
                 + [str(h) for h in (r.get("hints") or [])]
             )
-            title_hits = count_keyword_hits(title, keywords)
-            total_hits = count_keyword_hits(f"{title} {body}", keywords)
-            if total_hits < min_hits:
+            text = f"{title} {body}"
+            kw_hits = count_keyword_hits(text, keywords)
+
+            in_bm = r_id in bm
+            in_vec = r_id in vec_r
+            fallback_ok = fts_unavailable and kw_hits >= _FALLBACK_MIN_HITS
+            if not (in_bm or in_vec or fallback_ok):
                 continue
-            act = _activation(
-                useful_count=int(r.get("useful_count") or 0),
-                times_misled=int(r.get("times_misled") or 0),
-                confidence=r.get("confidence"),
-            )
-            score = (total_hits + title_hits) * act  # title hits count double
-            out.append(RelevantMemory(
-                kind="reflection", id=str(r.get("id")),
-                text=f"{title}: {body}".strip(": "),
-                polarity=bucket if bucket in ("do", "dont") else None,
-                confidence=r.get("confidence"),
-                useful_count=int(r.get("useful_count") or 0),
-                age_days=_age_days(r.get("updated_at"), _now),
-                hits=total_hits, score=score,
-            ))
 
-    try:
-        semantic = backend.semantic_list(project=project, track_exposure=False)
-    except Exception:  # noqa: BLE001 - degrade to no semantic
-        semantic = []
+            refl_candidates.append({
+                "id": r_id, "kind": "reflection",
+                "polarity": bucket if bucket in ("do", "dont") else None,
+                "text": f"{title}: {body}".strip(": "),
+                "confidence": r.get("confidence"),
+                "useful_count": int(r.get("useful_count") or 0),
+                "age_days": _age_days(r.get("updated_at"), _now),
+                "hits": kw_hits if (in_bm or fallback_ok) else 0,
+                "bm_rank": bm.get(r_id),
+                "vec_rank": vec_r.get(r_id),
+                # storage.protocol.retrieve guarantees times_overlooked/
+                # times_ignored on both backends (sqlite columns; agentcore
+                # copies its internal overlooked counter and hardcodes
+                # ignored=0 — see storage/agentcore.py::_parse_reflection_record).
+                # The .get(...) defaults below are defensive, not load-bearing.
+                "wilson": _wilson_for(
+                    int(r.get("useful_count") or 0),
+                    int(r.get("times_overlooked") or 0),
+                    int(r.get("times_ignored") or 0),
+                ),
+            })
+
+    sem_candidates: list[dict] = []
     for s in semantic or []:
+        s_id = str(getattr(s, "id", ""))
         content = getattr(s, "content", "") or ""
-        hits = count_keyword_hits(content, keywords)
-        if hits < min_hits:
-            continue
-        act = _activation(
-            useful_count=int(getattr(s, "useful_count", 0) or 0),
-            times_misled=int(getattr(s, "times_misled", 0) or 0),
-            confidence=None,
-        )
-        out.append(RelevantMemory(
-            kind="semantic", id=str(getattr(s, "id", "")),
-            text=content, polarity=None, confidence=None,
-            useful_count=int(getattr(s, "useful_count", 0) or 0),
-            age_days=_age_days(getattr(s, "updated_at", None), _now),
-            hits=hits, score=hits * act,
-        ))
+        kw_hits = count_keyword_hits(content, keywords)
 
-    out.sort(key=lambda m: (-m.score, m.id))
-    return out[:max_items]
+        in_vec = s_id in vec_s
+        # Semantics have no FTS/BM25 leg at all, so the keyword fallback
+        # applies whenever the vec leg is structurally unavailable: no
+        # query vector (no embedder / embed failure) OR no sqlite conn
+        # to query against (agentcore mode passes conn=None even when
+        # the embedder itself is healthy and qvec is real -- the vec
+        # candidate set still comes back empty in that case).
+        fallback_ok = (qvec is None or conn is None) and kw_hits >= _FALLBACK_MIN_HITS
+        if not (in_vec or fallback_ok):
+            continue
+
+        sem_candidates.append({
+            "id": s_id, "kind": "semantic", "polarity": None,
+            "text": content,
+            "confidence": None,
+            "useful_count": int(getattr(s, "useful_count", 0) or 0),
+            "age_days": _age_days(getattr(s, "updated_at", None), _now),
+            "hits": kw_hits if fallback_ok else 0,
+            "bm_rank": None,
+            "vec_rank": vec_s.get(s_id),
+            "wilson": _wilson_for(
+                int(getattr(s, "useful_count", 0) or 0),
+                int(getattr(s, "times_overlooked", 0) or 0),
+                int(getattr(s, "times_ignored", 0) or 0),
+            ),
+        })
+
+    all_scored = _rrf_score(refl_candidates) + _rrf_score(sem_candidates)
+    all_scored.sort(key=lambda t: (-t[0], t[1]["id"]))
+
+    out = [
+        RelevantMemory(
+            kind=c["kind"], id=c["id"], text=c["text"], polarity=c["polarity"],
+            confidence=c["confidence"], useful_count=c["useful_count"],
+            age_days=c["age_days"], hits=c["hits"], score=score,
+        )
+        for score, c in all_scored[:max_items]
+    ]
+    return out
 
 
 _TEXT_MAX_CHARS = 400
