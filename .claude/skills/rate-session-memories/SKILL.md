@@ -14,16 +14,18 @@ Call `memory.list_session_exposures` (no arguments — the server resolves the
 current session from env). Read the returned list. This is the ONLY valid set
 of ids to rate. The list in the RATE_MEMORIES directive may have been truncated.
 
-## STEP 2 — Classify each id
+## STEP 2 — Evidence first, then classify
 
-For each `(kind, id)` pair returned by the list, assign exactly ONE class:
+For each `(kind, id)`: FIRST try to write ONE line of evidence — what the
+memory changed in this session, or a quote of where you used it. Then:
 
-- **cited** — you quoted or directly referenced the memory in a reply.
-- **shaped** — the memory guided a decision but wasn't cited verbatim.
-- **ignored** — you saw it but it didn't affect this session. (Default.)
-- **misled** — it caused a wrong direction or wasted effort.
-- **overlooked** — the memory was relevant and you should have applied
-  it, but you didn't, until the user explicitly pointed you back to it.
+- Evidence line written → choose `cited` (quoted/directly referenced),
+  `shaped` (guided a decision), `misled` (sent you wrong), or `overlooked`
+  (user had to point you back to it). Include the evidence line in the
+  rating.
+- No evidence line possible → the class is `ignored`. Full stop. Do not
+  reverse the order; choosing a class first and rationalising evidence
+  after is how ratings drift.
 
 Rules:
 - Quote the id in your reasoning so you can't drift.
@@ -35,7 +37,6 @@ Rules:
   that user intervention is the observable anchor. Test for it first,
   separately from the cited/shaped/ignored axis. No anchor event → not
   `overlooked`.
-- Default is `ignored`. "Shaped" requires evidence you can point to.
 
 ## STEP 3 — Submit ALL ratings in ONE call
 
@@ -45,7 +46,8 @@ Call `memory.apply_session_ratings` with this exact shape (no `session_id`
 ```json
 {
   "ratings": [
-    {"kind": "reflection", "id": "r-abc...", "class": "cited"},
+    {"kind": "reflection", "id": "r-abc...", "class": "cited",
+     "evidence": "Used its junit-xml flag verbatim in the pytest invocation."},
     {"kind": "semantic",   "id": "s-def...", "class": "ignored"}
   ]
 }

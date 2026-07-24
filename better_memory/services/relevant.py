@@ -297,7 +297,8 @@ _BLOCK_HEADER = (
 )
 _BLOCK_FOOTER = (
     "If any entry above materially helps or misleads this task, credit it now: "
-    "memory_credit(kind, id, 'cited'|'shaped'|'misled').\n"
+    "memory_credit(kind, id, class, evidence) - include a one-line evidence "
+    "statement.\n"
     "</project-memory>"
 )
 

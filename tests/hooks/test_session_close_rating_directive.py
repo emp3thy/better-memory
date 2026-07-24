@@ -184,6 +184,24 @@ class TestRatingDirectiveEmission:
         directive = payload["hookSpecificOutput"]["additionalContext"]
         assert "overlooked" in directive
 
+    def test_directive_requires_evidence_first(self, tmp_path, tmp_memory_db):
+        _seed_unrated_exposure(tmp_memory_db, "S1")
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        assert "evidence" in directive
+        assert (
+            "FIRST write one line of evidence (what the memory changed, "
+            "or a quote)" in directive
+        )
+        assert "if you cannot, the class is `ignored`" in directive
+        assert "Non-ignored ratings without an evidence line are rejected" in directive
+
     def test_directive_shows_source_labels_and_counts(
         self, tmp_path, tmp_memory_db,
     ):

@@ -224,12 +224,12 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
             + ("\n".join(refl_lines) if refl_lines else "  (none)")
             + f"\n\nSemantic memories ({len(sem_lines)}):\n"
             + ("\n".join(sem_lines) if sem_lines else "  (none)")
-            + "\n\nFor each id, classify as one of:\n"
-            "  cited / shaped / ignored / misled / overlooked "
-            "(default: ignored)\n\n"
-            "Most exposures default to `ignored` — only flag the few "
-            "that actually shaped the session or misled you. Invoke "
-            "the skill `rate-session-memories`."
+            + "\n\n"
+            "For each id: FIRST write one line of evidence (what the memory "
+            "changed, or a quote) - if you cannot, the class is `ignored`.\n"
+            "Classes: cited / shaped / ignored / misled / overlooked.\n"
+            "Non-ignored ratings without an evidence line are rejected. "
+            "Invoke the skill `rate-session-memories`."
         )
         encoded = directive.encode("utf-8")
         if len(encoded) > CAP_BYTES:
