@@ -245,9 +245,13 @@ class AgentCoreBackend:
         Returns dict[polarity, list[reflection_dict]] in the same shape sqlite mode
         returns; the MCP memory.retrieve handler json-dumps this directly to Claude.
 
-        ``query`` is accepted for parity but no-op in agentcore mode — BM25
-        relevance fusion needs the local ``reflection_fts`` index, which has no
-        AgentCore equivalent. Ordering stays the Wilson rule above.
+        ``query``, when non-blank, is fused into the ordering above via
+        server-side semantic search: ``_relevance_rank_map`` calls
+        ``retrieve_memory_records`` against the actor's reflections
+        namespace and RRF-combines its result rank with the Wilson rank
+        (constant 60) — see ``_fetch_reflection_buckets`` for the fusion
+        formula. An empty/failed lookup or a blank query leaves ordering as
+        pure Wilson (today's Task-4 behaviour).
 
         track_exposure: when True (default) and a local exposure ledger is
         available (``self._local_conn`` — see ``record_exposures``), writes
@@ -267,6 +271,7 @@ class AgentCoreBackend:
             phase=phase,
             polarity=polarity if polarity in _POLARITIES else None,
             exploration_ids=exploration_ids,
+            query=query,
         )
         if track_exposure:
             self._record_retrieve_exposures(buckets, exploration_ids)
@@ -316,6 +321,7 @@ class AgentCoreBackend:
         phase: str | None = None,
         polarity: str | None = None,
         exploration_ids: set[str] | None = None,
+        query: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Two-namespace reflection fan-out shared by retrieve() and
         session_bootstrap().
@@ -350,6 +356,18 @@ class AgentCoreBackend:
         loop below. ``exploration_ids``, when passed, is populated in place
         with the id of every reflection that took the reserved slot in any
         bucket (used by ``retrieve()`` to tag exposure rows).
+
+        ``query``, when non-blank, fetches a server-side semantic rank map
+        once (``_relevance_rank_map``, over the actor's reflections
+        namespace) BEFORE the per-bucket fill, then RRF-fuses it with the
+        Wilson order per bucket: ``score = 1/(60 + wilson_rank) + 1/(60 +
+        relevance_rank)``, where ``wilson_rank`` is the item's position in
+        the just-computed Wilson order and a missing relevance leg (record
+        absent from the rank map) contributes nothing. The two-pass
+        exploration fill below then runs over this fused order, so the
+        reserved slot is chosen from fused-order untested candidates. An
+        empty/failed rank map (or blank query) leaves the fusion step a
+        no-op — pure Wilson order, unchanged from Task 4.
         """
         project_ns = resolve_namespace(actor_id, "reflections")
         general_ns = resolve_namespace("general", "reflections")
@@ -431,6 +449,15 @@ class AgentCoreBackend:
         # entire bucket).
         reserve = limit_per_bucket >= 2
 
+        # Server-side semantic rank map for RRF fusion, fetched ONCE (not
+        # per-bucket — a single retrieve_memory_records call covers every
+        # polarity) BEFORE the per-bucket fill so the exploration fill below
+        # operates on the fused order rather than pure Wilson. Blank query
+        # or an empty/failed lookup -> {} -> the fusion step is a no-op.
+        rank_map: dict[str, int] = {}
+        if query is not None and query.strip():
+            rank_map = self._relevance_rank_map(query.strip(), project_ns)
+
         for bucket_name, items in buckets.items():
             # Shared Wilson ordering (services/scoring.py): the lower bound
             # of the Wilson score interval on useful+overlooked / rated,
@@ -446,6 +473,28 @@ class AgentCoreBackend:
                     -r["_updated_at_ts"],
                 )
             )
+
+            if rank_map:
+                # RRF fusion (constant 60): score = 1/(60 + wilson_rank) +
+                # 1/(60 + relevance_rank); a record absent from rank_map
+                # contributes nothing for the relevance leg. `items` is
+                # already Wilson-ordered above, so enumerating it supplies
+                # wilson_rank directly, and the sort below is stable — equal
+                # scores (e.g. neither leg present) keep their Wilson order.
+                items = [
+                    r
+                    for _, r in sorted(
+                        enumerate(items),
+                        key=lambda pair: -(
+                            1.0 / (60 + pair[0])
+                            + (
+                                1.0 / (60 + rank_map[pair[1]["id"]])
+                                if pair[1]["id"] in rank_map
+                                else 0.0
+                            )
+                        ),
+                    )
+                ]
 
             if not reserve:
                 chosen = items[:limit_per_bucket]
@@ -491,6 +540,36 @@ class AgentCoreBackend:
                 for r in chosen
             ]
         return buckets
+
+    def _relevance_rank_map(
+        self, query: str, namespace: str, top_k: int = 50
+    ) -> dict[str, int]:
+        """Server-side semantic search rank map for RRF fusion with the
+        shared Wilson ordering (see ``_fetch_reflection_buckets``).
+
+        Same call shape as ``semantic_list``'s search path
+        (``retrieve_memory_records`` with ``searchCriteria={"searchQuery",
+        "topK"}``), but against the episodic (reflections) memory rather
+        than semantic. Returns ``{memoryRecordId: rank}`` from result order
+        (0 = best match). Best-effort: any exception (AWS error, malformed
+        response, ...) degrades to ``{}`` so the caller falls back to pure
+        Wilson order — never raises."""
+        try:
+            response = self._data.retrieve_memory_records(
+                memoryId=self._cfg.episodic.memory_id,
+                namespace=namespace,
+                searchCriteria={
+                    "searchQuery": query,
+                    "topK": top_k,
+                },
+            )
+            return {
+                rec["memoryRecordId"]: rank
+                for rank, rec in enumerate(response.get("memoryRecordSummaries", []))
+                if "memoryRecordId" in rec
+            }
+        except Exception:  # noqa: BLE001 - best-effort; Wilson order is the fallback
+            return {}
 
     def _parse_reflection_record(
         self,

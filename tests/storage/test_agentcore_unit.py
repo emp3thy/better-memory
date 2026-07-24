@@ -739,6 +739,107 @@ def test_retrieve_dedupes_record_seen_in_both_namespaces(
     assert [r["id"] for r in result["do"]] == ["rec-dup"]
 
 
+def _wilson_pair_stub(mock_data_client) -> None:
+    """Stubs list_memory_records so the project reflections namespace
+    returns one high-Wilson non-matching record ranked first under pure
+    Wilson order, and one low-Wilson record ranked second — the pair used
+    by the query/RRF-fusion tests below."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("irrelevant-highwilson", useful=50, ignored=5),
+                _wilson_ranking_record("relevant-lowwilson", useful=1, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+
+
+def test_retrieve_query_fuses_relevance_with_wilson_rrf(backend, mock_data_client) -> None:
+    """Under `query`, a semantically-relevant low-Wilson record outranks a
+    high-Wilson non-matching record via RRF fusion (constant 60):
+    score = 1/(60+wilson_rank) + 1/(60+relevance_rank), missing relevance
+    leg contributes nothing. Also asserts the retrieve_memory_records call
+    shape mirrors semantic_list's search path but against the episodic
+    memory + the actor's reflections namespace."""
+    _wilson_pair_stub(mock_data_client)
+    mock_data_client.retrieve_memory_records.return_value = {
+        "memoryRecordSummaries": [{"memoryRecordId": "relevant-lowwilson"}]
+    }
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["relevant-lowwilson", "irrelevant-highwilson"]
+    mock_data_client.retrieve_memory_records.assert_called_once_with(
+        memoryId="mem-epi-def4567890",
+        namespace="projects/testproj/reflections/",
+        searchCriteria={"searchQuery": "some query", "topK": 50},
+    )
+
+
+def test_retrieve_without_query_reverts_to_wilson_order(backend, mock_data_client) -> None:
+    """No `query` -> ordering is pure Wilson (today's Task-4 behaviour) and
+    no semantic search call is made at all."""
+    _wilson_pair_stub(mock_data_client)
+    result = backend.retrieve(project="testproj", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["irrelevant-highwilson", "relevant-lowwilson"]
+    mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_retrieve_query_relevance_lookup_error_degrades_to_wilson_order(
+    backend, mock_data_client
+) -> None:
+    """retrieve_memory_records raising (AWS error or otherwise) degrades to
+    an empty rank map -> pure Wilson order, and never raises out of
+    retrieve()."""
+    _wilson_pair_stub(mock_data_client)
+    mock_data_client.retrieve_memory_records.side_effect = Exception("boom")
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["irrelevant-highwilson", "relevant-lowwilson"]
+
+
+@pytest.mark.parametrize("blank_query", ["", "   "])
+def test_retrieve_blank_query_skips_relevance_call(
+    backend, mock_data_client, blank_query
+) -> None:
+    """Blank/whitespace-only query -> no retrieve_memory_records call at all
+    (not even attempted)."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.retrieve(project="testproj", query=blank_query, track_exposure=False)
+    mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_retrieve_query_exploration_slot_still_reserved_in_fused_order(
+    backend, mock_data_client
+) -> None:
+    """Fused (query) order feeds the two-pass exploration fill, not raw
+    Wilson order: relevance hits reorder the tested candidates (proven-3
+    jumps ahead of proven-2, displacing it out of the cap) while the
+    untested reflection still claims its reserved slot."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("proven-3", useful=10, ignored=5),
+                _wilson_ranking_record("untested", useful=1, ignored=0),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    mock_data_client.retrieve_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {"memoryRecordId": "proven-3"},
+            {"memoryRecordId": "proven-1"},
+        ]
+    }
+    result = backend.retrieve(
+        project="testproj", query="some query", limit_per_bucket=3, track_exposure=False
+    )
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["proven-1", "proven-3", "untested"]
+
+
 def _make_record_response(rec_id: str, **counters) -> dict:
     """Helper: build a MemoryRecord response with the standard metadata."""
     base = {
