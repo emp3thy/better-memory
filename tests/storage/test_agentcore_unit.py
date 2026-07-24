@@ -946,6 +946,95 @@ def test_retrieve_query_exploration_slot_still_reserved_in_fused_order(
     assert do_ids == ["proven-1", "proven-3", "untested"]
 
 
+# ----- Task 6: relevance_ranks -----
+
+
+def test_relevance_ranks_reflection_kind_stubbed_retrieve(backend, mock_data_client) -> None:
+    """kinds=("reflection",) calls RetrieveMemoryRecords against the
+    episodic memory, per project + general namespace, and returns the
+    merged (kind, id) -> rank map from result order."""
+    _retrieve_records_stub(mock_data_client, {
+        "projects/testproj/reflections/": ["r1", "r2"],
+    })
+    result = backend.relevance_ranks(query="some query", kinds=("reflection",))
+    assert result == {("reflection", "r1"): 0, ("reflection", "r2"): 1}
+
+    assert mock_data_client.retrieve_memory_records.call_count == 2
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/reflections/", "general/reflections/",
+    }
+    for call in mock_data_client.retrieve_memory_records.call_args_list:
+        assert call.kwargs["memoryId"] == "mem-epi-def4567890"
+        assert call.kwargs["searchCriteria"] == {
+            "searchQuery": "some query", "topK": 50,
+        }
+
+
+def test_relevance_ranks_semantic_kind_uses_semantic_memory_and_namespace(
+    backend, mock_data_client
+) -> None:
+    """kinds=("semantic",) calls RetrieveMemoryRecords against the
+    SEMANTIC memory id, not the episodic one, using the semantic namespace
+    family (mirrors semantic_list's own namespace resolution)."""
+    _retrieve_records_stub(mock_data_client, {
+        "projects/testproj/semantic/": ["s1"],
+    })
+    result = backend.relevance_ranks(query="some query", kinds=("semantic",))
+    assert result == {("semantic", "s1"): 0}
+
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/semantic/", "general/semantic/",
+    }
+    for call in mock_data_client.retrieve_memory_records.call_args_list:
+        assert call.kwargs["memoryId"] == "mem-sem-abc1234567"
+
+
+def test_relevance_ranks_both_kinds_combined(backend, mock_data_client) -> None:
+    """Default kinds=("reflection", "semantic") returns entries for both,
+    keyed separately -- ranks are per-kind, not globally comparable."""
+    def stub(**kwargs):
+        if kwargs["namespace"] in (
+            "projects/testproj/reflections/", "general/reflections/",
+        ):
+            ids = ["r1"] if kwargs["namespace"] == "projects/testproj/reflections/" else []
+        else:
+            ids = ["s1"] if kwargs["namespace"] == "projects/testproj/semantic/" else []
+        return {"memoryRecordSummaries": [{"memoryRecordId": i} for i in ids]}
+
+    mock_data_client.retrieve_memory_records.side_effect = stub
+    result = backend.relevance_ranks(query="some query")
+    assert result == {("reflection", "r1"): 0, ("semantic", "s1"): 0}
+
+
+def test_relevance_ranks_namespace_error_degrades_that_kind_to_empty(
+    backend, mock_data_client
+) -> None:
+    """RetrieveMemoryRecords raising on every namespace call for a kind
+    degrades that kind to no entries -- never raises out of
+    relevance_ranks (matches _relevance_rank_map's own best-effort
+    contract)."""
+    mock_data_client.retrieve_memory_records.side_effect = Exception("boom")
+    result = backend.relevance_ranks(query="some query")
+    assert result == {}
+
+
+@pytest.mark.parametrize("blank_query", ["", "   "])
+def test_relevance_ranks_blank_query_skips_wire_call(
+    backend, mock_data_client, blank_query
+) -> None:
+    result = backend.relevance_ranks(query=blank_query)
+    assert result == {}
+    mock_data_client.retrieve_memory_records.assert_not_called()
+
+
 def _make_record_response(rec_id: str, **counters) -> dict:
     """Helper: build a MemoryRecord response with the standard metadata."""
     base = {

@@ -320,6 +320,39 @@ class StorageBackend(Protocol):
         """
         ...
 
+    # ----- Contextual relevance -----
+
+    def relevance_ranks(
+        self,
+        *,
+        query: str,
+        kinds: tuple[str, ...] = ("reflection", "semantic"),
+        top_k: int = 50,
+    ) -> dict[tuple[str, str], int]:
+        """Server-side relevance rank map for the contextual evidence gate
+        (``services/relevant.py``'s ``retrieve_relevant``). Returns
+        ``{(kind, id): rank}`` -- 0 is the best match, per kind (ranks are
+        not comparable ACROSS kinds; each (kind, id) is only ever looked up
+        for its own candidate). An empty dict means "no evidence" or
+        "unavailable" -- never raises.
+
+        SqliteBackend: a thin wrapper over its existing BM25
+        (``reflection_fts``) + vector legs, RRF-merged per kind. Provided
+        for protocol completeness only -- ``retrieve_relevant``'s sqlite
+        path keeps calling those legs directly against its own ``conn``
+        parameter and never calls this method, so sqlite's contextual-gate
+        behavior is unaffected by this method's existence.
+
+        AgentCoreBackend: server-side semantic search
+        (``retrieve_memory_records``) fanned out per kind's project +
+        general namespace pair (reusing ``_relevance_rank_map`` /
+        ``_merge_relevance_rank_maps``, the same machinery ``retrieve``
+        uses for its own RRF fusion with the Wilson prior), ranked by
+        result order. Best-effort: any AWS error degrades that kind's
+        contribution to empty rather than raising.
+        """
+        ...
+
     # ----- Synthesis (sqlite-only — guarded by supports_synthesis) -----
 
     def synthesize_next_get_context(

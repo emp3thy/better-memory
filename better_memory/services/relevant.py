@@ -18,8 +18,14 @@ the gate exists specifically to close it.
 
 Fetches the small, already-ranked sets through the StorageBackend
 abstraction (works on sqlite AND agentcore); the BM25/vec legs additionally
-require a raw sqlite ``conn`` (agentcore passes ``conn=None`` and degrades
-to the keyword fallback for reflections).
+require a raw sqlite ``conn``. Agentcore (``conn=None`` AND
+``supports_synthesis=False``) replaces the BM25/vec legs wholesale with
+``backend.relevance_ranks`` -- a server-side semantic-search rank map --
+and only falls back to the keyword-hit floor when that lookup itself comes
+back empty (an AWS error, or genuinely no matches). A sqlite backend
+called with ``conn=None`` keeps the pre-existing keyword-fallback
+behavior unchanged, regardless of whether it also implements
+``relevance_ranks`` (it does, for protocol completeness only).
 """
 from __future__ import annotations
 
@@ -172,9 +178,17 @@ def retrieve_relevant(
 
     A memory is returned only if it clears the evidence gate: a BM25 match,
     a vector cosine >= ``vec_floor``, or (only when that leg is structurally
-    unavailable, e.g. ``conn=None`` as in agentcore mode, or no query
-    vector) a keyword-hit fallback. Among qualifiers, ranking is RRF
-    over the Wilson prior plus whichever of BM25/vec ranks are present.
+    unavailable, e.g. no query vector) a keyword-hit fallback. Among
+    qualifiers, ranking is RRF over the Wilson prior plus whichever of
+    BM25/vec ranks are present.
+
+    Agentcore backends (``conn=None`` AND ``supports_synthesis=False``)
+    replace the BM25/vec legs with ``backend.relevance_ranks`` -- a
+    server-side semantic-search rank map fused into the same RRF -- and
+    fall back to the keyword-hit floor only when that lookup comes back
+    empty (AWS error). Sqlite backends are unaffected by this branch even
+    when called with ``conn=None``.
+
     Never raises -- any backend/leg failure degrades that leg to "absent"
     rather than propagating.
     """
@@ -200,6 +214,38 @@ def retrieve_relevant(
 
     fts_unavailable = conn is None
 
+    # Agentcore evidence gate (design spec 2026-07-24-agentcore-parity-
+    # design.md §3): when the caller has no sqlite FTS/vec substrate
+    # (conn=None) AND the backend is agentcore-flavored --
+    # supports_synthesis=False, the existing Protocol capability flag that
+    # already distinguishes AgentCoreBackend from SqliteBackend everywhere
+    # else in this codebase -- the evidence gate becomes membership in a
+    # backend-computed relevance rank map (server-side RetrieveMemoryRecords
+    # semantic search) instead of the keyword-hit fallback. A conn=None
+    # SqliteBackend caller (supports_synthesis=True) is explicitly excluded
+    # here, so sqlite's own fallback semantics stay byte-for-byte unchanged
+    # regardless of whether SqliteBackend also implements relevance_ranks
+    # (it does, for protocol completeness -- see storage/sqlite.py -- but
+    # this function never calls it in that case).
+    agentcore_mode = (
+        conn is None
+        and hasattr(backend, "relevance_ranks")
+        and getattr(backend, "supports_synthesis", True) is False
+    )
+    rank_map: dict[tuple[str, str], int] = {}
+    if agentcore_mode:
+        try:
+            rank_map = backend.relevance_ranks(
+                query=query, kinds=("reflection", "semantic"),
+            )
+        except Exception:  # noqa: BLE001 - best-effort; degrade to keyword fallback
+            rank_map = {}
+    # Keyword fallback fires only when the backend-side lookup itself came
+    # back empty (AWS error on every namespace, or genuinely no matches) --
+    # not simply "backend is agentcore" -- matching the sqlite fallback's
+    # own "leg structurally unavailable" contract.
+    agentcore_kw_fallback = agentcore_mode and not rank_map
+
     refl_candidates: list[dict] = []
     order = ["do", "dont"] + (["neutral"] if include_neutral else [])
     for bucket in order:
@@ -215,8 +261,12 @@ def retrieve_relevant(
 
             in_bm = r_id in bm
             in_vec = r_id in vec_r
-            fallback_ok = fts_unavailable and kw_hits >= _FALLBACK_MIN_HITS
-            if not (in_bm or in_vec or fallback_ok):
+            in_backend_rank = agentcore_mode and ("reflection", r_id) in rank_map
+            fallback_ok = (
+                (agentcore_kw_fallback if agentcore_mode else fts_unavailable)
+                and kw_hits >= _FALLBACK_MIN_HITS
+            )
+            if not (in_bm or in_vec or in_backend_rank or fallback_ok):
                 continue
 
             refl_candidates.append({
@@ -226,8 +276,11 @@ def retrieve_relevant(
                 "confidence": r.get("confidence"),
                 "useful_count": int(r.get("useful_count") or 0),
                 "age_days": _age_days(r.get("updated_at"), _now),
-                "hits": kw_hits if (in_bm or fallback_ok) else 0,
-                "bm_rank": bm.get(r_id),
+                "hits": kw_hits if (in_bm or in_backend_rank or fallback_ok) else 0,
+                "bm_rank": (
+                    rank_map.get(("reflection", r_id))
+                    if agentcore_mode else bm.get(r_id)
+                ),
                 "vec_rank": vec_r.get(r_id),
                 # storage.protocol.retrieve guarantees times_overlooked/
                 # times_ignored on both backends (sqlite columns; agentcore
@@ -248,14 +301,19 @@ def retrieve_relevant(
         kw_hits = count_keyword_hits(content, keywords)
 
         in_vec = s_id in vec_s
+        in_backend_rank = agentcore_mode and ("semantic", s_id) in rank_map
         # Semantics have no FTS/BM25 leg at all, so the keyword fallback
         # applies whenever the vec leg is structurally unavailable: no
         # query vector (no embedder / embed failure) OR no sqlite conn
-        # to query against (agentcore mode passes conn=None even when
-        # the embedder itself is healthy and qvec is real -- the vec
-        # candidate set still comes back empty in that case).
-        fallback_ok = (qvec is None or conn is None) and kw_hits >= _FALLBACK_MIN_HITS
-        if not (in_vec or fallback_ok):
+        # to query against. In agentcore mode the vec leg is replaced
+        # wholesale by the backend rank map, so the fallback there fires
+        # only per the same agentcore_kw_fallback signal as reflections
+        # (empty rank map == AWS error), not merely "conn is None".
+        fallback_ok = (
+            agentcore_kw_fallback if agentcore_mode
+            else (qvec is None or conn is None)
+        ) and kw_hits >= _FALLBACK_MIN_HITS
+        if not (in_vec or in_backend_rank or fallback_ok):
             continue
 
         sem_candidates.append({
@@ -264,9 +322,12 @@ def retrieve_relevant(
             "confidence": None,
             "useful_count": int(getattr(s, "useful_count", 0) or 0),
             "age_days": _age_days(getattr(s, "updated_at", None), _now),
-            "hits": kw_hits if fallback_ok else 0,
+            "hits": kw_hits if (in_backend_rank or fallback_ok) else 0,
             "bm_rank": None,
-            "vec_rank": vec_s.get(s_id),
+            "vec_rank": (
+                rank_map.get(("semantic", s_id))
+                if agentcore_mode else vec_s.get(s_id)
+            ),
             "wilson": _wilson_for(
                 int(getattr(s, "useful_count", 0) or 0),
                 int(getattr(s, "times_overlooked", 0) or 0),

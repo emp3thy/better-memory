@@ -121,8 +121,11 @@ def main() -> None:
             # substrate (reflection_fts / *_embeddings), which agentcore has
             # none of, so retrieve_relevant still gets conn=None for
             # agentcore — that parameter means "FTS/vec index available",
-            # not "any local connection at all" (a later task changes this
-            # gate once/if agentcore grows a local index).
+            # not "any local connection at all". retrieve_relevant itself
+            # detects agentcore (conn=None + supports_synthesis=False) and
+            # substitutes backend.relevance_ranks — a server-side semantic
+            # search — for the BM25/vec legs, so agentcore's evidence gate
+            # is no longer purely keyword-based despite conn=None here.
             with closing(connect(cfg.memory_db)) as conn:
                 _bump_diagnostic(
                     conn, cfg,

@@ -251,6 +251,164 @@ def test_blank_query_returns_empty(conn, blank_query):
     assert emb.calls == []
 
 
+class _StubAgentCoreBackend:
+    """Minimal agentcore-flavored stub for retrieve_relevant's agentcore
+    evidence-gate branch, isolated from the real AgentCoreBackend (which
+    needs boto3 mocks -- see tests/storage/test_agentcore_unit.py for
+    relevance_ranks's own wire-shape tests). Exposes exactly the surface
+    retrieve_relevant touches: retrieve / semantic_list / relevance_ranks
+    / supports_synthesis=False (the capability flag that gates the branch
+    on, alongside conn=None)."""
+
+    supports_synthesis = False
+
+    def __init__(self, *, reflections=None, semantics=None, rank_map=None,
+                 raise_on_ranks=False):
+        self._reflections = reflections or {"do": [], "dont": [], "neutral": []}
+        self._semantics = semantics or []
+        self._rank_map = rank_map or {}
+        self._raise_on_ranks = raise_on_ranks
+
+    def retrieve(self, **kwargs):
+        return self._reflections
+
+    def semantic_list(self, **kwargs):
+        return self._semantics
+
+    def relevance_ranks(self, *, query, kinds=("reflection", "semantic"), top_k=50):
+        if self._raise_on_ranks:
+            raise RuntimeError("AWS boom")
+        return dict(self._rank_map)
+
+
+def _stub_reflection(rid, *, title, use_cases="", useful=0, overlooked=0, ignored=0):
+    return {
+        "id": rid, "title": title, "use_cases": use_cases, "hints": [],
+        "confidence": 0.5, "useful_count": useful,
+        "times_overlooked": overlooked, "times_ignored": ignored,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+
+
+class TestAgentCoreRelevanceGate:
+    """conn=None + supports_synthesis=False routes retrieve_relevant
+    through backend.relevance_ranks instead of the BM25/vec legs (which
+    are structurally unavailable with no sqlite conn -- see
+    services/relevant.py's agentcore_mode gate)."""
+
+    def test_backend_rank_membership_qualifies_without_token_overlap(self):
+        # Zero shared tokens between title and query -- the old
+        # keyword-hit fallback would never qualify this; only the backend
+        # rank map's membership does, mirroring the vec-gate's
+        # DirectedEmbedder scenario but with no embedder involved at all.
+        reflections = {
+            "do": [_stub_reflection("r1", title="Zebra flamingo unrelated topic")],
+            "dont": [], "neutral": [],
+        }
+        backend = _StubAgentCoreBackend(
+            reflections=reflections, rank_map={("reflection", "r1"): 0},
+        )
+        out = retrieve_relevant(
+            backend, query="how does retention archive things", project="p",
+            conn=None, now=lambda: FIXED_NOW,
+        )
+        assert [(m.kind, m.id) for m in out] == [("reflection", "r1")]
+
+    def test_backend_rank_membership_qualifies_semantic_without_token_overlap(self):
+        from better_memory.services.semantic import SemanticMemory
+
+        semantics = [SemanticMemory(
+            id="s1", content="unrelated flamingo content", project="p",
+            scope="project", created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )]
+        backend = _StubAgentCoreBackend(
+            semantics=semantics, rank_map={("semantic", "s1"): 0},
+        )
+        out = retrieve_relevant(
+            backend, query="how does retention archive things", project="p",
+            conn=None, now=lambda: FIXED_NOW,
+        )
+        assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
+
+    def test_empty_rank_map_falls_back_to_keywords(self):
+        # No relevance_ranks matches (AWS error / genuinely empty) -- the
+        # keyword-hit floor still fires, same as the pre-existing
+        # conn=None sqlite behaviour (test_no_conn_falls_back_to_keywords).
+        reflections = {
+            "do": [_stub_reflection(
+                "r1", title="Retention thresholds alpha",
+                use_cases="retention thresholds tuning guide",
+            )],
+            "dont": [], "neutral": [],
+        }
+        backend = _StubAgentCoreBackend(reflections=reflections, rank_map={})
+        out = retrieve_relevant(
+            backend, query="retention thresholds", project="p",
+            conn=None, now=lambda: FIXED_NOW,
+        )
+        assert [(m.kind, m.id) for m in out] == [("reflection", "r1")]
+
+    def test_no_matching_evidence_no_injection(self):
+        # Empty rank map AND no keyword overlap -- nothing qualifies.
+        reflections = {
+            "do": [_stub_reflection("r1", title="Zebra flamingo unrelated topic")],
+            "dont": [], "neutral": [],
+        }
+        backend = _StubAgentCoreBackend(reflections=reflections, rank_map={})
+        out = retrieve_relevant(
+            backend, query="how does retention archive things", project="p",
+            conn=None, now=lambda: FIXED_NOW,
+        )
+        assert out == []
+
+    def test_relevance_ranks_error_degrades_to_keyword_fallback(self):
+        # relevance_ranks raising must never propagate out of
+        # retrieve_relevant -- it degrades exactly like an empty map.
+        reflections = {
+            "do": [_stub_reflection(
+                "r1", title="Retention thresholds alpha",
+                use_cases="retention thresholds tuning guide",
+            )],
+            "dont": [], "neutral": [],
+        }
+        backend = _StubAgentCoreBackend(
+            reflections=reflections, raise_on_ranks=True,
+        )
+        out = retrieve_relevant(
+            backend, query="retention thresholds", project="p",
+            conn=None, now=lambda: FIXED_NOW,
+        )
+        assert [(m.kind, m.id) for m in out] == [("reflection", "r1")]
+
+    def test_wilson_still_ranks_not_qualifies_in_agentcore_mode(self):
+        # Both reflections are present in the rank map (both qualify), but
+        # Wilson still decides ranking among qualifiers via RRF -- a
+        # popular-but-irrelevant reflection absent from the rank map must
+        # NOT be injected just because it's popular.
+        reflections = {
+            "do": [
+                _stub_reflection("r-hi", title="Retention thresholds alpha",
+                                  useful=5, ignored=1),
+                _stub_reflection("r-lo", title="Retention thresholds beta",
+                                  useful=0, ignored=6),
+                _stub_reflection("r-popular-irrelevant",
+                                  title="Zebra flamingo unrelated topic",
+                                  useful=50),
+            ],
+            "dont": [], "neutral": [],
+        }
+        backend = _StubAgentCoreBackend(
+            reflections=reflections,
+            rank_map={("reflection", "r-hi"): 0, ("reflection", "r-lo"): 1},
+        )
+        out = retrieve_relevant(
+            backend, query="retention thresholds", project="p",
+            conn=None, now=lambda: FIXED_NOW,
+        )
+        assert [m.id for m in out] == ["r-hi", "r-lo"]
+
+
 def test_returns_relevantmemory(conn):
     _seed_reflection(conn, "r1", title="Retention archives by confidence")
     backend = _backend(conn)

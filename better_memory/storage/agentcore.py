@@ -557,21 +557,31 @@ class AgentCoreBackend:
         return buckets
 
     def _relevance_rank_map(
-        self, query: str, namespace: str, top_k: int = 50
+        self,
+        query: str,
+        namespace: str,
+        top_k: int = 50,
+        *,
+        memory_id: str | None = None,
     ) -> dict[str, int]:
         """Server-side semantic search rank map for RRF fusion with the
-        shared Wilson ordering (see ``_fetch_reflection_buckets``).
+        shared Wilson ordering (see ``_fetch_reflection_buckets``), and —
+        via ``relevance_ranks`` — with the contextual evidence gate in
+        ``services/relevant.py``.
 
         Same call shape as ``semantic_list``'s search path
         (``retrieve_memory_records`` with ``searchCriteria={"searchQuery",
-        "topK"}``), but against the episodic (reflections) memory rather
-        than semantic. Returns ``{memoryRecordId: rank}`` from result order
-        (0 = best match). Best-effort: any exception (AWS error, malformed
-        response, ...) degrades to ``{}`` so the caller falls back to pure
-        Wilson order — never raises."""
+        "topK"}``). ``memory_id`` defaults to the episodic (reflections)
+        memory when omitted, matching every existing caller
+        (``_fetch_reflection_buckets``); ``relevance_ranks`` passes the
+        semantic memory's id explicitly for "semantic"-kind lookups.
+        Returns ``{memoryRecordId: rank}`` from result order (0 = best
+        match). Best-effort: any exception (AWS error, malformed response,
+        ...) degrades to ``{}`` so the caller falls back to pure Wilson
+        order / the keyword fallback — never raises."""
         try:
             response = self._data.retrieve_memory_records(
-                memoryId=self._cfg.episodic.memory_id,
+                memoryId=memory_id or self._cfg.episodic.memory_id,
                 namespace=namespace,
                 searchCriteria={
                     "searchQuery": query,
@@ -622,6 +632,68 @@ class AgentCoreBackend:
                     if rid not in merged:
                         merged[rid] = len(merged)
         return merged
+
+    def relevance_ranks(
+        self,
+        *,
+        query: str,
+        kinds: tuple[str, ...] = ("reflection", "semantic"),
+        top_k: int = 50,
+    ) -> dict[tuple[str, str], int]:
+        """Server-side relevance rank map for the contextual evidence gate
+        in ``services/relevant.py`` (``retrieve_relevant``'s agentcore
+        branch, gated on ``conn is None`` + ``supports_synthesis is
+        False``).
+
+        Reuses the same fan-out/merge machinery ``_fetch_reflection_
+        buckets`` uses for its own Wilson/relevance RRF fusion
+        (``_relevance_rank_map`` + ``_merge_relevance_rank_maps``), applied
+        per requested kind against that kind's own memory + namespace
+        pair: "reflection" -> the episodic memory's
+        projects/{actor}/reflections/ + general/reflections/ namespaces
+        (mirroring ``retrieve``'s own fan-out); "semantic" -> the semantic
+        memory's projects/{actor}/semantic/ + general/semantic/ namespaces
+        (mirroring ``semantic_list``'s namespace resolution). The two
+        namespace results are merged via ``_merge_relevance_rank_maps``
+        (namespace-fair round robin) into one rank map per kind, then
+        combined into the returned ``(kind, id) -> rank`` map — ranks are
+        only ever compared within their own kind by the caller, never
+        across kinds.
+
+        Best-effort per kind, per namespace: ``_relevance_rank_map`` never
+        raises, so one namespace (or one whole kind) failing/emptying still
+        lets the others contribute. Blank query or every requested kind
+        failing/emptying returns ``{}`` — the caller's designated signal to
+        fall back to the keyword-hit gate."""
+        if not query or not query.strip():
+            return {}
+        q = query.strip()
+        actor_id = resolve_actor_id(self._project)
+
+        out: dict[tuple[str, str], int] = {}
+        for kind in kinds:
+            if kind == "reflection":
+                memory_id = self._cfg.episodic.memory_id
+                ns_kind = "reflections"
+            elif kind == "semantic":
+                memory_id = self._cfg.semantic.memory_id
+                ns_kind = "semantic"
+            else:
+                continue
+
+            project_ns = resolve_namespace(actor_id, ns_kind)
+            general_ns = resolve_namespace("general", ns_kind)
+            namespaces = [project_ns]
+            if general_ns != project_ns:
+                namespaces.append(general_ns)
+
+            merged = self._merge_relevance_rank_maps([
+                self._relevance_rank_map(q, ns, top_k, memory_id=memory_id)
+                for ns in namespaces
+            ])
+            for rid, rank in merged.items():
+                out[(kind, rid)] = rank
+        return out
 
     def _parse_reflection_record(
         self,
