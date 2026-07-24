@@ -478,7 +478,8 @@ class TestSessionHandlersRemoteBranch:
         )
         payload = _payload(
             await handlers.credit(
-                {"kind": "semantic", "id": _RECORD_ID_40, "class": "cited"}
+                {"kind": "semantic", "id": _RECORD_ID_40, "class": "cited",
+                 "evidence": "quoted its retry guidance"}
             )
         )
         assert payload == {"applied": "cited", "skipped": None}
@@ -487,6 +488,7 @@ class TestSessionHandlersRemoteBranch:
             kind="semantic",
             id=_RECORD_ID_40,
             classification="cited",
+            evidence="quoted its retry guidance",
         )
         rating.credit_one.assert_not_called()
 

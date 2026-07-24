@@ -143,6 +143,7 @@ class SessionToolHandlers:
                 kind=args["kind"],
                 id=args["id"],
                 classification=args["class"],
+                evidence=args.get("evidence"),
             )
         else:
             payload = self._memory_rating.credit_one(
