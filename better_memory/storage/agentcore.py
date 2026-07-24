@@ -247,11 +247,13 @@ class AgentCoreBackend:
 
         ``query``, when non-blank, is fused into the ordering above via
         server-side semantic search: ``_relevance_rank_map`` calls
-        ``retrieve_memory_records`` against the actor's reflections
-        namespace and RRF-combines its result rank with the Wilson rank
-        (constant 60) — see ``_fetch_reflection_buckets`` for the fusion
-        formula. An empty/failed lookup or a blank query leaves ordering as
-        pure Wilson (today's Task-4 behaviour).
+        ``retrieve_memory_records`` PER namespace (project + general/
+        promoted — same fan-out the Wilson fetch uses), the per-namespace
+        results are merged (``_merge_relevance_rank_maps``), and the merged
+        rank is RRF-combined with the Wilson rank (constant 60) — see
+        ``_fetch_reflection_buckets`` for the fusion formula. An empty/
+        failed lookup or a blank query leaves ordering as pure Wilson
+        (today's Task-4 behaviour).
 
         track_exposure: when True (default) and a local exposure ledger is
         available (``self._local_conn`` — see ``record_exposures``), writes
@@ -358,10 +360,12 @@ class AgentCoreBackend:
         bucket (used by ``retrieve()`` to tag exposure rows).
 
         ``query``, when non-blank, fetches a server-side semantic rank map
-        once (``_relevance_rank_map``, over the actor's reflections
-        namespace) BEFORE the per-bucket fill, then RRF-fuses it with the
-        Wilson order per bucket: ``score = 1/(60 + wilson_rank) + 1/(60 +
-        relevance_rank)``, where ``wilson_rank`` is the item's position in
+        (``_relevance_rank_map``, called once PER namespace over the same
+        project + general/promoted fan-out as the Wilson fetch above, then
+        merged via ``_merge_relevance_rank_maps``) BEFORE the per-bucket
+        fill, then RRF-fuses it with the Wilson order per bucket: ``score =
+        1/(60 + wilson_rank) + 1/(60 + relevance_rank)``, where
+        ``wilson_rank`` is the item's position in
         the just-computed Wilson order and a missing relevance leg (record
         absent from the rank map) contributes nothing. The two-pass
         exploration fill below then runs over this fused order, so the
@@ -449,14 +453,25 @@ class AgentCoreBackend:
         # entire bucket).
         reserve = limit_per_bucket >= 2
 
-        # Server-side semantic rank map for RRF fusion, fetched ONCE (not
-        # per-bucket — a single retrieve_memory_records call covers every
-        # polarity) BEFORE the per-bucket fill so the exploration fill below
-        # operates on the fused order rather than pure Wilson. Blank query
-        # or an empty/failed lookup -> {} -> the fusion step is a no-op.
+        # Server-side semantic rank map for RRF fusion, fetched ONCE per
+        # namespace (not per-bucket — one retrieve_memory_records call per
+        # namespace covers every polarity) BEFORE the per-bucket fill so the
+        # exploration fill below operates on the fused order rather than
+        # pure Wilson. Design spec (2026-07-24-agentcore-parity-design.md
+        # §3): RetrieveMemoryRecords is called PER namespace — same
+        # project + general/promoted fan-out the Wilson fetch above already
+        # uses (`namespaces`) — so a promoted/general-scope reflection gets
+        # the same relevance boost as a project-scoped one. Each namespace
+        # call is independently best-effort (`_relevance_rank_map` never
+        # raises); one namespace failing still lets the other's results
+        # through the merge. Blank query or every namespace failing/empty
+        # -> {} -> the fusion step below is a no-op.
         rank_map: dict[str, int] = {}
         if query is not None and query.strip():
-            rank_map = self._relevance_rank_map(query.strip(), project_ns)
+            q = query.strip()
+            rank_map = self._merge_relevance_rank_maps(
+                [self._relevance_rank_map(q, ns) for ns, _ in namespaces]
+            )
 
         for bucket_name, items in buckets.items():
             # Shared Wilson ordering (services/scoring.py): the lower bound
@@ -570,6 +585,43 @@ class AgentCoreBackend:
             }
         except Exception:  # noqa: BLE001 - best-effort; Wilson order is the fallback
             return {}
+
+    def _merge_relevance_rank_maps(
+        self, rank_maps: list[dict[str, int]]
+    ) -> dict[str, int]:
+        """Merge one ``_relevance_rank_map`` result per namespace (see the
+        call site in ``_fetch_reflection_buckets``, which fans
+        ``_relevance_rank_map`` out over every namespace the Wilson fetch
+        itself uses — project + general/promoted) into a single global rank
+        map.
+
+        RetrieveMemoryRecords' response shape has no ``score`` field
+        verified anywhere in this codebase's fixtures/docs (only prose
+        mentions of a "cosine score" in the design doc) — rather than parse
+        an unconfirmed key, this interleaves each namespace's already
+        rank-ordered id list round-robin (best-of-namespace-1, best-of-
+        namespace-2, next-of-namespace-1, ...) and assigns global ranks
+        0..n-1 in that interleaved order. This is a namespace-fair merge
+        that needs no cross-namespace score comparison. A duplicate id (a
+        just-promoted record can transiently appear in both namespaces,
+        mirroring the id-dedup in ``_fetch_reflection_buckets``) keeps its
+        FIRST (better) global rank."""
+        ordered_ids = [
+            sorted(rank_map, key=lambda rid: rank_map[rid]) for rank_map in rank_maps
+        ]
+        merged: dict[str, int] = {}
+        cursors = [0] * len(ordered_ids)
+        advanced = True
+        while advanced:
+            advanced = False
+            for i, ids in enumerate(ordered_ids):
+                if cursors[i] < len(ids):
+                    advanced = True
+                    rid = ids[cursors[i]]
+                    cursors[i] += 1
+                    if rid not in merged:
+                        merged[rid] = len(merged)
+        return merged
 
     def _parse_reflection_record(
         self,

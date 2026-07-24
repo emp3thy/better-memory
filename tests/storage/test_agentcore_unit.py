@@ -754,25 +754,128 @@ def _wilson_pair_stub(mock_data_client) -> None:
     mock_data_client.list_memory_records.side_effect = stub
 
 
+def _retrieve_records_stub(
+    mock_data_client, results_by_namespace: dict[str, list[str]]
+) -> None:
+    """Stub retrieve_memory_records per-namespace: results_by_namespace maps
+    namespace -> ordered list of memoryRecordId (best match first).
+    Namespaces not present in the map return an empty result — mirrors how
+    `_wilson_pair_stub`-style helpers key list_memory_records by
+    namespace."""
+    def stub(**kwargs):
+        ids = results_by_namespace.get(kwargs["namespace"], [])
+        return {"memoryRecordSummaries": [{"memoryRecordId": rid} for rid in ids]}
+    mock_data_client.retrieve_memory_records.side_effect = stub
+
+
 def test_retrieve_query_fuses_relevance_with_wilson_rrf(backend, mock_data_client) -> None:
     """Under `query`, a semantically-relevant low-Wilson record outranks a
     high-Wilson non-matching record via RRF fusion (constant 60):
     score = 1/(60+wilson_rank) + 1/(60+relevance_rank), missing relevance
-    leg contributes nothing. Also asserts the retrieve_memory_records call
-    shape mirrors semantic_list's search path but against the episodic
-    memory + the actor's reflections namespace."""
+    leg contributes nothing. Also asserts retrieve_memory_records is called
+    PER namespace (design spec 2026-07-24-agentcore-parity-design.md §3) —
+    project + general/promoted, same fan-out as the Wilson (list_memory_
+    records) fetch — with the semantic_list-mirroring call shape against
+    the episodic memory."""
     _wilson_pair_stub(mock_data_client)
-    mock_data_client.retrieve_memory_records.return_value = {
-        "memoryRecordSummaries": [{"memoryRecordId": "relevant-lowwilson"}]
-    }
+    _retrieve_records_stub(mock_data_client, {
+        "projects/testproj/reflections/": ["relevant-lowwilson"],
+    })
     result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
     do_ids = [r["id"] for r in result["do"]]
     assert do_ids == ["relevant-lowwilson", "irrelevant-highwilson"]
-    mock_data_client.retrieve_memory_records.assert_called_once_with(
-        memoryId="mem-epi-def4567890",
-        namespace="projects/testproj/reflections/",
-        searchCriteria={"searchQuery": "some query", "topK": 50},
-    )
+
+    assert mock_data_client.retrieve_memory_records.call_count == 2
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/reflections/",
+        "general/reflections/",
+    }
+    for call in mock_data_client.retrieve_memory_records.call_args_list:
+        assert call.kwargs["memoryId"] == "mem-epi-def4567890"
+        assert call.kwargs["searchCriteria"] == {
+            "searchQuery": "some query", "topK": 50,
+        }
+
+
+def test_retrieve_query_fuses_relevance_from_general_namespace(
+    backend, mock_data_client
+) -> None:
+    """Design spec requires RetrieveMemoryRecords called PER namespace —
+    not just the project namespace. A low-Wilson record living ONLY in
+    general/reflections/ (promoted or shared) still gets a relevance boost
+    from its own namespace's search call and can outrank a high-Wilson
+    project-namespace record that doesn't match the query."""
+    def stub_list(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "irrelevant-project-highwilson", useful=50, ignored=5,
+                ),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "relevant-general-lowwilson", useful=1, ignored=1,
+                ),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub_list
+    _retrieve_records_stub(mock_data_client, {
+        "general/reflections/": ["relevant-general-lowwilson"],
+    })
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["relevant-general-lowwilson", "irrelevant-project-highwilson"]
+
+    assert mock_data_client.retrieve_memory_records.call_count == 2
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/reflections/",
+        "general/reflections/",
+    }
+
+
+def test_retrieve_query_one_namespace_lookup_failure_still_uses_the_other(
+    backend, mock_data_client
+) -> None:
+    """A namespace-level RetrieveMemoryRecords failure is independently
+    best-effort per namespace: the project namespace call raising doesn't
+    blank out the general namespace's (successful) relevance boost."""
+    def stub_list(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "irrelevant-project-highwilson", useful=50, ignored=5,
+                ),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "relevant-general-lowwilson", useful=1, ignored=1,
+                ),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    def stub_retrieve(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            raise Exception("boom")
+        return {"memoryRecordSummaries": [
+            {"memoryRecordId": "relevant-general-lowwilson"},
+        ]}
+
+    mock_data_client.list_memory_records.side_effect = stub_list
+    mock_data_client.retrieve_memory_records.side_effect = stub_retrieve
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["relevant-general-lowwilson", "irrelevant-project-highwilson"]
 
 
 def test_retrieve_without_query_reverts_to_wilson_order(backend, mock_data_client) -> None:
@@ -788,14 +891,17 @@ def test_retrieve_without_query_reverts_to_wilson_order(backend, mock_data_clien
 def test_retrieve_query_relevance_lookup_error_degrades_to_wilson_order(
     backend, mock_data_client
 ) -> None:
-    """retrieve_memory_records raising (AWS error or otherwise) degrades to
-    an empty rank map -> pure Wilson order, and never raises out of
-    retrieve()."""
+    """retrieve_memory_records raising on EVERY namespace call (AWS error or
+    otherwise) degrades to an empty merged rank map -> pure Wilson order,
+    and never raises out of retrieve()."""
     _wilson_pair_stub(mock_data_client)
     mock_data_client.retrieve_memory_records.side_effect = Exception("boom")
     result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
     do_ids = [r["id"] for r in result["do"]]
     assert do_ids == ["irrelevant-highwilson", "relevant-lowwilson"]
+    # Both namespaces were attempted (each independently best-effort) even
+    # though both raised.
+    assert mock_data_client.retrieve_memory_records.call_count == 2
 
 
 @pytest.mark.parametrize("blank_query", ["", "   "])
