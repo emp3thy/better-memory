@@ -100,8 +100,8 @@ class StorageBackend(Protocol):
         times_misled, updated_at}``. ``times_overlooked`` and
         ``times_ignored`` feed the Wilson-lower-bound prior in
         ``services/relevant.py``; both backends guarantee the keys are
-        present, but agentcore's ``times_ignored`` is always ``0`` (it has
-        no exposure/rating sweep to derive it from). Sync —
+        present and read-back the ignored_count counter (body-first for
+        migrated reflections, metadata numberValue for AWS-extracted). Sync —
         no embedder call (reflections are pre-extracted in both backends;
         sqlite mode ranks by Wilson lower bound on (useful+overlooked)/rated,
         computed in Python; agentcore mode applies the legacy linear formula

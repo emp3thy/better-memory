@@ -1148,6 +1148,44 @@ def test_semantic_list_scope_classification_normalizes_leading_slash(
     }
 
 
+def test_semantic_summary_metadata_ignored_count(backend, mock_data_client) -> None:
+    """_semantic_summary_to_model reads ignored_count from metadata."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "sm-ignored",
+                "content": {"text": "semantic content"},
+                "namespaces": ["projects/testproj/semantic/"],
+                "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+                "metadata": {
+                    "ignored_count": {"numberValue": 4},
+                },
+            }
+        ]
+    }
+    result = backend.semantic_list()
+    assert len(result) == 1
+    assert result[0].times_ignored == 4
+
+
+def test_semantic_summary_no_ignored_count(backend, mock_data_client) -> None:
+    """_semantic_summary_to_model defaults times_ignored to 0 when absent."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "sm-no-ignored",
+                "content": {"text": "semantic content"},
+                "namespaces": ["projects/testproj/semantic/"],
+                "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+                "metadata": {},
+            }
+        ]
+    }
+    result = backend.semantic_list()
+    assert len(result) == 1
+    assert result[0].times_ignored == 0
+
+
 def test_semantic_update_text_calls_batch_update(backend, mock_data_client) -> None:
     mock_data_client.get_memory_record.return_value = {
         "memoryRecord": {
@@ -1575,6 +1613,78 @@ def test_parse_reflection_body_state_record_uses_body(backend) -> None:
     # records, which carry polarity nowhere else.
     assert parsed["_polarity"] == "do"
     assert parsed["_status"] == "promoted"
+
+
+def test_parse_reflection_body_ignored_count(backend) -> None:
+    """ignored_count read from body (migrated reflection)."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-body-ignored",
+        "content": {"text": json.dumps({
+            "title": "Test",
+            "use_cases": "test",
+            "hints": [],
+            "confidence": 0.8,
+            "tech": "python",
+            "phase": "general",
+            "ignored_count": 3,
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {},
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+    assert parsed["times_ignored"] == 3
+
+
+def test_parse_reflection_metadata_ignored_count(backend) -> None:
+    """ignored_count read from metadata (AWS-extracted reflection)."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-meta-ignored",
+        "content": {"text": json.dumps({
+            "title": "Test",
+            "use_cases": "test",
+            "hints": [],
+            "confidence": 0.8,
+            "tech": "python",
+            "phase": "general",
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {
+            "ignored_count": {"numberValue": 2},
+        },
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+    assert parsed["times_ignored"] == 2
+
+
+def test_parse_reflection_no_ignored_count(backend) -> None:
+    """ignored_count absent in both body and metadata defaults to 0."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-no-ignored",
+        "content": {"text": json.dumps({
+            "title": "Test",
+            "use_cases": "test",
+            "hints": [],
+            "confidence": 0.8,
+            "tech": "python",
+            "phase": "general",
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {},
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+    assert parsed["times_ignored"] == 0
 
 
 def test_retrieve_buckets_migrated_record_by_body_polarity(

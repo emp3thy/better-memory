@@ -524,14 +524,7 @@ class AgentCoreBackend:
             # prior in services/relevant.py sees the real overlooked count
             # instead of silently defaulting to 0 (PR #84 review).
             "times_overlooked": overlooked_count,
-            # AgentCore has no exposure/rating sweep, so "ignored" (shown
-            # but never rated) is never tracked here — 0 is the true
-            # recorded signal, not a stand-in for a missing feature. The
-            # Wilson prior therefore degrades to a monotone function of
-            # (useful_count + times_overlooked) on this backend, which is
-            # equivalent to the pre-existing popularity ordering below, not
-            # a corruption of it.
-            "times_ignored": 0,
+            "times_ignored": _count_body_first("ignored_count", "ignored_count"),
             "times_misled": _count_body_first("times_misled", "times_misled"),
             "updated_at": updated_at_value,
             # Internal ranking/bucketing helpers — stripped by
@@ -1040,6 +1033,8 @@ class AgentCoreBackend:
             last_misled_at=None,
             times_overlooked=_count("overlooked_count"),
             last_overlooked_at=None,
+            times_ignored=_count("ignored_count"),
+            last_ignored_at=None,
         )
 
     def semantic_update_text(self, *, id: str, content: str) -> None:
