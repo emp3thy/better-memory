@@ -258,7 +258,18 @@ class StorageBackend(Protocol):
         *,
         session_id: str,
     ) -> dict[str, Any]:
-        """List unrated memory exposures for the given session."""
+        """List unrated memory exposures for the given session.
+
+        Backend-agnostic: both backends read the SAME local
+        ``session_memory_exposure`` table via ``services.exposure_log``.
+        SqliteBackend always has a connection; AgentCoreBackend uses one
+        when available (``local_conn``, wired from the caller's local
+        ``memory.db`` connection — see ``storage/factory.py`` and the
+        ``contextual_inject`` / ``session_bootstrap`` hooks) and otherwise
+        degrades to the empty envelope ``{"session_id": ..., "exposures":
+        []}``. AgentCore's memory records carry no exposure log of their
+        own — session-operational state like this always lives locally,
+        never in AgentCore, regardless of where memory CONTENT lives."""
         ...
 
     def apply_session_ratings(
@@ -277,9 +288,15 @@ class StorageBackend(Protocol):
         items: list[tuple[str, str]],
         source: str,
     ) -> None:
-        """Record (kind, id) memory exposures for later rating. Sqlite writes
-        session_memory_exposure rows; agentcore is a documented no-op (it has
-        no exposure log - rating flows through credit_one)."""
+        """Record (kind, id) memory exposures for later rating.
+
+        Backend-agnostic: both backends write the SAME local
+        ``session_memory_exposure`` table via ``services.exposure_log``.
+        SqliteBackend always has a connection; AgentCoreBackend uses the
+        local ledger connection when one is available (``local_conn``) and
+        otherwise no-ops — AgentCore's memory records carry no exposure
+        log of their own, so this table is always local session-operational
+        state, never AgentCore-side content, regardless of backend."""
         ...
 
     def credit_one(

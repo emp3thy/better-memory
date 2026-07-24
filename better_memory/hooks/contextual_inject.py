@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from contextlib import closing, nullcontext
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -112,12 +112,18 @@ def main() -> None:
                     raise _SkipInjection()  # module-local sentinel; caught below
                 seen.mark_pretool_fired()
             seen.bump_turn()
-            conn_ctx = (
-                closing(connect(cfg.memory_db))
-                if cfg.storage_backend == "sqlite"
-                else nullcontext(None)
-            )
-            with conn_ctx as conn:
+            # A real local connection is opened in BOTH modes now. Agentcore
+            # mode never stores memory CONTENT locally, but session-
+            # operational state (the exposure ledger) lives in the local
+            # memory.db regardless of backend — build_backend threads this
+            # conn through as the backend's exposure-ledger connection. The
+            # BM25/vec legs below still require the SQLITE-CONTENT
+            # substrate (reflection_fts / *_embeddings), which agentcore has
+            # none of, so retrieve_relevant still gets conn=None for
+            # agentcore — that parameter means "FTS/vec index available",
+            # not "any local connection at all" (a later task changes this
+            # gate once/if agentcore grows a local index).
+            with closing(connect(cfg.memory_db)) as conn:
                 _bump_diagnostic(
                     conn, cfg,
                     "contextual_fired_userprompt" if event == "UserPromptSubmit"
@@ -138,7 +144,7 @@ def main() -> None:
                     )
                 items = retrieve_relevant(
                     backend, query=query, project=project,
-                    conn=conn,
+                    conn=conn if cfg.storage_backend == "sqlite" else None,
                     sync_embedder=sync_embedder,
                     vec_floor=cfg.context_vec_floor,
                     max_items=cfg.context_max_items,

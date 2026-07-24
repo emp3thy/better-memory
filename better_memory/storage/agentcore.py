@@ -21,6 +21,7 @@ import asyncio
 import concurrent.futures
 import hashlib
 import json
+import sqlite3
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -77,12 +78,23 @@ class AgentCoreBackend:
         control_client: Any,
         session_id: str | None,
         project: str,
+        local_conn: sqlite3.Connection | None = None,
     ) -> None:
         self._cfg = config
         self._data = data_client
         self._control = control_client
         self._session_id = session_id
         self._project = project
+        # Local exposure ledger (session_memory_exposure table in the local
+        # memory.db). Agentcore mode never stores memory CONTENT locally —
+        # reflections/semantic memories/observations live in AgentCore — but
+        # session-operational state (the exposure ledger, the migration
+        # ledger, hook_errors) lives alongside the sqlite backend's own
+        # database regardless of which backend holds the content. None when
+        # no local db is available (e.g. some unit tests); record_exposures
+        # / list_session_exposures degrade to their pre-existing no-op /
+        # empty-envelope behaviour in that case.
+        self._local_conn = local_conn
 
     # ----- Capability flags -----
 
@@ -1345,12 +1357,82 @@ class AgentCoreBackend:
         items: list[tuple[str, str]],
         source: str,
     ) -> None:
-        """No-op: agentcore mode has no exposure log (see list_session_exposures)."""
+        """Write exposures to the local ledger when one is available.
+
+        Agentcore mode has no AWS-side exposure log (memory records carry
+        no per-session concept); the SAME shared ``exposure_log.record``
+        primitive sqlite mode uses is delegated to against the local
+        ``memory.db`` instead, keyed by the backend's ``local_conn`` (wired
+        by ``storage/factory.py`` from the caller's local connection — see
+        ``hooks/contextual_inject.py`` / ``hooks/session_bootstrap.py``).
+
+        Falls back to the pre-existing no-op when ``local_conn`` is None
+        (no local db available, e.g. plain unit-test construction) or when
+        ``session_id`` is empty — matching ``exposure_log.record``'s own
+        best-effort short-circuit. Best-effort overall: any local-db error
+        is swallowed rather than raised, so a ledger write can never block
+        the caller's exposure-tracking path (mirrors the contextual_inject
+        hook's own best-effort wrapper around this call).
+        """
+        if self._local_conn is None or not session_id:
+            return
+        try:
+            from better_memory.services import exposure_log
+
+            exposure_log.record(
+                self._local_conn,
+                session_id=session_id,
+                items=items,
+                source=source,
+                now=datetime.now(UTC).isoformat(),
+            )
+            self._local_conn.commit()
+        except Exception:  # noqa: BLE001 - exposures must never block
+            pass
 
     def list_session_exposures(self, *, session_id: str) -> dict[str, Any]:
-        """Per spec Rating model section: no exposure log in agentcore mode.
-        Returns the standard envelope shape with an empty exposures list."""
-        return {"session_id": session_id, "exposures": []}
+        """List unrated exposures from the local ledger when one is available.
+
+        ``session_id`` re-resolution mirrors ``_require_session_id``'s
+        fallback chain (live env/marker, then the construction-time id) but
+        NEVER raises: an empty/unresolvable session id degrades to the
+        empty envelope ``{"session_id": None, "exposures": []}``, matching
+        sqlite mode's own no-session shape
+        (``SessionBootstrapService.list_session_exposures``).
+
+        When no local ledger is available (``local_conn`` is None — no AWS
+        exposure log exists to fall back to), returns the envelope with an
+        empty exposures list — the pre-existing agentcore-mode contract.
+        Otherwise builds the same envelope shape as sqlite mode over
+        ``exposure_log.list_unrated``'s grouped/deduped/display-joined rows.
+        """
+        sid = session_id
+        if not sid:
+            try:
+                sid = self._require_session_id("list_session_exposures")
+            except ValueError:
+                return {"session_id": None, "exposures": []}
+
+        if self._local_conn is None:
+            return {"session_id": sid, "exposures": []}
+
+        from better_memory.services import exposure_log
+
+        rows = exposure_log.list_unrated(self._local_conn, session_id=sid)
+        return {
+            "session_id": sid,
+            "exposures": [
+                {
+                    "kind": r["memory_kind"],
+                    "id": r["memory_id"],
+                    **({"title": r["display"]} if r["memory_kind"] == "reflection"
+                       else {"content": r["display"]}),
+                    "exposed_at": r["exposed_at"],
+                    "source": r["source"],
+                }
+                for r in rows
+            ],
+        }
 
     def credit_one(
         self,

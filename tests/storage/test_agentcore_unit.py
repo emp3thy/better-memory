@@ -11,6 +11,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from better_memory.db.connection import connect
+from better_memory.db.schema import apply_migrations
 from better_memory.storage import StorageBackend
 from better_memory.storage.agentcore import AgentCoreBackend
 from better_memory.storage.agentcore_persistence import (
@@ -1866,3 +1868,133 @@ def test_t2_record_use_extracted_uses_metadata_path_unchanged(
     assert "metadata" in sent
     assert "content" not in sent
     assert sent["metadata"]["useful_count"]["numberValue"] == 2
+
+
+# ===== Task 2: local exposure ledger (record_exposures / list_session_exposures) =====
+
+
+@pytest.fixture
+def local_conn(tmp_path):
+    """Real tmp sqlite connection with migrations applied — mirrors the
+    services/session_bootstrap unit tests' fixture. Closed at teardown."""
+    conn = connect(tmp_path / "ledger.db")
+    try:
+        apply_migrations(conn)
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def backend_with_local_conn(
+    ac_config, mock_data_client, mock_control_client, local_conn
+) -> AgentCoreBackend:
+    return AgentCoreBackend(
+        config=ac_config,
+        data_client=mock_data_client,
+        control_client=mock_control_client,
+        session_id="test-session-xyz",
+        project="testproj",
+        local_conn=local_conn,
+    )
+
+
+def _seed_local_reflection(conn, rid: str, *, title: str) -> None:
+    conn.execute(
+        """INSERT INTO reflections
+           (id, title, project, phase, polarity, use_cases, hints,
+            confidence, created_at, updated_at, useful_count)
+           VALUES (?, ?, 'testproj', 'general', 'do', 'context', '[]',
+                   0.8, '2026-01-01', '2026-01-01', 0)""",
+        (rid, title),
+    )
+    conn.commit()
+
+
+def test_record_exposures_writes_to_local_ledger_when_available(
+    backend_with_local_conn, local_conn
+) -> None:
+    """Task 2: with a local_conn wired in, record_exposures delegates to the
+    shared exposure_log primitive and commits — a roundtrip through
+    list_session_exposures surfaces the row with its display text."""
+    _seed_local_reflection(local_conn, "refl-ledger-1", title="ledger roundtrip title")
+
+    backend_with_local_conn.record_exposures(
+        session_id="test-session-xyz",
+        items=[("reflection", "refl-ledger-1")],
+        source="contextual",
+    )
+
+    result = backend_with_local_conn.list_session_exposures(session_id="test-session-xyz")
+    assert result["session_id"] == "test-session-xyz"
+    assert len(result["exposures"]) == 1
+    exposure = result["exposures"][0]
+    assert exposure["kind"] == "reflection"
+    assert exposure["id"] == "refl-ledger-1"
+    assert exposure["title"] == "ledger roundtrip title"
+    assert exposure["source"] == "contextual"
+    assert exposure["exposed_at"]
+
+
+def test_record_exposures_without_local_conn_stays_legacy_noop(
+    backend, mock_data_client, mock_control_client
+) -> None:
+    """No local_conn wired (the `backend` fixture default) — record_exposures
+    must keep the pre-existing no-op contract: no wire calls, no exception."""
+    result = backend.record_exposures(
+        session_id="s", items=[("reflection", "r1")], source="contextual",
+    )
+    assert result is None
+    assert mock_data_client.method_calls == []
+    assert mock_control_client.method_calls == []
+
+
+def test_list_session_exposures_without_local_conn_stays_legacy_empty(backend) -> None:
+    """No local_conn wired — list_session_exposures keeps the pre-existing
+    empty-envelope contract."""
+    result = backend.list_session_exposures(session_id="test-session-xyz")
+    assert result == {"session_id": "test-session-xyz", "exposures": []}
+
+
+def test_record_exposures_empty_session_id_writes_nothing(
+    backend_with_local_conn, local_conn
+) -> None:
+    """Even with a real local_conn available, an empty session_id must not
+    write any row (mirrors exposure_log.record's own best-effort guard)."""
+    backend_with_local_conn.record_exposures(
+        session_id="", items=[("reflection", "r1")], source="contextual",
+    )
+    row = local_conn.execute("SELECT COUNT(*) AS n FROM session_memory_exposure").fetchone()
+    assert row["n"] == 0
+
+
+def test_list_session_exposures_empty_session_id_unresolvable_returns_empty_envelope(
+    backend_with_local_conn,
+) -> None:
+    """An empty session_id with no live env/marker AND no construction-time
+    fallback (backend_with_local_conn was built with a real session id, so
+    this exercises the FALLBACK to that construction-time value rather than
+    the raise path — see the dedicated unresolvable test below for that)."""
+    result = backend_with_local_conn.list_session_exposures(session_id="")
+    # Falls back to the construction-time session_id ("test-session-xyz"),
+    # matching _require_session_id's fallback chain.
+    assert result["session_id"] == "test-session-xyz"
+    assert result["exposures"] == []
+
+
+def test_list_session_exposures_empty_session_id_truly_unresolvable(
+    ac_config, mock_data_client, mock_control_client, local_conn,
+) -> None:
+    """No passed session_id, no live env/marker, AND no construction-time
+    session_id (None) — must NOT raise; degrades to the empty envelope with
+    session_id=None, matching sqlite's own no-session shape."""
+    backend = AgentCoreBackend(
+        config=ac_config,
+        data_client=mock_data_client,
+        control_client=mock_control_client,
+        session_id=None,
+        project="testproj",
+        local_conn=local_conn,
+    )
+    result = backend.list_session_exposures(session_id="")
+    assert result == {"session_id": None, "exposures": []}
