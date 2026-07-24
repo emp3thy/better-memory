@@ -19,15 +19,17 @@ def conn(tmp_memory_db: Path):
         c.close()
 
 
-def _seed_rated_exposure(conn, sid, kind, mid, classification="cited"):
+def _seed_rated_exposure(
+    conn, sid, kind, mid, classification="cited", evidence=None,
+):
     """Insert an exposure that's already been rated."""
     conn.execute(
         """INSERT INTO session_memory_exposure
            (session_id, memory_kind, memory_id, exposed_at, source,
-            rated_at, classification)
+            rated_at, classification, evidence)
            VALUES (?, ?, ?, '2026-05-11T10:00:00+00:00', 'bootstrap',
-                   '2026-05-11T11:00:00+00:00', ?)""",
-        (sid, kind, mid, classification),
+                   '2026-05-11T11:00:00+00:00', ?, ?)""",
+        (sid, kind, mid, classification, evidence),
     )
     conn.commit()
 
@@ -123,6 +125,46 @@ class TestDiagnosticsPanel:
         assert "r1" in body
         assert "cited" in body
         assert "My Reflection Title" in body
+
+    def test_recent_ratings_panel_shows_evidence_cell(
+        self, conn, tmp_memory_db, monkeypatch,
+    ):
+        from better_memory.ui.app import create_app
+
+        _seed_reflection(conn, "r1", title="My Reflection Title")
+        _seed_rated_exposure(
+            conn, "S1", "reflection", "r1", "shaped",
+            evidence="guided the retry fix",
+        )
+
+        monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_memory_db.parent))
+        app = create_app(start_watchdog=False)
+        client = app.test_client()
+        response = client.get("/diagnostics")
+        assert response.status_code == 200
+        body = response.data.decode("utf-8")
+        assert "guided the retry fix" in body
+
+    def test_recent_ratings_panel_truncates_long_evidence(
+        self, conn, tmp_memory_db, monkeypatch,
+    ):
+        from better_memory.ui.app import create_app
+
+        _seed_reflection(conn, "r1", title="My Reflection Title")
+        long_evidence = "x" * 200
+        _seed_rated_exposure(
+            conn, "S1", "reflection", "r1", "shaped", evidence=long_evidence,
+        )
+
+        monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_memory_db.parent))
+        app = create_app(start_watchdog=False)
+        client = app.test_client()
+        body = client.get("/diagnostics").data.decode("utf-8")
+        # Full text preserved in the title attribute for hover.
+        assert f'title="{long_evidence}"' in body
+        # Displayed cell text is truncated: the untruncated 200-char run
+        # must not appear anywhere outside that title attribute.
+        assert body.count(long_evidence) == 1
 
     def test_session_id_missing_counter_displayed(
         self, conn, tmp_memory_db, monkeypatch,

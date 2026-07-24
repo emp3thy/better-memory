@@ -391,6 +391,65 @@ class TestSemanticDrawerOverlookedAlwaysShown:
         assert m is not None and m.group(1) == "3"
 
 
+class TestSemanticDrawerRatingEvidence:
+    def _seed_memory(self, tmp_db: Path) -> None:
+        import sqlite3
+
+        with sqlite3.connect(tmp_db) as c:
+            c.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at) VALUES "
+                "('m1','rule','proj-a','project',"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+            )
+            c.commit()
+
+    def _seed_rating_evidence(
+        self, tmp_db: Path, *, classification: str, evidence: str,
+    ) -> None:
+        from better_memory.db.connection import connect
+
+        conn = connect(tmp_db)
+        try:
+            conn.execute(
+                "INSERT INTO session_memory_exposure "
+                "(session_id, memory_kind, memory_id, exposed_at, source, "
+                "rated_at, classification, evidence) "
+                "VALUES ('s-1', 'semantic', 'm1', "
+                "'2026-05-01T10:00:00+00:00', 'bootstrap', "
+                "'2026-05-01T11:00:00+00:00', ?, ?)",
+                (classification, evidence),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_drawer_shows_section_and_evidence_when_present(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed_memory(tmp_db)
+        self._seed_rating_evidence(
+            tmp_db, classification="cited", evidence="quoted verbatim in the fix",
+        )
+        body = client.get("/semantic/m1/drawer").get_data(as_text=True)
+        assert "Rating evidence" in body
+        assert "quoted verbatim in the fix" in body
+        assert "chip outcome-success" in body
+
+    def test_drawer_omits_section_when_no_evidence(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed_memory(tmp_db)
+        body = client.get("/semantic/m1/drawer").get_data(as_text=True)
+        assert "Rating evidence" not in body
+
+
 class TestSemanticRowRatingStat:
     def test_row_shows_all_three_badges_at_zero(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch

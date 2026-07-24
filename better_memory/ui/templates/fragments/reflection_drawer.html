@@ -118,4 +118,19 @@
       <p class="empty-inline">No source observations linked yet.</p>
     {% endif %}
   </section>
+
+  {% if rating_evidence %}
+    <section class="drawer-section">
+      <h4>Rating evidence</h4>
+      <ul class="rating-evidence-list">
+        {% for ev in rating_evidence %}
+          <li class="rating-evidence-item">
+            <span class="chip {{ ev.classification | rating_chip_class }}">{{ ev.classification }}</span>
+            <span class="rating-evidence-text">{{ ev.evidence }}</span>
+            <span class="rating-evidence-date">{{ ev.rated_at }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
 </div>

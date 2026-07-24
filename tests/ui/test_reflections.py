@@ -643,6 +643,114 @@ class TestReflectionRowRatingStat:
         assert "rating-overlooked" in body
 
 
+def _seed_rating_evidence(
+    db_path: Path,
+    *,
+    kind: str,
+    memory_id: str,
+    classification: str,
+    evidence: str,
+    session_id: str = "s-1",
+    exposed_at: str = "2026-05-11T10:00:00+00:00",
+    rated_at: str = "2026-05-11T11:00:00+00:00",
+) -> None:
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO session_memory_exposure "
+            "(session_id, memory_kind, memory_id, exposed_at, source, "
+            "rated_at, classification, evidence) "
+            "VALUES (?, ?, ?, ?, 'bootstrap', ?, ?, ?)",
+            (session_id, kind, memory_id, exposed_at, rated_at, classification, evidence),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestReflectionDrawerRatingEvidence:
+    def test_drawer_shows_section_and_evidence_when_present(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        _seed_rating_evidence(
+            tmp_db, kind="reflection", memory_id="r-1",
+            classification="shaped", evidence="guided the retry fix",
+        )
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "Rating evidence" in body
+        assert "guided the retry fix" in body
+
+    def test_shaped_maps_to_outcome_success_chip(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        _seed_rating_evidence(
+            tmp_db, kind="reflection", memory_id="r-1",
+            classification="shaped", evidence="guided the retry fix",
+        )
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "chip outcome-success" in body
+
+    def test_misled_maps_to_outcome_failure_chip(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        _seed_rating_evidence(
+            tmp_db, kind="reflection", memory_id="r-1",
+            classification="misled", evidence="sent it down a bad path",
+        )
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "chip outcome-failure" in body
+
+    def test_overlooked_maps_to_outcome_partial_chip(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        _seed_rating_evidence(
+            tmp_db, kind="reflection", memory_id="r-1",
+            classification="overlooked", evidence="was relevant but dropped",
+        )
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "chip outcome-partial" in body
+
+    def test_ignored_maps_to_outcome_no_outcome_chip(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        _seed_rating_evidence(
+            tmp_db, kind="reflection", memory_id="r-1",
+            classification="ignored", evidence="checked but unrelated",
+        )
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "chip outcome-no_outcome" in body
+
+    def test_drawer_omits_section_when_no_evidence(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1", status="confirmed")
+        body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "Rating evidence" not in body
+
+
 class TestReflectionDrawerOverlookedAlwaysShown:
     def test_drawer_shows_overlooked_line_at_zero(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch

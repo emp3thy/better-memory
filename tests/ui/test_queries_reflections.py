@@ -10,9 +10,11 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.services.episode import EpisodeService
 from better_memory.ui.queries import (
+    RatingEvidenceRow,
     ReflectionDetail,
     ReflectionListRow,
     ReflectionSourceObservation,
+    fetch_rating_evidence,
     reflection_detail,
     reflection_list_for_ui,
 )
@@ -421,3 +423,95 @@ class TestOverlookedInReadModel:
         assert detail is not None
         assert detail.times_overlooked == 0
         assert detail.last_overlooked_at is None
+
+
+def _seed_exposure(
+    conn,
+    *,
+    kind: str,
+    memory_id: str,
+    session_id: str = "s-1",
+    exposed_at: str = "2026-05-11T10:00:00+00:00",
+    rated_at: str | None = "2026-05-11T11:00:00+00:00",
+    classification: str | None = "cited",
+    evidence: str | None = "some evidence",
+) -> None:
+    conn.execute(
+        "INSERT INTO session_memory_exposure "
+        "(session_id, memory_kind, memory_id, exposed_at, source, "
+        "rated_at, classification, evidence) "
+        "VALUES (?, ?, ?, ?, 'bootstrap', ?, ?, ?)",
+        (session_id, kind, memory_id, exposed_at, rated_at, classification, evidence),
+    )
+    conn.commit()
+
+
+class TestFetchRatingEvidence:
+    def test_returns_empty_when_no_rows(self, conn):
+        rows = fetch_rating_evidence(conn, "reflection", "r1")
+        assert rows == []
+
+    def test_returns_row_with_expected_fields(self, conn):
+        _seed_exposure(
+            conn, kind="reflection", memory_id="r1",
+            classification="shaped", evidence="guided the fix",
+            rated_at="2026-05-11T11:00:00+00:00",
+        )
+        rows = fetch_rating_evidence(conn, "reflection", "r1")
+        assert rows == [
+            RatingEvidenceRow(
+                classification="shaped",
+                evidence="guided the fix",
+                rated_at="2026-05-11T11:00:00+00:00",
+            )
+        ]
+
+    def test_excludes_rows_with_null_evidence(self, conn):
+        _seed_exposure(
+            conn, kind="reflection", memory_id="r1", exposed_at="a",
+            classification="ignored", evidence=None,
+        )
+        rows = fetch_rating_evidence(conn, "reflection", "r1")
+        assert rows == []
+
+    def test_isolates_by_kind_and_memory_id(self, conn):
+        _seed_exposure(
+            conn, kind="reflection", memory_id="r1", exposed_at="a",
+            evidence="for r1",
+        )
+        _seed_exposure(
+            conn, kind="semantic", memory_id="r1", exposed_at="b",
+            evidence="for semantic r1",
+        )
+        _seed_exposure(
+            conn, kind="reflection", memory_id="r2", exposed_at="c",
+            evidence="for r2",
+        )
+        rows = fetch_rating_evidence(conn, "reflection", "r1")
+        assert [r.evidence for r in rows] == ["for r1"]
+
+    def test_orders_newest_rated_at_first(self, conn):
+        _seed_exposure(
+            conn, kind="reflection", memory_id="r1", exposed_at="a",
+            rated_at="2026-05-11T09:00:00+00:00", evidence="older",
+        )
+        _seed_exposure(
+            conn, kind="reflection", memory_id="r1", exposed_at="b",
+            rated_at="2026-05-11T12:00:00+00:00", evidence="newer",
+        )
+        rows = fetch_rating_evidence(conn, "reflection", "r1")
+        assert [r.evidence for r in rows] == ["newer", "older"]
+
+    def test_limit_caps_row_count(self, conn):
+        for i in range(15):
+            _seed_exposure(
+                conn, kind="reflection", memory_id="r1",
+                exposed_at=f"exp-{i}",
+                rated_at=f"2026-05-11T{10 + i:02d}:00:00+00:00",
+                evidence=f"evidence-{i}",
+            )
+        rows = fetch_rating_evidence(conn, "reflection", "r1")
+        assert len(rows) == 10  # default limit
+
+        rows = fetch_rating_evidence(conn, "reflection", "r1", limit=3)
+        assert len(rows) == 3

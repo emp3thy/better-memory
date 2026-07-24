@@ -22,7 +22,7 @@
     <h2>Recent ratings</h2>
     <p class="small">Last 20 rated session_memory_exposure rows.</p>
     <table class="table">
-      <thead><tr><th>rated_at</th><th>kind</th><th>id</th><th>class</th><th>display</th></tr></thead>
+      <thead><tr><th>rated_at</th><th>kind</th><th>id</th><th>class</th><th>display</th><th>evidence</th></tr></thead>
       <tbody>
       {% for r in recent_ratings %}
         <tr>
@@ -31,6 +31,7 @@
           <td>{{ r.memory_id }}</td>
           <td><span class="badge">{{ r.classification }}</span></td>
           <td>{{ r.display | truncate(60) if r.display else '' }}</td>
+          <td title="{{ r.evidence or '' }}">{{ r.evidence | truncate(120) if r.evidence else '' }}</td>
         </tr>
       {% endfor %}
       </tbody>
