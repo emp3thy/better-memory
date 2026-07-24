@@ -164,21 +164,31 @@ captures whether memories actually shaped Claude's work:
    (sqlite mode only — see [Injection strategies](#injection-strategies)
    for what `contextual_inject` scores and dedups before it exposes
    anything).
-2. **Mid-session credit** — `memory.credit(kind, id, class)` lets
+2. **Mid-session credit** — `memory.credit(kind, id, class, evidence)` lets
    Claude credit a memory as `cited`, `shaped`, `misled`, or `overlooked` the moment
-   it's used. Survives context compaction.
+   it's used. `evidence` — a one-line statement of what the memory changed,
+   or a quote — is required in the tool schema for every `memory.credit`
+   call (all four credit classes are non-ignored). Survives context
+   compaction.
 3. **End-of-session sweep** — the
    [`session_close`](https://github.com/emp3thy/better-memory/blob/main/better_memory/hooks/session_close.py)
    hook checks for unrated exposures. If any exist, it emits a `Stop`
    block directive triggering the `rate-session-memories` skill. The
    directive lists each pending exposure with its source tag
    (`[bootstrap]` / `[retrieve]` / `[contextual]`) and a leading
-   `sources: bootstrap N, contextual N, retrieve N` counts line, then
-   the skill calls `memory.list_session_exposures` and submits
-   `memory.apply_session_ratings` with one class per id
-   (`cited` / `shaped` / `ignored` / `misled` / `overlooked`). Only on the second Stop
-   fire — after ratings land — does the hook drop the `session_end`
-   marker into the spool.
+   `sources: bootstrap N, contextual N, retrieve N` counts line, and
+   instructs (evidence-first): for each id, write the one-line evidence
+   FIRST — if there is nothing to point at, the class is `ignored`; only
+   once evidence exists does a `cited`/`shaped`/`misled`/`overlooked` class
+   follow. The skill then calls `memory.list_session_exposures` and
+   submits `memory.apply_session_ratings` with one `{class, evidence}` per
+   id (`cited` / `shaped` / `ignored` / `misled` / `overlooked`; `ignored`
+   is the only class evidence is optional for). `MemoryRatingService`
+   enforces this server-side: the whole batch is validated before any row
+   is written, so one non-ignored rating missing its evidence line fails
+   the entire `memory.apply_session_ratings` call loudly, with none of the
+   batch applied. Only on the second Stop fire — after ratings land — does
+   the hook drop the `session_end` marker into the spool.
 4. **Ranking** - `useful_count` / `times_overlooked` / `times_misled` /
    `times_ignored` columns on reflections and semantic memories
    accumulate, and retrieval ranks each bucket by a Wilson score lower
@@ -204,10 +214,20 @@ captures whether memories actually shaped Claude's work:
    query that matches nothing on either extra leg degrades exactly to
    the Wilson-only order.
 
+Every non-ignored rating's evidence line is stored on the
+`session_memory_exposure` row (`evidence` column, migration
+`0016_rating_evidence.sql`; nullable, so historical rows predating the
+migration stay `NULL`). It is audit-only — no ranking or scoring reads it,
+and it is unrelated to `reflections.evidence_count` / `evidence_count` on
+semantic memories, which count synthesis source observations, not rating
+evidence.
+
 The management UI's Reflections and Semantic tabs surface useful /
-overlooked / misled badges per row, and `/diagnostics` exposes recent
-ratings, a total overlooked count, and a `session_id_missing` counter
-for instrumentation gaps.
+overlooked / misled badges per row plus a "Rating evidence" history (the
+last 10 evidenced ratings for that memory, newest first) in the reflection
+and semantic drawers, and `/diagnostics` exposes recent ratings — including
+an evidence column — a total overlooked count, and a `session_id_missing`
+counter for instrumentation gaps.
 
 ## Synthesis pipeline
 
