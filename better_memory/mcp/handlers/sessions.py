@@ -150,6 +150,7 @@ class SessionToolHandlers:
                 kind=args["kind"],
                 id=args["id"],
                 classification=args["class"],
+                evidence=args.get("evidence"),
             )
         return [TextContent(type="text", text=json.dumps(payload))]
 

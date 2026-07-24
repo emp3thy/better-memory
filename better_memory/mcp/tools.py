@@ -477,7 +477,10 @@ def tool_definitions(
                 "(resolved server-side from CLAUDE_SESSION_ID). Called "
                 "at session end by the rate-session-memories skill. "
                 "Raises if CLAUDE_SESSION_ID is unset — call only inside "
-                "an active Claude session."
+                "an active Claude session. Non-ignored classes require "
+                "`evidence` (one line: what the memory changed, or a "
+                "quote); write the evidence line FIRST — no evidence "
+                "means the class is `ignored`."
             ),
             inputSchema={
                 "type": "object",
@@ -504,9 +507,11 @@ def tool_definitions(
                                 # MemoryRatingService.apply_session_ratings
                                 # enforces the real contract (required +
                                 # non-empty for every non-ignored class,
-                                # <=EVIDENCE_MAX_CHARS). Full schema
-                                # description/required wiring is Task 3.
-                                "evidence": {"type": "string"},
+                                # <=EVIDENCE_MAX_CHARS).
+                                "evidence": {
+                                    "type": "string",
+                                    "maxLength": 500,
+                                },
                             },
                         },
                     },
@@ -523,16 +528,20 @@ def tool_definitions(
                 "class must be 'cited', 'shaped', 'misled', or "
                 "'overlooked' — NOT 'ignored'. Use 'overlooked' when the "
                 "user pointed you back to a memory you already had but "
-                "had not applied."
+                "had not applied. Always include `evidence`: one line — "
+                "what the memory changed, or a quote. If you cannot "
+                "write one, the memory was `ignored`; do not call "
+                "credit."
             ),
             inputSchema={
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["kind", "id", "class"],
+                "required": ["kind", "id", "class", "evidence"],
                 "properties": {
                     "kind": {"enum": ["reflection", "semantic"]},
                     "id": {"type": "string"},
                     "class": {"enum": ["cited", "shaped", "misled", "overlooked"]},
+                    "evidence": {"type": "string", "maxLength": 500},
                 },
             },
         ),

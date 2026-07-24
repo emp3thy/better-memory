@@ -158,18 +158,13 @@ class TestMarkerFileFallback:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         write_session_id(home, "SCR", project_dir=str(tmp_path))
 
-        # NOTE (Task 2 / evidence rating): the memory.credit MCP handler
-        # does not yet forward an "evidence" argument to credit_one (that
-        # wiring is Task 3's schema update). credit_one's evidence
-        # parameter now defaults to None, which fails validation for the
-        # non-ignored "cited" class with a clean ValueError (isError),
-        # rather than the TypeError a required kwarg would have raised.
-        # This is a transitional state: memory.credit is broken at
-        # runtime for non-ignored classes until Task 3 lands. This test
-        # is adjusted to assert that transitional behaviour rather than
-        # a successful credit, so the marker-fallback session resolution
-        # (the thing this test is actually about) is still exercised up
-        # to the point where credit_one raises.
+        # NOTE (Task 3 / evidence rating): memory.credit's inputSchema now
+        # marks "evidence" required, so calling without it is rejected by
+        # the MCP SDK's jsonschema validation before the handler (and thus
+        # the marker-based session resolution) ever runs. This test is
+        # about marker-fallback session resolution, not evidence — the
+        # ValueError match="evidence" here comes from schema validation
+        # ("'evidence' is a required property"), not from credit_one.
         with pytest.raises(ValueError, match="evidence"):
             run_async(srv_mod._dispatch_for_tests(
                 "memory.credit",
@@ -331,24 +326,94 @@ class TestApplySessionRatingsTool:
                 {"ratings": [{"kind": "reflection", "id": "r1", "class": "cited"}]},
             ))
 
+    def test_batch_with_evidence_is_stored_on_exposure_row(
+        self, memory_db, monkeypatch,
+    ):
+        """A non-ignored class in the batch stores its evidence line on
+        session_memory_exposure.evidence (migration 0016)."""
+        from better_memory.mcp import server as srv_mod
+        conn, _ = memory_db
+        _seed_reflection(conn, "r-ev")
+        _seed_exposure(conn, "S1", "reflection", "r-ev")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.apply_session_ratings",
+            {"ratings": [
+                {"kind": "reflection", "id": "r-ev", "class": "shaped",
+                 "evidence": "changed the retry backoff to exponential"},
+            ]},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["applied"]["shaped"] == 1
+
+        row = conn.execute(
+            """SELECT evidence FROM session_memory_exposure
+               WHERE session_id = 'S1' AND memory_id = 'r-ev'"""
+        ).fetchone()
+        assert row["evidence"] == "changed the retry backoff to exponential"
+
+    def test_batch_shaped_without_evidence_is_error(
+        self, memory_db, monkeypatch,
+    ):
+        """A non-ignored class ('shaped') with no evidence line is rejected
+        by the service, and the error names 'evidence'."""
+        from better_memory.mcp import server as srv_mod
+        conn, _ = memory_db
+        _seed_reflection(conn, "r-noev")
+        _seed_exposure(conn, "S1", "reflection", "r-noev")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+
+        with pytest.raises(ValueError, match="evidence"):
+            run_async(srv_mod._dispatch_for_tests(
+                "memory.apply_session_ratings",
+                {"ratings": [
+                    {"kind": "reflection", "id": "r-noev", "class": "shaped"},
+                ]},
+            ))
+
 
 class TestMemoryCreditTool:
-    def test_credit_one(self, memory_db, monkeypatch):
+    def test_credit_one_without_evidence_is_error(self, memory_db, monkeypatch):
+        """memory.credit's inputSchema requires "evidence" (Task 3); calling
+        without it is rejected by jsonschema validation before the handler
+        (and therefore credit_one) ever runs."""
         from better_memory.mcp import server as srv_mod
         conn, _ = memory_db
         _seed_reflection(conn, "r1")
         _seed_exposure(conn, "S1", "reflection", "r1")
         monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
 
-        # NOTE (Task 2 / evidence rating): transitional — see the identical
-        # note in TestMarkerFileFallback.test_credit_uses_marker_when_env_absent.
-        # memory.credit does not forward evidence until Task 3, so
-        # credit_one's compat default (None) fails validation cleanly.
         with pytest.raises(ValueError, match="evidence"):
             run_async(srv_mod._dispatch_for_tests(
                 "memory.credit",
                 {"kind": "reflection", "id": "r1", "class": "cited"},
             ))
+
+    def test_credit_one_with_evidence_applies_and_stores(
+        self, memory_db, monkeypatch,
+    ):
+        """credit WITH evidence succeeds end-to-end and the evidence line
+        lands on session_memory_exposure.evidence."""
+        from better_memory.mcp import server as srv_mod
+        conn, _ = memory_db
+        _seed_reflection(conn, "r1")
+        _seed_exposure(conn, "S1", "reflection", "r1")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.credit",
+            {"kind": "reflection", "id": "r1", "class": "cited",
+             "evidence": "quoted it verbatim in the fix"},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload == {"applied": "cited", "skipped": None}
+
+        row = conn.execute(
+            """SELECT evidence FROM session_memory_exposure
+               WHERE session_id = 'S1' AND memory_id = 'r1'"""
+        ).fetchone()
+        assert row["evidence"] == "quoted it verbatim in the fix"
 
     def test_no_session_returns_skipped(self, memory_db, monkeypatch):
         from better_memory.mcp import server as srv_mod
@@ -357,7 +422,8 @@ class TestMemoryCreditTool:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         result = run_async(srv_mod._dispatch_for_tests(
             "memory.credit",
-            {"kind": "reflection", "id": "r1", "class": "cited"},
+            {"kind": "reflection", "id": "r1", "class": "cited",
+             "evidence": "irrelevant — no_session short-circuits first"},
         ))
         payload = json.loads(result[0].text)
         assert payload == {"applied": None, "skipped": "no_session"}
@@ -385,19 +451,70 @@ class TestOverlookedClassInSchemas:
         assert "overlooked" in enum
 
     def test_credit_dispatch_accepts_overlooked(self, memory_db, monkeypatch):
+        """The "overlooked" enum value reaches credit_one and applies
+        cleanly when evidence is supplied (Task 3)."""
         from better_memory.mcp import server as srv_mod
         conn, _ = memory_db
         _seed_reflection(conn, "r1")
         _seed_exposure(conn, "S1", "reflection", "r1")
         monkeypatch.setenv("CLAUDE_SESSION_ID", "S1")
-        # NOTE (Task 2 / evidence rating): transitional — see the identical
-        # note in TestMarkerFileFallback.test_credit_uses_marker_when_env_absent.
-        # memory.credit does not forward evidence until Task 3, so
-        # credit_one's compat default (None) fails validation cleanly.
-        # This test now confirms the "overlooked" enum value still reaches
-        # credit_one (fails on evidence, not on an unknown-class error).
-        with pytest.raises(ValueError, match="evidence"):
-            run_async(srv_mod._dispatch_for_tests(
-                "memory.credit",
-                {"kind": "reflection", "id": "r1", "class": "overlooked"},
-            ))
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.credit",
+            {"kind": "reflection", "id": "r1", "class": "overlooked",
+             "evidence": "user pointed me back to this reflection"},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload == {"applied": "overlooked", "skipped": None}
+
+
+class TestEvidenceSchema:
+    """Task 3: memory.credit requires evidence; apply_session_ratings'
+    per-item evidence property gains maxLength + the evidence-first
+    description rule."""
+
+    def test_credit_required_includes_evidence(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions() if t.name == "memory.credit"
+        )
+        assert tool.inputSchema["required"] == [
+            "kind", "id", "class", "evidence"
+        ]
+
+    def test_credit_evidence_property_shape(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions() if t.name == "memory.credit"
+        )
+        prop = tool.inputSchema["properties"]["evidence"]
+        assert prop == {"type": "string", "maxLength": 500}
+
+    def test_credit_description_states_evidence_rule(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions() if t.name == "memory.credit"
+        )
+        assert "evidence" in tool.description
+        assert "ignored" in tool.description
+
+    def test_apply_ratings_items_evidence_property_shape(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.apply_session_ratings"
+        )
+        prop = (
+            tool.inputSchema["properties"]["ratings"]
+            ["items"]["properties"]["evidence"]
+        )
+        assert prop == {"type": "string", "maxLength": 500}
+
+    def test_apply_ratings_description_states_evidence_first_rule(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.apply_session_ratings"
+        )
+        assert "evidence" in tool.description
+        assert "ignored" in tool.description
