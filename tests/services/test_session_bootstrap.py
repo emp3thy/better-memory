@@ -212,7 +212,7 @@ def test_render_omits_empty_sections(conn, git_repo: Path) -> None:
     assert "Reflections" not in text
     # but the header and footer should still render
     assert "## better-memory: session bootstrap" in text
-    assert "memory_record_use" in text  # footer
+    assert "memory_credit" in text  # footer
 
 
 def test_render_truncates_long_hints(conn, git_repo: Path) -> None:
