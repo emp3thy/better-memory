@@ -30,8 +30,10 @@ memory changed in this session, or a quote of where you used it. Then:
 Rules:
 - Quote the id in your reasoning so you can't drift.
 - Do not invent ids. Do not skip ids.
-- If genuinely uncertain between two classes, prefer the lower one
-  (shaped > cited, ignored > shaped). `misled` is never a fallback.
+- If genuinely uncertain between two EVIDENCED classes, prefer the weaker
+  claim (shaped over cited). `misled` is never a fallback. Once an
+  evidence line exists, `ignored` is no longer available — uncertainty
+  about class never reverses the evidence decision.
 - `overlooked` is never a fallback. Use it ONLY when the user explicitly
   pointed you back to a memory you already had and had not applied —
   that user intervention is the observable anchor. Test for it first,
