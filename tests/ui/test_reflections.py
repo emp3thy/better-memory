@@ -739,6 +739,15 @@ class TestReflectionDrawerRatingEvidence:
         )
         body = client.get("/reflections/r-1/drawer").get_data(as_text=True)
         assert "chip outcome-no_outcome" in body
+        # The rendered class must actually be styled -- app.css must define
+        # a rule for .chip.outcome-no_outcome (not just the .outcome-badge
+        # variant), or the ignored-class chip renders bare.
+        css_path = (
+            Path(__file__).resolve().parents[2]
+            / "better_memory" / "ui" / "static" / "app.css"
+        )
+        css_text = css_path.read_text(encoding="utf-8")
+        assert ".chip.outcome-no_outcome" in css_text
 
     def test_drawer_omits_section_when_no_evidence(
         self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
