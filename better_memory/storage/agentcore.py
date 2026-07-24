@@ -948,16 +948,10 @@ class AgentCoreBackend:
         the declared metadata counters the migrator writes.
 
         Counters come from the declared numberValue metadata keys
-        (useful_count / times_misled / overlooked_count → times_overlooked);
-        the collapsed rating timestamp comes from last_credited_at stringValue.
-        Absent metadata (AWS-extracted or freshly-created records) → zeroed
-        counters, never None.
-
-        times_ignored is deliberately not populated here: agentcore has no
-        exposure/rating sweep to derive it from, so it falls through to the
-        SemanticMemory dataclass default of 0 — the true recorded signal,
-        not a corruption of it (mirrors the reflection-dict handling in
-        _parse_reflection_record above)."""
+        (useful_count / times_misled / overlooked_count → times_overlooked /
+        ignored_count → times_ignored); the collapsed rating timestamp comes
+        from last_credited_at stringValue. Absent metadata (AWS-extracted or
+        freshly-created records) → zeroed counters, never None."""
         # Local import: the SemanticMemory read model lives in the services
         # layer; importing at module scope would invert the storage→services
         # layering. This is a lightweight frozen dataclass, imported lazily.
