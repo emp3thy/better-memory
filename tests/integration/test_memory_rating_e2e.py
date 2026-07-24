@@ -152,11 +152,13 @@ def test_full_rating_loop(conn, monkeypatch):
 
     r1_credit = rating.credit_one(
         session_id="SESS-1", kind="reflection", id="r1", classification="cited",
+        evidence="used it to fix the bug",
     )
     assert r1_credit == {"applied": "cited", "skipped": None}
 
     s1_credit = rating.credit_one(
         session_id="SESS-1", kind="semantic", id="s1", classification="shaped",
+        evidence="shaped the approach",
     )
     assert s1_credit == {"applied": "shaped", "skipped": None}
 

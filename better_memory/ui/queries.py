@@ -782,6 +782,50 @@ class RetentionRunRow:
     triggered_by: str
 
 
+@dataclass(frozen=True)
+class RatingEvidenceRow:
+    """One rated exposure that carries an evidence line.
+
+    Sourced from ``session_memory_exposure`` (migration 0016's ``evidence``
+    column). Distinct from ``ReflectionFull.evidence_count``/``evidence_count``
+    on ``ReflectionListRow`` — those count synthesis SOURCE OBSERVATIONS and
+    have nothing to do with rating evidence.
+    """
+
+    classification: str
+    evidence: str
+    rated_at: str
+
+
+def fetch_rating_evidence(
+    conn: sqlite3.Connection, kind: str, memory_id: str, limit: int = 10,
+) -> list[RatingEvidenceRow]:
+    """Return rated exposures with a non-null evidence line, newest first.
+
+    ``kind`` is ``'reflection'`` or ``'semantic'`` (matches
+    ``session_memory_exposure.memory_kind``). Only rows where
+    ``evidence IS NOT NULL`` are returned — ``ignored`` classifications may
+    or may not carry one (see MemoryRatingService), everything else is
+    required to. ``limit`` is enforced in SQL via ``LIMIT``.
+    """
+    rows = conn.execute(
+        "SELECT classification, evidence, rated_at "
+        "FROM session_memory_exposure "
+        "WHERE memory_kind = ? AND memory_id = ? AND evidence IS NOT NULL "
+        "ORDER BY rated_at DESC "
+        "LIMIT ?",
+        (kind, memory_id, limit),
+    ).fetchall()
+    return [
+        RatingEvidenceRow(
+            classification=r["classification"],
+            evidence=r["evidence"],
+            rated_at=r["rated_at"],
+        )
+        for r in rows
+    ]
+
+
 def retention_runs_list_for_ui(
     conn: sqlite3.Connection, *, limit: int = 30,
 ) -> list[RetentionRunRow]:

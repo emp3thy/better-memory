@@ -211,6 +211,15 @@ skill that classifies every exposed reflection / semantic memory as
 a Stop-block directive when unrated exposures remain so the skill fires
 before the session ends.
 
+Every non-`ignored` class requires a one-line `evidence` statement — what
+the memory changed, or a quote — enforced server-side: write the evidence
+line first, and if there is nothing to point at, the class is `ignored`
+instead. `ignored` is the only class evidence is optional for. Evidence is
+audit-only (stored on the `session_memory_exposure` row for the UI
+history; no scoring reads it) and is unrelated to `evidence_count` on
+reflections/semantic memories, which counts synthesis source
+observations.
+
 Session ids resolve server-side from `CLAUDE_SESSION_ID`; none of these
 tools accept a session id parameter.
 
@@ -226,6 +235,7 @@ context compaction; the session-end sweep catches anything missed.
 | `kind` | `reflection` / `semantic` | yes | Memory kind. |
 | `id` | string | yes | Id of the exposed memory. |
 | `class` | `cited` / `shaped` / `misled` / `overlooked` | yes | Mid-session credit cannot mark a memory `ignored` — that's only valid via the end-of-session sweep. |
+| `evidence` | string, <= 500 chars | yes | One line: what the memory changed, or a quote. Required in the tool schema itself (all four credit classes are non-ignored) — if you cannot write one, the memory was `ignored`; do not call `credit`. |
 
 ### `memory.list_session_exposures`
 
@@ -241,7 +251,7 @@ Raises if `CLAUDE_SESSION_ID` is unset.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
-| `ratings` | array | yes | One entry per exposure. Each entry: `{kind: "reflection" \| "semantic", id: string, class: "cited" \| "shaped" \| "ignored" \| "misled" \| "overlooked"}`. Minimum one entry. |
+| `ratings` | array | yes | One entry per exposure. Each entry: `{kind: "reflection" \| "semantic", id: string, class: "cited" \| "shaped" \| "ignored" \| "misled" \| "overlooked", evidence?: string}`. Minimum one entry. `evidence` (<= 500 chars) is required for every non-`ignored` class and optional for `ignored`; the wire schema marks it optional per-entry, but `MemoryRatingService.apply_session_ratings` enforces the real contract by validating every entry in the batch before writing any row — one non-ignored entry missing `evidence` rejects the whole batch with a `ValueError`, none applied. |
 
 Returns `{applied: {...}, skipped: {...}}`. Ids not in the
 authoritative exposure list land in `skipped.not_exposed`.

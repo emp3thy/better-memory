@@ -74,7 +74,7 @@ better-memory gets memory in front of Claude two ways: a dump at session start, 
 - A keyword-hit fallback (>= 2 distinct hits) applies only where the BM25/vector legs are structurally unavailable: for reflections, when there is no raw sqlite `conn` (agentcore mode); for semantic memories -- which have no FTS substrate at all -- whenever no query vector could be produced (no embedder configured, or the Ollama embed call is in cooldown). `BETTER_MEMORY_CONTEXT_MIN_HITS` is **deprecated**: `contextual_inject` no longer reads it, superseded by the evidence gate above.
 - Because PreToolUse now matches every tool, a per-session latch (`SeenStore.pretool_fired` / `mark_pretool_fired`, `better_memory/services/context_seen.py`) runs the full retrieval path at most once per session for PreToolUse; every later PreToolUse event in the session short-circuits on the latch state before touching the DB or the embedder. UserPromptSubmit is unaffected by the latch and fires on every prompt.
 - Survivors are capped to `BETTER_MEMORY_CONTEXT_MAX_ITEMS`, then filtered through a per-session `SeenStore` (`better_memory/services/context_seen.py`, JSON file at `<home>/state/context_seen_<session_id>.json`) that deduplicates memories already injected this session. `BETTER_MEMORY_CONTEXT_REINJECT_TURNS=0` (default) means a memory is injected at most once per session; a positive value allows re-injection after that many turns have passed since it was last shown. A "turn" here is one firing of the `contextual_inject` hook, not one user prompt-response cycle: each user prompt is a turn, and each PreToolUse latch-firing is a turn too (subsequent latched-out PreToolUse events do not bump the turn counter).
-- Survivors render as a `<project-memory source="better-memory">` XML block in `additionalContext`, one entry per item with its kind, id, confidence, `useful_count`, and age, a `dont`-polarity item prefixed `Known pitfall -- do this instead:`, and a footer inviting `memory_credit(kind, id, 'cited'|'shaped'|'misled')` when an entry actually helped or misled.
+- Survivors render as a `<project-memory source="better-memory">` XML block in `additionalContext`, one entry per item with its kind, id, confidence, `useful_count`, and age, a `dont`-polarity item prefixed `Known pitfall -- do this instead:`, and a footer inviting `memory_credit(kind, id, class, evidence)` — with a one-line evidence statement — when an entry actually helped or misled.
 - Survivors are logged to `session_memory_exposure` with `source='contextual'` (best-effort; a write failure never blocks injection) and counted in `rating_diagnostics` (`contextual_fired_userprompt`, `contextual_fired_pretool`, `contextual_injected`, `contextual_suppressed_floor`, `contextual_suppressed_dedup`). These counters are per-firing, not per-item: a firing that injects one or several memories still increments `contextual_injected` by exactly 1. `contextual_suppressed_floor` now means "no candidate cleared the evidence gate", not "below the old keyword-hits floor".
 
 Gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE` (`userprompt` / `pretool` / `both` / `off`). The hook never raises and always exits 0 — failures are swallowed and logged to `hook_errors`, with no `additionalContext` emitted on that turn.
@@ -164,21 +164,31 @@ captures whether memories actually shaped Claude's work:
    (sqlite mode only — see [Injection strategies](#injection-strategies)
    for what `contextual_inject` scores and dedups before it exposes
    anything).
-2. **Mid-session credit** — `memory.credit(kind, id, class)` lets
+2. **Mid-session credit** — `memory.credit(kind, id, class, evidence)` lets
    Claude credit a memory as `cited`, `shaped`, `misled`, or `overlooked` the moment
-   it's used. Survives context compaction.
+   it's used. `evidence` — a one-line statement of what the memory changed,
+   or a quote — is required in the tool schema for every `memory.credit`
+   call (all four credit classes are non-ignored). Survives context
+   compaction.
 3. **End-of-session sweep** — the
    [`session_close`](https://github.com/emp3thy/better-memory/blob/main/better_memory/hooks/session_close.py)
    hook checks for unrated exposures. If any exist, it emits a `Stop`
    block directive triggering the `rate-session-memories` skill. The
    directive lists each pending exposure with its source tag
    (`[bootstrap]` / `[retrieve]` / `[contextual]`) and a leading
-   `sources: bootstrap N, contextual N, retrieve N` counts line, then
-   the skill calls `memory.list_session_exposures` and submits
-   `memory.apply_session_ratings` with one class per id
-   (`cited` / `shaped` / `ignored` / `misled` / `overlooked`). Only on the second Stop
-   fire — after ratings land — does the hook drop the `session_end`
-   marker into the spool.
+   `sources: bootstrap N, contextual N, retrieve N` counts line, and
+   instructs (evidence-first): for each id, write the one-line evidence
+   FIRST — if there is nothing to point at, the class is `ignored`; only
+   once evidence exists does a `cited`/`shaped`/`misled`/`overlooked` class
+   follow. The skill then calls `memory.list_session_exposures` and
+   submits `memory.apply_session_ratings` with one `{class, evidence}` per
+   id (`cited` / `shaped` / `ignored` / `misled` / `overlooked`; `ignored`
+   is the only class evidence is optional for). `MemoryRatingService`
+   enforces this server-side: the whole batch is validated before any row
+   is written, so one non-ignored rating missing its evidence line fails
+   the entire `memory.apply_session_ratings` call loudly, with none of the
+   batch applied. Only on the second Stop fire — after ratings land — does
+   the hook drop the `session_end` marker into the spool.
 4. **Ranking** - `useful_count` / `times_overlooked` / `times_misled` /
    `times_ignored` columns on reflections and semantic memories
    accumulate, and retrieval ranks each bucket by a Wilson score lower
@@ -204,10 +214,20 @@ captures whether memories actually shaped Claude's work:
    query that matches nothing on either extra leg degrades exactly to
    the Wilson-only order.
 
+Every non-ignored rating's evidence line is stored on the
+`session_memory_exposure` row (`evidence` column, migration
+`0016_rating_evidence.sql`; nullable, so historical rows predating the
+migration stay `NULL`). It is audit-only — no ranking or scoring reads it,
+and it is unrelated to `reflections.evidence_count` / `evidence_count` on
+semantic memories, which count synthesis source observations, not rating
+evidence.
+
 The management UI's Reflections and Semantic tabs surface useful /
-overlooked / misled badges per row, and `/diagnostics` exposes recent
-ratings, a total overlooked count, and a `session_id_missing` counter
-for instrumentation gaps.
+overlooked / misled badges per row plus a "Rating evidence" history (the
+last 10 evidenced ratings for that memory, newest first) in the reflection
+and semantic drawers, and `/diagnostics` exposes recent ratings — including
+an evidence column — a total overlooked count, and a `session_id_missing`
+counter for instrumentation gaps.
 
 ## Synthesis pipeline
 

@@ -29,7 +29,8 @@ def test_block_structure_and_full_id():
     assert "used 15x" in out
     assert "34d old" in out
     assert "memory_credit" in out                 # rating affordance line
-    assert "'cited'|'shaped'|'misled'" in out
+    assert "memory_credit(kind, id, class, evidence)" in out
+    assert "evidence" in out                       # nudge requires evidence
 
 
 def test_dont_polarity_rendered_as_corrective():

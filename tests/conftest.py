@@ -44,21 +44,30 @@ def run_async[T](coro: Coroutine[object, object, T]) -> T:
 
 @pytest.fixture(autouse=True)
 def _strip_leaked_claude_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip Claude Code env vars that the dev shell leaks into pytest.
+    """Strip live-deployment env vars that the dev shell leaks into pytest.
 
-    Claude Code sets ``CLAUDE_CODE_SESSION_ID`` (and ``CLAUDE_PROJECT_DIR``)
-    in the env of shell tool subprocesses, but NOT in the env of spawned
-    stdio MCP servers. Several tests exercise "what happens when no session
-    env var is set" by calling ``monkeypatch.delenv("CLAUDE_SESSION_ID")``,
-    not realising production code also reads ``CLAUDE_CODE_SESSION_ID`` —
-    so those tests pass in CI but fail when run from a Claude Code shell.
+    Live settings.json env (INJECT_MODE=deferred, embeddings backend) leaks
+    into test runs via the shell's environment. Claude Code also sets
+    ``CLAUDE_CODE_SESSION_ID`` (and ``CLAUDE_PROJECT_DIR``) in the env of
+    shell tool subprocesses, but NOT in the env of spawned stdio MCP servers.
+    Several tests exercise "what happens when no session env var is set" by
+    calling ``monkeypatch.delenv("CLAUDE_SESSION_ID")``, not realising
+    production code also reads ``CLAUDE_CODE_SESSION_ID`` — so those tests
+    pass in CI but fail when run from a Claude Code shell.
 
     This autouse fixture clears the leaking variables at the start of every
     test. Tests that need the env var must ``monkeypatch.setenv`` it
-    explicitly. (No effect when running outside Claude Code: the vars
-    weren't set in the first place.)
+    explicitly. (No effect when running outside Claude Code or with unset
+    better-memory settings: the vars weren't set in the first place.)
     """
-    for var in ("CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR"):
+    for var in (
+        "CLAUDE_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_PROJECT_DIR",
+        "BETTER_MEMORY_INJECT_MODE",
+        "BETTER_MEMORY_EMBEDDINGS_BACKEND",
+        "BETTER_MEMORY_CONTEXT_VEC_FLOOR",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 

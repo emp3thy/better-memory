@@ -134,6 +134,24 @@ def create_app(
 
     import json as _json
 
+    _RATING_CHIP_CLASS = {
+        "cited": "outcome-success",
+        "shaped": "outcome-success",
+        "misled": "outcome-failure",
+        "overlooked": "outcome-partial",
+        "ignored": "outcome-no_outcome",
+    }
+
+    @app.template_filter("rating_chip_class")
+    def _rating_chip_class(classification: str) -> str:
+        """Map a rating classification to its `.chip`/`.outcome-badge` class.
+
+        cited/shaped -> outcome-success, misled -> outcome-failure,
+        overlooked -> outcome-partial, ignored (and anything unknown) ->
+        outcome-no_outcome.
+        """
+        return _RATING_CHIP_CLASS.get(classification, "outcome-no_outcome")
+
     @app.template_filter("decode_hints")
     def _decode_hints(raw: str | None) -> list[str]:
         """Decode the hints column for template display.
@@ -339,8 +357,12 @@ def create_app(
         detail = queries.reflection_detail(conn, reflection_id=id)
         if detail is None:
             abort(404)
+        rating_evidence = queries.fetch_rating_evidence(
+            conn, "reflection", id
+        )
         return render_template(
-            "fragments/reflection_drawer.html", detail=detail
+            "fragments/reflection_drawer.html",
+            detail=detail, rating_evidence=rating_evidence,
         )
 
     @app.post("/reflections/<id>/confirm")
@@ -357,8 +379,12 @@ def create_app(
                 "</div>"
             ), 409, {}
         detail = queries.reflection_detail(conn, reflection_id=id)
+        rating_evidence = queries.fetch_rating_evidence(
+            conn, "reflection", id
+        )
         rendered = render_template(
-            "fragments/reflection_drawer.html", detail=detail
+            "fragments/reflection_drawer.html",
+            detail=detail, rating_evidence=rating_evidence,
         )
         return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
@@ -376,8 +402,12 @@ def create_app(
                 "</div>"
             ), 409, {}
         detail = queries.reflection_detail(conn, reflection_id=id)
+        rating_evidence = queries.fetch_rating_evidence(
+            conn, "reflection", id
+        )
         rendered = render_template(
-            "fragments/reflection_drawer.html", detail=detail
+            "fragments/reflection_drawer.html",
+            detail=detail, rating_evidence=rating_evidence,
         )
         return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
@@ -420,8 +450,12 @@ def create_app(
                 "</div>"
             ), 409, {}
         detail = queries.reflection_detail(conn, reflection_id=id)
+        rating_evidence = queries.fetch_rating_evidence(
+            conn, "reflection", id
+        )
         rendered = render_template(
-            "fragments/reflection_drawer.html", detail=detail
+            "fragments/reflection_drawer.html",
+            detail=detail, rating_evidence=rating_evidence,
         )
         return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
@@ -441,8 +475,12 @@ def create_app(
                 "</div>"
             ), 409, {}
         detail = queries.reflection_detail(conn, reflection_id=id)
+        rating_evidence = queries.fetch_rating_evidence(
+            conn, "reflection", id
+        )
         rendered = render_template(
-            "fragments/reflection_drawer.html", detail=detail
+            "fragments/reflection_drawer.html",
+            detail=detail, rating_evidence=rating_evidence,
         )
         return rendered, 200, {"HX-Trigger": "reflection-changed"}
 
@@ -542,8 +580,10 @@ def create_app(
             "times_overlooked": row["times_overlooked"] or 0,
             "last_overlooked_at": row["last_overlooked_at"],
         }
+        rating_evidence = queries.fetch_rating_evidence(conn, "semantic", id)
         return render_template(
-            "fragments/semantic_drawer.html", memory=memory,
+            "fragments/semantic_drawer.html",
+            memory=memory, rating_evidence=rating_evidence,
         )
 
     @app.post("/semantic/<id>/update")
@@ -640,6 +680,7 @@ def create_app(
         recent_ratings = conn.execute(
             """
             SELECT e.rated_at, e.memory_kind, e.memory_id, e.classification,
+                   e.evidence,
                    COALESCE(r.title, s.content) AS display
               FROM session_memory_exposure e
               LEFT JOIN reflections        r ON e.memory_kind='reflection'
