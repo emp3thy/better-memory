@@ -11,10 +11,15 @@ better-memory ships these hooks that wire into Claude Code's hook framework:
 
 The `contextual_inject` hook is gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE`
 (`userprompt` \| `pretool` \| `both` (default) \| `off`). It runs in-process
-against `memory.db`, whole-word-matches the curated memory set against the
-prompt / tool-input, and injects the top matches; it never blocks a turn.
-Note: whether `PreToolUse` fires for the built-in `Skill`/`Task` tools is
-environment-dependent — `UserPromptSubmit` is the reliable trigger.
+against `memory.db` and gates each candidate through a three-leg evidence
+check (BM25 match against `reflection_fts`, or vector cosine similarity
+>= `BETTER_MEMORY_CONTEXT_VEC_FLOOR` (default 0.55), or — only when both
+those legs are structurally unavailable — a keyword-hit fallback), then
+ranks qualifiers by reciprocal rank fusion over a Wilson-score usefulness
+prior; it injects the top matches (capped at `BETTER_MEMORY_CONTEXT_MAX_ITEMS`)
+and never blocks a turn. `PreToolUse` is registered unscoped (matches every
+tool) but latches to one real firing per session — later tool calls
+short-circuit on a state file before touching the DB.
 
 ## Registering the hooks
 
@@ -52,8 +57,7 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.session_close",
-            "async": true
+            "command": "uv run python -m better_memory.hooks.session_close"
           }
         ]
       }
@@ -70,7 +74,6 @@ project-scoped):
     ],
     "PreToolUse": [
       {
-        "matcher": "Skill|Task|Write",
         "hooks": [
           {
             "type": "command",
@@ -99,16 +102,28 @@ Adjust the `command` to match your environment — for example:
    directly (no MCP RPC on the hook critical path), calls
    `SessionBootstrapService.bootstrap`, which:
    - resolves the project name from `cwd` via the git-aware
-     `project_name(cwd)` helper (uses `git rev-parse --git-common-dir` so
-     worktrees share scope with their main repo);
+     `project_name(cwd)` helper (walks up looking for `.git`, handling
+     worktrees, so worktrees share scope with their main repo);
    - opens a fresh background episode for this session, or reuses an
      existing open background episode if `source=resume`;
-   - retrieves all project-scoped + general-scope semantic memories and
-     all distilled reflections (`do` / `dont` / `neutral` buckets) — no
-     per-bucket cap;
+   - retrieves project-scoped + general-scope semantic memories and
+     distilled reflections (`do` / `dont` / `neutral` buckets, capped at
+     20 per bucket), then renders them per `BETTER_MEMORY_INJECT_MODE`:
+     - `deferred` (the mode actually deployed live) — renders only
+       general-scope semantic memories in full, plus a one-line index
+       ("better-memory knows N reflections + M semantic memories...")
+       telling Claude to pull specifics via `memory_retrieve` with a
+       task query. No reflections are rendered in full at bootstrap.
+     - `legacy` (the config default when the env var is unset) — renders
+       up to `BETTER_MEMORY_BOOTSTRAP_TOP_N` (default 5) semantic
+       memories and reflections in full, with the remainder listed in a
+       compact "Index (not expanded)" section.
    - renders a markdown block with a `## better-memory: session
      bootstrap` header summarising project / source / episode action,
-     followed by the memories and reflections.
+     followed by the memories and reflections;
+   - appends a CLAUDE.md drift-sentinel warning (at most one) if the
+     user's `~/.claude/CLAUDE.md` references a schema field/enum that no
+     longer matches the codebase.
    The hook prints a `hookSpecificOutput` JSON envelope with the rendered
    markdown as `additionalContext`. Claude Code injects this into the
    first turn's context. If anything fails, a fallback directive is

@@ -4,11 +4,15 @@ When to use: immediately after evidence arrives that confirms or disproves a pri
 
 ## Two call sites
 
-`record_use` is the canonical way to stamp an outcome once evidence is in hand. It's called in two situations:
+`record_use` is the canonical way to stamp an outcome on a raw
+**observation** (an id returned by `memory.observe`) once evidence is
+in hand:
 
 **1. Closing the loop on a memory YOU wrote as neutral.** Every `memory.observe(outcome='neutral')` with a decision baked in should, eventually, get a matching `record_use(id, outcome=...)` once validation arrives.
 
-**2. Validating a memory you RETRIEVED and applied.** If a retrieved memory influenced your work, close the loop with `record_use(retrieved_id, outcome=...)` once you know whether it held up.
+**2. Validating an observation you RETRIEVED via `memory.retrieve_observations` and applied.** If a retrieved observation influenced your work, close the loop with `record_use(retrieved_id, outcome=...)` once you know whether it held up.
+
+For a **reflection** or **semantic memory** (returned by `memory.retrieve` / `memory.semantic_retrieve`), `record_use` is a no-op — use `memory.credit(kind, id, class, evidence)` instead (see Pattern 2 below).
 
 ```python
 memory.record_use(id, outcome='success' | 'failure' | None)
@@ -32,7 +36,7 @@ Recording a `failure` against a stale memory is how you retire bad advice over t
 
 `memory.close_episode(outcome='success' | 'partial' | 'abandoned')` is a stronger reinforcement signal than per-observation `record_use`. Every observation made during the episode inherits the outcome at synthesis time.
 
-If the work was opened with `memory.start_episode(...)` and the goal is now resolved, prefer hardening — call `close_episode` with a real outcome. Per-observation `record_use` is still right when you're closing the loop on a single decision (e.g. validating one retrieved memory you applied), but for goal-driven work, hardening is the higher-leverage move.
+If the work was opened with `memory.start_episode(...)` and the goal is now resolved, prefer hardening — call `close_episode` with a real outcome. Per-observation `record_use` is still right when you're closing the loop on a single decision (e.g. validating one retrieved observation you applied), but for goal-driven work, hardening is the higher-leverage move.
 
 ## Pattern 1 — closing your own neutral observe
 
@@ -53,22 +57,26 @@ memory.record_use(obs_id, outcome="success")  # if tests passed
 memory.record_use(obs_id, outcome="failure")  # if it broke something
 ```
 
-## Pattern 2 — validating a retrieved memory
+## Pattern 2 — validating a retrieved reflection or semantic memory
+
+`record_use` only operates on raw **observations** (ids from
+`memory.observe`) — calling it with a reflection or semantic-memory id
+is a silent no-op. For memories returned by `memory.retrieve` /
+`memory.semantic_retrieve`, close the loop with
+`memory.credit(kind, id, class, evidence)` instead:
 
 ```python
-hits = memory.retrieve(query="add FK index", component="db")
+hits = memory.retrieve(query="add FK index to observations table", project="db")
 
-for item in hits["do"]:
-    # About to apply — mark the read
-    memory.record_use(item["id"])
+# ... apply the first approach, finish the work ...
 
-# ... finish the work, observe the result ...
+# It worked — credit it as having shaped the change, with evidence
+memory.credit("reflection", hits["do"][0]["id"], "shaped",
+              "reused the covering-index pattern for the new FK column")
 
-# The first approach worked
-memory.record_use(hits["do"][0]["id"], outcome="success")
-
-# The second approach is stale — schema changed underneath
-memory.record_use(hits["do"][1]["id"], outcome="failure")
+# The second approach turned out stale — schema changed underneath
+memory.credit("reflection", hits["do"][1]["id"], "misled",
+              "followed this but the referenced column no longer exists")
 ```
 
 ## Rule of thumb

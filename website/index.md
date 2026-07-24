@@ -75,7 +75,7 @@ memory.retrieve(query="growatt") → do bucket
         <div class="brut-bucket-ex">"Python ZoneInfo unavailable on Windows without tzdata package."</div>
       </div>
     </div>
-    <p class="brut-bucket-sub">reinforcement-weighted — memory.record_use promotes signal, demotes noise.</p>
+    <p class="brut-bucket-sub">ranked by a Wilson-score hit-rate prior — memory.credit promotes signal, demotes noise.</p>
   </div>
 </section>
 
