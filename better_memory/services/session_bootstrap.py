@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from better_memory.config import project_name
+from better_memory.services import exposure_log
 from better_memory.services.episode import EpisodeService
 from better_memory.services.reflection import ReflectionSynthesisService
 from better_memory.services.semantic import SemanticMemoryService
@@ -166,17 +167,12 @@ class SessionBootstrapService:
         if not session_id or not items:
             return
         now = self._clock().isoformat()
-        self._conn.executemany(
-            "INSERT INTO session_memory_exposure "
-            "(session_id, memory_kind, memory_id, exposed_at, source) "
-            "SELECT ?, ?, ?, ?, ? "
-            "WHERE NOT EXISTS ("
-            "  SELECT 1 FROM session_memory_exposure "
-            "  WHERE session_id = ? AND memory_kind = ? AND memory_id = ?)",
-            [
-                (session_id, kind, mid, now, source, session_id, kind, mid)
-                for kind, mid in items
-            ],
+        exposure_log.record(
+            self._conn,
+            session_id=session_id,
+            items=items,
+            source=source,
+            now=now,
         )
         self._conn.commit()
 
@@ -394,23 +390,7 @@ class SessionBootstrapService:
         # one UPDATE, so the LLM must see one entry per unique memory;
         # otherwise apply_session_ratings rejects the batch for duplicate
         # (kind, id) pairs.
-        rows = self._conn.execute(
-            """
-            SELECT e.memory_kind, e.memory_id,
-                   MIN(e.exposed_at) AS exposed_at,
-                   MIN(e.source) AS source,
-                   COALESCE(r.title, s.content) AS display
-              FROM session_memory_exposure e
-              LEFT JOIN reflections        r ON e.memory_kind='reflection'
-                                            AND e.memory_id = r.id
-              LEFT JOIN semantic_memories  s ON e.memory_kind='semantic'
-                                            AND e.memory_id = s.id
-             WHERE e.session_id = ? AND e.rated_at IS NULL
-             GROUP BY e.memory_kind, e.memory_id
-             ORDER BY exposed_at ASC
-            """,
-            (session_id,),
-        ).fetchall()
+        rows = exposure_log.list_unrated(self._conn, session_id=session_id)
         return {
             "session_id": session_id,
             "exposures": [

@@ -175,6 +175,10 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
             # apply path stamps ALL unrated rows per (kind, id) in one
             # UPDATE, so one rating per unique memory is the correct
             # contract to surface to the LLM.
+            # Standalone copy, intentionally not delegated to
+            # better_memory.services.exposure_log.list_unrated (see that
+            # module for the shared implementation) — kept inline here so
+            # this hook has no service-layer import dependency.
             rows = conn.execute(
                 """
                 SELECT e.memory_kind, e.memory_id,
