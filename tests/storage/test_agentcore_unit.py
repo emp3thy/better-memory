@@ -1014,15 +1014,36 @@ def test_relevance_ranks_both_kinds_combined(backend, mock_data_client) -> None:
     assert result == {("reflection", "r1"): 0, ("semantic", "s1"): 0}
 
 
-def test_relevance_ranks_namespace_error_degrades_that_kind_to_empty(
+def test_relevance_ranks_all_namespaces_error_returns_none(
     backend, mock_data_client
 ) -> None:
-    """RetrieveMemoryRecords raising on every namespace call for a kind
-    degrades that kind to no entries -- never raises out of
-    relevance_ranks (matches _relevance_rank_map's own best-effort
-    contract)."""
+    """RetrieveMemoryRecords raising on EVERY namespace call, for every
+    requested kind, degrades relevance_ranks to ``None`` -- NOT ``{}`` --
+    since ``None`` is the caller's (retrieve_relevant's) designated signal
+    that the lookup itself failed (AWS error), distinct from a
+    successful-but-empty result. Never raises out of relevance_ranks."""
     mock_data_client.retrieve_memory_records.side_effect = Exception("boom")
     result = backend.relevance_ranks(query="some query")
+    assert result is None
+
+
+def test_relevance_ranks_one_namespace_error_other_empty_returns_empty_dict(
+    backend, mock_data_client
+) -> None:
+    """One namespace erroring while its sibling namespace call SUCCEEDS
+    (even with zero matches) must NOT degrade to None -- that would
+    incorrectly signal "lookup failed" for a kind that genuinely ran and
+    found nothing in at least one namespace. Matches
+    _merge_relevance_rank_maps' contract: only ALL-None legs produce
+    None; any successful leg (empty or not) produces a real (possibly
+    empty) dict."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            raise Exception("boom")
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.retrieve_memory_records.side_effect = stub
+    result = backend.relevance_ranks(query="some query", kinds=("reflection",))
     assert result == {}
 
 

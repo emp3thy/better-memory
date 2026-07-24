@@ -263,10 +263,19 @@ class _StubAgentCoreBackend:
     supports_synthesis = False
 
     def __init__(self, *, reflections=None, semantics=None, rank_map=None,
-                 raise_on_ranks=False):
+                 return_none=False, raise_on_ranks=False):
+        """``rank_map``: the dict relevance_ranks returns on success
+        (defaults to ``{}`` -- a legitimate "ran fine, nothing matched"
+        result). ``return_none=True`` simulates the REAL AgentCoreBackend's
+        own best-effort contract for a failed lookup (returns ``None``
+        directly, never raises). ``raise_on_ranks=True`` additionally
+        exercises retrieve_relevant's own defensive try/except around the
+        call (belt-and-suspenders, since a real backend is not supposed to
+        raise at all)."""
         self._reflections = reflections or {"do": [], "dont": [], "neutral": []}
         self._semantics = semantics or []
-        self._rank_map = rank_map or {}
+        self._rank_map = rank_map if rank_map is not None else {}
+        self._return_none = return_none
         self._raise_on_ranks = raise_on_ranks
 
     def retrieve(self, **kwargs):
@@ -278,6 +287,8 @@ class _StubAgentCoreBackend:
     def relevance_ranks(self, *, query, kinds=("reflection", "semantic"), top_k=50):
         if self._raise_on_ranks:
             raise RuntimeError("AWS boom")
+        if self._return_none:
+            return None
         return dict(self._rank_map)
 
 
@@ -331,10 +342,14 @@ class TestAgentCoreRelevanceGate:
         )
         assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
 
-    def test_empty_rank_map_falls_back_to_keywords(self):
-        # No relevance_ranks matches (AWS error / genuinely empty) -- the
-        # keyword-hit floor still fires, same as the pre-existing
-        # conn=None sqlite behaviour (test_no_conn_falls_back_to_keywords).
+    def test_zero_match_rank_map_does_not_fall_back_to_keywords(self):
+        # relevance_ranks returns {} -- the lookup RAN and genuinely found
+        # nothing. Even though the reflection has strong keyword overlap
+        # with the query, it must NOT qualify: a legitimate negative
+        # result from the server-side gate is not a "leg unavailable"
+        # situation, so the keyword-hit floor must not override it (design
+        # spec 2026-07-24-agentcore-parity-design.md §3 -- conflating {}
+        # with an AWS error was the bug this test pins).
         reflections = {
             "do": [_stub_reflection(
                 "r1", title="Retention thresholds alpha",
@@ -347,10 +362,32 @@ class TestAgentCoreRelevanceGate:
             backend, query="retention thresholds", project="p",
             conn=None, now=lambda: FIXED_NOW,
         )
+        assert out == []
+
+    def test_none_rank_map_falls_back_to_keywords(self):
+        # relevance_ranks returns None -- the REAL AgentCoreBackend's own
+        # signal that the lookup itself failed (AWS error on every
+        # namespace/kind), not that it found nothing. THIS is the only
+        # case the keyword-hit floor should fire for in agentcore mode,
+        # matching the pre-existing conn=None sqlite behaviour
+        # (test_no_conn_falls_back_to_keywords).
+        reflections = {
+            "do": [_stub_reflection(
+                "r1", title="Retention thresholds alpha",
+                use_cases="retention thresholds tuning guide",
+            )],
+            "dont": [], "neutral": [],
+        }
+        backend = _StubAgentCoreBackend(reflections=reflections, return_none=True)
+        out = retrieve_relevant(
+            backend, query="retention thresholds", project="p",
+            conn=None, now=lambda: FIXED_NOW,
+        )
         assert [(m.kind, m.id) for m in out] == [("reflection", "r1")]
 
     def test_no_matching_evidence_no_injection(self):
-        # Empty rank map AND no keyword overlap -- nothing qualifies.
+        # Empty rank map AND no keyword overlap -- nothing qualifies
+        # regardless of the None/{} distinction.
         reflections = {
             "do": [_stub_reflection("r1", title="Zebra flamingo unrelated topic")],
             "dont": [], "neutral": [],
@@ -364,7 +401,8 @@ class TestAgentCoreRelevanceGate:
 
     def test_relevance_ranks_error_degrades_to_keyword_fallback(self):
         # relevance_ranks raising must never propagate out of
-        # retrieve_relevant -- it degrades exactly like an empty map.
+        # retrieve_relevant -- it degrades exactly like a None return
+        # (retrieve_relevant's own try/except around the call).
         reflections = {
             "do": [_stub_reflection(
                 "r1", title="Retention thresholds alpha",

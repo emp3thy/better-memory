@@ -282,6 +282,12 @@ class SqliteBackend:
         """Thin protocol-completeness wrapper over the existing BM25
         (``reflection_fts``) + vector legs (``services/relevant.py``'s
         ``_bm25_qualifiers`` / ``_vec_qualifiers``), RRF-merged per kind.
+        Always returns a dict, never ``None`` -- its underlying legs
+        already degrade internally (a missing conn, no query vector, or a
+        malformed FTS query all resolve to empty results, not an error) so
+        there is no failure mode to signal here (see the Protocol
+        docstring's ``None`` vs ``{}`` contract, which only agentcore's
+        AWS-error path actually exercises).
 
         NOT consumed by ``retrieve_relevant``'s own sqlite path -- that
         function keeps calling those helpers directly against its own

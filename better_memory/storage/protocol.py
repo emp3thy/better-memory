@@ -328,28 +328,43 @@ class StorageBackend(Protocol):
         query: str,
         kinds: tuple[str, ...] = ("reflection", "semantic"),
         top_k: int = 50,
-    ) -> dict[tuple[str, str], int]:
+    ) -> dict[tuple[str, str], int] | None:
         """Server-side relevance rank map for the contextual evidence gate
         (``services/relevant.py``'s ``retrieve_relevant``). Returns
         ``{(kind, id): rank}`` -- 0 is the best match, per kind (ranks are
         not comparable ACROSS kinds; each (kind, id) is only ever looked up
-        for its own candidate). An empty dict means "no evidence" or
-        "unavailable" -- never raises.
+        for its own candidate). Never raises.
+
+        The empty-dict / ``None`` distinction is load-bearing, NOT
+        interchangeable: ``{}`` means the lookup ran and genuinely found no
+        matches (a legitimate negative result -- the caller's evidence gate
+        must respect it, not paper over it with a keyword-hit fallback).
+        ``None`` means the lookup itself could not run/complete (e.g. an
+        AWS error on every namespace) -- THIS is the caller's designated
+        signal to degrade to the keyword-hit fallback. Conflating the two
+        would let keyword overlap re-qualify memories the server-side
+        search legitimately rejected (design spec
+        2026-07-24-agentcore-parity-design.md §3).
 
         SqliteBackend: a thin wrapper over its existing BM25
-        (``reflection_fts``) + vector legs, RRF-merged per kind. Provided
-        for protocol completeness only -- ``retrieve_relevant``'s sqlite
-        path keeps calling those legs directly against its own ``conn``
-        parameter and never calls this method, so sqlite's contextual-gate
-        behavior is unaffected by this method's existence.
+        (``reflection_fts``) + vector legs, RRF-merged per kind. Its own
+        legs never raise (they degrade internally), so it always returns a
+        dict, never ``None``. Provided for protocol completeness only --
+        ``retrieve_relevant``'s sqlite path keeps calling those legs
+        directly against its own ``conn`` parameter and never calls this
+        method, so sqlite's contextual-gate behavior is unaffected by this
+        method's existence.
 
         AgentCoreBackend: server-side semantic search
         (``retrieve_memory_records``) fanned out per kind's project +
         general namespace pair (reusing ``_relevance_rank_map`` /
         ``_merge_relevance_rank_maps``, the same machinery ``retrieve``
         uses for its own RRF fusion with the Wilson prior), ranked by
-        result order. Best-effort: any AWS error degrades that kind's
-        contribution to empty rather than raising.
+        result order. Best-effort per namespace: a kind whose EVERY
+        namespace call fails contributes ``None`` (propagated up to an
+        overall ``None`` only if every requested kind fails that way);
+        any kind with at least one successful namespace call contributes
+        its (possibly empty) results to the overall dict.
         """
         ...
 

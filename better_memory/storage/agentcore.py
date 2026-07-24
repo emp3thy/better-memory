@@ -464,14 +464,18 @@ class AgentCoreBackend:
         # the same relevance boost as a project-scoped one. Each namespace
         # call is independently best-effort (`_relevance_rank_map` never
         # raises); one namespace failing still lets the other's results
-        # through the merge. Blank query or every namespace failing/empty
-        # -> {} -> the fusion step below is a no-op.
+        # through the merge. Blank query or every namespace failing -> the
+        # merge returns None -- Task 5's own fusion contract collapses that
+        # to {} here (a no-op fusion step, degrading to pure Wilson order);
+        # this is DIFFERENT from Task 6's relevance_ranks, which surfaces
+        # the None/{} distinction to its caller instead of collapsing it —
+        # see relevance_ranks below.
         rank_map: dict[str, int] = {}
         if query is not None and query.strip():
             q = query.strip()
             rank_map = self._merge_relevance_rank_maps(
                 [self._relevance_rank_map(q, ns) for ns, _ in namespaces]
-            )
+            ) or {}
 
         for bucket_name, items in buckets.items():
             # Shared Wilson ordering (services/scoring.py): the lower bound
@@ -563,7 +567,7 @@ class AgentCoreBackend:
         top_k: int = 50,
         *,
         memory_id: str | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, int] | None:
         """Server-side semantic search rank map for RRF fusion with the
         shared Wilson ordering (see ``_fetch_reflection_buckets``), and —
         via ``relevance_ranks`` — with the contextual evidence gate in
@@ -576,9 +580,14 @@ class AgentCoreBackend:
         (``_fetch_reflection_buckets``); ``relevance_ranks`` passes the
         semantic memory's id explicitly for "semantic"-kind lookups.
         Returns ``{memoryRecordId: rank}`` from result order (0 = best
-        match). Best-effort: any exception (AWS error, malformed response,
-        ...) degrades to ``{}`` so the caller falls back to pure Wilson
-        order / the keyword fallback — never raises."""
+        match) on success -- including a genuinely empty ``{}`` when the
+        call succeeds but nothing matches. Best-effort: any exception (AWS
+        error, malformed response, ...) degrades to ``None`` -- NOT ``{}``
+        -- so callers can distinguish "this namespace's lookup failed"
+        from "it ran and found nothing" (``_merge_relevance_rank_maps``
+        skips ``None`` legs when merging; ``relevance_ranks`` surfaces the
+        distinction to its own caller, ``retrieve_relevant``'s keyword-
+        fallback gate). Never raises."""
         try:
             response = self._data.retrieve_memory_records(
                 memoryId=memory_id or self._cfg.episodic.memory_id,
@@ -593,17 +602,27 @@ class AgentCoreBackend:
                 for rank, rec in enumerate(response.get("memoryRecordSummaries", []))
                 if "memoryRecordId" in rec
             }
-        except Exception:  # noqa: BLE001 - best-effort; Wilson order is the fallback
-            return {}
+        except Exception:  # noqa: BLE001 - best-effort; None signals "lookup failed"
+            return None
 
     def _merge_relevance_rank_maps(
-        self, rank_maps: list[dict[str, int]]
-    ) -> dict[str, int]:
+        self, rank_maps: list[dict[str, int] | None]
+    ) -> dict[str, int] | None:
         """Merge one ``_relevance_rank_map`` result per namespace (see the
         call site in ``_fetch_reflection_buckets``, which fans
         ``_relevance_rank_map`` out over every namespace the Wilson fetch
         itself uses — project + general/promoted) into a single global rank
         map.
+
+        ``None`` legs (a namespace whose lookup itself failed — see
+        ``_relevance_rank_map``) are skipped when merging: one namespace
+        failing still lets a successful sibling's results through. Only
+        when EVERY leg is ``None`` does this method itself return ``None``
+        — propagating "the whole lookup failed" up to the caller, which
+        for ``relevance_ranks`` is the signal that distinguishes an AWS
+        error from a legitimate empty result. A leg list that is entirely
+        empty dicts (every namespace ran fine, none matched) correctly
+        returns ``{}``, not ``None``.
 
         RetrieveMemoryRecords' response shape has no ``score`` field
         verified anywhere in this codebase's fixtures/docs (only prose
@@ -616,8 +635,11 @@ class AgentCoreBackend:
         just-promoted record can transiently appear in both namespaces,
         mirroring the id-dedup in ``_fetch_reflection_buckets``) keeps its
         FIRST (better) global rank."""
+        succeeded = [rank_map for rank_map in rank_maps if rank_map is not None]
+        if not succeeded:
+            return None
         ordered_ids = [
-            sorted(rank_map, key=lambda rid: rank_map[rid]) for rank_map in rank_maps
+            sorted(rank_map, key=lambda rid: rank_map[rid]) for rank_map in succeeded
         ]
         merged: dict[str, int] = {}
         cursors = [0] * len(ordered_ids)
@@ -639,7 +661,7 @@ class AgentCoreBackend:
         query: str,
         kinds: tuple[str, ...] = ("reflection", "semantic"),
         top_k: int = 50,
-    ) -> dict[tuple[str, str], int]:
+    ) -> dict[tuple[str, str], int] | None:
         """Server-side relevance rank map for the contextual evidence gate
         in ``services/relevant.py`` (``retrieve_relevant``'s agentcore
         branch, gated on ``conn is None`` + ``supports_synthesis is
@@ -660,17 +682,21 @@ class AgentCoreBackend:
         only ever compared within their own kind by the caller, never
         across kinds.
 
-        Best-effort per kind, per namespace: ``_relevance_rank_map`` never
-        raises, so one namespace (or one whole kind) failing/emptying still
-        lets the others contribute. Blank query or every requested kind
-        failing/emptying returns ``{}`` — the caller's designated signal to
-        fall back to the keyword-hit gate."""
+        The ``None`` vs ``{}`` distinction is load-bearing (see the
+        Protocol docstring): a kind whose EVERY namespace lookup fails
+        contributes nothing and is treated as failed; a kind with at
+        least one successful namespace lookup contributes its (possibly
+        empty) results normally. Blank query, or EVERY requested kind
+        failing that way, returns ``None`` / ``{}`` respectively — see
+        below. A blank query short-circuits to ``{}`` (nothing was
+        searched, not an error) without any wire call."""
         if not query or not query.strip():
             return {}
         q = query.strip()
         actor_id = resolve_actor_id(self._project)
 
         out: dict[tuple[str, str], int] = {}
+        any_kind_succeeded = False
         for kind in kinds:
             if kind == "reflection":
                 memory_id = self._cfg.episodic.memory_id
@@ -691,9 +717,17 @@ class AgentCoreBackend:
                 self._relevance_rank_map(q, ns, top_k, memory_id=memory_id)
                 for ns in namespaces
             ])
+            if merged is None:
+                # Every namespace call for this kind failed -- this kind
+                # contributes nothing (not even an empty-result entry);
+                # any_kind_succeeded stays whatever the other kinds set it
+                # to, so one kind failing doesn't blank out a sibling
+                # kind's genuine results.
+                continue
+            any_kind_succeeded = True
             for rid, rank in merged.items():
                 out[(kind, rid)] = rank
-        return out
+        return out if any_kind_succeeded else None
 
     def _parse_reflection_record(
         self,

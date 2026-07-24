@@ -21,11 +21,14 @@ abstraction (works on sqlite AND agentcore); the BM25/vec legs additionally
 require a raw sqlite ``conn``. Agentcore (``conn=None`` AND
 ``supports_synthesis=False``) replaces the BM25/vec legs wholesale with
 ``backend.relevance_ranks`` -- a server-side semantic-search rank map --
-and only falls back to the keyword-hit floor when that lookup itself comes
-back empty (an AWS error, or genuinely no matches). A sqlite backend
-called with ``conn=None`` keeps the pre-existing keyword-fallback
-behavior unchanged, regardless of whether it also implements
-``relevance_ranks`` (it does, for protocol completeness only).
+and falls back to the keyword-hit floor ONLY when that lookup itself
+FAILS (``relevance_ranks`` returns ``None`` -- an AWS error). A
+successful lookup that genuinely finds nothing (``{}``) does NOT trigger
+the fallback -- a legitimate negative result from the server-side gate
+must not be overridden by keyword overlap. A sqlite backend called with
+``conn=None`` keeps the pre-existing keyword-fallback behavior
+unchanged, regardless of whether it also implements ``relevance_ranks``
+(it does, for protocol completeness only).
 """
 from __future__ import annotations
 
@@ -185,9 +188,11 @@ def retrieve_relevant(
     Agentcore backends (``conn=None`` AND ``supports_synthesis=False``)
     replace the BM25/vec legs with ``backend.relevance_ranks`` -- a
     server-side semantic-search rank map fused into the same RRF -- and
-    fall back to the keyword-hit floor only when that lookup comes back
-    empty (AWS error). Sqlite backends are unaffected by this branch even
-    when called with ``conn=None``.
+    fall back to the keyword-hit floor only when that lookup FAILS
+    (returns ``None`` -- an AWS error), never merely because it found
+    nothing (``{}`` is a legitimate negative result the gate must
+    respect). Sqlite backends are unaffected by this branch even when
+    called with ``conn=None``.
 
     Never raises -- any backend/leg failure degrades that leg to "absent"
     rather than propagating.
@@ -232,19 +237,22 @@ def retrieve_relevant(
         and hasattr(backend, "relevance_ranks")
         and getattr(backend, "supports_synthesis", True) is False
     )
-    rank_map: dict[tuple[str, str], int] = {}
+    # None vs {} from relevance_ranks is load-bearing (see
+    # StorageBackend.relevance_ranks's docstring): None means the
+    # backend-side lookup itself failed (AWS error on every namespace) --
+    # THAT is the keyword-fallback trigger. {} means the lookup ran fine
+    # and genuinely found nothing, which must NOT re-qualify memories via
+    # keyword overlap -- the server-side gate's negative result stands.
+    raw_rank_map: dict[tuple[str, str], int] | None = None
     if agentcore_mode:
         try:
-            rank_map = backend.relevance_ranks(
+            raw_rank_map = backend.relevance_ranks(
                 query=query, kinds=("reflection", "semantic"),
             )
         except Exception:  # noqa: BLE001 - best-effort; degrade to keyword fallback
-            rank_map = {}
-    # Keyword fallback fires only when the backend-side lookup itself came
-    # back empty (AWS error on every namespace, or genuinely no matches) --
-    # not simply "backend is agentcore" -- matching the sqlite fallback's
-    # own "leg structurally unavailable" contract.
-    agentcore_kw_fallback = agentcore_mode and not rank_map
+            raw_rank_map = None
+    agentcore_kw_fallback = agentcore_mode and raw_rank_map is None
+    rank_map: dict[tuple[str, str], int] = raw_rank_map or {}
 
     refl_candidates: list[dict] = []
     order = ["do", "dont"] + (["neutral"] if include_neutral else [])
@@ -308,7 +316,8 @@ def retrieve_relevant(
         # to query against. In agentcore mode the vec leg is replaced
         # wholesale by the backend rank map, so the fallback there fires
         # only per the same agentcore_kw_fallback signal as reflections
-        # (empty rank map == AWS error), not merely "conn is None".
+        # (relevance_ranks returned None == AWS error; a genuinely empty
+        # {} does NOT trigger it), not merely "conn is None".
         fallback_ok = (
             agentcore_kw_fallback if agentcore_mode
             else (qvec is None or conn is None)
