@@ -66,6 +66,7 @@ class TestCreditOneClassEffects:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         assert result == {"applied": "cited", "skipped": None}
         row = conn.execute(
@@ -81,6 +82,7 @@ class TestCreditOneClassEffects:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         svc.credit_one(
             session_id="S1", kind="semantic", id="s1", classification="shaped",
+            evidence="shaped the approach",
         )
         row = conn.execute(
             "SELECT useful_count FROM semantic_memories WHERE id='s1'"
@@ -94,6 +96,7 @@ class TestCreditOneClassEffects:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="misled",
+            evidence="followed the wrong path",
         )
         row = conn.execute(
             "SELECT useful_count, times_misled, last_misled_at "
@@ -110,6 +113,7 @@ class TestCreditOneClassEffects:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         row = conn.execute(
             "SELECT rated_at, classification FROM session_memory_exposure "
@@ -127,6 +131,7 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         assert result == {"applied": None, "skipped": "not_exposed"}
         row = conn.execute(
@@ -141,10 +146,12 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         # second call is the no-op
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it again",
         )
         assert result == {"applied": None, "skipped": "already_rated"}
         row = conn.execute(
@@ -159,7 +166,7 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r-missing",
-            classification="cited",
+            classification="cited", evidence="used it to fix the bug",
         )
         assert result == {"applied": None, "skipped": "memory_missing"}
 
@@ -174,6 +181,7 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         assert result == {"applied": None, "skipped": "memory_retired"}
 
@@ -188,6 +196,7 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         assert result == {"applied": None, "skipped": "memory_retired"}
 
@@ -203,6 +212,7 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="semantic", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         assert result == {"applied": None, "skipped": "memory_missing"}
 
@@ -235,6 +245,7 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="shaped",
+            evidence="shaped the approach",
         )
         assert result == {"applied": "shaped", "skipped": None}
 
@@ -259,6 +270,7 @@ class TestCreditOneSkips:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         assert result == {"applied": None, "skipped": "already_rated"}
 
@@ -299,7 +311,7 @@ class TestCreditOneOverlooked:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         result = svc.credit_one(
             session_id="S1", kind="reflection", id="r1",
-            classification="overlooked",
+            classification="overlooked", evidence="overlooked but relevant",
         )
         assert result == {"applied": "overlooked", "skipped": None}
         row = conn.execute(
@@ -320,7 +332,7 @@ class TestCreditOneOverlooked:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         svc.credit_one(
             session_id="S1", kind="semantic", id="s1",
-            classification="overlooked",
+            classification="overlooked", evidence="overlooked but relevant",
         )
         row = conn.execute(
             "SELECT times_overlooked FROM semantic_memories WHERE id='s1'"
@@ -334,7 +346,7 @@ class TestCreditOneOverlooked:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         svc.credit_one(
             session_id="S1", kind="reflection", id="r1",
-            classification="overlooked",
+            classification="overlooked", evidence="overlooked but relevant",
         )
         row = conn.execute(
             "SELECT classification FROM session_memory_exposure "
@@ -359,10 +371,13 @@ class TestApplySessionRatings:
         result = svc.apply_session_ratings(
             session_id="S1",
             ratings=[
-                {"kind": "reflection", "id": "r1", "class": "cited"},
+                {"kind": "reflection", "id": "r1", "class": "cited",
+                 "evidence": "used it to fix the bug"},
                 {"kind": "reflection", "id": "r2", "class": "ignored"},
-                {"kind": "semantic",   "id": "s1", "class": "shaped"},
-                {"kind": "semantic",   "id": "s2", "class": "misled"},
+                {"kind": "semantic",   "id": "s1", "class": "shaped",
+                 "evidence": "shaped the approach"},
+                {"kind": "semantic",   "id": "s2", "class": "misled",
+                 "evidence": "followed the wrong path"},
             ],
         )
         assert result["session_id"] == "S1"
@@ -432,10 +447,14 @@ class TestApplySessionRatings:
         result = svc.apply_session_ratings(
             session_id="S1",
             ratings=[
-                {"kind": "reflection", "id": "r1", "class": "cited"},
-                {"kind": "reflection", "id": "r2", "class": "cited"},
-                {"kind": "reflection", "id": "r3", "class": "cited"},
-                {"kind": "reflection", "id": "r4", "class": "cited"},
+                {"kind": "reflection", "id": "r1", "class": "cited",
+                 "evidence": "used it to fix the bug"},
+                {"kind": "reflection", "id": "r2", "class": "cited",
+                 "evidence": "used it to fix the bug"},
+                {"kind": "reflection", "id": "r3", "class": "cited",
+                 "evidence": "used it to fix the bug"},
+                {"kind": "reflection", "id": "r4", "class": "cited",
+                 "evidence": "used it to fix the bug"},
             ],
         )
         assert result["applied"] == {
@@ -469,7 +488,8 @@ class TestApplySessionRatings:
             svc.apply_session_ratings(
                 session_id="S1",
                 ratings=[
-                    {"kind": "reflection", "id": "r1", "class": "cited"},
+                    {"kind": "reflection", "id": "r1", "class": "cited",
+                     "evidence": "used it to fix the bug"},
                     {"kind": "reflection", "id": "r1", "class": "ignored"},
                 ],
             )
@@ -527,8 +547,10 @@ class TestApplySessionRatings:
             svc.apply_session_ratings(
                 session_id="S1",
                 ratings=[
-                    {"kind": "reflection", "id": "r1", "class": "cited"},
-                    {"kind": "reflection", "id": "r2", "class": "cited"},
+                    {"kind": "reflection", "id": "r1", "class": "cited",
+                     "evidence": "used it to fix the bug"},
+                    {"kind": "reflection", "id": "r2", "class": "cited",
+                     "evidence": "used it to fix the bug"},
                 ],
             )
 
@@ -548,6 +570,7 @@ class TestApplySessionRatings:
         svc = MemoryRatingService(conn, clock=fixed_clock)
         svc.credit_one(
             session_id="S1", kind="reflection", id="r1", classification="cited",
+            evidence="used it to fix the bug",
         )
         # Sweep both ids; r1 should land in skipped.already_rated.
         result = svc.apply_session_ratings(
@@ -573,7 +596,8 @@ class TestApplySessionRatings:
         result = svc.apply_session_ratings(
             session_id="S1",
             ratings=[
-                {"kind": "reflection", "id": "r1", "class": "overlooked"},
+                {"kind": "reflection", "id": "r1", "class": "overlooked",
+                 "evidence": "overlooked but relevant"},
             ],
         )
         assert result["applied"]["overlooked"] == 1

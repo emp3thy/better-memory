@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from better_memory._common import default_clock
 
@@ -61,6 +61,28 @@ _VALID_KINDS: set[str] = {"reflection", "semantic"}
 _VALID_CLASSES: set[str] = {"cited", "shaped", "ignored", "misled", "overlooked"}
 _CREDIT_CLASSES: set[str] = {"cited", "shaped", "misled", "overlooked"}
 
+EVIDENCE_MAX_CHARS = 500
+
+
+def _validate_evidence(cls: str, evidence: object, *, where: str) -> str | None:
+    """Trim + enforce the evidence contract for one rating.
+
+    Non-ignored classes require a non-empty line; `ignored` may carry one.
+    Returns the trimmed value (or None). Raises ValueError with the
+    caller-supplied position prefix on violation.
+    """
+    trimmed = evidence.strip() if isinstance(evidence, str) else None
+    if cls != "ignored" and not trimmed:
+        raise ValueError(
+            f"{where}: class {cls!r} requires a non-empty evidence line "
+            "(what the memory changed, or a quote); if there is nothing "
+            "to point at, the class is 'ignored'")
+    if trimmed and len(trimmed) > EVIDENCE_MAX_CHARS:
+        raise ValueError(
+            f"{where}: evidence exceeds {EVIDENCE_MAX_CHARS} chars "
+            f"({len(trimmed)})")
+    return trimmed or None
+
 
 class MemoryRatingService:
     """Writes useful_count / times_misled on reflections + semantic memories,
@@ -84,12 +106,20 @@ class MemoryRatingService:
         kind: str,
         id: str,
         classification: str,
+        evidence: str | None = None,
     ) -> ApplyOutcome:
         """Apply one rating for (session_id, kind, id).
 
         Validation (ValueError before any DB write):
         - kind must be 'reflection' or 'semantic'.
         - classification must be 'cited', 'shaped', 'misled', or 'overlooked' (NOT 'ignored').
+        - evidence must be a non-empty (post-strip), <=EVIDENCE_MAX_CHARS
+          line; all credit classes are non-ignored, so this is effectively
+          required. `evidence` defaults to None only as a runtime-safety
+          compat shim for callers that have not yet been updated to pass
+          it (see MCP `memory.credit` handler) — None fails validation
+          with a clear ValueError instead of a TypeError, so an un-updated
+          caller gets a clean error response rather than a crash.
 
         Skip outcomes (no exception, no write, returned via dict):
         - 'not_exposed' — no matching exposure row for this session.
@@ -123,6 +153,9 @@ class MemoryRatingService:
                 f"Invalid classification: {classification!r}. "
                 f"Expected one of {_CREDIT_CLASSES}"
             )
+        trimmed_evidence = _validate_evidence(
+            classification, evidence, where="credit"
+        )
 
         now = self._clock().isoformat()
         self._conn.execute("SAVEPOINT memory_credit")
@@ -130,6 +163,7 @@ class MemoryRatingService:
             outcome = self._apply_one(
                 session_id=session_id, kind=kind, memory_id=id,
                 classification=classification, now=now,
+                evidence=trimmed_evidence,
             )
         except BaseException:
             self._conn.execute("ROLLBACK TO SAVEPOINT memory_credit")
@@ -149,6 +183,7 @@ class MemoryRatingService:
         memory_id: str,
         classification: str,
         now: str,
+        evidence: str | None = None,
     ) -> ApplyOutcome:
         """Inside-savepoint per-row apply. Returns the same dict shape as
         credit_one. Shared by credit_one and apply_session_ratings (Task 3).
@@ -223,10 +258,10 @@ class MemoryRatingService:
         # 4. Stamp the exposure row.
         self._conn.execute(
             "UPDATE session_memory_exposure "
-            "SET rated_at = ?, classification = ? "
+            "SET rated_at = ?, classification = ?, evidence = ? "
             "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?"
             "  AND rated_at IS NULL",
-            (now, classification, session_id, kind, memory_id),
+            (now, classification, evidence, session_id, kind, memory_id),
         )
 
         return {"applied": classification, "skipped": None}
@@ -236,7 +271,7 @@ class MemoryRatingService:
         self,
         *,
         session_id: str,
-        ratings: list[dict[str, str]],
+        ratings: list[dict[str, Any]],
     ) -> ApplySessionRatingsResult:
         """Atomic batch update at session end.
 
@@ -246,6 +281,10 @@ class MemoryRatingService:
         - each entry must have kind in {'reflection', 'semantic'},
           class in {'cited', 'shaped', 'ignored', 'misled', 'overlooked'},
           and a string id.
+        - each entry may carry an optional "evidence" string. Non-ignored
+          classes require a non-empty (post-strip), <=EVIDENCE_MAX_CHARS
+          evidence line; 'ignored' may carry one or omit it. The trimmed
+          value is stored on session_memory_exposure.evidence.
         - no duplicate (kind, id) pairs in one batch.
 
         Inside the SAVEPOINT, each entry runs through _apply_one. Skip
@@ -286,6 +325,9 @@ class MemoryRatingService:
                     f"ratings[{i}].class: invalid {cls!r}; "
                     f"expected one of {_VALID_CLASSES}"
                 )
+            r["_evidence"] = _validate_evidence(
+                cls, r.get("evidence"), where=f"ratings[{i}]"
+            )
             if not isinstance(rid, str) or not rid:
                 raise ValueError(f"ratings[{i}].id: must be non-empty string")
             key = (kind, rid)
@@ -314,6 +356,7 @@ class MemoryRatingService:
                     memory_id=r["id"],
                     classification=r["class"],
                     now=now,
+                    evidence=r["_evidence"],
                 )
                 applied_class = outcome["applied"]
                 skipped_reason = outcome["skipped"]

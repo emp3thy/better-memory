@@ -500,6 +500,13 @@ def tool_definitions(
                                         "misled", "overlooked",
                                     ]
                                 },
+                                # Optional here at the wire-schema level;
+                                # MemoryRatingService.apply_session_ratings
+                                # enforces the real contract (required +
+                                # non-empty for every non-ignored class,
+                                # <=EVIDENCE_MAX_CHARS). Full schema
+                                # description/required wiring is Task 3.
+                                "evidence": {"type": "string"},
                             },
                         },
                     },
