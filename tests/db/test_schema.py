@@ -228,7 +228,7 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
         expected_initial = [
             "0001", "0002", "0003", "0004", "0005",
             "0006", "0007", "0008", "0009", "0010", "0011",
-            "0012", "0013", "0014",
+            "0012", "0013", "0014", "0015", "0016",
         ]
         assert versions[: len(expected_initial)] == expected_initial
         # Subsequent migrations are appended; idempotency is the property
@@ -806,4 +806,12 @@ def test_0015_via_exploration_column(tmp_memory_db):
     apply_migrations(conn)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(session_memory_exposure)")]
     assert "via_exploration" in cols
+    conn.close()
+
+
+def test_0016_rating_evidence_column(tmp_memory_db):
+    conn = connect(tmp_memory_db)
+    apply_migrations(conn)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(session_memory_exposure)")]
+    assert "evidence" in cols
     conn.close()

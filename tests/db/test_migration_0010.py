@@ -59,7 +59,7 @@ class TestExposureClassificationCheck:
         assert cols == {
             "session_id", "memory_kind", "memory_id",
             "exposed_at", "source", "rated_at", "classification",
-            "via_exploration",
+            "via_exploration", "evidence",
         }
 
     def test_primary_key_preserved(self, conn):
