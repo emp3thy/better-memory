@@ -53,7 +53,7 @@ memory.close_episode(
 | Pure fact / observed system behaviour | `neutral` (no outcome inherent) | — |
 | Bug identified AND fixed same session | `success` (fix verified) | — |
 | Bug identified, not yet fixed | `neutral` | `success` when fix lands |
-| Applied a memory someone else wrote | **don't observe** — call `record_use(retrieved_id, outcome=...)` instead | — |
+| Applied a retrieved reflection or semantic memory | **don't observe** — credit it via `memory_credit(kind, id, class, evidence)` with a one-line evidence statement | — |
 
 ## Examples
 

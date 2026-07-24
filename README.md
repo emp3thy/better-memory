@@ -8,12 +8,14 @@ It's a memory layer for Claude Code that (with the default sqlite backend) runs 
 
 1. **As it works**, the assistant records what it tried and how it turned out — a fix that worked, an approach that failed, a preference you stated.
 2. **Between sessions**, those raw notes are distilled into short, durable lessons — signal kept, noise dropped.
-3. **Next session**, the relevant lessons are handed back to the assistant automatically, before it touches your code, so it starts already informed about your project.
+3. **Next session**, lessons surface exactly when they become relevant: your standing rules inject at session start, and everything else arrives as you work — each prompt and the session's first tool call are scored against the memory store (text match + semantic similarity + track record), and only memories with real evidence of relevance inject. No firehose, no guessing.
+4. **Every serve gets scored.** At session end the assistant rates each surfaced memory — and any non-trivial rating requires a one-line receipt (what the memory changed, or a quote). Hit rates drive the ranking: memories that keep helping rise, memories that keep getting ignored sink, and brand-new lessons get a reserved trial slot to earn their score.
 
 ## What you get
 
 - **Even the failures pay off** — a botched approach is recorded just as carefully as a working fix, so the assistant turns a dead end into a *don't* the next session won't repeat.
-- **The right lesson at the right time** — past lessons come back sorted into *do this*, *avoid this*, and *context*, weighted by how reliable each has proven.
+- **The right lesson at the right time** — past lessons come back sorted into *do this*, *avoid this*, and *context*, ranked by a Wilson-score hit rate (how often each memory actually helped, out of how often it was shown) fused with text and semantic relevance to what you're doing right now.
+- **Ratings with receipts** — when the assistant claims a memory helped, it must say how, in one line; those evidence lines are stored and browsable per-memory in the management UI.
 - **Your standards, on hand** — drop your own conventions, language guides, and project docs into a knowledge base the assistant can search.
 - **Zero ceremony** — once it's installed, capture is automatic: hooks inside Claude Code snapshot your session for you, with nothing to call or manage mid-task.
 - **Nothing happens silently** — every change to memory is an append-only record you can audit.
@@ -170,9 +172,11 @@ One env var roots the runtime filesystem layout:
 | `BETTER_MEMORY_STORAGE_BACKEND` | unset | `sqlite` or `agentcore`. Explicit override of the storage backend; when unset, `$BETTER_MEMORY_HOME/settings.json` (written by `better-memory agentcore init`) decides, falling back to `sqlite`. The env var always wins over settings.json. |
 | `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 | `BETTER_MEMORY_PROJECT` | unset | Force the project name for all calls in this process. Highest-priority project-resolution signal — overrides both the `.better-memory` file and the git-derived name. Designed for subprocess scoping (e.g. ralph's executor sets it per-iteration so subagent observations land in the PBI's target_repo regardless of the worktree's cwd). Empty/whitespace-only values are treated as unset. |
-| `BETTER_MEMORY_CONTEXT_INJECT_MODE` | `both` | Contextual memory-injection hook trigger: `userprompt`, `pretool`, `both` (default), or `off`. |
-| `BETTER_MEMORY_BOOTSTRAP_TOP_N` | `5` | Number of project-scoped semantic memories/reflections the SessionStart bootstrap renders in full; the rest collapse into a one-line index. `0` = legacy full dump. |
-| `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | Minimum distinct keyword hits a memory needs to clear the contextual-injection floor. |
+| `BETTER_MEMORY_INJECT_MODE` | `legacy` (config default; `deferred` is the recommended and currently-deployed setting) | `deferred`: SessionStart injects only general-scope standing rules + a one-line index; everything else surfaces via the contextual channel as it becomes relevant. `legacy`: the original full bootstrap dump. Unknown values coerce to `legacy`. |
+| `BETTER_MEMORY_CONTEXT_INJECT_MODE` | `both` | Contextual memory-injection hook trigger: `userprompt`, `pretool`, `both` (default), or `off`. PreToolUse fires once per session (any tool), latched. |
+| `BETTER_MEMORY_CONTEXT_VEC_FLOOR` | `0.55` | Cosine floor for the contextual channel's vector-evidence leg. A memory injects only with a text match or a cosine ≥ floor; calibrated precision-first (see the deferred-injection spec). |
+| `BETTER_MEMORY_BOOTSTRAP_TOP_N` | `5` | Legacy-mode only: project-scoped items the SessionStart bootstrap renders in full; the rest collapse into a one-line index. `0` = full dump. |
+| `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | **Deprecated, unused** — superseded by the evidence gate (BM25 / vector floor). Kept for back-compat only. |
 | `BETTER_MEMORY_CONTEXT_MAX_ITEMS` | `3` | Max memories the contextual-injection hook injects per firing. |
 | `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns before a contextually-injected memory can be re-injected. `0` = never re-inject. A turn is one firing of the `contextual_inject` hook (each user prompt, plus each matched tool call in mode `both`), not one user prompt-response cycle. |
 
@@ -219,7 +223,7 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 | Tool | Purpose |
 |---|---|
 | `memory.observe(content, component?, theme?, trigger_type?, outcome?, tech?, scope?)` | Record an observation. Returns `{"id": ...}`. |
-| `memory.retrieve(project?, tech?, phase?, polarity?, limit_per_bucket?)` | Distilled reflections in `do` / `dont` / `neutral` buckets. Drains spool first. |
+| `memory.retrieve(query?, project?, tech?, phase?, polarity?, limit_per_bucket?)` | Distilled reflections in `do` / `dont` / `neutral` buckets, ranked by a Wilson-score hit-rate prior; pass `query` (a plain-language task description) to fuse in BM25 + vector relevance. One shortlist slot per bucket is reserved for an under-rated memory so new lessons earn a score. Drains spool first. |
 | `memory.retrieve_observations(query?, component?, theme?, outcome?, episode_id?, project?, limit?)` | Raw-observation drill-down with hybrid FTS5 + vector search. |
 | `memory.record_use(id, outcome?)` | Stamp reinforcement outcome on a memory after validation. |
 
@@ -252,9 +256,9 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 
 | Tool | Purpose |
 |---|---|
-| `memory.credit(kind, id, class)` | Opportunistic per-tool-use credit. `class` ∈ `cited` / `shaped` / `misled` / `overlooked` (not `ignored`). Call immediately when a retrieved memory is actually used. |
+| `memory.credit(kind, id, class, evidence)` | Opportunistic per-tool-use credit. `class` ∈ `cited` / `shaped` / `misled` / `overlooked` (not `ignored`). `evidence` is required: one line — what the memory changed, or a quote. If you can't write one, the memory was ignored; don't call credit. |
 | `memory.list_session_exposures()` | Unrated exposure rows for the current session. Read-only; used by the `rate-session-memories` skill. |
-| `memory.apply_session_ratings(ratings)` | Atomic end-of-session batch rating. Each entry: `{kind, id, class}` with `class` ∈ `cited` / `shaped` / `ignored` / `misled` / `overlooked`. |
+| `memory.apply_session_ratings(ratings)` | Atomic end-of-session batch rating. Each entry: `{kind, id, class, evidence?}` — evidence is required for every non-`ignored` class (write the evidence line first; nothing to point at means the class is `ignored`). Violating batches are rejected whole. |
 
 **Knowledge** — human-authored markdown corpus.
 
@@ -267,7 +271,7 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 
 | Tool | Purpose |
 |---|---|
-| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject project + general semantic memories and reflections as `additionalContext` markdown. Reflections retrieved up to 20 per polarity bucket, ranked by usefulness then confidence; only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items render in full, the rest collapse into a one-line index. Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. |
+| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject startup context as `additionalContext` markdown. In `deferred` mode (recommended): general-scope standing rules in full plus a one-line index — everything else arrives contextually. In `legacy` mode: the original render (up to 20 reflections/bucket, Wilson-ranked, top `BETTER_MEMORY_BOOTSTRAP_TOP_N` in full). Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. The hook also runs a CLAUDE.md drift sentinel: if your CLAUDE.md documents tool parameters that don't exist in the live schemas, one warning line is appended. |
 | `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` | Apply spec §9 retention rules; archive or hard-delete. |
 | `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 
@@ -339,7 +343,15 @@ Your hook command is using `python.exe`; switch to `.venv\Scripts\pythonw.exe`. 
 
 ## Architecture
 
-See `docs/superpowers/specs/2026-04-06-better-memory-design.md` for the full design spec — four-layer epistemic hierarchy, hybrid search via FTS5 + sqlite-vec + RRF, reinforcement-weighted ranking, and the consolidation pipeline that lives in Plan 2.
+See `docs/superpowers/specs/2026-04-06-better-memory-design.md` for the original design spec — four-layer epistemic hierarchy, hybrid search via FTS5 + sqlite-vec + RRF, reinforcement-weighted ranking, and the consolidation pipeline.
+
+### The retrieval-quality layer (July 2026)
+
+Three shipped upgrades sit on top of that foundation (specs: `2026-07-23-retrieval-quality-design.md`, `2026-07-23-deferred-injection-design.md`):
+
+- **Wilson-score ranking.** Reflections and semantic memories rank by the lower bound of their observed hit rate — `(useful + overlooked) / (useful + overlooked + ignored)` — so a memory that helps 3 times out of 4 serves outranks one that helped 67 times out of 192. No raw-count rich-get-richer. One shortlist slot per bucket is reserved for memories with fewer than 3 ratings (the **exploration slot**), so new lessons get served, rated, and scored instead of starving; those serves are tagged (`via_exploration`) and excluded from headline usefulness metrics.
+- **Deferred, evidence-gated injection.** SessionStart injects only your standing rules; each prompt (and the session's first tool call) is then scored against the store with three legs — BM25 text match, vector cosine (reflections and semantic memories are embedded at write time, self-healed on retrieve, backfillable via `python -m better_memory.cli.backfill_embeddings`), and the Wilson prior for ranking only. A memory injects solely on positive relevance evidence; popularity can never force an irrelevant injection. Ollama outages cost at most one bounded stall per minute (file-persisted circuit breaker shared across hook processes).
+- **Evidence-anchored ratings.** Non-`ignored` ratings require a one-line receipt, enforced server-side and stored on the exposure row; the management UI shows each memory's rating-evidence history. Ratings are the fuel for everything above, so their variance is the system's noise floor — the receipts anchor them to observable events.
 
 ## Observation lifecycle
 

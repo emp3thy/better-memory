@@ -34,9 +34,9 @@ _VALID_SOURCES: frozenset[str] = frozenset({"startup", "resume", "clear", "compa
 _HINT_MAX_CHARS = 600
 
 _FOOTER = (
-    "Use mcp__better-memory__memory_record_use(id, success|failure) when a "
-    "memory materially helps or misleads. Use mcp__better-memory__memory_observe "
-    "to write new ones."
+    "When an injected memory materially helps or misleads, credit it: "
+    "memory_credit(kind, id, class, evidence) - one-line evidence statement. "
+    "Use mcp__better-memory__memory_observe to write new ones."
 )
 
 

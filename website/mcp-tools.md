@@ -27,11 +27,12 @@ Get reflections bucketed by polarity, plus drained spool observations.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
+| `query` | string | optional (strongly recommended) | Plain-language description of the task at hand. Fuses BM25 + vector search via RRF with the Wilson-score usefulness prior. Omitting it degrades gracefully to the Wilson-prior-only order — the same generic top-ranked lessons every call. |
 | `project` | string | optional | Defaults to current project (cwd-derived). |
 | `tech` | string | optional | Filter by tech tag. |
 | `phase` | `planning` / `implementation` / `general` | optional | Filter by reflection phase. |
 | `polarity` | `do` / `dont` / `neutral` | optional | Restrict to one bucket. |
-| `limit_per_bucket` | int | optional | Defaults to 20. |
+| `limit_per_bucket` | int | optional | Defaults to 5. |
 
 Returns `{"do": [...], "dont": [...], "neutral": [...]}`. Drains the spool first.
 
@@ -201,10 +202,11 @@ Returns a step summary: `{episode_id, counts, queue, failure}`.
 
 ## Rating tools
 
-Memories prove their worth by being used. The rating loop closes the
-feedback cycle on top of [`memory.record_use`](#memoryrecord_use):
-mid-session credit via `memory.credit`, and an end-of-session sweep
-driven by the
+Memories prove their worth by being used. Reflections and semantic
+memories are rated through a separate loop from
+[`memory.record_use`](#memoryrecord_use) (which only ever touches raw
+observations): mid-session credit via `memory.credit`, and an
+end-of-session sweep driven by the
 [`rate-session-memories`](https://github.com/emp3thy/better-memory/blob/main/.claude/skills/rate-session-memories/SKILL.md)
 skill that classifies every exposed reflection / semantic memory as
 `cited`, `shaped`, `ignored`, `misled`, or `overlooked`. The session_close hook emits

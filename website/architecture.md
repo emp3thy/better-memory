@@ -7,7 +7,7 @@ better-memory is a four-layer epistemic hierarchy backed by a pluggable storage 
 | Layer | Purpose | Lifecycle |
 |---|---|---|
 | **Observation** | A factual snapshot the AI writes at a decision point. Tagged with an outcome, component, theme, and trigger type. | Created by `memory.observe`. Eventually consumed into a reflection or archived. |
-| **Reflection** | A distilled lesson synthesised from one or more observations. Has a polarity (`do` / `dont` / `neutral`), a confidence, and a use-cases description. | Created by the synthesis pipeline (LLM-driven). Reinforced by `memory.record_use`. |
+| **Reflection** | A distilled lesson synthesised from one or more observations. Has a polarity (`do` / `dont` / `neutral`), a confidence, and a use-cases description. | Created by the synthesis pipeline (LLM-driven). Rated via `memory.credit`, ranked by the Wilson-score hit-rate prior described in [Self-rating loop](#self-rating-loop). |
 | **Episode** | A bounded session of work — opened on session start, closed when the goal is met or abandoned. Observations and reflections are scoped to an episode. | Background episodes open implicitly on first observe; foreground episodes are explicit (`memory.start_episode`). |
 | **Knowledge** | Human-authored markdown — standards, language conventions, per-project docs. Indexed via SQLite FTS5. Read-only for the AI. | Edited by humans. Reindexed on MCP server startup (mtime-only). |
 
@@ -49,12 +49,19 @@ See [Configuration](configuration.md) for env vars and [AgentCore setup](agentco
 
 ## Retrieval
 
-`memory.retrieve` returns three buckets — `do`, `dont`, `neutral` — built from a hybrid search:
+Two distinct retrieve tools, two distinct ranking mechanisms:
 
-1. **FTS5 lexical** match against observation content + reflection use-cases.
-2. **sqlite-vec** dense vector match against observation embeddings (768-dim from `nomic-embed-text`).
-3. **Reciprocal Rank Fusion (RRF)** combines the two ranked lists.
-4. Results are filtered by the bucket's polarity and weighted by `reinforcement_score` (each `memory.record_use` shifts a memory's score up on success or down on failure).
+- **`memory.retrieve`** returns three reflection buckets — `do`, `dont`,
+  `neutral` — ranked by the Wilson-score hit-rate prior on rated
+  exposures (see [Self-rating loop](#self-rating-loop) for the formula
+  and the query-driven BM25/vector re-fusion).
+- **`memory.retrieve_observations`** returns raw observations via a
+  hybrid search: FTS5 lexical match against observation content, plus
+  a sqlite-vec dense vector match against observation embeddings
+  (768-dim from `nomic-embed-text`), combined by Reciprocal Rank Fusion
+  (RRF). Results are filtered by outcome bucket and weighted by
+  `reinforcement_score` (each `memory.record_use` shifts a memory's
+  score up on success or down on failure — see [Reinforcement](#reinforcement)).
 
 ## Injection strategies
 
@@ -143,18 +150,26 @@ predating this feature, or rows written during a breaker outage:
 
 ## Reinforcement
 
-Each observation and reflection has a `reinforcement_score` that decays slowly over time and is updated by validated use:
+Each **observation** (not reflections or semantic memories — see below)
+has a `reinforcement_score` that decays slowly over time and is updated
+by validated use:
 
 - `memory.record_use(id, outcome="success")` → score goes up.
 - `memory.record_use(id, outcome="failure")` → score goes down.
 
-This is the lever that keeps recall faithful: a well-validated `dont` will keep surfacing for the same query class; a once-true-now-misleading observation gets demoted by repeated failure stamps.
+This is the lever that keeps observation recall faithful: a
+well-validated failed approach will keep surfacing for the same query
+class; a once-true-now-misleading observation gets demoted by repeated
+failure stamps.
 
 ## Self-rating loop
 
-`memory.record_use` is the in-band reinforcement primitive. Layered on
-top of it is a closed-loop self-rating cycle that runs per session and
-captures whether memories actually shaped Claude's work:
+Reflections and semantic memories have no `reinforcement_score` column
+and are never touched by `memory.record_use` — calling it with a
+reflection/semantic id is a silent no-op. Instead, a closed-loop
+self-rating cycle runs per session and captures whether memories
+actually shaped Claude's work, feeding the Wilson-score hit-rate prior
+described below:
 
 1. **Exposure** — every reflection or semantic memory surfaced by
    `memory.retrieve` / `memory.semantic_retrieve` / the SessionStart

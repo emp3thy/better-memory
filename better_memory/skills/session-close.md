@@ -6,7 +6,7 @@ When to use: at the end of a coding session, before wrapping up.
 
 1. Every decision point since the last `memory.observe()` — captured?
 2. Every `observe(outcome='neutral')` whose outcome is now known — closed via `record_use(id, outcome=...)`?
-3. Every retrieved memory you actually applied — stamped via `record_use(id, outcome=...)`?
+3. Every retrieved reflection or semantic memory you actually applied — credited via `memory.credit(kind, id, class, evidence)`?
 4. Any unexpected behaviour worth the next session knowing — recorded as `neutral`?
 
 If any are missing, write them now. Short. Specific. Past tense.
@@ -18,7 +18,7 @@ Starting from the last `memory.observe()` you made, scan forward in the transcri
 - **Every decision point** → expect a matching `observe()` with an `outcome`.
 - **Every `observe(outcome='neutral')` you wrote as a decision** → expect a corresponding `record_use(id, outcome=...)` once validated. If the outcome is now known but the record_use never happened, call it now.
 - **Every failed attempt you reverted** → expect an `observe(outcome='failure')` (evidence was in hand at the time).
-- **Every retrieved memory you applied** → expect a `record_use(id, outcome=...)`.
+- **Every retrieved reflection or semantic memory you applied** → expect a `memory.credit(kind, id, class, evidence)` call. Anything left uncredited is caught by the `rate-session-memories` skill and defaults to `ignored`.
 
 The goal: no in-flight decisions with unknown outcomes, and no applied retrievals without feedback.
 
