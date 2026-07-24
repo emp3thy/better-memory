@@ -37,8 +37,9 @@ from better_memory.services.keywords import count_keyword_hits, extract_keywords
 from better_memory.services.scoring import wilson_lower_bound
 
 #: Keyword-hit floor used only when the FTS/vec legs are structurally
-#: unavailable (no sqlite conn for reflections; no query vector for
-#: semantics, which have no FTS substrate at all).
+#: unavailable (no sqlite conn for reflections; no query vector, or no
+#: sqlite conn, for semantics -- which have no FTS substrate at all and
+#: whose vec leg needs a conn even when the embedder itself is healthy).
 _FALLBACK_MIN_HITS = 2
 
 #: Reciprocal rank fusion constant, matching search/hybrid.py and
@@ -171,7 +172,8 @@ def retrieve_relevant(
 
     A memory is returned only if it clears the evidence gate: a BM25 match,
     a vector cosine >= ``vec_floor``, or (only when that leg is structurally
-    unavailable) a keyword-hit fallback. Among qualifiers, ranking is RRF
+    unavailable, e.g. ``conn=None`` as in agentcore mode, or no query
+    vector) a keyword-hit fallback. Among qualifiers, ranking is RRF
     over the Wilson prior plus whichever of BM25/vec ranks are present.
     Never raises -- any backend/leg failure degrades that leg to "absent"
     rather than propagating.
@@ -242,9 +244,12 @@ def retrieve_relevant(
 
         in_vec = s_id in vec_s
         # Semantics have no FTS/BM25 leg at all, so the keyword fallback
-        # applies whenever the vec leg itself is absent (no embedder /
-        # embed failure), not only when conn is None.
-        fallback_ok = qvec is None and kw_hits >= _FALLBACK_MIN_HITS
+        # applies whenever the vec leg is structurally unavailable: no
+        # query vector (no embedder / embed failure) OR no sqlite conn
+        # to query against (agentcore mode passes conn=None even when
+        # the embedder itself is healthy and qvec is real -- the vec
+        # candidate set still comes back empty in that case).
+        fallback_ok = (qvec is None or conn is None) and kw_hits >= _FALLBACK_MIN_HITS
         if not (in_vec or fallback_ok):
             continue
 

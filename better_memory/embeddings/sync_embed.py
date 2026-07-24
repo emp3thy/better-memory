@@ -13,6 +13,13 @@ Two hazards this class exists to contain:
 
 Returns ``None`` on every failure path — callers treat a missing vector
 as "no vec leg", never as an error.
+
+The in-memory ``_down_until`` breaker is per-process, so it does nothing
+for hook invocations, which are short-lived subprocesses that exit and
+restart on every event. ``down_state_file`` persists the cooldown deadline
+to disk (wall-clock ``time.time()``, not the monotonic ``clock``) so a
+fresh hook process can see that Ollama was recently marked down and skip
+straight to ``None`` instead of re-probing a dead endpoint on every event.
 """
 
 from __future__ import annotations

@@ -208,6 +208,8 @@ class SessionBootstrapService:
         cwd: Path | None = None,
         project: str | None = None,
     ) -> BootstrapResult:
+        from better_memory.config import get_config
+
         coerced_source = source if source in _VALID_SOURCES else "startup"
         if project is None:
             if cwd is None:
@@ -257,9 +259,7 @@ class SessionBootstrapService:
             "neutral": len(buckets["neutral"]),
         }
 
-        from better_memory.config import get_config as _get_config_deferred
-
-        if _get_config_deferred().inject_mode == "deferred":
+        if get_config().inject_mode == "deferred":
             general_only = [m for m in semantic if m.scope == "general"]
             deferred_now = self._clock()
             n_refl = sum(reflections_counts.values())
@@ -305,7 +305,6 @@ class SessionBootstrapService:
         if self._top_n is not None:
             top_n = self._top_n
         else:
-            from better_memory.config import get_config
             top_n = get_config().bootstrap_top_n
 
         now = self._clock()

@@ -182,6 +182,21 @@ class TestSemantics:
         )
         assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
 
+    def test_semantic_fallback_keyword_when_conn_none_agentcore(self, conn):
+        """agentcore mode: conn=None but the embedder is healthy and qvec is
+        real. The vec candidate set is still structurally empty because vec
+        queries need the sqlite conn -- so the keyword fallback must fire
+        here too, not only when qvec itself is None."""
+        _seed_semantic(conn, "s1", content="repo uses uv run pytest on windows")
+        emb = DirectedEmbedder("unrelated trigger phrase")
+        sync_embedder = SyncEmbedder(lambda: emb)
+        backend = _backend(conn, sync_embedder=sync_embedder)
+        out = retrieve_relevant(
+            backend, query="uv run pytest windows setup", project="p",
+            conn=None, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
+        )
+        assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
+
 
 class TestCapsAndDegradation:
     def test_max_items_cap(self, conn):
