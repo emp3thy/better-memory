@@ -327,9 +327,11 @@ class SqliteBackend:
         kind: str,
         id: str,
         classification: str,
+        evidence: str | None = None,
     ) -> Any:
         return self._memory_rating.credit_one(
             session_id=session_id, kind=kind, id=id, classification=classification,
+            evidence=evidence,
         )
 
     # ----- Synthesis -----

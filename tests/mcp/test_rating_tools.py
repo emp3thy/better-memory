@@ -495,6 +495,7 @@ class TestEvidenceSchema:
         tool = next(
             t for t in _tool_definitions() if t.name == "memory.credit"
         )
+        assert tool.description is not None
         assert "evidence" in tool.description
         assert "ignored" in tool.description
 
@@ -516,5 +517,6 @@ class TestEvidenceSchema:
             t for t in _tool_definitions()
             if t.name == "memory.apply_session_ratings"
         )
+        assert tool.description is not None
         assert "evidence" in tool.description
         assert "ignored" in tool.description

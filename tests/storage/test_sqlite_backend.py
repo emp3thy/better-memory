@@ -283,6 +283,7 @@ def test_credit_one_for_missing_memory_returns_skip(backend, memory_conn) -> Non
         kind="reflection",
         id="does-not-exist",
         classification="cited",
+        evidence="checking the missing-memory skip path",
     )
     assert result["applied"] is None
     assert result["skipped"] == "memory_missing"

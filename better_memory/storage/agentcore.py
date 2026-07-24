@@ -1359,6 +1359,7 @@ class AgentCoreBackend:
         kind: str,
         id: str,
         classification: str,
+        evidence: str | None = None,
     ) -> dict[str, Any]:
         """Apply one classification → counter increment on a record.
 
@@ -1366,7 +1367,13 @@ class AgentCoreBackend:
             cited / shaped → useful_count
             ignored        → ignored_count
             misled         → times_misled
-            overlooked     → overlooked_count"""
+            overlooked     → overlooked_count
+
+        `evidence` is accepted for StorageBackend protocol parity only.
+        Agentcore mode has no exposure table (see list_session_exposures)
+        and therefore nowhere to store a rating-evidence line; it is not
+        validated or persisted here — sqlite is the only backend with an
+        evidence contract (MemoryRatingService)."""
         counter_key = _RATING_TO_COUNTER.get(classification)
         if counter_key is None:
             raise ValueError(

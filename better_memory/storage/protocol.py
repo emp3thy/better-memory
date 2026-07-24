@@ -289,8 +289,17 @@ class StorageBackend(Protocol):
         kind: str,
         id: str,
         classification: str,
+        evidence: str | None = None,
     ) -> Any:
-        """Apply a single rating for an exposed memory. Returns ApplyOutcome."""
+        """Apply a single rating for an exposed memory. Returns ApplyOutcome.
+
+        `evidence` is a one-line string (what the memory changed, or a
+        quote); non-ignored classes require a non-empty value —
+        SqliteBackend forwards it to MemoryRatingService, which validates
+        and stores it. AgentCoreBackend accepts the parameter for
+        signature parity but has no evidence storage (no exposure table)
+        and does not validate or persist it — see AgentCoreBackend.credit_one.
+        """
         ...
 
     # ----- Synthesis (sqlite-only — guarded by supports_synthesis) -----
