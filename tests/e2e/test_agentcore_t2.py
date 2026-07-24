@@ -907,8 +907,21 @@ class TestContextualInjectWireAndDegradation:
     ) -> None:
         """Case A: with valid agentcore config the per-prompt hook reaches
         BOTH fake memories on the wire (EPI reflections fan-out via
-        backend.retrieve + SEM via backend.semantic_list) and injects a
-        <project-memory> block into the envelope."""
+        backend.retrieve + SEM via backend.semantic_list, PLUS the Task-6
+        relevance_ranks search leg over both memories) and injects a
+        <project-memory> block into the envelope.
+
+        The docker reflection qualifies via relevance_ranks membership
+        (server-side RetrieveMemoryRecords "finding" it), not the
+        keyword-hit fallback: a legitimate empty search result must NOT
+        re-qualify a memory via keyword overlap (design spec
+        2026-07-24-agentcore-parity-design.md §3 / relevance_ranks' None
+        vs {} contract), so the fake's RetrieveMemoryRecords response is
+        explicitly canned to return the docker record for the episodic
+        memory (EPI-FAKE-0001) — proving the real happy path: server-side
+        semantic search actually finding the match — and {} (unconfigured
+        fallback) for the semantic memory (SEM-FAKE-0001), which has no
+        record to find."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
             write_fake_agentcore_json(bm_home)
@@ -916,6 +929,15 @@ class TestContextualInjectWireAndDegradation:
                 "ListMemoryRecords",
                 {"memoryRecordSummaries": [_DOCKER_REFLECTION_SUMMARY]},
             )
+
+            def _retrieve_response(request: Any) -> dict[str, Any]:
+                if "EPI-FAKE-0001" in request.path:
+                    return {"memoryRecordSummaries": [
+                        {"memoryRecordId": "refl-fake-docker"},
+                    ]}
+                return {"memoryRecordSummaries": []}
+
+            fake.set_response("RetrieveMemoryRecords", _retrieve_response)
             env = agentcore_env(
                 clean_slate_home,
                 fake.port,
@@ -937,11 +959,17 @@ class TestContextualInjectWireAndDegradation:
             assert "refl-fake-docker" in rendered
 
             paths = [r.path for r in fake.requests]
-            # backend.retrieve → 2 namespace EPI list calls (project +
-            # general/promoted merge, polarity client-side);
-            # backend.semantic_list → 1 SEM list call.
-            assert sum("EPI-FAKE-0001" in p for p in paths) == 2
-            assert sum("SEM-FAKE-0001" in p for p in paths) == 1
+            # EPI-FAKE-0001: 2 ListMemoryRecords calls (backend.retrieve's
+            # Wilson fetch, project + general/promoted namespaces, called
+            # WITHOUT a query so it never itself triggers a relevance
+            # search) + 2 RetrieveMemoryRecords calls (relevance_ranks'
+            # "reflection" kind, same project + general namespace pair) = 4.
+            # SEM-FAKE-0001: 1 ListMemoryRecords call (backend.
+            # semantic_list, project namespace only — semantic_list never
+            # fans out to general) + 2 RetrieveMemoryRecords calls
+            # (relevance_ranks' "semantic" kind, project + general) = 3.
+            assert sum("EPI-FAKE-0001" in p for p in paths) == 4
+            assert sum("SEM-FAKE-0001" in p for p in paths) == 3
 
     def test_case_b_misconfig_clean_slate_silent_noop_with_stray_db(
         self, clean_slate_home: Path, tmp_path: Path

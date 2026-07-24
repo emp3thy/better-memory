@@ -680,8 +680,20 @@ def test_j7_contextual_inject_honours_settings_activation(
 ) -> None:
     """The per-prompt hook reaches AWS with NO backend env var — proving
     ``contextual_inject``'s resolver honours settings.json (the load-
-    bearing difference from D6-A, which force-sets the env var): 2 EPI +
-    1 SEM list calls and a ``<project-memory>`` block in the envelope.
+    bearing difference from D6-A, which force-sets the env var): 2 EPI
+    list + 2 EPI relevance-search + 1 SEM list + 2 SEM relevance-search
+    calls, and a ``<project-memory>`` block in the envelope.
+
+    The docker reflection qualifies via relevance_ranks membership (a
+    server-side RetrieveMemoryRecords "finding" it), not the keyword-hit
+    fallback -- a legitimate empty search result must NOT re-qualify a
+    memory via keyword overlap (design spec
+    2026-07-24-agentcore-parity-design.md §3 / relevance_ranks' None vs
+    {} contract) -- so RetrieveMemoryRecords is explicitly canned to
+    return the docker record for the episodic memory (EPI-FAKE-0001) and
+    {} for the semantic memory (SEM-FAKE-0001), which has no record to
+    find. See test_agentcore_t2.py's D6-A case-A test for the identical
+    fan-out this mirrors.
 
     regression_caught: reverting contextual_inject to env-only backend
     resolution ignores settings.json → empty envelope, zero wire.
@@ -692,6 +704,15 @@ def test_j7_contextual_inject_honours_settings_activation(
             "ListMemoryRecords",
             {"memoryRecordSummaries": [_DOCKER_REFLECTION_SUMMARY]},
         )
+
+        def _retrieve_response(request: Any) -> dict[str, Any]:
+            if "EPI-FAKE-0001" in request.path:
+                return {"memoryRecordSummaries": [
+                    {"memoryRecordId": "refl-fake-docker"},
+                ]}
+            return {"memoryRecordSummaries": []}
+
+        fake.set_response("RetrieveMemoryRecords", _retrieve_response)
         env = agentcore_env(
             clean_slate_home,
             fake.port,
@@ -718,10 +739,15 @@ def test_j7_contextual_inject_honours_settings_activation(
         assert "refl-fake-docker" in rendered
 
         paths = [r.path for r in fake.requests]
-        # retrieve → 2 EPI namespace calls (project + general/promoted
-        # merge); semantic_list → 1 SEM call.
-        assert sum("EPI-FAKE-0001" in p for p in paths) == 2
-        assert sum("SEM-FAKE-0001" in p for p in paths) == 1
+        # EPI-FAKE-0001: 2 ListMemoryRecords (backend.retrieve's Wilson
+        # fetch, project + general/promoted, no query so no relevance
+        # search of its own) + 2 RetrieveMemoryRecords (relevance_ranks'
+        # "reflection" kind, project + general) = 4.
+        # SEM-FAKE-0001: 1 ListMemoryRecords (backend.semantic_list,
+        # project namespace only) + 2 RetrieveMemoryRecords
+        # (relevance_ranks' "semantic" kind, project + general) = 3.
+        assert sum("EPI-FAKE-0001" in p for p in paths) == 4
+        assert sum("SEM-FAKE-0001" in p for p in paths) == 3
 
 
 # ---------------------------------------------------------------------------
