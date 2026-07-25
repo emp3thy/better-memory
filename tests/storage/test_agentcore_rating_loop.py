@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -216,17 +217,19 @@ class TestFullSweepE2E:
         assert kwargs["extractionMode"] == "SKIP"
         assert kwargs["metadata"] == {"type": {"stringValue": "ratings"}}
         assert kwargs["sessionId"] == "test-session-xyz"
-        payload = kwargs["payload"]
+        payload: list[dict[str, Any]] = kwargs["payload"]
         assert len(payload) == 1
-        blob = payload[0]["blob"]
-        blob_text = json.dumps(blob) if not isinstance(blob, str) else blob
+        blob: dict[str, Any] = payload[0]["blob"]
+        # Sanity: blob is a plain JSON-serializable dict (the "blob" Document
+        # shape per CreateEvent's PayloadType — see agentcore.py
+        # _emit_ratings_event), not a pre-serialized string.
+        assert json.dumps(blob)
         rated_ids = {r["id"] for r in blob["ratings"]}
         assert rated_ids == {"r-cited", "r-ignored", "r-misled"}
         by_id = {r["id"]: r for r in blob["ratings"]}
         assert by_id["r-cited"]["class"] == "cited"
         assert by_id["r-cited"]["evidence"] == "cited it directly"
         assert by_id["r-ignored"]["class"] == "ignored"
-        assert blob_text  # sanity: JSON-serializable
 
 
 class TestEvidenceRejectionParity:
@@ -375,3 +378,34 @@ class TestNoLocalConnDegrade:
             "memory_missing": 0, "memory_retired": 0,
         }
         assert mock_data_client.batch_update_memory_records.call_count == 1
+
+
+class TestCreateEventSdkGuard:
+    def test_botocore_create_event_supports_extraction_mode(self) -> None:
+        """Guard against a silent regression, not a functional test: the
+        installed botocore's bedrock-agentcore CreateEvent model must
+        declare `extractionMode` — required for _emit_ratings_event's
+        extractionMode='SKIP' receipt (keeps rated-batch payloads out of
+        AgentCore's built-in LLM extraction). Older botocore (<1.43.56, the
+        version originally pinned when Task 7 was written) lacks this
+        member; a real (non-mocked) boto3 client then raises
+        ParamValidationError on every call, which the sweep's best-effort
+        try/except swallows — so the receipt event silently never fires,
+        with zero test signal, unless something asserts on the SDK's shape
+        directly. A future accidental downgrade of the boto3/botocore pins
+        (pyproject.toml agentcore/dev groups) must fail THIS test loudly
+        instead."""
+        pytest.importorskip("botocore")
+        import botocore.session
+
+        model = botocore.session.get_session().get_service_model(
+            "bedrock-agentcore"
+        )
+        input_shape = model.operation_model("CreateEvent").input_shape
+        assert input_shape is not None
+        # botocore's Shape.members is a CachedProperty (a hand-rolled
+        # descriptor, not `@property`) — botocore ships no type stubs, so
+        # pyright can't resolve the descriptor's return type statically.
+        # Real attribute, confirmed at runtime; static-only false positive.
+        members = input_shape.members  # pyright: ignore[reportAttributeAccessIssue]
+        assert "extractionMode" in members

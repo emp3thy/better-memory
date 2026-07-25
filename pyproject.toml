@@ -23,8 +23,8 @@ better-memory = "better_memory.cli.main:main"
 
 [project.optional-dependencies]
 agentcore = [
-    "boto3>=1.43.14",
-    "botocore>=1.43.14",
+    "boto3>=1.43.56",
+    "botocore>=1.43.56",
 ]
 
 [dependency-groups]
@@ -34,8 +34,8 @@ dev = [
     "pytest-playwright",
     "ruff",
     "pyright",
-    "boto3>=1.43.14",
-    "botocore>=1.43.14",
+    "boto3>=1.43.56",
+    "botocore>=1.43.56",
 ]
 docs = [
     "mkdocs-material",
