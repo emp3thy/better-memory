@@ -33,14 +33,14 @@ flowchart LR
 | Aspect | `sqlite` | `agentcore` |
 |---|---|---|
 | Data location | Local file (`memory.db`) | AWS-managed (region from `agentcore.json`) |
-| Local files | `memory.db` + `knowledge.db` (all memory content) | `memory.db` + `knowledge.db` still created — hook-error log + knowledge index only (no memory content) |
+| Local files | `memory.db` + `knowledge.db` (all memory content) | `memory.db` + `knowledge.db` still created — knowledge index, hook-error log, and session-operational state (exposure ledger, migration ledger); no memory content |
 | Extraction | Local Claude (synthesize_next_* tools) | Cloud (built-in strategies) |
 | Latency | Single-digit ms | 100-500 ms per AWS call |
 | Cost | Free | Per-API-call + per-record pricing |
-| Multi-machine sync | No | Yes (shared memory resources) |
-| Closure events | N/A | `CreateEvent(role=OTHER)` from Stop hook |
+| Multi-machine sync | No | Yes — memory content and rating counters are shared; the exposure ledger and its evidence stay local/session-scoped on every machine |
+| Closure events | N/A | `CreateEvent(role=OTHER)` from Stop hook; end-of-session rating sweeps additionally emit one best-effort `CreateEvent` (`extractionMode: SKIP`) as a durable, team-visible receipt of what was rated |
 | Episode tracking | Local `episodes` table | Internal to AgentCore (sessionId) |
-| Exposure log (`record_exposures`) | Writes `session_memory_exposure` rows (sources `bootstrap` / `retrieve` / `contextual`) | No-op — no exposure log, so the end-of-session rating sweep has nothing to trigger on; rating flows through `memory.credit` (and direct `memory.apply_session_ratings` calls) |
+| Self-rating loop (exposure ledger, `memory.credit`, sweep, Wilson ranking, exploration slot) | Local, entirely in `memory.db` | Same loop — backend-agnostic. Exposure ledger writes to the SAME local `session_memory_exposure` table (session-operational state, never memory content); rating counters (`useful_count`, `ignored_count`, etc.) live on the AWS record and are genuinely shared across teammates. `query`-conditioned retrieval and the contextual-injection evidence gate use server-side semantic search (`RetrieveMemoryRecords`) in place of sqlite's BM25/vector legs, degrading to Wilson-only / keyword fallback only on an AWS error. |
 | Bulk import | N/A (clean start) | `better-memory agentcore migrate` copies existing sqlite reflections + semantic memories into AWS (idempotent, ledgered) |
 
 Migrating with `better-memory agentcore migrate` is distinct from activating: it only writes records to AWS and never flips `storage_backend`. A migrated reflection carries its rating counters, `status`, and `source_row_id` in the record's JSON **content body** — the built-in episodic strategy owns the metadata schema — whereas cloud-extracted records (and migrated semantic records) keep that state in record **metadata**. See [AgentCore setup > Migrate](agentcore-setup.md#migrate-existing-memory-optional).
@@ -76,9 +76,9 @@ better-memory gets memory in front of Claude two ways: a dump at session start, 
 
 **Contextual injection (UserPromptSubmit / PreToolUse).** The `contextual_inject` hook (`better_memory/hooks/contextual_inject.py`) scores the curated memory set (semantic + reflections) against the current prompt (UserPromptSubmit, fires on every prompt) or tool name + input (PreToolUse, matcher now unscoped -- every tool call, not a fixed allowlist) via `retrieve_relevant` (`better_memory/services/relevant.py`), a three-leg evidence-gated scorer:
 
-- A memory injects only when it clears an evidence gate: a BM25 match against `reflection_fts` (title / use_cases / hints), or a vector cosine similarity >= `BETTER_MEMORY_CONTEXT_VEC_FLOOR` (default `0.55`) against its embedding. No evidence, no injection -- a memory with neither leg present is silently dropped, however popular it is.
-- The Wilson lower-bound prior on rated exposures (see [Self-rating loop](#self-rating-loop)) never qualifies a memory by itself; among qualifiers it only ranks, via reciprocal rank fusion together with whichever of the BM25/vector ranks are present. Popularity forcing irrelevant injections into context was the old failure mode the gate exists to close.
-- A keyword-hit fallback (>= 2 distinct hits) applies only where the BM25/vector legs are structurally unavailable: for reflections, when there is no raw sqlite `conn` (agentcore mode); for semantic memories -- which have no FTS substrate at all -- whenever no query vector could be produced (no embedder configured, or the Ollama embed call is in cooldown). `BETTER_MEMORY_CONTEXT_MIN_HITS` is **deprecated**: `contextual_inject` no longer reads it, superseded by the evidence gate above.
+- A memory injects only when it clears an evidence gate: a BM25 match against `reflection_fts` (title / use_cases / hints), or a vector cosine similarity >= `BETTER_MEMORY_CONTEXT_VEC_FLOOR` (default `0.55`) against its embedding. No evidence, no injection -- a memory with neither leg present is silently dropped, however popular it is. In agentcore mode, the BM25/vector legs are replaced by the backend's own `relevance_ranks` (`StorageBackend.relevance_ranks`, backed by server-side `RetrieveMemoryRecords` semantic search): a memory qualifies iff it appears in that search's result set.
+- The Wilson lower-bound prior on rated exposures (see [Self-rating loop](#self-rating-loop)) never qualifies a memory by itself; among qualifiers it only ranks, via reciprocal rank fusion together with whichever of the BM25/vector ranks (or, on agentcore, the `relevance_ranks` rank) are present. Popularity forcing irrelevant injections into context was the old failure mode the gate exists to close.
+- A keyword-hit fallback (>= 2 distinct hits) applies only where the primary evidence leg is structurally unavailable or has failed: for sqlite-backed reflections, when there is no raw sqlite `conn`; for agentcore-backed reflections and semantic memories, only when `relevance_ranks` itself fails (an AWS error on every namespace, signalled by `None` -- a genuinely empty `{}` result is a legitimate negative and is NOT a fallback trigger); for sqlite-backed semantic memories -- which have no FTS substrate at all -- whenever no query vector could be produced (no embedder configured, or the Ollama embed call is in cooldown). `BETTER_MEMORY_CONTEXT_MIN_HITS` is **deprecated**: `contextual_inject` no longer reads it, superseded by the evidence gate above.
 - Because PreToolUse now matches every tool, a per-session latch (`SeenStore.pretool_fired` / `mark_pretool_fired`, `better_memory/services/context_seen.py`) runs the full retrieval path at most once per session for PreToolUse; every later PreToolUse event in the session short-circuits on the latch state before touching the DB or the embedder. UserPromptSubmit is unaffected by the latch and fires on every prompt.
 - Survivors are capped to `BETTER_MEMORY_CONTEXT_MAX_ITEMS`, then filtered through a per-session `SeenStore` (`better_memory/services/context_seen.py`, JSON file at `<home>/state/context_seen_<session_id>.json`) that deduplicates memories already injected this session. `BETTER_MEMORY_CONTEXT_REINJECT_TURNS=0` (default) means a memory is injected at most once per session; a positive value allows re-injection after that many turns have passed since it was last shown. A "turn" here is one firing of the `contextual_inject` hook, not one user prompt-response cycle: each user prompt is a turn, and each PreToolUse latch-firing is a turn too (subsequent latched-out PreToolUse events do not bump the turn counter).
 - Survivors render as a `<project-memory source="better-memory">` XML block in `additionalContext`, one entry per item with its kind, id, confidence, `useful_count`, and age, a `dont`-polarity item prefixed `Known pitfall -- do this instead:`, and a footer inviting `memory_credit(kind, id, class, evidence)` — with a one-line evidence statement — when an entry actually helped or misled.
@@ -175,10 +175,11 @@ described below:
    `memory.retrieve` / `memory.semantic_retrieve` / the SessionStart
    bootstrap / the `contextual_inject` hook is logged to
    `session_memory_exposure` with the active `session_id` and a
-   `source` of `retrieve`, `bootstrap`, or `contextual` respectively
-   (sqlite mode only — see [Injection strategies](#injection-strategies)
-   for what `contextual_inject` scores and dedups before it exposes
-   anything).
+   `source` of `retrieve`, `bootstrap`, or `contextual` respectively —
+   the same local `memory.db` table on both storage backends, since it is
+   session-operational state rather than memory content (see
+   [Injection strategies](#injection-strategies) for what
+   `contextual_inject` scores and dedups before it exposes anything).
 2. **Mid-session credit** — `memory.credit(kind, id, class, evidence)` lets
    Claude credit a memory as `cited`, `shaped`, `misled`, or `overlooked` the moment
    it's used. `evidence` — a one-line statement of what the memory changed,

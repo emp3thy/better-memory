@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -322,13 +323,15 @@ def _run_inprocess(payload: dict, monkeypatch, capsys) -> dict:
     return json.loads(capsys.readouterr().out)
 
 
-def test_agentcore_mode_does_not_open_sqlite_connection(
+def test_agentcore_mode_opens_local_conn_for_exposure_ledger(
     tmp_path, monkeypatch, capsys
 ):
-    """storage_backend=agentcore must never call connect(); bootstrap goes
-    through build_backend(memory_conn=None) and renders the backend dict's
-    additional_context. The session marker is still written (the MCP server
-    needs the session-id bridge in agentcore mode too)."""
+    """storage_backend=agentcore now ALSO opens a real local connection —
+    for session-operational state (the exposure ledger), never for memory
+    CONTENT. bootstrap goes through build_backend(memory_conn=<real conn>)
+    and renders the backend dict's additional_context. The session marker
+    is still written (the MCP server needs the session-id bridge in
+    agentcore mode too), and the local connection is closed on exit."""
     from better_memory.runtime.session_marker import read_session_id
 
     home = tmp_path / "bm-home"
@@ -346,10 +349,13 @@ def test_agentcore_mode_does_not_open_sqlite_connection(
     monkeypatch.setenv("HOME", str(no_home))
 
     connect_calls: list = []
-    monkeypatch.setattr(
-        hook, "connect",
-        lambda *a, **kw: connect_calls.append(a) or _FakeConn(),
-    )
+    real_connect = hook.connect
+
+    def _tracking_connect(*a, **kw):
+        connect_calls.append(a)
+        return real_connect(*a, **kw)
+
+    monkeypatch.setattr(hook, "connect", _tracking_connect)
 
     build_backend_calls: list[dict] = []
     fake_backend = _FakeRemoteBackend()
@@ -370,9 +376,11 @@ def test_agentcore_mode_does_not_open_sqlite_connection(
         res["hookSpecificOutput"]["additionalContext"]
         == "remote-bootstrap-context"
     )
-    assert connect_calls == []
+    # A real local connection IS opened now (for the exposure ledger) —
+    # that's the Task 2 contract change from the prior "never opened" rule.
+    assert len(connect_calls) == 1
     assert len(build_backend_calls) == 1
-    assert build_backend_calls[0]["memory_conn"] is None
+    assert build_backend_calls[0]["memory_conn"] is not None
     assert build_backend_calls[0]["session_id"] == "ac-sess-1"
     assert len(fake_backend.bootstrap_calls) == 1
     call = fake_backend.bootstrap_calls[0]
@@ -381,6 +389,88 @@ def test_agentcore_mode_does_not_open_sqlite_connection(
     assert call["cwd"] == Path(str(proj))
     # Session-id bridge marker still written in agentcore mode.
     assert read_session_id(home, project_dir=str(proj)) == "ac-sess-1"
+
+
+def test_agentcore_mode_bootstrap_exposure_lands_in_local_ledger(
+    tmp_path, monkeypatch, capsys
+):
+    """Task 2: the SessionStart hook's agentcore branch opens the local db
+    for session-operational state (the exposure ledger) even though memory
+    CONTENT stays in AgentCore. Mirrors a deferred-mode bootstrap, which
+    exposes only GENERAL-scope semantic ids (see
+    SessionBootstrapService.bootstrap's deferred branch) — this proves the
+    wiring end-to-end: hook opens conn -> build_backend threads it through
+    -> backend.session_bootstrap's exposure write lands in the real db."""
+    from better_memory.services import exposure_log
+
+    home = tmp_path / "bm-home"
+    home.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    # The hook itself never calls apply_migrations (the sqlite branch's
+    # connect() targets an already-migrated memory.db in real deployments,
+    # created at install time) — pre-apply here so the fake backend's
+    # exposure_log.record call below has a session_memory_exposure table
+    # to write into.
+    c = connect(home / "memory.db")
+    try:
+        apply_migrations(c, migrations_dir=_MIGRATIONS)
+    finally:
+        c.close()
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+
+    class _FakeDeferredBackend:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def session_bootstrap(self, **kwargs):
+            exposure_log.record(
+                self._conn,
+                session_id=kwargs["session_id"],
+                items=[("semantic", "sem-general-1")],
+                source="bootstrap",
+                now=datetime.now(UTC).isoformat(),
+            )
+            self._conn.commit()
+            return {
+                "additional_context": "remote-deferred-context",
+                "project": "/testproj",
+                "source": kwargs.get("source") or "",
+                "episode_id": kwargs.get("session_id"),
+                "episode_action": "opened",
+                "semantic_count": 1,
+                "reflections_counts": {"do": 0, "dont": 0, "neutral": 0},
+            }
+
+    build_backend_calls: list[dict] = []
+
+    def _fake_build_backend(**kwargs):
+        build_backend_calls.append(kwargs)
+        return _FakeDeferredBackend(kwargs["memory_conn"])
+
+    monkeypatch.setattr(hook, "build_backend", _fake_build_backend)
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "ac-deferred-sess", "cwd": str(proj)},
+        monkeypatch, capsys,
+    )
+
+    assert res["hookSpecificOutput"]["additionalContext"] == "remote-deferred-context"
+    assert len(build_backend_calls) == 1
+    assert build_backend_calls[0]["memory_conn"] is not None
+
+    check_conn = connect(home / "memory.db")
+    try:
+        row = check_conn.execute(
+            "SELECT source FROM session_memory_exposure "
+            "WHERE session_id = ? AND memory_id = ?",
+            ("ac-deferred-sess", "sem-general-1"),
+        ).fetchone()
+    finally:
+        check_conn.close()
+    assert row is not None
+    assert row["source"] == "bootstrap"
 
 
 def test_agentcore_mode_backend_failure_falls_back_to_directive(
@@ -423,8 +513,11 @@ def test_agentcore_mode_backend_failure_falls_back_to_directive(
     assert "session bootstrap failed" in text
     assert "FileNotFoundError" in text
     assert "memory_session_bootstrap" in text
-    # Misconfigured agentcore must not silently degrade INTO sqlite.
-    assert connect_calls == []
+    # Task 2: connect() IS now called once, to open the local exposure
+    # ledger — but that is NOT a degrade into sqlite CONTENT retrieval:
+    # build_backend still fails and the manual-bootstrap directive still
+    # fires (asserted above), never a silent SessionBootstrapService path.
+    assert len(connect_calls) == 1
     # Fix 6: marker written BEFORE the failing backend call.
     assert read_session_id(home, project_dir=str(proj)) == "ac-sess-2"
 

@@ -11,6 +11,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from better_memory.db.connection import connect
+from better_memory.db.schema import apply_migrations
 from better_memory.storage import StorageBackend
 from better_memory.storage.agentcore import AgentCoreBackend
 from better_memory.storage.agentcore_persistence import (
@@ -512,50 +514,102 @@ def test_retrieve_parses_reflection_json_content(backend, mock_data_client) -> N
     assert not any(key.startswith("_") for key in refl), refl
 
 
-def test_retrieve_ranks_by_useful_plus_3x_overlooked(backend, mock_data_client) -> None:
-    """Ranking matches sqlite: useful_count + 3*times_overlooked DESC,
-    confidence DESC, updated_at DESC."""
+def _wilson_ranking_record(rec_id: str, *, useful: int, ignored: int, overlooked: int = 0) -> dict:
+    """A record with only status/polarity metadata plus the three Wilson
+    inputs set — the rest default to 0."""
     import json
-    def make_record(rec_id: str, useful: int, overlooked: int) -> dict:
-        return {
-            "memoryRecordId": rec_id,
-            "content": {"text": json.dumps({
-                "title": rec_id, "use_cases": "u", "hints": "h", "confidence": "0.9",
-            })},
-            "memoryStrategyId": "x",
-            "namespaces": ["projects/testproj/reflections/"],
-            "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
-            "metadata": {
-                "polarity": {"stringValue": "do"},
-                "useful_count": {"numberValue": useful},
-                "missed_count": {"numberValue": 0},
-                "ignored_count": {"numberValue": 0},
-                "times_misled": {"numberValue": 0},
-                "overlooked_count": {"numberValue": overlooked},
-                "status": {"stringValue": "active"},
-            },
-        }
+    return {
+        "memoryRecordId": rec_id,
+        "content": {"text": json.dumps({
+            "title": rec_id, "use_cases": "u", "hints": "h", "confidence": "0.9",
+        })},
+        "memoryStrategyId": "x",
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {
+            "polarity": {"stringValue": "do"},
+            "useful_count": {"numberValue": useful},
+            "missed_count": {"numberValue": 0},
+            "ignored_count": {"numberValue": ignored},
+            "times_misled": {"numberValue": 0},
+            "overlooked_count": {"numberValue": overlooked},
+            "status": {"stringValue": "active"},
+        },
+    }
 
+
+def test_retrieve_ranks_by_shared_wilson_ordering(backend, mock_data_client) -> None:
+    """Ranking matches the shared Wilson ordering (services/scoring.py):
+    wilson_lower_bound(useful+overlooked, useful+overlooked+ignored) DESC,
+    confidence DESC, updated_at DESC — replacing the legacy
+    useful + 3*overlooked heuristic.
+
+    Same counters as tests/services/test_wilson_ranking.py's
+    test_hit_rate_beats_raw_count: a high-volume-but-lower-hit-rate
+    'workhorse' (67 useful / 125 ignored, ~0.28 raw hit rate) loses to a
+    'newcomer' with a higher hit rate on far less evidence (3 useful /
+    1 ignored, ~0.30 raw hit rate) — literal parity with the sqlite test's
+    newcomer-beats-workhorse assertion. Both are past EXPLORATION_RATED_FLOOR
+    (rated >= 3), so the exploration slot never interferes with this
+    ordering."""
     def stub(**kwargs):
         if kwargs["namespace"] == "projects/testproj/reflections/":
-            # high-rank: useful=10 -> score 10
-            # mid-rank:  useful=2, overlooked=3 -> score 2 + 9 = 11
-            # low-rank:  useful=0, overlooked=0 -> score 0
             return {"memoryRecordSummaries": [
-                make_record("low", useful=0, overlooked=0),
-                make_record("high-via-useful", useful=10, overlooked=0),
-                make_record("highest-via-overlooked", useful=2, overlooked=3),
+                _wilson_ranking_record("r-workhorse", useful=67, ignored=125),
+                _wilson_ranking_record("r-newcomer", useful=3, ignored=1),
             ]}
         return {"memoryRecordSummaries": []}
 
     mock_data_client.list_memory_records.side_effect = stub
-    result = backend.retrieve(project="testproj")
-    do_titles = [r["title"] for r in result["do"]]
-    # Score = useful_count + 3*times_overlooked
-    # highest-via-overlooked: 2 + 9 = 11
-    # high-via-useful:        10 + 0 = 10
-    # low:                    0 + 0 = 0
-    assert do_titles == ["highest-via-overlooked", "high-via-useful", "low"]
+    result = backend.retrieve(project="testproj", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["r-newcomer", "r-workhorse"]
+
+
+def test_retrieve_exploration_slot_surfaces_untested_reflection(
+    backend, mock_data_client
+) -> None:
+    """Exploration slot (reflection.py parity): with limit_per_bucket cap=3
+    and 4 candidates — 3 proven (rated >= EXPLORATION_RATED_FLOOR) ranked
+    below-cap plus 1 untested (rated < 3) — the untested reflection takes
+    the reserved last slot instead of being dropped."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("proven-3", useful=10, ignored=5),
+                _wilson_ranking_record("untested", useful=1, ignored=0),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj", limit_per_bucket=3, track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert len(do_ids) == 3
+    assert do_ids == ["proven-1", "proven-2", "untested"]
+
+
+def test_retrieve_exploration_slot_all_proven_when_no_untested(
+    backend, mock_data_client
+) -> None:
+    """No untested candidate in the bucket -> the reserved slot is simply
+    filled from the remainder in ranked order; all returned rows are
+    proven."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("proven-3", useful=10, ignored=5),
+                _wilson_ranking_record("proven-4", useful=5, ignored=5),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj", limit_per_bucket=3, track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["proven-1", "proven-2", "proven-3"]
 
 
 def _reflection_summary(
@@ -683,6 +737,323 @@ def test_retrieve_dedupes_record_seen_in_both_namespaces(
     mock_data_client.list_memory_records.side_effect = stub
     result = backend.retrieve(project="testproj")
     assert [r["id"] for r in result["do"]] == ["rec-dup"]
+
+
+def _wilson_pair_stub(mock_data_client) -> None:
+    """Stubs list_memory_records so the project reflections namespace
+    returns one high-Wilson non-matching record ranked first under pure
+    Wilson order, and one low-Wilson record ranked second — the pair used
+    by the query/RRF-fusion tests below."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("irrelevant-highwilson", useful=50, ignored=5),
+                _wilson_ranking_record("relevant-lowwilson", useful=1, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+
+
+def _retrieve_records_stub(
+    mock_data_client, results_by_namespace: dict[str, list[str]]
+) -> None:
+    """Stub retrieve_memory_records per-namespace: results_by_namespace maps
+    namespace -> ordered list of memoryRecordId (best match first).
+    Namespaces not present in the map return an empty result — mirrors how
+    `_wilson_pair_stub`-style helpers key list_memory_records by
+    namespace."""
+    def stub(**kwargs):
+        ids = results_by_namespace.get(kwargs["namespace"], [])
+        return {"memoryRecordSummaries": [{"memoryRecordId": rid} for rid in ids]}
+    mock_data_client.retrieve_memory_records.side_effect = stub
+
+
+def test_retrieve_query_fuses_relevance_with_wilson_rrf(backend, mock_data_client) -> None:
+    """Under `query`, a semantically-relevant low-Wilson record outranks a
+    high-Wilson non-matching record via RRF fusion (constant 60):
+    score = 1/(60+wilson_rank) + 1/(60+relevance_rank), missing relevance
+    leg contributes nothing. Also asserts retrieve_memory_records is called
+    PER namespace (design spec 2026-07-24-agentcore-parity-design.md §3) —
+    project + general/promoted, same fan-out as the Wilson (list_memory_
+    records) fetch — with the semantic_list-mirroring call shape against
+    the episodic memory."""
+    _wilson_pair_stub(mock_data_client)
+    _retrieve_records_stub(mock_data_client, {
+        "projects/testproj/reflections/": ["relevant-lowwilson"],
+    })
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["relevant-lowwilson", "irrelevant-highwilson"]
+
+    assert mock_data_client.retrieve_memory_records.call_count == 2
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/reflections/",
+        "general/reflections/",
+    }
+    for call in mock_data_client.retrieve_memory_records.call_args_list:
+        assert call.kwargs["memoryId"] == "mem-epi-def4567890"
+        assert call.kwargs["searchCriteria"] == {
+            "searchQuery": "some query", "topK": 50,
+        }
+
+
+def test_retrieve_query_fuses_relevance_from_general_namespace(
+    backend, mock_data_client
+) -> None:
+    """Design spec requires RetrieveMemoryRecords called PER namespace —
+    not just the project namespace. A low-Wilson record living ONLY in
+    general/reflections/ (promoted or shared) still gets a relevance boost
+    from its own namespace's search call and can outrank a high-Wilson
+    project-namespace record that doesn't match the query."""
+    def stub_list(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "irrelevant-project-highwilson", useful=50, ignored=5,
+                ),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "relevant-general-lowwilson", useful=1, ignored=1,
+                ),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub_list
+    _retrieve_records_stub(mock_data_client, {
+        "general/reflections/": ["relevant-general-lowwilson"],
+    })
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["relevant-general-lowwilson", "irrelevant-project-highwilson"]
+
+    assert mock_data_client.retrieve_memory_records.call_count == 2
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/reflections/",
+        "general/reflections/",
+    }
+
+
+def test_retrieve_query_one_namespace_lookup_failure_still_uses_the_other(
+    backend, mock_data_client
+) -> None:
+    """A namespace-level RetrieveMemoryRecords failure is independently
+    best-effort per namespace: the project namespace call raising doesn't
+    blank out the general namespace's (successful) relevance boost."""
+    def stub_list(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "irrelevant-project-highwilson", useful=50, ignored=5,
+                ),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record(
+                    "relevant-general-lowwilson", useful=1, ignored=1,
+                ),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    def stub_retrieve(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            raise Exception("boom")
+        return {"memoryRecordSummaries": [
+            {"memoryRecordId": "relevant-general-lowwilson"},
+        ]}
+
+    mock_data_client.list_memory_records.side_effect = stub_list
+    mock_data_client.retrieve_memory_records.side_effect = stub_retrieve
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["relevant-general-lowwilson", "irrelevant-project-highwilson"]
+
+
+def test_retrieve_without_query_reverts_to_wilson_order(backend, mock_data_client) -> None:
+    """No `query` -> ordering is pure Wilson (today's Task-4 behaviour) and
+    no semantic search call is made at all."""
+    _wilson_pair_stub(mock_data_client)
+    result = backend.retrieve(project="testproj", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["irrelevant-highwilson", "relevant-lowwilson"]
+    mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_retrieve_query_relevance_lookup_error_degrades_to_wilson_order(
+    backend, mock_data_client
+) -> None:
+    """retrieve_memory_records raising on EVERY namespace call (AWS error or
+    otherwise) degrades to an empty merged rank map -> pure Wilson order,
+    and never raises out of retrieve()."""
+    _wilson_pair_stub(mock_data_client)
+    mock_data_client.retrieve_memory_records.side_effect = Exception("boom")
+    result = backend.retrieve(project="testproj", query="some query", track_exposure=False)
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["irrelevant-highwilson", "relevant-lowwilson"]
+    # Both namespaces were attempted (each independently best-effort) even
+    # though both raised.
+    assert mock_data_client.retrieve_memory_records.call_count == 2
+
+
+@pytest.mark.parametrize("blank_query", ["", "   "])
+def test_retrieve_blank_query_skips_relevance_call(
+    backend, mock_data_client, blank_query
+) -> None:
+    """Blank/whitespace-only query -> no retrieve_memory_records call at all
+    (not even attempted)."""
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.retrieve(project="testproj", query=blank_query, track_exposure=False)
+    mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_retrieve_query_exploration_slot_still_reserved_in_fused_order(
+    backend, mock_data_client
+) -> None:
+    """Fused (query) order feeds the two-pass exploration fill, not raw
+    Wilson order: relevance hits reorder the tested candidates (proven-3
+    jumps ahead of proven-2, displacing it out of the cap) while the
+    untested reflection still claims its reserved slot."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("proven-3", useful=10, ignored=5),
+                _wilson_ranking_record("untested", useful=1, ignored=0),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    mock_data_client.retrieve_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {"memoryRecordId": "proven-3"},
+            {"memoryRecordId": "proven-1"},
+        ]
+    }
+    result = backend.retrieve(
+        project="testproj", query="some query", limit_per_bucket=3, track_exposure=False
+    )
+    do_ids = [r["id"] for r in result["do"]]
+    assert do_ids == ["proven-1", "proven-3", "untested"]
+
+
+# ----- Task 6: relevance_ranks -----
+
+
+def test_relevance_ranks_reflection_kind_stubbed_retrieve(backend, mock_data_client) -> None:
+    """kinds=("reflection",) calls RetrieveMemoryRecords against the
+    episodic memory, per project + general namespace, and returns the
+    merged (kind, id) -> rank map from result order."""
+    _retrieve_records_stub(mock_data_client, {
+        "projects/testproj/reflections/": ["r1", "r2"],
+    })
+    result = backend.relevance_ranks(query="some query", kinds=("reflection",))
+    assert result == {("reflection", "r1"): 0, ("reflection", "r2"): 1}
+
+    assert mock_data_client.retrieve_memory_records.call_count == 2
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/reflections/", "general/reflections/",
+    }
+    for call in mock_data_client.retrieve_memory_records.call_args_list:
+        assert call.kwargs["memoryId"] == "mem-epi-def4567890"
+        assert call.kwargs["searchCriteria"] == {
+            "searchQuery": "some query", "topK": 50,
+        }
+
+
+def test_relevance_ranks_semantic_kind_uses_semantic_memory_and_namespace(
+    backend, mock_data_client
+) -> None:
+    """kinds=("semantic",) calls RetrieveMemoryRecords against the
+    SEMANTIC memory id, not the episodic one, using the semantic namespace
+    family (mirrors semantic_list's own namespace resolution)."""
+    _retrieve_records_stub(mock_data_client, {
+        "projects/testproj/semantic/": ["s1"],
+    })
+    result = backend.relevance_ranks(query="some query", kinds=("semantic",))
+    assert result == {("semantic", "s1"): 0}
+
+    namespaces_called = {
+        call.kwargs["namespace"]
+        for call in mock_data_client.retrieve_memory_records.call_args_list
+    }
+    assert namespaces_called == {
+        "projects/testproj/semantic/", "general/semantic/",
+    }
+    for call in mock_data_client.retrieve_memory_records.call_args_list:
+        assert call.kwargs["memoryId"] == "mem-sem-abc1234567"
+
+
+def test_relevance_ranks_both_kinds_combined(backend, mock_data_client) -> None:
+    """Default kinds=("reflection", "semantic") returns entries for both,
+    keyed separately -- ranks are per-kind, not globally comparable."""
+    def stub(**kwargs):
+        if kwargs["namespace"] in (
+            "projects/testproj/reflections/", "general/reflections/",
+        ):
+            ids = ["r1"] if kwargs["namespace"] == "projects/testproj/reflections/" else []
+        else:
+            ids = ["s1"] if kwargs["namespace"] == "projects/testproj/semantic/" else []
+        return {"memoryRecordSummaries": [{"memoryRecordId": i} for i in ids]}
+
+    mock_data_client.retrieve_memory_records.side_effect = stub
+    result = backend.relevance_ranks(query="some query")
+    assert result == {("reflection", "r1"): 0, ("semantic", "s1"): 0}
+
+
+def test_relevance_ranks_all_namespaces_error_returns_none(
+    backend, mock_data_client
+) -> None:
+    """RetrieveMemoryRecords raising on EVERY namespace call, for every
+    requested kind, degrades relevance_ranks to ``None`` -- NOT ``{}`` --
+    since ``None`` is the caller's (retrieve_relevant's) designated signal
+    that the lookup itself failed (AWS error), distinct from a
+    successful-but-empty result. Never raises out of relevance_ranks."""
+    mock_data_client.retrieve_memory_records.side_effect = Exception("boom")
+    result = backend.relevance_ranks(query="some query")
+    assert result is None
+
+
+def test_relevance_ranks_one_namespace_error_other_empty_returns_empty_dict(
+    backend, mock_data_client
+) -> None:
+    """One namespace erroring while its sibling namespace call SUCCEEDS
+    (even with zero matches) must NOT degrade to None -- that would
+    incorrectly signal "lookup failed" for a kind that genuinely ran and
+    found nothing in at least one namespace. Matches
+    _merge_relevance_rank_maps' contract: only ALL-None legs produce
+    None; any successful leg (empty or not) produces a real (possibly
+    empty) dict."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            raise Exception("boom")
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.retrieve_memory_records.side_effect = stub
+    result = backend.relevance_ranks(query="some query", kinds=("reflection",))
+    assert result == {}
+
+
+@pytest.mark.parametrize("blank_query", ["", "   "])
+def test_relevance_ranks_blank_query_skips_wire_call(
+    backend, mock_data_client, blank_query
+) -> None:
+    result = backend.relevance_ranks(query=blank_query)
+    assert result == {}
+    mock_data_client.retrieve_memory_records.assert_not_called()
 
 
 def _make_record_response(rec_id: str, **counters) -> dict:
@@ -830,9 +1201,14 @@ def test_record_exposures_is_noop(
     assert mock_control_client.method_calls == []
 
 
+_MID_SESSION_CLASSES = {
+    k: v for k, v in _RATING_TO_COUNTER.items() if k != "ignored"
+}
+
+
 @pytest.mark.parametrize(
     "classification,counter_key",
-    list(_RATING_TO_COUNTER.items()),
+    list(_MID_SESSION_CLASSES.items()),
 )
 def test_credit_one_bumps_correct_counter(
     backend, mock_data_client, classification, counter_key
@@ -847,6 +1223,7 @@ def test_credit_one_bumps_correct_counter(
         kind="reflection",
         id="rec-c",
         classification=classification,
+        evidence="the memory changed my approach",
     )
     # Sqlite parity: credit_one returns the applied CLASSIFICATION.
     assert result == {"applied": classification, "skipped": None}
@@ -864,6 +1241,39 @@ def test_credit_one_rejects_unknown_classification(backend) -> None:
             id="rec-c",
             classification="bogus",
         )
+
+
+def test_credit_one_rejects_ignored_classification(backend, mock_data_client) -> None:
+    """Sqlite parity: 'ignored' is the session-end sweep's exclusive write
+    path (apply_session_ratings) — credit_one must reject it mid-session
+    with the same error text sqlite's MemoryRatingService.credit_one uses,
+    and must not touch AWS."""
+    with pytest.raises(
+        ValueError,
+        match=r"credit_one does not accept classification='ignored'",
+    ):
+        backend.credit_one(
+            session_id="s",
+            kind="reflection",
+            id="rec-c",
+            classification="ignored",
+        )
+    mock_data_client.get_memory_record.assert_not_called()
+    mock_data_client.batch_update_memory_records.assert_not_called()
+
+
+def test_credit_one_requires_evidence_for_non_ignored_class(backend, mock_data_client) -> None:
+    """Evidence is now validated (shared services.memory_rating.validate_evidence
+    helper) on the credit_one path too — matching sqlite's contract."""
+    with pytest.raises(ValueError, match="evidence"):
+        backend.credit_one(
+            session_id="s",
+            kind="reflection",
+            id="rec-c",
+            classification="cited",
+        )
+    mock_data_client.get_memory_record.assert_not_called()
+    mock_data_client.batch_update_memory_records.assert_not_called()
 
 
 def test_credit_one_routes_semantic_kind_to_semantic_memory(backend, mock_data_client) -> None:
@@ -895,6 +1305,7 @@ def test_credit_one_routes_semantic_kind_to_semantic_memory(backend, mock_data_c
         kind="semantic",
         id="sm-rec",
         classification="cited",
+        evidence="matched the userPreference schema",
     )
     assert result == {"applied": "cited", "skipped": None}
 
@@ -920,8 +1331,10 @@ def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) ->
     result = backend.apply_session_ratings(
         session_id="test-session-xyz",
         ratings=[
-            {"kind": "reflection", "id": "rec-1", "class": "cited"},
-            {"kind": "reflection", "id": "rec-2", "class": "overlooked"},
+            {"kind": "reflection", "id": "rec-1", "class": "cited",
+             "evidence": "cited it directly"},
+            {"kind": "reflection", "id": "rec-2", "class": "overlooked",
+             "evidence": "was retrieved but never used"},
         ],
     )
     assert mock_data_client.batch_update_memory_records.call_count == 2
@@ -951,13 +1364,23 @@ def test_apply_session_ratings_empty_raises_like_sqlite(backend) -> None:
         ([{"kind": "reflection", "id": "rec-x"}], "missing required field"),
         ([{"kind": "reflection", "id": "rec-x", "class": "bogus"}], "invalid 'bogus'"),
         ([{"kind": "widget", "id": "rec-x", "class": "cited"}], "invalid 'widget'"),
-        ([{"kind": "reflection", "id": "", "class": "cited"}], "non-empty string"),
+        (
+            [{"kind": "reflection", "id": "", "class": "cited",
+              "evidence": "some evidence"}],
+            "non-empty string",
+        ),
         (
             [
-                {"kind": "reflection", "id": "rec-x", "class": "cited"},
-                {"kind": "reflection", "id": "rec-x", "class": "misled"},
+                {"kind": "reflection", "id": "rec-x", "class": "cited",
+                 "evidence": "e1"},
+                {"kind": "reflection", "id": "rec-x", "class": "misled",
+                 "evidence": "e2"},
             ],
             "duplicate",
+        ),
+        (
+            [{"kind": "reflection", "id": "rec-x", "class": "cited"}],
+            "evidence",
         ),
     ],
 )
@@ -1000,8 +1423,10 @@ def test_apply_session_ratings_counts_wire_failures_as_memory_missing(
     result = backend.apply_session_ratings(
         session_id="test-session-xyz",
         ratings=[
-            {"kind": "reflection", "id": "rec-fail", "class": "cited"},
-            {"kind": "reflection", "id": "rec-ok", "class": "shaped"},
+            {"kind": "reflection", "id": "rec-fail", "class": "cited",
+             "evidence": "e1"},
+            {"kind": "reflection", "id": "rec-ok", "class": "shaped",
+             "evidence": "e2"},
         ],
     )
     assert result["applied"]["shaped"] == 1
@@ -1144,6 +1569,44 @@ def test_semantic_list_scope_classification_normalizes_leading_slash(
         "sm-slash-general": "general",
         "sm-slash-project": "project",
     }
+
+
+def test_semantic_summary_metadata_ignored_count(backend, mock_data_client) -> None:
+    """_semantic_summary_to_model reads ignored_count from metadata."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "sm-ignored",
+                "content": {"text": "semantic content"},
+                "namespaces": ["projects/testproj/semantic/"],
+                "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+                "metadata": {
+                    "ignored_count": {"numberValue": 4},
+                },
+            }
+        ]
+    }
+    result = backend.semantic_list()
+    assert len(result) == 1
+    assert result[0].times_ignored == 4
+
+
+def test_semantic_summary_no_ignored_count(backend, mock_data_client) -> None:
+    """_semantic_summary_to_model defaults times_ignored to 0 when absent."""
+    mock_data_client.list_memory_records.return_value = {
+        "memoryRecordSummaries": [
+            {
+                "memoryRecordId": "sm-no-ignored",
+                "content": {"text": "semantic content"},
+                "namespaces": ["projects/testproj/semantic/"],
+                "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+                "metadata": {},
+            }
+        ]
+    }
+    result = backend.semantic_list()
+    assert len(result) == 1
+    assert result[0].times_ignored == 0
 
 
 def test_semantic_update_text_calls_batch_update(backend, mock_data_client) -> None:
@@ -1575,6 +2038,78 @@ def test_parse_reflection_body_state_record_uses_body(backend) -> None:
     assert parsed["_status"] == "promoted"
 
 
+def test_parse_reflection_body_ignored_count(backend) -> None:
+    """ignored_count read from body (migrated reflection)."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-body-ignored",
+        "content": {"text": json.dumps({
+            "title": "Test",
+            "use_cases": "test",
+            "hints": [],
+            "confidence": 0.8,
+            "tech": "python",
+            "phase": "general",
+            "ignored_count": 3,
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {},
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+    assert parsed["times_ignored"] == 3
+
+
+def test_parse_reflection_metadata_ignored_count(backend) -> None:
+    """ignored_count read from metadata (AWS-extracted reflection)."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-meta-ignored",
+        "content": {"text": json.dumps({
+            "title": "Test",
+            "use_cases": "test",
+            "hints": [],
+            "confidence": 0.8,
+            "tech": "python",
+            "phase": "general",
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {
+            "ignored_count": {"numberValue": 2},
+        },
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+    assert parsed["times_ignored"] == 2
+
+
+def test_parse_reflection_no_ignored_count(backend) -> None:
+    """ignored_count absent in both body and metadata defaults to 0."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-no-ignored",
+        "content": {"text": json.dumps({
+            "title": "Test",
+            "use_cases": "test",
+            "hints": [],
+            "confidence": 0.8,
+            "tech": "python",
+            "phase": "general",
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {},
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+    assert parsed["times_ignored"] == 0
+
+
 def test_retrieve_buckets_migrated_record_by_body_polarity(
     backend, mock_data_client
 ) -> None:
@@ -1714,7 +2249,8 @@ def test_t2_credit_one_migrated_rewrites_body_counter(
     fake = backend._data
 
     result = backend.credit_one(
-        session_id="s", kind="reflection", id="mig-1", classification="cited"
+        session_id="s", kind="reflection", id="mig-1", classification="cited",
+        evidence="cited the migrated reflection",
     )
     assert result == {"applied": "cited", "skipped": None}
 
@@ -1753,7 +2289,8 @@ def test_t2_credit_one_migrated_overlooked_bumps_times_overlooked(
     fake = backend._data
 
     result = backend.credit_one(
-        session_id="s", kind="reflection", id="mig-o", classification="overlooked"
+        session_id="s", kind="reflection", id="mig-o", classification="overlooked",
+        evidence="retrieved but not acted on",
     )
     assert result == {"applied": "overlooked", "skipped": None}
 
@@ -1839,7 +2376,8 @@ def test_t2_credit_one_extracted_uses_metadata_path_unchanged(
         "failedRecords": [],
     }
     result = backend.credit_one(
-        session_id="s", kind="reflection", id="ext-1", classification="cited"
+        session_id="s", kind="reflection", id="ext-1", classification="cited",
+        evidence="cited the extracted reflection",
     )
     assert result == {"applied": "cited", "skipped": None}
 
@@ -1866,3 +2404,208 @@ def test_t2_record_use_extracted_uses_metadata_path_unchanged(
     assert "metadata" in sent
     assert "content" not in sent
     assert sent["metadata"]["useful_count"]["numberValue"] == 2
+
+
+# ===== Task 2: local exposure ledger (record_exposures / list_session_exposures) =====
+
+
+@pytest.fixture
+def local_conn(tmp_path):
+    """Real tmp sqlite connection with migrations applied — mirrors the
+    services/session_bootstrap unit tests' fixture. Closed at teardown."""
+    conn = connect(tmp_path / "ledger.db")
+    try:
+        apply_migrations(conn)
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def backend_with_local_conn(
+    ac_config, mock_data_client, mock_control_client, local_conn
+) -> AgentCoreBackend:
+    return AgentCoreBackend(
+        config=ac_config,
+        data_client=mock_data_client,
+        control_client=mock_control_client,
+        session_id="test-session-xyz",
+        project="testproj",
+        local_conn=local_conn,
+    )
+
+
+def _seed_local_reflection(conn, rid: str, *, title: str) -> None:
+    conn.execute(
+        """INSERT INTO reflections
+           (id, title, project, phase, polarity, use_cases, hints,
+            confidence, created_at, updated_at, useful_count)
+           VALUES (?, ?, 'testproj', 'general', 'do', 'context', '[]',
+                   0.8, '2026-01-01', '2026-01-01', 0)""",
+        (rid, title),
+    )
+    conn.commit()
+
+
+def test_record_exposures_writes_to_local_ledger_when_available(
+    backend_with_local_conn, local_conn
+) -> None:
+    """Task 2: with a local_conn wired in, record_exposures delegates to the
+    shared exposure_log primitive and commits — a roundtrip through
+    list_session_exposures surfaces the row with its display text."""
+    _seed_local_reflection(local_conn, "refl-ledger-1", title="ledger roundtrip title")
+
+    backend_with_local_conn.record_exposures(
+        session_id="test-session-xyz",
+        items=[("reflection", "refl-ledger-1")],
+        source="contextual",
+    )
+
+    result = backend_with_local_conn.list_session_exposures(session_id="test-session-xyz")
+    assert result["session_id"] == "test-session-xyz"
+    assert len(result["exposures"]) == 1
+    exposure = result["exposures"][0]
+    assert exposure["kind"] == "reflection"
+    assert exposure["id"] == "refl-ledger-1"
+    assert exposure["title"] == "ledger roundtrip title"
+    assert exposure["source"] == "contextual"
+    assert exposure["exposed_at"]
+
+
+def test_record_exposures_without_local_conn_stays_legacy_noop(
+    backend, mock_data_client, mock_control_client
+) -> None:
+    """No local_conn wired (the `backend` fixture default) — record_exposures
+    must keep the pre-existing no-op contract: no wire calls, no exception."""
+    result = backend.record_exposures(
+        session_id="s", items=[("reflection", "r1")], source="contextual",
+    )
+    assert result is None
+    assert mock_data_client.method_calls == []
+    assert mock_control_client.method_calls == []
+
+
+def test_list_session_exposures_without_local_conn_stays_legacy_empty(backend) -> None:
+    """No local_conn wired — list_session_exposures keeps the pre-existing
+    empty-envelope contract."""
+    result = backend.list_session_exposures(session_id="test-session-xyz")
+    assert result == {"session_id": "test-session-xyz", "exposures": []}
+
+
+def test_record_exposures_empty_session_id_writes_nothing(
+    backend_with_local_conn, local_conn
+) -> None:
+    """Even with a real local_conn available, an empty session_id must not
+    write any row (mirrors exposure_log.record's own best-effort guard)."""
+    backend_with_local_conn.record_exposures(
+        session_id="", items=[("reflection", "r1")], source="contextual",
+    )
+    row = local_conn.execute("SELECT COUNT(*) AS n FROM session_memory_exposure").fetchone()
+    assert row["n"] == 0
+
+
+def test_list_session_exposures_empty_session_id_unresolvable_returns_empty_envelope(
+    backend_with_local_conn,
+) -> None:
+    """An empty session_id with no live env/marker AND no construction-time
+    fallback (backend_with_local_conn was built with a real session id, so
+    this exercises the FALLBACK to that construction-time value rather than
+    the raise path — see the dedicated unresolvable test below for that)."""
+    result = backend_with_local_conn.list_session_exposures(session_id="")
+    # Falls back to the construction-time session_id ("test-session-xyz"),
+    # matching _require_session_id's fallback chain.
+    assert result["session_id"] == "test-session-xyz"
+    assert result["exposures"] == []
+
+
+def test_list_session_exposures_empty_session_id_truly_unresolvable(
+    ac_config, mock_data_client, mock_control_client, local_conn,
+) -> None:
+    """No passed session_id, no live env/marker, AND no construction-time
+    session_id (None) — must NOT raise; degrades to the empty envelope with
+    session_id=None, matching sqlite's own no-session shape."""
+    backend = AgentCoreBackend(
+        config=ac_config,
+        data_client=mock_data_client,
+        control_client=mock_control_client,
+        session_id=None,
+        project="testproj",
+        local_conn=local_conn,
+    )
+    result = backend.list_session_exposures(session_id="")
+    assert result == {"session_id": None, "exposures": []}
+
+
+# ===== Task 4: retrieve-path exposures (source='retrieve', via_exploration) =====
+
+
+def test_retrieve_records_exposures_with_exploration_tag(
+    backend_with_local_conn, local_conn, mock_data_client
+) -> None:
+    """retrieve() writes source='retrieve' exposure rows for every returned
+    reflection id when a local ledger is available; the reflection that took
+    the reserved exploration slot is tagged via_exploration=1."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+                _wilson_ranking_record("proven-2", useful=15, ignored=5),
+                _wilson_ranking_record("untested", useful=1, ignored=0),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend_with_local_conn.retrieve(project="testproj", limit_per_bucket=3)
+    assert [r["id"] for r in result["do"]] == ["proven-1", "proven-2", "untested"]
+
+    rows = local_conn.execute(
+        "SELECT memory_id, source, via_exploration FROM session_memory_exposure "
+        "WHERE session_id = 'test-session-xyz' ORDER BY memory_id"
+    ).fetchall()
+    by_id = {r["memory_id"]: r for r in rows}
+    assert set(by_id) == {"proven-1", "proven-2", "untested"}
+    assert all(r["source"] == "retrieve" for r in rows)
+    assert by_id["untested"]["via_exploration"] == 1
+    assert by_id["proven-1"]["via_exploration"] == 0
+    assert by_id["proven-2"]["via_exploration"] == 0
+
+
+def test_retrieve_without_local_conn_writes_nothing_and_buckets_unaffected(
+    backend, mock_data_client
+) -> None:
+    """No local_conn wired (the default `backend` fixture) — retrieve must
+    not raise, must write no exposure rows (there's no ledger to write to),
+    and must return buckets identical to the local-ledger case."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    assert [r["id"] for r in result["do"]] == ["proven-1"]
+
+
+def test_retrieve_track_exposure_false_writes_nothing(
+    backend_with_local_conn, local_conn, mock_data_client
+) -> None:
+    """track_exposure=False suppresses the retrieve-path exposure write even
+    though a local ledger is available — mirrors sqlite's track_exposure
+    contract (used by callers, e.g. session bootstrap, that manage their own
+    exposure tracking)."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("proven-1", useful=20, ignored=5),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend_with_local_conn.retrieve(project="testproj", track_exposure=False)
+    assert [r["id"] for r in result["do"]] == ["proven-1"]
+    row = local_conn.execute(
+        "SELECT COUNT(*) AS n FROM session_memory_exposure"
+    ).fetchone()
+    assert row["n"] == 0

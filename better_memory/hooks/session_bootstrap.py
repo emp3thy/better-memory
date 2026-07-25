@@ -89,23 +89,30 @@ def main() -> None:
             project_dir=os.environ.get("CLAUDE_PROJECT_DIR") or cwd_str,
         )
         if cfg.storage_backend == "agentcore":
-            # Route through the storage factory like contextual_inject.py:
-            # agentcore mode must never open the local sqlite database. The
-            # backend returns the BootstrapResult-shaped dict (see
-            # AgentCoreBackend.session_bootstrap); on any failure (missing
-            # agentcore.json, boto3 absent, wire error) the except below
-            # emits the manual-bootstrap fallback directive — never a
-            # silent fall-through to sqlite.
-            backend = build_backend(
-                config=cfg,
-                memory_conn=None,
-                embedder=None,
-                session_id=session_id or None,
-                project=project_name(Path(cwd_str)),
-            )
-            remote_result = backend.session_bootstrap(
-                source=source, session_id=session_id, cwd=Path(cwd_str),
-            )
+            # Route through the storage factory like contextual_inject.py.
+            # Revised rule: agentcore mode never stores MEMORY CONTENT
+            # locally (reflections / semantic memories / observations all
+            # live in AgentCore) — but session-operational state (the
+            # exposure ledger, the migration ledger, hook_errors) lives in
+            # the local memory.db regardless of backend, so the local
+            # connection is opened here too and threaded through to the
+            # backend as its exposure-ledger connection. On any failure
+            # (missing agentcore.json, boto3 absent, wire error) the except
+            # below emits the manual-bootstrap fallback directive — never a
+            # silent fall-through to sqlite. The connection is closed on
+            # every path (success or exception) via the same `with closing`
+            # lifecycle the sqlite branch below uses.
+            with closing(connect(cfg.memory_db)) as conn:
+                backend = build_backend(
+                    config=cfg,
+                    memory_conn=conn,
+                    embedder=None,
+                    session_id=session_id or None,
+                    project=project_name(Path(cwd_str)),
+                )
+                remote_result = backend.session_bootstrap(
+                    source=source, session_id=session_id, cwd=Path(cwd_str),
+                )
             rendered = str(remote_result["additional_context"])
         else:
             with closing(connect(cfg.memory_db)) as conn:

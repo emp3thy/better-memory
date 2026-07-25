@@ -99,5 +99,13 @@ def build_backend(
             control_client=control_client,
             session_id=session_id,
             project=project,
+            # Agentcore mode never stores memory CONTENT locally, but
+            # session-operational state (exposure ledger, migration ledger,
+            # hook errors) lives in the local memory.db regardless of
+            # backend — thread the caller's connection through so
+            # record_exposures / list_session_exposures have a ledger to
+            # write to. None when the caller has none (memory_conn is
+            # itself optional here, unlike the sqlite branch above).
+            local_conn=memory_conn,
         )
     raise ValueError(f"unknown storage_backend={config.storage_backend!r}")

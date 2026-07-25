@@ -7,7 +7,7 @@
 - AWS account with Bedrock AgentCore Memory available in your chosen region (`init --region` defaults to `eu-west-2`).
 - IAM principal (user or role) with the policy below attached.
 - AWS credentials discoverable by boto3 (env vars, `~/.aws/credentials`, EC2/EKS role, etc.).
-- `better-memory[agentcore]` installed: `pip install 'better-memory[agentcore]'` or `uv pip install '.[agentcore]'`.
+- `better-memory[agentcore]` installed: `pip install 'better-memory[agentcore]'` or `uv pip install '.[agentcore]'`. The extra pins `boto3>=1.43.56` and `botocore>=1.43.56` — older versions predate the `extractionMode` parameter on `CreateEvent`, which both the Stop hook's closure event and the end-of-session rating sweep's receipt event (see [Capability table](#capability-table)) depend on. If you install boto3/botocore separately (rather than through the extra), make sure they meet that floor.
 
 ## IAM policy
 
@@ -108,12 +108,33 @@ Flags (read from the `migrate` argparse):
 
 **Migration does not activate the backend.** `migrate` only writes records into AWS; it never touches `settings.json`. Activate separately with `init` (or by setting `storage_backend` yourself) — see [Initialise](#initialise). Exit codes: `0` all rows converged, `2` completed with some failed records (re-run to retry), `1` a configuration or setup error.
 
+## Capability table
+
+The self-rating / learning loop is **backend-agnostic**: agentcore mode runs the same exposure tracking, mid-session credit, end-of-session rating sweep, Wilson-score ranking, and exploration slot that sqlite mode does — just against AWS-side counters instead of local columns. What still differs is synthesis, episodes, and retention (AgentCore manages those internally and better-memory's local machinery has no equivalent), plus evidence browsing (local-only for now).
+
+| Capability | `sqlite` | `agentcore` |
+|---|---|---|
+| Exposure ledger, mid-session `memory.credit`, end-of-session sweep, Wilson ranking, exploration slot | Local, entirely in `memory.db` | Same loop. Exposure ledger is the same local `memory.db` table (session-operational state, not memory content); rating counters (`useful_count`, `ignored_count`, `overlooked_count`, `times_misled`) live on the AWS record and are genuinely shared across every teammate's session. |
+| Query-conditioned retrieval (`memory.retrieve(query=...)`) | BM25 + vector RRF against the Wilson prior | Server-side semantic search (`RetrieveMemoryRecords`) RRF-fused against the Wilson prior instead (no BM25 leg — semantic search subsumes it); degrades to the Wilson-only order on an AWS error. |
+| Contextual-injection evidence gate | BM25 / vector legs | The backend's own `relevance_ranks` (same `RetrieveMemoryRecords` semantic search) — a memory qualifies iff present in that result set; keyword fallback applies only when the AWS lookup itself fails, never merely because it found no matches. |
+| Rating-evidence browsing | Per-exposure `evidence` column, browsable in the management UI's Reflections/Semantic drawers | **Local-only for now.** The local exposure rows are stamped with evidence the same way, but there's no cross-machine evidence browsing yet — a future PR adds a read path for the ratings-event log below. |
+| Rating-evidence receipts | N/A (the local row is the record) | Each end-of-session sweep emits one best-effort `CreateEvent` (`extractionMode: "SKIP"`, `metadata.type: "ratings"`) as a durable, team-visible receipt of what was rated. Durable from day one; no read/browse UI for it yet (non-goal of this change, tracked as a follow-up). |
+| Synthesis (observation → reflection distillation) | Local, Claude-driven (`memory.synthesize_next_*`) | Cloud, built-in strategy on its own ~15-20 minute cadence — unchanged by this parity work. |
+| Episodes | Local `episodes` table + episode tools | Internal to AgentCore via `sessionId` — unchanged by this parity work. |
+| Retention | `memory.run_retention` | AgentCore's own event expiry (set at `init`) — unchanged by this parity work. |
+
+!!! warning "Silent metadata drop on undeclared keys"
+    AgentCore batch create/update calls that include a `memoryStrategyId` **silently strip any metadata key not declared in that strategy's `memoryRecordSchema`** — no error, no warning, the key is just absent from the stored record. This is documented AWS behaviour, not a better-memory bug, but it is easy to trip over if you extend the schema yourself.
+
+    better-memory's own counters are safe: every key it writes (`useful_count`, `missed_count`, `ignored_count`, `times_misled`, `overlooked_count`, `last_credited_at`, `status`, plus `source_row_id` on the semantic strategy) is declared on both strategies at `init` time (`cli/_agentcore_strategies.py`). If you add a new metadata key of your own, declare it in the strategy's schema first — and if the memory is already provisioned, widen the schema in place via `UpdateMemoryStrategy` (the same call `better-memory agentcore migrate` uses to add `source_row_id` to older semantic memories) — or writes of that key will silently vanish.
+
 ## What changes in agentcore mode
 
-- **Memory data lives in AWS.** Observations, reflections, semantic memories, and reinforcement all go to Bedrock AgentCore — `memory.observe`, `memory.retrieve`, `memory.retrieve_observations`, `memory.record_use`, the four `memory.semantic_*` tools, the rating tools (`memory.credit`, `memory.apply_session_ratings`, `memory.list_session_exposures`), and `memory.session_bootstrap` all dispatch to the AgentCore backend. A local `memory.db` is still created for hook-error logging and `knowledge.db` for knowledge tools; no memory content is stored in them.
+- **Memory content lives in AWS; session-operational state stays local.** Observations, reflections, semantic memories, and reinforcement all go to Bedrock AgentCore — `memory.observe`, `memory.retrieve`, `memory.retrieve_observations`, `memory.record_use`, the four `memory.semantic_*` tools, the rating tools (`memory.credit`, `memory.apply_session_ratings`, `memory.list_session_exposures`), and `memory.session_bootstrap` all dispatch to the AgentCore backend. A local `memory.db` and `knowledge.db` are still created — `knowledge.db` for the knowledge tools, `memory.db` for hook-error logging, the `agentcore_migration` ledger, and (see the capability table above) the exposure ledger that drives the self-rating loop. The rule is: agentcore mode never stores memory CONTENT locally; session-operational state (exposure ledger, migration ledger, hook errors) always lives in the local `memory.db`, on both backends.
 - **`memory.synthesize_next_*` tools are not registered** — the built-in episodic strategy extracts in the cloud on its own ~15-20 minute cadence (~1-3 minutes after a closure event).
 - **Episode and retention tools are not registered.** `memory.start_episode`, `memory.close_episode`, `memory.reconcile_episodes`, `memory.list_episodes`, and `memory.run_retention` are hidden from the advertised tool list — AgentCore manages event grouping via `sessionId` and applies its own event expiry, so better-memory's local episode/retention machinery has no equivalent.
 - **Closure events fire automatically.** The Stop hook resolves the backend the same way the server does (env var, else `settings.json`) and, when it resolves to agentcore, emits a `CreateEvent(role=OTHER)` against the current AgentCore session, which tells the episodic strategy "extract now". Failure is logged but never blocks the hook. The mere existence of `agentcore.json` does **not** activate this — only the env var or `settings.json` does.
+- **The end-of-session rating sweep emits a receipt event too.** After `memory.apply_session_ratings` successfully stamps local exposure rows and pushes counter bumps to AWS, it emits one best-effort `CreateEvent` (`extractionMode: "SKIP"` so it's excluded from LLM extraction) carrying the rated batch as its payload. This is a durable, team-visible audit trail from day one; failure never blocks the sweep, and there's no read/browse path for these events yet (see the capability table above).
 
 See [Architecture > Storage backends](architecture.md#storage-backends) for the data-flow diagram.
 

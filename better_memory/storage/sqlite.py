@@ -57,6 +57,7 @@ class SqliteBackend:
     ) -> None:
         self._conn = memory_conn
         self._embedder = embedder
+        self._sync_embedder = sync_embedder
         self._session_id: str | None = session_id
         self._project = project
         self._project_resolver = lambda: self._project
@@ -268,6 +269,76 @@ class SqliteBackend:
             outcome=outcome,
             only_open=only_open,
         )
+
+    # ----- Contextual relevance -----
+
+    def relevance_ranks(
+        self,
+        *,
+        query: str,
+        kinds: tuple[str, ...] = ("reflection", "semantic"),
+        top_k: int = 50,
+    ) -> dict[tuple[str, str], int]:
+        """Thin protocol-completeness wrapper over the existing BM25
+        (``reflection_fts``) + vector legs (``services/relevant.py``'s
+        ``_bm25_qualifiers`` / ``_vec_qualifiers``), RRF-merged per kind.
+        Always returns a dict, never ``None`` -- its underlying legs
+        already degrade internally (a missing conn, no query vector, or a
+        malformed FTS query all resolve to empty results, not an error) so
+        there is no failure mode to signal here (see the Protocol
+        docstring's ``None`` vs ``{}`` contract, which only agentcore's
+        AWS-error path actually exercises).
+
+        NOT consumed by ``retrieve_relevant``'s own sqlite path -- that
+        function keeps calling those helpers directly against its own
+        ``conn`` parameter (see its ``agentcore_mode`` gate, which is
+        False for any backend reporting ``supports_synthesis=True``), so
+        this method's existence changes zero sqlite contextual-gate
+        behavior. It exists purely so SqliteBackend satisfies the full
+        ``StorageBackend.relevance_ranks`` contract.
+        """
+        if not (query or "").strip():
+            return {}
+        # Local import: services/relevant.py is the contextual-gate module;
+        # importing its private ranking helpers here (rather than
+        # duplicating the BM25/vec SQL) keeps the two legs byte-identical
+        # without creating a module-load-time cycle (relevant.py itself
+        # never imports storage).
+        from better_memory.services.relevant import (
+            _RRF_K,
+            _bm25_qualifiers,
+            _vec_qualifiers,
+        )
+
+        q = query.strip()
+        qvec = (
+            self._sync_embedder.embed_text(q)
+            if self._sync_embedder is not None else None
+        )
+
+        def _rrf_merge(rank_maps: list[dict[str, int]]) -> dict[str, int]:
+            scores: dict[str, float] = {}
+            for rm in rank_maps:
+                for rid, rank in rm.items():
+                    scores[rid] = scores.get(rid, 0.0) + 1.0 / (_RRF_K + rank)
+            ordered = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+            return {rid: i for i, (rid, _) in enumerate(ordered[:top_k])}
+
+        out: dict[tuple[str, str], int] = {}
+        if "reflection" in kinds:
+            bm = _bm25_qualifiers(self._conn, q)
+            vec_r = _vec_qualifiers(
+                self._conn, "reflection_embeddings", "reflection_id", qvec, 0.55,
+            )
+            for rid, rank in _rrf_merge([bm, vec_r]).items():
+                out[("reflection", rid)] = rank
+        if "semantic" in kinds:
+            vec_s = _vec_qualifiers(
+                self._conn, "semantic_embeddings", "memory_id", qvec, 0.55,
+            )
+            for rid, rank in _rrf_merge([vec_s]).items():
+                out[("semantic", rid)] = rank
+        return out
 
     # ----- Reflection lifecycle -----
 

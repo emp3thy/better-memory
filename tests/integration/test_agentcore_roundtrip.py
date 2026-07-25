@@ -80,6 +80,7 @@ def test_semantic_credit_one_bumps_useful_count(agentcore_backend) -> None:
         kind="semantic",
         id=record_id,
         classification="cited",
+        evidence="integration test citation",
     )
     assert result["applied"] == record_id
     assert result["skipped"] is None
@@ -155,5 +156,6 @@ def test_observe_credit_uses_correct_counter_via_extraction(agentcore_backend) -
         kind="reflection",
         id=first["id"],
         classification="cited",
+        evidence="integration test citation",
     )
     assert result["applied"] == first["id"]

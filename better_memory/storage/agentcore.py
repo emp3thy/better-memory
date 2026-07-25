@@ -21,6 +21,7 @@ import asyncio
 import concurrent.futures
 import hashlib
 import json
+import sqlite3
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ else:
         class _ClientError(Exception):
             response: dict[str, Any]
 
+from better_memory.services.scoring import wilson_lower_bound
 from better_memory.storage.agentcore_persistence import AgentCoreConfig
 from better_memory.storage.protocol import Outcome, UseOutcome
 from better_memory.storage.session import (
@@ -45,7 +47,6 @@ from better_memory.storage.session import (
 )
 
 _POLARITIES: tuple[str, str, str] = ("do", "dont", "neutral")
-_OVERLOOKED_RANKING_WEIGHT = 3  # mirrors better_memory/services/memory_rating.py:71
 _AGENTCORE_SYSTEM_METADATA_PREFIX = "x-amz-agentcore-memory-"
 _RATING_TO_COUNTER: dict[str, str] = {
     "cited": "useful_count",
@@ -77,12 +78,23 @@ class AgentCoreBackend:
         control_client: Any,
         session_id: str | None,
         project: str,
+        local_conn: sqlite3.Connection | None = None,
     ) -> None:
         self._cfg = config
         self._data = data_client
         self._control = control_client
         self._session_id = session_id
         self._project = project
+        # Local exposure ledger (session_memory_exposure table in the local
+        # memory.db). Agentcore mode never stores memory CONTENT locally —
+        # reflections/semantic memories/observations live in AgentCore — but
+        # session-operational state (the exposure ledger, the migration
+        # ledger, hook_errors) lives alongside the sqlite backend's own
+        # database regardless of which backend holds the content. None when
+        # no local db is available (e.g. some unit tests); record_exposures
+        # / list_session_exposures degrade to their pre-existing no-op /
+        # empty-envelope behaviour in that case.
+        self._local_conn = local_conn
 
     # ----- Capability flags -----
 
@@ -224,28 +236,83 @@ class AgentCoreBackend:
         ``project = ? OR scope = 'general'`` clause), parse JSON content,
         bucket by polarity CLIENT-SIDE (live AWS rejects ``polarity`` as a
         metadata filter key — only the CreateMemory indexedKeys are legal),
-        rank via the sqlite ordering rule (useful_count +
-        3*times_overlooked DESC, confidence DESC, updated_at DESC).
+        rank via the SHARED Wilson ordering (``services/scoring.py``):
+        ``wilson_lower_bound(useful+overlooked, useful+overlooked+ignored)``
+        DESC, confidence DESC, updated_at DESC — identical formula/tiebreaks
+        to sqlite's ``ReflectionSynthesisService.retrieve_reflections``,
+        including its per-bucket reserved exploration slot for under-rated
+        candidates (``EXPLORATION_RATED_FLOOR``).
         Returns dict[polarity, list[reflection_dict]] in the same shape sqlite mode
         returns; the MCP memory.retrieve handler json-dumps this directly to Claude.
 
-        ``query`` is accepted for parity but no-op in agentcore mode — BM25
-        relevance fusion needs the local ``reflection_fts`` index, which has no
-        AgentCore equivalent. Ordering stays the popularity rule below.
+        ``query``, when non-blank, is fused into the ordering above via
+        server-side semantic search: ``_relevance_rank_map`` calls
+        ``retrieve_memory_records`` PER namespace (project + general/
+        promoted — same fan-out the Wilson fetch uses), the per-namespace
+        results are merged (``_merge_relevance_rank_maps``), and the merged
+        rank is RRF-combined with the Wilson rank (constant 60) — see
+        ``_fetch_reflection_buckets`` for the fusion formula. An empty/
+        failed lookup or a blank query leaves ordering as pure Wilson
+        (today's Task-4 behaviour).
 
-        track_exposure is accepted for parity but no-op in agentcore mode —
-        AgentCore has no session_memory_exposure table; exposure tracking is
-        not part of the agentcore-mode rating model.
+        track_exposure: when True (default) and a local exposure ledger is
+        available (``self._local_conn`` — see ``record_exposures``), writes
+        a ``source='retrieve'`` row per returned reflection id, tagging the
+        slot-taker(s) as ``via_exploration``. Best-effort: never raises, and
+        never affects the returned buckets. Set False to suppress (mirrors
+        sqlite's ``track_exposure`` contract, used by callers that manage
+        their own exposure tracking).
         """
         actor_id = resolve_actor_id(project or self._project)
         effective_limit = limit_per_bucket if limit_per_bucket is not None else 20
-        return self._fetch_reflection_buckets(
+        exploration_ids: set[str] = set()
+        buckets = self._fetch_reflection_buckets(
             actor_id=actor_id,
             limit_per_bucket=effective_limit,
             tech=tech,
             phase=phase,
             polarity=polarity if polarity in _POLARITIES else None,
+            exploration_ids=exploration_ids,
+            query=query,
         )
+        if track_exposure:
+            self._record_retrieve_exposures(buckets, exploration_ids)
+        return buckets
+
+    def _record_retrieve_exposures(
+        self,
+        buckets: dict[str, list[dict[str, Any]]],
+        exploration_ids: set[str],
+    ) -> None:
+        """Best-effort ``source='retrieve'`` exposure write to the local
+        ledger (see ``record_exposures``'s docstring for the shared-ledger
+        rationale). No-op when no local ledger is wired or no session id
+        resolves; never raises and never affects the returned buckets."""
+        if self._local_conn is None:
+            return
+        try:
+            sid = self._require_session_id("retrieve")
+        except ValueError:
+            return
+        if not sid:
+            return
+        all_ids = [r["id"] for bucket in buckets.values() for r in bucket]
+        if not all_ids:
+            return
+        try:
+            from better_memory.services import exposure_log
+
+            exposure_log.record(
+                self._local_conn,
+                session_id=sid,
+                items=[("reflection", rid) for rid in all_ids],
+                source="retrieve",
+                now=datetime.now(UTC).isoformat(),
+                exploration_ids=frozenset(exploration_ids),
+            )
+            self._local_conn.commit()
+        except Exception:  # noqa: BLE001 - exposures must never block retrieve
+            pass
 
     def _fetch_reflection_buckets(
         self,
@@ -255,6 +322,8 @@ class AgentCoreBackend:
         tech: str | None = None,
         phase: str | None = None,
         polarity: str | None = None,
+        exploration_ids: set[str] | None = None,
+        query: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Two-namespace reflection fan-out shared by retrieve() and
         session_bootstrap().
@@ -282,6 +351,27 @@ class AgentCoreBackend:
         records must still be retrievable. Dedup by record id across the
         two calls (a just-promoted record can appear in both while the
         list index lags), project namespace winning.
+
+        Ranking: shared Wilson ordering (``services/scoring.py``) with the
+        same per-bucket exploration slot as sqlite's
+        ``ReflectionSynthesisService.retrieve_reflections`` — see the sort
+        loop below. ``exploration_ids``, when passed, is populated in place
+        with the id of every reflection that took the reserved slot in any
+        bucket (used by ``retrieve()`` to tag exposure rows).
+
+        ``query``, when non-blank, fetches a server-side semantic rank map
+        (``_relevance_rank_map``, called once PER namespace over the same
+        project + general/promoted fan-out as the Wilson fetch above, then
+        merged via ``_merge_relevance_rank_maps``) BEFORE the per-bucket
+        fill, then RRF-fuses it with the Wilson order per bucket: ``score =
+        1/(60 + wilson_rank) + 1/(60 + relevance_rank)``, where
+        ``wilson_rank`` is the item's position in
+        the just-computed Wilson order and a missing relevance leg (record
+        absent from the rank map) contributes nothing. The two-pass
+        exploration fill below then runs over this fused order, so the
+        reserved slot is chosen from fused-order untested candidates. An
+        empty/failed rank map (or blank query) leaves the fusion step a
+        no-op — pure Wilson order, unchanged from Task 4.
         """
         project_ns = resolve_namespace(actor_id, "reflections")
         general_ns = resolve_namespace("general", "reflections")
@@ -350,23 +440,294 @@ class AgentCoreBackend:
                 seen_ids.add(parsed["id"])
                 buckets[bucket].append(parsed)
 
+        # Local import: EXPLORATION_RATED_FLOOR lives in the reflection
+        # synthesis service (services/reflection.py), which pulls in
+        # sqlite_vec and friends — keep that off agentcore's module-level
+        # import path (mirrors the local exposure_log imports elsewhere in
+        # this class).
+        from better_memory.services.reflection import EXPLORATION_RATED_FLOOR
+
+        # Only worth reserving an exploration slot when there's room for at
+        # least one proven row alongside it — mirrors reflection.py's own
+        # `reserve` gate (cap < 2 means the untested row would consume the
+        # entire bucket).
+        reserve = limit_per_bucket >= 2
+
+        # Server-side semantic rank map for RRF fusion, fetched ONCE per
+        # namespace (not per-bucket — one retrieve_memory_records call per
+        # namespace covers every polarity) BEFORE the per-bucket fill so the
+        # exploration fill below operates on the fused order rather than
+        # pure Wilson. Design spec (2026-07-24-agentcore-parity-design.md
+        # §3): RetrieveMemoryRecords is called PER namespace — same
+        # project + general/promoted fan-out the Wilson fetch above already
+        # uses (`namespaces`) — so a promoted/general-scope reflection gets
+        # the same relevance boost as a project-scoped one. Each namespace
+        # call is independently best-effort (`_relevance_rank_map` never
+        # raises); one namespace failing still lets the other's results
+        # through the merge. Blank query or every namespace failing -> the
+        # merge returns None -- Task 5's own fusion contract collapses that
+        # to {} here (a no-op fusion step, degrading to pure Wilson order);
+        # this is DIFFERENT from Task 6's relevance_ranks, which surfaces
+        # the None/{} distinction to its caller instead of collapsing it —
+        # see relevance_ranks below.
+        rank_map: dict[str, int] = {}
+        if query is not None and query.strip():
+            q = query.strip()
+            rank_map = self._merge_relevance_rank_maps(
+                [self._relevance_rank_map(q, ns) for ns, _ in namespaces]
+            ) or {}
+
         for bucket_name, items in buckets.items():
-            # Sqlite ordering: (useful_count + 3*times_overlooked) DESC,
-            # confidence DESC, updated_at DESC.
+            # Shared Wilson ordering (services/scoring.py): the lower bound
+            # of the Wilson score interval on useful+overlooked / rated,
+            # then confidence, then recency — identical formula/tiebreaks to
+            # sqlite's ReflectionSynthesisService.retrieve_reflections.
             items.sort(
                 key=lambda r: (
-                    -(r["useful_count"] + _OVERLOOKED_RANKING_WEIGHT * r["_overlooked_count"]),
+                    -wilson_lower_bound(
+                        r["useful_count"] + r["times_overlooked"],
+                        r["useful_count"] + r["times_overlooked"] + r["times_ignored"],
+                    ),
                     -r["confidence"],
                     -r["_updated_at_ts"],
                 )
             )
+
+            if rank_map:
+                # RRF fusion (constant 60): score = 1/(60 + wilson_rank) +
+                # 1/(60 + relevance_rank); a record absent from rank_map
+                # contributes nothing for the relevance leg. `items` is
+                # already Wilson-ordered above, so enumerating it supplies
+                # wilson_rank directly, and the sort below is stable — equal
+                # scores (e.g. neither leg present) keep their Wilson order.
+                items = [
+                    r
+                    for _, r in sorted(
+                        enumerate(items),
+                        key=lambda pair: -(
+                            1.0 / (60 + pair[0])
+                            + (
+                                1.0 / (60 + rank_map[pair[1]["id"]])
+                                if pair[1]["id"] in rank_map
+                                else 0.0
+                            )
+                        ),
+                    )
+                ]
+
+            if not reserve:
+                chosen = items[:limit_per_bucket]
+            else:
+                # Two-pass fill (reflection.py parity): cap-1 best TESTED
+                # rows in ranked order, one reserved slot for the best
+                # UNTESTED row (rated < EXPLORATION_RATED_FLOOR) if any,
+                # else top up from the remainder — preserving ranked order
+                # via an index sort at the end.
+                def _rated(r: dict[str, Any]) -> int:
+                    return (
+                        r["useful_count"] + r["times_overlooked"]
+                        + r["times_ignored"]
+                    )
+
+                tested_idx = [
+                    i for i, r in enumerate(items)
+                    if _rated(r) >= EXPLORATION_RATED_FLOOR
+                ]
+                untested_idx = [
+                    i for i, r in enumerate(items)
+                    if _rated(r) < EXPLORATION_RATED_FLOOR
+                ]
+                chosen_idx = tested_idx[: limit_per_bucket - 1]
+                if untested_idx:
+                    chosen_idx.append(untested_idx[0])
+                    if exploration_ids is not None:
+                        exploration_ids.add(items[untested_idx[0]]["id"])
+                if len(chosen_idx) < limit_per_bucket:  # top up from the remainder
+                    taken = set(chosen_idx)
+                    for i in range(len(items)):
+                        if len(chosen_idx) >= limit_per_bucket:
+                            break
+                        if i not in taken:
+                            chosen_idx.append(i)
+                chosen_idx.sort()  # preserve ranked order
+                chosen = [items[i] for i in chosen_idx]
+
             # Strip the internal ranking/bucketing helpers — the payload
             # must be key-identical to the sqlite reflection dicts.
             buckets[bucket_name] = [
                 {k: v for k, v in r.items() if not k.startswith("_")}
-                for r in items[:limit_per_bucket]
+                for r in chosen
             ]
         return buckets
+
+    def _relevance_rank_map(
+        self,
+        query: str,
+        namespace: str,
+        top_k: int = 50,
+        *,
+        memory_id: str | None = None,
+    ) -> dict[str, int] | None:
+        """Server-side semantic search rank map for RRF fusion with the
+        shared Wilson ordering (see ``_fetch_reflection_buckets``), and —
+        via ``relevance_ranks`` — with the contextual evidence gate in
+        ``services/relevant.py``.
+
+        Same call shape as ``semantic_list``'s search path
+        (``retrieve_memory_records`` with ``searchCriteria={"searchQuery",
+        "topK"}``). ``memory_id`` defaults to the episodic (reflections)
+        memory when omitted, matching every existing caller
+        (``_fetch_reflection_buckets``); ``relevance_ranks`` passes the
+        semantic memory's id explicitly for "semantic"-kind lookups.
+        Returns ``{memoryRecordId: rank}`` from result order (0 = best
+        match) on success -- including a genuinely empty ``{}`` when the
+        call succeeds but nothing matches. Best-effort: any exception (AWS
+        error, malformed response, ...) degrades to ``None`` -- NOT ``{}``
+        -- so callers can distinguish "this namespace's lookup failed"
+        from "it ran and found nothing" (``_merge_relevance_rank_maps``
+        skips ``None`` legs when merging; ``relevance_ranks`` surfaces the
+        distinction to its own caller, ``retrieve_relevant``'s keyword-
+        fallback gate). Never raises."""
+        try:
+            response = self._data.retrieve_memory_records(
+                memoryId=memory_id or self._cfg.episodic.memory_id,
+                namespace=namespace,
+                searchCriteria={
+                    "searchQuery": query,
+                    "topK": top_k,
+                },
+            )
+            return {
+                rec["memoryRecordId"]: rank
+                for rank, rec in enumerate(response.get("memoryRecordSummaries", []))
+                if "memoryRecordId" in rec
+            }
+        except Exception:  # noqa: BLE001 - best-effort; None signals "lookup failed"
+            return None
+
+    def _merge_relevance_rank_maps(
+        self, rank_maps: list[dict[str, int] | None]
+    ) -> dict[str, int] | None:
+        """Merge one ``_relevance_rank_map`` result per namespace (see the
+        call site in ``_fetch_reflection_buckets``, which fans
+        ``_relevance_rank_map`` out over every namespace the Wilson fetch
+        itself uses — project + general/promoted) into a single global rank
+        map.
+
+        ``None`` legs (a namespace whose lookup itself failed — see
+        ``_relevance_rank_map``) are skipped when merging: one namespace
+        failing still lets a successful sibling's results through. Only
+        when EVERY leg is ``None`` does this method itself return ``None``
+        — propagating "the whole lookup failed" up to the caller, which
+        for ``relevance_ranks`` is the signal that distinguishes an AWS
+        error from a legitimate empty result. A leg list that is entirely
+        empty dicts (every namespace ran fine, none matched) correctly
+        returns ``{}``, not ``None``.
+
+        RetrieveMemoryRecords' response shape has no ``score`` field
+        verified anywhere in this codebase's fixtures/docs (only prose
+        mentions of a "cosine score" in the design doc) — rather than parse
+        an unconfirmed key, this interleaves each namespace's already
+        rank-ordered id list round-robin (best-of-namespace-1, best-of-
+        namespace-2, next-of-namespace-1, ...) and assigns global ranks
+        0..n-1 in that interleaved order. This is a namespace-fair merge
+        that needs no cross-namespace score comparison. A duplicate id (a
+        just-promoted record can transiently appear in both namespaces,
+        mirroring the id-dedup in ``_fetch_reflection_buckets``) keeps its
+        FIRST (better) global rank."""
+        succeeded = [rank_map for rank_map in rank_maps if rank_map is not None]
+        if not succeeded:
+            return None
+        ordered_ids = [
+            sorted(rank_map, key=lambda rid: rank_map[rid]) for rank_map in succeeded
+        ]
+        merged: dict[str, int] = {}
+        cursors = [0] * len(ordered_ids)
+        advanced = True
+        while advanced:
+            advanced = False
+            for i, ids in enumerate(ordered_ids):
+                if cursors[i] < len(ids):
+                    advanced = True
+                    rid = ids[cursors[i]]
+                    cursors[i] += 1
+                    if rid not in merged:
+                        merged[rid] = len(merged)
+        return merged
+
+    def relevance_ranks(
+        self,
+        *,
+        query: str,
+        kinds: tuple[str, ...] = ("reflection", "semantic"),
+        top_k: int = 50,
+    ) -> dict[tuple[str, str], int] | None:
+        """Server-side relevance rank map for the contextual evidence gate
+        in ``services/relevant.py`` (``retrieve_relevant``'s agentcore
+        branch, gated on ``conn is None`` + ``supports_synthesis is
+        False``).
+
+        Reuses the same fan-out/merge machinery ``_fetch_reflection_
+        buckets`` uses for its own Wilson/relevance RRF fusion
+        (``_relevance_rank_map`` + ``_merge_relevance_rank_maps``), applied
+        per requested kind against that kind's own memory + namespace
+        pair: "reflection" -> the episodic memory's
+        projects/{actor}/reflections/ + general/reflections/ namespaces
+        (mirroring ``retrieve``'s own fan-out); "semantic" -> the semantic
+        memory's projects/{actor}/semantic/ + general/semantic/ namespaces
+        (mirroring ``semantic_list``'s namespace resolution). The two
+        namespace results are merged via ``_merge_relevance_rank_maps``
+        (namespace-fair round robin) into one rank map per kind, then
+        combined into the returned ``(kind, id) -> rank`` map — ranks are
+        only ever compared within their own kind by the caller, never
+        across kinds.
+
+        The ``None`` vs ``{}`` distinction is load-bearing (see the
+        Protocol docstring): a kind whose EVERY namespace lookup fails
+        contributes nothing and is treated as failed; a kind with at
+        least one successful namespace lookup contributes its (possibly
+        empty) results normally. Blank query, or EVERY requested kind
+        failing that way, returns ``None`` / ``{}`` respectively — see
+        below. A blank query short-circuits to ``{}`` (nothing was
+        searched, not an error) without any wire call."""
+        if not query or not query.strip():
+            return {}
+        q = query.strip()
+        actor_id = resolve_actor_id(self._project)
+
+        out: dict[tuple[str, str], int] = {}
+        any_kind_succeeded = False
+        for kind in kinds:
+            if kind == "reflection":
+                memory_id = self._cfg.episodic.memory_id
+                ns_kind = "reflections"
+            elif kind == "semantic":
+                memory_id = self._cfg.semantic.memory_id
+                ns_kind = "semantic"
+            else:
+                continue
+
+            project_ns = resolve_namespace(actor_id, ns_kind)
+            general_ns = resolve_namespace("general", ns_kind)
+            namespaces = [project_ns]
+            if general_ns != project_ns:
+                namespaces.append(general_ns)
+
+            merged = self._merge_relevance_rank_maps([
+                self._relevance_rank_map(q, ns, top_k, memory_id=memory_id)
+                for ns in namespaces
+            ])
+            if merged is None:
+                # Every namespace call for this kind failed -- this kind
+                # contributes nothing (not even an empty-result entry);
+                # any_kind_succeeded stays whatever the other kinds set it
+                # to, so one kind failing doesn't blank out a sibling
+                # kind's genuine results.
+                continue
+            any_kind_succeeded = True
+            for rid, rank in merged.items():
+                out[(kind, rid)] = rank
+        return out if any_kind_succeeded else None
 
     def _parse_reflection_record(
         self,
@@ -512,14 +873,7 @@ class AgentCoreBackend:
             # prior in services/relevant.py sees the real overlooked count
             # instead of silently defaulting to 0 (PR #84 review).
             "times_overlooked": overlooked_count,
-            # AgentCore has no exposure/rating sweep, so "ignored" (shown
-            # but never rated) is never tracked here — 0 is the true
-            # recorded signal, not a stand-in for a missing feature. The
-            # Wilson prior therefore degrades to a monotone function of
-            # (useful_count + times_overlooked) on this backend, which is
-            # equivalent to the pre-existing popularity ordering below, not
-            # a corruption of it.
-            "times_ignored": 0,
+            "times_ignored": _count_body_first("ignored_count", "ignored_count"),
             "times_misled": _count_body_first("times_misled", "times_misled"),
             "updated_at": updated_at_value,
             # Internal ranking/bucketing helpers — stripped by
@@ -943,16 +1297,10 @@ class AgentCoreBackend:
         the declared metadata counters the migrator writes.
 
         Counters come from the declared numberValue metadata keys
-        (useful_count / times_misled / overlooked_count → times_overlooked);
-        the collapsed rating timestamp comes from last_credited_at stringValue.
-        Absent metadata (AWS-extracted or freshly-created records) → zeroed
-        counters, never None.
-
-        times_ignored is deliberately not populated here: agentcore has no
-        exposure/rating sweep to derive it from, so it falls through to the
-        SemanticMemory dataclass default of 0 — the true recorded signal,
-        not a corruption of it (mirrors the reflection-dict handling in
-        _parse_reflection_record above)."""
+        (useful_count / times_misled / overlooked_count → times_overlooked /
+        ignored_count → times_ignored); the collapsed rating timestamp comes
+        from last_credited_at stringValue. Absent metadata (AWS-extracted or
+        freshly-created records) → zeroed counters, never None."""
         # Local import: the SemanticMemory read model lives in the services
         # layer; importing at module scope would invert the storage→services
         # layering. This is a lightweight frozen dataclass, imported lazily.
@@ -1028,6 +1376,8 @@ class AgentCoreBackend:
             last_misled_at=None,
             times_overlooked=_count("overlooked_count"),
             last_overlooked_at=None,
+            times_ignored=_count("ignored_count"),
+            last_ignored_at=None,
         )
 
     def semantic_update_text(self, *, id: str, content: str) -> None:
@@ -1345,12 +1695,82 @@ class AgentCoreBackend:
         items: list[tuple[str, str]],
         source: str,
     ) -> None:
-        """No-op: agentcore mode has no exposure log (see list_session_exposures)."""
+        """Write exposures to the local ledger when one is available.
+
+        Agentcore mode has no AWS-side exposure log (memory records carry
+        no per-session concept); the SAME shared ``exposure_log.record``
+        primitive sqlite mode uses is delegated to against the local
+        ``memory.db`` instead, keyed by the backend's ``local_conn`` (wired
+        by ``storage/factory.py`` from the caller's local connection — see
+        ``hooks/contextual_inject.py`` / ``hooks/session_bootstrap.py``).
+
+        Falls back to the pre-existing no-op when ``local_conn`` is None
+        (no local db available, e.g. plain unit-test construction) or when
+        ``session_id`` is empty — matching ``exposure_log.record``'s own
+        best-effort short-circuit. Best-effort overall: any local-db error
+        is swallowed rather than raised, so a ledger write can never block
+        the caller's exposure-tracking path (mirrors the contextual_inject
+        hook's own best-effort wrapper around this call).
+        """
+        if self._local_conn is None or not session_id:
+            return
+        try:
+            from better_memory.services import exposure_log
+
+            exposure_log.record(
+                self._local_conn,
+                session_id=session_id,
+                items=items,
+                source=source,
+                now=datetime.now(UTC).isoformat(),
+            )
+            self._local_conn.commit()
+        except Exception:  # noqa: BLE001 - exposures must never block
+            pass
 
     def list_session_exposures(self, *, session_id: str) -> dict[str, Any]:
-        """Per spec Rating model section: no exposure log in agentcore mode.
-        Returns the standard envelope shape with an empty exposures list."""
-        return {"session_id": session_id, "exposures": []}
+        """List unrated exposures from the local ledger when one is available.
+
+        ``session_id`` re-resolution mirrors ``_require_session_id``'s
+        fallback chain (live env/marker, then the construction-time id) but
+        NEVER raises: an empty/unresolvable session id degrades to the
+        empty envelope ``{"session_id": None, "exposures": []}``, matching
+        sqlite mode's own no-session shape
+        (``SessionBootstrapService.list_session_exposures``).
+
+        When no local ledger is available (``local_conn`` is None — no AWS
+        exposure log exists to fall back to), returns the envelope with an
+        empty exposures list — the pre-existing agentcore-mode contract.
+        Otherwise builds the same envelope shape as sqlite mode over
+        ``exposure_log.list_unrated``'s grouped/deduped/display-joined rows.
+        """
+        sid = session_id
+        if not sid:
+            try:
+                sid = self._require_session_id("list_session_exposures")
+            except ValueError:
+                return {"session_id": None, "exposures": []}
+
+        if self._local_conn is None:
+            return {"session_id": sid, "exposures": []}
+
+        from better_memory.services import exposure_log
+
+        rows = exposure_log.list_unrated(self._local_conn, session_id=sid)
+        return {
+            "session_id": sid,
+            "exposures": [
+                {
+                    "kind": r["memory_kind"],
+                    "id": r["memory_id"],
+                    **({"title": r["display"]} if r["memory_kind"] == "reflection"
+                       else {"content": r["display"]}),
+                    "exposed_at": r["exposed_at"],
+                    "source": r["source"],
+                }
+                for r in rows
+            ],
+        }
 
     def credit_one(
         self,
@@ -1361,25 +1781,99 @@ class AgentCoreBackend:
         classification: str,
         evidence: str | None = None,
     ) -> dict[str, Any]:
-        """Apply one classification → counter increment on a record.
+        """Apply one classification → counter increment on a record,
+        mid-session (the memory.credit MCP tool path).
 
         Counter mapping (spec Rating model section):
             cited / shaped → useful_count
-            ignored        → ignored_count
             misled         → times_misled
             overlooked     → overlooked_count
 
-        `evidence` is accepted for StorageBackend protocol parity only.
-        Agentcore mode has no exposure table (see list_session_exposures)
-        and therefore nowhere to store a rating-evidence line; it is not
-        validated or persisted here — sqlite is the only backend with an
-        evidence contract (MemoryRatingService)."""
-        counter_key = _RATING_TO_COUNTER.get(classification)
-        if counter_key is None:
+        Sqlite parity (services/memory_rating.py MemoryRatingService.
+        credit_one), added by agentcore-parity Task 7:
+        - classification='ignored' is REJECTED here with the same error
+          text sqlite uses — 'ignored' is the session-end sweep's
+          exclusive write path (apply_session_ratings); accepting it here
+          would let a single mid-session call bump ignored_count outside
+          the sweep's skip-bucket accounting.
+        - `evidence` is now validated via the shared
+          services.memory_rating.validate_evidence helper (non-empty,
+          post-strip, <=EVIDENCE_MAX_CHARS) — the same contract sqlite
+          enforces. `evidence` defaults to None only as a compat shim for
+          callers not yet updated to pass it; None fails validation with a
+          clear ValueError rather than a crash (mirrors sqlite's
+          credit_one docstring).
+
+        On a successful AWS counter push, best-effort stamps the local
+        exposure row (rated_at/classification/evidence) via
+        exposure_log.stamp when a local ledger is wired (self._local_conn)
+        — never raises; mirrors the write-then-best-effort-ledger pattern
+        used elsewhere in this class (record_exposures,
+        _record_retrieve_exposures). Agentcore has no skip-bucket concept
+        on this path (not_exposed/already_rated are sweep-only — see
+        apply_session_ratings); exposure_log.stamp is itself a no-op when
+        no matching unrated row exists, so this call is safe regardless of
+        ledger state.
+        """
+        from better_memory.services.memory_rating import validate_evidence
+
+        if classification == "ignored":
+            raise ValueError(
+                "credit_one does not accept classification='ignored'; "
+                "'ignored' is the session-end sweep default."
+            )
+        if classification not in _RATING_TO_COUNTER:
             raise ValueError(
                 f"classification={classification!r} is not one of "
                 f"{sorted(_RATING_TO_COUNTER)}"
             )
+        trimmed_evidence = validate_evidence(classification, evidence, where="credit")
+
+        result = self._credit_counter(kind=kind, id=id, classification=classification)
+
+        if result["applied"] is not None and self._local_conn is not None:
+            try:
+                from better_memory.services import exposure_log
+
+                exposure_log.stamp(
+                    self._local_conn,
+                    session_id=session_id,
+                    kind=kind,
+                    memory_id=id,
+                    classification=classification,
+                    evidence=trimmed_evidence,
+                    now=datetime.now(UTC).isoformat(),
+                )
+                self._local_conn.commit()
+            except Exception:  # noqa: BLE001 - local stamp must never block credit_one
+                pass
+
+        return result
+
+    def _credit_counter(
+        self, *, kind: str, id: str, classification: str
+    ) -> dict[str, Any]:
+        """AWS-side counter bump for one (kind, id, classification) — the
+        wire mechanics shared by credit_one (mid-session, rejects
+        'ignored') and apply_session_ratings (the session-end sweep, the
+        only caller that reaches this with classification='ignored' —
+        'ignored' → ignored_count is legitimate only via the sweep, design
+        §3.2/§4). Callers are responsible for validating `classification`
+        before calling this (it is a dict lookup here, not re-validated).
+
+        Routes by kind (semantic vs episodic memory), and — for episodic
+        reflections — by source_backend: migrated (SQLite-origin) records
+        read-modify-write the JSON content BODY (metadata writes are
+        silently dropped there); AWS-extracted / semantic records use the
+        declared metadata path.
+
+        Returns {"applied": classification, "skipped": None} on success or
+        {"applied": None, "skipped": <error message>} on a per-record
+        batch-update failure (failedRecords). Raises _ClientError on a hard
+        404 (ResourceNotFoundException) after the transient-404 retry is
+        exhausted — callers decide whether that counts as memory_missing.
+        """
+        counter_key = _RATING_TO_COUNTER[classification]
 
         # Route the lookup + update to the right memory based on kind.
         # Semantic records live in self._cfg.semantic.memory_id; looking
@@ -1452,15 +1946,49 @@ class AgentCoreBackend:
         self,
         *,
         session_id: str,
-        ratings: list[dict[str, str]],
+        ratings: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Batch rating apply — sqlite-parity validation and return shape.
+        """The real session-end rating sweep (agentcore-parity Task 7,
+        design §2). Runs, in order:
 
-        Mirrors MemoryRatingService.apply_session_ratings: the whole batch
-        is validated BEFORE any wire call (non-empty session_id/ratings,
-        kind in {reflection, semantic}, class in the five rating classes,
-        non-empty string id, no duplicate (kind, id) pairs — ValueError on
-        any violation), then each entry runs through credit_one.
+        (a) Validate the WHOLE batch via the shared
+            services.memory_rating.validate_ratings_batch helper — batch-
+            atomic (ValueError on the first violation, zero wire calls,
+            nothing applied), identical error text and evidence contract
+            to sqlite's MemoryRatingService.apply_session_ratings.
+        (b) Per entry, when a local exposure ledger is wired
+            (self._local_conn): look up its exposure rows for
+            (session_id, kind, id). No rows → skipped.not_exposed. Rows
+            all already rated → skipped.already_rated. Otherwise stamp
+            every unrated row via exposure_log.stamp (rated_at,
+            classification, evidence) BEFORE the AWS push — a later AWS
+            counter failure does not roll this stamp back (best-effort,
+            per-item, matching this file's established style elsewhere).
+            Without a local ledger (self._local_conn is None), this step
+            is skipped entirely — not_exposed/already_rated never fire,
+            matching the pre-Task-7 behaviour.
+        (c) Push the counter bump to AWS via the shared `_credit_counter`
+            wire mechanics credit_one also uses — INCLUDING
+            classification='ignored' → ignored_count; the sweep is the
+            only legitimate writer of ignores (credit_one rejects it). A
+            hard 404 (ResourceNotFoundException, or a per-record
+            batch-update failedRecords entry) counts as
+            skipped.memory_missing. Any OTHER AWS failure (throttling,
+            access-denied, a transient network error — batch APIs share a
+            20 TPS pool, so throttling is plausible) is best-effort: the
+            local stamp from (b) already committed and is NOT lost, the
+            entry counts as applied (design's error-handling section:
+            "All AWS calls best-effort ... counters are statistics, not
+            ledgers"), and the sweep keeps going. Nothing raised by step
+            (c) ever aborts the sweep.
+        (d) After the loop, ONE best-effort CreateEvent receipt
+            (extractionMode='SKIP' so AgentCore's built-in extraction
+            ignores it; metadata={'type': {'stringValue': 'ratings'}};
+            sessionId=the resolved session; payload = one blob item with
+            the JSON of every entry that was actually applied, including
+            evidence) — only when at least one entry applied. Event
+            failure is swallowed and never affects the sweep's return
+            value.
 
         Returns the sqlite shape::
 
@@ -1470,43 +1998,20 @@ class AgentCoreBackend:
              "skipped":  {"not_exposed": int, "already_rated": int,
                           "memory_missing": int, "memory_retired": int}}
 
-        Agentcore has no exposure log, so not_exposed / already_rated /
-        memory_retired never fire here; a missing record (GetMemoryRecord
-        404) or a per-record batch-update failure counts as
-        memory_missing. There is no AWS-side atomicity — entries already
-        credited stay credited if a later entry raises."""
+        memory_retired never fires here — agentcore reflections carry no
+        equivalent "superseded before rating" lifecycle check on this
+        path. There is no AWS-side atomicity for step (c) — entries
+        already credited/stamped stay that way regardless of what happens
+        to a later entry, and this method itself never raises once past
+        the up-front batch validation in step (a)."""
         if not session_id:
             raise ValueError("session_id must be non-empty")
         if not ratings:
             raise ValueError("ratings must be non-empty")
 
-        valid_kinds = {"reflection", "semantic"}
-        seen: set[tuple[str, str]] = set()
-        for i, r in enumerate(ratings):
-            for field_name in ("kind", "class", "id"):
-                if field_name not in r:
-                    raise ValueError(
-                        f"ratings[{i}].{field_name}: missing required field"
-                    )
-            kind = r["kind"]
-            rid = r["id"]
-            cls = r["class"]
-            if kind not in valid_kinds:
-                raise ValueError(
-                    f"ratings[{i}].kind: invalid {kind!r}; "
-                    f"expected one of {valid_kinds}"
-                )
-            if cls not in _RATING_TO_COUNTER:
-                raise ValueError(
-                    f"ratings[{i}].class: invalid {cls!r}; "
-                    f"expected one of {set(_RATING_TO_COUNTER)}"
-                )
-            if not isinstance(rid, str) or not rid:
-                raise ValueError(f"ratings[{i}].id: must be non-empty string")
-            key = (kind, rid)
-            if key in seen:
-                raise ValueError(f"ratings[{i}]: duplicate (kind, id) = {key!r}")
-            seen.add(key)
+        from better_memory.services.memory_rating import validate_ratings_batch
+
+        ratings = validate_ratings_batch(ratings)
 
         applied: dict[str, int] = {cls: 0 for cls in _RATING_TO_COUNTER}
         skipped: dict[str, int] = {
@@ -1515,29 +2020,109 @@ class AgentCoreBackend:
             "memory_missing": 0,
             "memory_retired": 0,
         }
+        now_iso = datetime.now(UTC).isoformat()
+        rated_entries: list[dict[str, Any]] = []
+
         for r in ratings:
-            try:
-                result = self.credit_one(
+            kind = r["kind"]
+            rid = r["id"]
+            cls = r["class"]
+            evidence = r["_evidence"]
+
+            if self._local_conn is not None:
+                from better_memory.services import exposure_log
+
+                rows = self._local_conn.execute(
+                    "SELECT rated_at FROM session_memory_exposure "
+                    "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?",
+                    (session_id, kind, rid),
+                ).fetchall()
+                if not rows:
+                    skipped["not_exposed"] += 1
+                    continue
+                if all(row["rated_at"] is not None for row in rows):
+                    skipped["already_rated"] += 1
+                    continue
+                exposure_log.stamp(
+                    self._local_conn,
                     session_id=session_id,
-                    kind=r["kind"],
-                    id=r["id"],
-                    classification=r["class"],
+                    kind=kind,
+                    memory_id=rid,
+                    classification=cls,
+                    evidence=evidence,
+                    now=now_iso,
                 )
-            except _ClientError as exc:
-                code = exc.response.get("Error", {}).get("Code", "")
-                if code != "ResourceNotFoundException":
-                    raise
-                # The record no longer exists — sqlite calls this
-                # memory_missing; keep rating the rest of the batch.
-                skipped["memory_missing"] += 1
+                self._local_conn.commit()
+
+            try:
+                result = self._credit_counter(kind=kind, id=rid, classification=cls)
+            except Exception as exc:  # noqa: BLE001 - AWS counter push must never abort the sweep
+                if isinstance(exc, _ClientError):
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code == "ResourceNotFoundException":
+                        # The record no longer exists — sqlite calls this
+                        # memory_missing; keep rating the rest of the batch.
+                        # The local stamp above (if any) is NOT rolled back.
+                        skipped["memory_missing"] += 1
+                        continue
+                # Any OTHER AWS failure — throttling, access-denied, a
+                # transient network error, anything besides a confirmed
+                # "the record is gone" 404 (batch APIs share a 20 TPS pool,
+                # so throttling is plausible). Per the design's
+                # error-handling section ("All AWS calls best-effort ...
+                # counters are statistics, not ledgers"): the local stamp
+                # committed above is the session's evidence-of-record
+                # (classification + evidence, feeding the UI and the
+                # skip-bucket accounting) and must NOT be lost to a
+                # throttled/denied AWS call. The rating IS applied — from
+                # the ledger's and the rater's perspective — even though
+                # this one counter increment was not; count it and keep
+                # sweeping the rest of the batch. apply_session_ratings
+                # must never raise from an AWS failure.
+                applied[cls] += 1
+                rated_entries.append(
+                    {"kind": kind, "id": rid, "class": cls, "evidence": evidence}
+                )
                 continue
-            if result["applied"] is not None:
-                applied[r["class"]] += 1
-            else:
+            if result["applied"] is None:
                 # Per-record batch-update failure (failedRecords) — the
                 # closest sqlite skip reason is memory_missing.
                 skipped["memory_missing"] += 1
+                continue
+
+            applied[cls] += 1
+            rated_entries.append(
+                {"kind": kind, "id": rid, "class": cls, "evidence": evidence}
+            )
+
+        if rated_entries:
+            try:
+                self._emit_ratings_event(session_id=session_id, rated=rated_entries)
+            except Exception:  # noqa: BLE001 - receipt event must never block the sweep
+                pass
+
         return {"session_id": session_id, "applied": applied, "skipped": skipped}
+
+    def _emit_ratings_event(
+        self, *, session_id: str, rated: list[dict[str, Any]]
+    ) -> None:
+        """Best-effort CreateEvent receipt for a successful rating sweep
+        (design §3.2/§4 "Ratings event (C-lite)"). extractionMode='SKIP'
+        keeps this out of AgentCore's built-in episodicMemoryStrategy
+        extraction — it is a durable, team-visible receipt only; the
+        read/UI path is deferred to a future PR. Callers wrap this in a
+        try/except — a failure here must never affect the sweep's return
+        value."""
+        actor_id = resolve_actor_id(self._project)
+        self._data.create_event(
+            memoryId=self._cfg.episodic.memory_id,
+            actorId=actor_id,
+            sessionId=session_id,
+            eventTimestamp=datetime.now(UTC),
+            extractionMode="SKIP",
+            payload=[{"blob": {"ratings": rated}}],
+            metadata={"type": {"stringValue": "ratings"}},
+        )
 
     # ----- Synthesis: no-ops in agentcore mode -----
 

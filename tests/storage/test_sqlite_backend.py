@@ -294,3 +294,53 @@ def test_synthesize_next_get_context_returns_none_when_no_pending(backend) -> No
     assert backend.synthesize_next_get_context(project="testproj") is None
 
 
+# ----- Task 6: relevance_ranks -----
+
+
+def test_relevance_ranks_finds_seeded_fts_row(backend, memory_conn) -> None:
+    """Protocol-completeness check: a reflection whose title matches the
+    query via BM25 (reflection_fts, auto-populated by the schema's insert
+    trigger) shows up in the returned (kind, id) -> rank map."""
+    memory_conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, phase, polarity, use_cases, hints, "
+        " confidence, status, scope, created_at, updated_at) VALUES "
+        "('refl-fts-1', 'Retention archives by confidence', 'testproj', "
+        " 'general', 'do', 'uc', '[]', 0.9, 'confirmed', 'project', "
+        " '2026-05-25T00:00:00Z', '2026-05-25T00:00:00Z')"
+    )
+    memory_conn.commit()
+
+    result = backend.relevance_ranks(
+        query="how does retention archive things", kinds=("reflection",),
+    )
+    assert result == {("reflection", "refl-fts-1"): 0}
+
+
+def test_relevance_ranks_blank_query_returns_empty(backend) -> None:
+    assert backend.relevance_ranks(query="   ") == {}
+
+
+def test_relevance_ranks_no_match_returns_empty(backend) -> None:
+    assert backend.relevance_ranks(query="nothing matches anything here") == {}
+
+
+def test_relevance_ranks_kinds_filter(backend, memory_conn) -> None:
+    """Requesting only kinds=("semantic",) must not surface reflection
+    matches, even when a matching reflection exists."""
+    memory_conn.execute(
+        "INSERT INTO reflections "
+        "(id, title, project, phase, polarity, use_cases, hints, "
+        " confidence, status, scope, created_at, updated_at) VALUES "
+        "('refl-fts-2', 'Retention archives by confidence', 'testproj', "
+        " 'general', 'do', 'uc', '[]', 0.9, 'confirmed', 'project', "
+        " '2026-05-25T00:00:00Z', '2026-05-25T00:00:00Z')"
+    )
+    memory_conn.commit()
+
+    result = backend.relevance_ranks(
+        query="how does retention archive things", kinds=("semantic",),
+    )
+    assert result == {}
+
+

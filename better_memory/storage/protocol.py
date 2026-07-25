@@ -100,18 +100,24 @@ class StorageBackend(Protocol):
         times_misled, updated_at}``. ``times_overlooked`` and
         ``times_ignored`` feed the Wilson-lower-bound prior in
         ``services/relevant.py``; both backends guarantee the keys are
-        present, but agentcore's ``times_ignored`` is always ``0`` (it has
-        no exposure/rating sweep to derive it from). Sync —
+        present (sqlite reads times_ignored column directly; agentcore reads
+        ignored_count counter — body-first for migrated reflections, metadata
+        numberValue for AWS-extracted). Sync —
         no embedder call (reflections are pre-extracted in both backends;
-        sqlite mode ranks by Wilson lower bound on (useful+overlooked)/rated,
-        computed in Python; agentcore mode applies the legacy linear formula
-        client-side over metadata counters).
+        both backends rank by the SAME Wilson lower bound on
+        (useful+overlooked)/rated formula and tiebreaks — sqlite computes it
+        in Python over its columns, agentcore computes it client-side over
+        the metadata/body counters it read back; the exploration slot is
+        identical on both).
 
         ``query`` optionally supplies a natural-language description of the
         task at hand. sqlite mode fuses a BM25 relevance ranking over
         title / use_cases / hints into the Wilson-prior via RRF; agentcore
-        mode ignores it. Omitting it yields the Wilson-prior alone, which
-        is identical for every caller regardless of the work being done.
+        mode fuses a server-side semantic-search ranking instead
+        (`RetrieveMemoryRecords`, no BM25 leg — the semantic search
+        subsumes it), same RRF shape, degrading to the Wilson-only order on
+        an AWS error. Omitting it yields the Wilson-prior alone, which is
+        identical for every caller regardless of the work being done.
 
         This method is the canonical path for the MCP ``memory.retrieve``
         tool handler and the ``memory.start_episode`` handler in
@@ -258,7 +264,18 @@ class StorageBackend(Protocol):
         *,
         session_id: str,
     ) -> dict[str, Any]:
-        """List unrated memory exposures for the given session."""
+        """List unrated memory exposures for the given session.
+
+        Backend-agnostic: both backends read the SAME local
+        ``session_memory_exposure`` table via ``services.exposure_log``.
+        SqliteBackend always has a connection; AgentCoreBackend uses one
+        when available (``local_conn``, wired from the caller's local
+        ``memory.db`` connection — see ``storage/factory.py`` and the
+        ``contextual_inject`` / ``session_bootstrap`` hooks) and otherwise
+        degrades to the empty envelope ``{"session_id": ..., "exposures":
+        []}``. AgentCore's memory records carry no exposure log of their
+        own — session-operational state like this always lives locally,
+        never in AgentCore, regardless of where memory CONTENT lives."""
         ...
 
     def apply_session_ratings(
@@ -277,9 +294,15 @@ class StorageBackend(Protocol):
         items: list[tuple[str, str]],
         source: str,
     ) -> None:
-        """Record (kind, id) memory exposures for later rating. Sqlite writes
-        session_memory_exposure rows; agentcore is a documented no-op (it has
-        no exposure log - rating flows through credit_one)."""
+        """Record (kind, id) memory exposures for later rating.
+
+        Backend-agnostic: both backends write the SAME local
+        ``session_memory_exposure`` table via ``services.exposure_log``.
+        SqliteBackend always has a connection; AgentCoreBackend uses the
+        local ledger connection when one is available (``local_conn``) and
+        otherwise no-ops — AgentCore's memory records carry no exposure
+        log of their own, so this table is always local session-operational
+        state, never AgentCore-side content, regardless of backend."""
         ...
 
     def credit_one(
@@ -294,11 +317,63 @@ class StorageBackend(Protocol):
         """Apply a single rating for an exposed memory. Returns ApplyOutcome.
 
         `evidence` is a one-line string (what the memory changed, or a
-        quote); non-ignored classes require a non-empty value —
-        SqliteBackend forwards it to MemoryRatingService, which validates
-        and stores it. AgentCoreBackend accepts the parameter for
-        signature parity but has no evidence storage (no exposure table)
-        and does not validate or persist it — see AgentCoreBackend.credit_one.
+        quote); non-ignored classes require a non-empty value, validated
+        identically on both backends (`services.memory_rating.validate_evidence`
+        underneath both SqliteBackend and AgentCoreBackend). Both backends
+        also reject `classification='ignored'` here — 'ignored' is the
+        session-end sweep's exclusive write path
+        (`apply_session_ratings`). On a successful AWS counter push,
+        AgentCoreBackend best-effort stamps the local exposure row
+        (`rated_at`/`classification`/`evidence`) when a local ledger is
+        wired — see AgentCoreBackend.credit_one.
+        """
+        ...
+
+    # ----- Contextual relevance -----
+
+    def relevance_ranks(
+        self,
+        *,
+        query: str,
+        kinds: tuple[str, ...] = ("reflection", "semantic"),
+        top_k: int = 50,
+    ) -> dict[tuple[str, str], int] | None:
+        """Server-side relevance rank map for the contextual evidence gate
+        (``services/relevant.py``'s ``retrieve_relevant``). Returns
+        ``{(kind, id): rank}`` -- 0 is the best match, per kind (ranks are
+        not comparable ACROSS kinds; each (kind, id) is only ever looked up
+        for its own candidate). Never raises.
+
+        The empty-dict / ``None`` distinction is load-bearing, NOT
+        interchangeable: ``{}`` means the lookup ran and genuinely found no
+        matches (a legitimate negative result -- the caller's evidence gate
+        must respect it, not paper over it with a keyword-hit fallback).
+        ``None`` means the lookup itself could not run/complete (e.g. an
+        AWS error on every namespace) -- THIS is the caller's designated
+        signal to degrade to the keyword-hit fallback. Conflating the two
+        would let keyword overlap re-qualify memories the server-side
+        search legitimately rejected (design spec
+        2026-07-24-agentcore-parity-design.md §3).
+
+        SqliteBackend: a thin wrapper over its existing BM25
+        (``reflection_fts``) + vector legs, RRF-merged per kind. Its own
+        legs never raise (they degrade internally), so it always returns a
+        dict, never ``None``. Provided for protocol completeness only --
+        ``retrieve_relevant``'s sqlite path keeps calling those legs
+        directly against its own ``conn`` parameter and never calls this
+        method, so sqlite's contextual-gate behavior is unaffected by this
+        method's existence.
+
+        AgentCoreBackend: server-side semantic search
+        (``retrieve_memory_records``) fanned out per kind's project +
+        general namespace pair (reusing ``_relevance_rank_map`` /
+        ``_merge_relevance_rank_maps``, the same machinery ``retrieve``
+        uses for its own RRF fusion with the Wilson prior), ranked by
+        result order. Best-effort per namespace: a kind whose EVERY
+        namespace call fails contributes ``None`` (propagated up to an
+        overall ``None`` only if every requested kind fails that way);
+        any kind with at least one successful namespace call contributes
+        its (possibly empty) results to the overall dict.
         """
         ...
 

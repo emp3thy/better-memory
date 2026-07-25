@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -198,27 +199,19 @@ def test_fired_counters(bm_home, monkeypatch, capsys):
     assert _diag_value(bm_home, "contextual_fired_pretool") == 1
 
 
-def test_agentcore_mode_does_not_open_sqlite_connection(bm_home, monkeypatch, capsys):
-    """storage_backend=agentcore must never call connect() (better_memory.db.connection.connect).
+def test_agentcore_mode_opens_local_conn_for_exposure_ledger(bm_home, monkeypatch, capsys):
+    """storage_backend=agentcore now opens a REAL local connection too — for
+    the exposure ledger (session-operational state), never for memory
+    CONTENT. connect() IS called; build_backend receives the real conn as
+    memory_conn; retrieve_relevant still gets conn=None (agentcore has no
+    FTS/vec substrate — see services/relevant.py's docstring).
 
-    A true end-to-end agentcore hook test needs boto3/botocore stubs the hook-level
-    suite doesn't set up, so this narrows to: connect() is not invoked, and
-    build_backend is called with memory_conn=None, when storage_backend != sqlite.
+    A true end-to-end agentcore hook test needs boto3/botocore stubs the
+    hook-level suite doesn't set up, so build_backend itself stays stubbed;
+    only the local connection's threading is verified here.
     """
     monkeypatch.setenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", "both")
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
-
-    connect_calls = []
-
-    class _FakeConn:
-        def close(self):
-            pass
-
-    def _track_connect(*args, **kwargs):
-        connect_calls.append(args)
-        return _FakeConn()
-
-    monkeypatch.setattr(hook, "connect", _track_connect)
 
     build_backend_calls = []
 
@@ -238,6 +231,15 @@ def test_agentcore_mode_does_not_open_sqlite_connection(bm_home, monkeypatch, ca
 
     monkeypatch.setattr(hook, "build_backend", _fake_build_backend)
 
+    retrieve_relevant_calls = []
+    real_retrieve_relevant = hook.retrieve_relevant
+
+    def _tracking_retrieve_relevant(*args, **kwargs):
+        retrieve_relevant_calls.append(kwargs)
+        return real_retrieve_relevant(*args, **kwargs)
+
+    monkeypatch.setattr(hook, "retrieve_relevant", _tracking_retrieve_relevant)
+
     monkeypatch.setattr(
         sys, "stdin",
         io.StringIO(json.dumps({
@@ -248,9 +250,102 @@ def test_agentcore_mode_does_not_open_sqlite_connection(bm_home, monkeypatch, ca
         hook.main()
     assert e.value.code == 0
 
-    assert connect_calls == []
+    # A real local connection was opened and threaded through as memory_conn
+    # — no longer None (that was the pre-Task-2 contract).
     assert len(build_backend_calls) == 1
-    assert build_backend_calls[0]["memory_conn"] is None
+    assert build_backend_calls[0]["memory_conn"] is not None
+    # retrieve_relevant still gets conn=None for agentcore: that parameter
+    # means "sqlite FTS/vec index available", not "any local connection at
+    # all" — agentcore has no reflection_fts / *_embeddings substrate.
+    assert len(retrieve_relevant_calls) == 1
+    assert retrieve_relevant_calls[0]["conn"] is None
+
+
+def test_agentcore_mode_exposure_lands_in_local_ledger(bm_home, monkeypatch, capsys):
+    """Task 2: a `contextual` exposure survives a full hook run and lands as
+    a session_memory_exposure row in the local memory.db, even though
+    memory CONTENT (the reflection itself) stays in AgentCore. The fake
+    backend's record_exposures forwards to the same shared exposure_log
+    primitive AgentCoreBackend.record_exposures uses (unit-tested directly
+    in tests/storage/test_agentcore_unit.py) — this test proves the HOOK
+    wiring: the connection the hook opens is the one the ledger write lands
+    in."""
+    from better_memory.services import exposure_log
+
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_INJECT_MODE", "both")
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+
+    class _FakeAgentCoreBackend:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def retrieve(self, **kwargs):
+            return {
+                "do": [{
+                    "id": "refl-agentcore-1",
+                    "title": "widget deploy playbook",
+                    "use_cases": "deploy widget service",
+                    "hints": [],
+                    "confidence": 0.8,
+                    "tech": None,
+                    "evidence_count": 0,
+                    "useful_count": 0,
+                    "times_overlooked": 0,
+                    "times_ignored": 0,
+                    "times_misled": 0,
+                    "updated_at": None,
+                }],
+                "dont": [],
+                "neutral": [],
+            }
+
+        def semantic_list(self, **kwargs):
+            return []
+
+        def record_exposures(self, *, session_id, items, source):
+            exposure_log.record(
+                self._conn,
+                session_id=session_id,
+                items=items,
+                source=source,
+                now=datetime.now(UTC).isoformat(),
+            )
+            self._conn.commit()
+
+    build_backend_calls = []
+
+    def _fake_build_backend(**kwargs):
+        build_backend_calls.append(kwargs)
+        return _FakeAgentCoreBackend(kwargs["memory_conn"])
+
+    monkeypatch.setattr(hook, "build_backend", _fake_build_backend)
+
+    monkeypatch.setattr(
+        sys, "stdin",
+        io.StringIO(json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "deploy the widget service now",
+            "cwd": ".", "session_id": "ac-sess-ledger",
+        })),
+    )
+    with pytest.raises(SystemExit) as e:
+        hook.main()
+    assert e.value.code == 0
+
+    assert len(build_backend_calls) == 1
+    assert build_backend_calls[0]["memory_conn"] is not None
+
+    conn = connect(bm_home / "memory.db")
+    try:
+        row = conn.execute(
+            "SELECT source FROM session_memory_exposure "
+            "WHERE session_id = ? AND memory_id = ?",
+            ("ac-sess-ledger", "refl-agentcore-1"),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["source"] == "contextual"
 
 
 def test_exposure_write_failure_does_not_block_injection(bm_home, monkeypatch, capsys):

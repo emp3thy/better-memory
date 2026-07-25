@@ -196,7 +196,20 @@ def test_relevant_reads_agentcore_semantic_counters_and_content(
     surfaces the real content + non-zero useful_count. Before the fix,
     semantic_list returned dicts and getattr(s,'content') / getattr(s,
     'useful_count') defaulted to '' / 0, so this memory would never clear
-    the keyword-fallback evidence gate and semantic injection was dead."""
+    the keyword-fallback evidence gate and semantic injection was dead.
+
+    retrieve_memory_records is explicitly made to raise here: this test
+    predates Task 6's relevance_ranks (a server-side search leg
+    retrieve_relevant now also consults in agentcore mode) and exercises
+    the keyword-fallback path specifically, not the relevance-rank-map
+    path -- an unconfigured MagicMock would otherwise behave as a
+    legitimate empty search result (MagicMock's default __iter__), which
+    correctly does NOT trigger the keyword fallback post-Task-6 and would
+    make this assertion fail for reasons unrelated to what it actually
+    tests (semantic_list's attribute-access parity)."""
+    mock_data_client.retrieve_memory_records.side_effect = RuntimeError(
+        "relevance search intentionally unavailable in this test"
+    )
     # No reflections; semantic namespace has one strongly-matching memory.
     mock_data_client.list_memory_records.return_value = {
         "memoryRecordSummaries": [
