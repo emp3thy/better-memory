@@ -721,10 +721,11 @@ def _ensure_semantic_schema(
 
     Behaviour:
     - If the live schema already declares ``source_row_id`` → return.
-    - Otherwise widen it in place via ``update_memory_strategy``, sending the
-      FULL :data:`SEMANTIC_METADATA_SCHEMA` (which declares ``source_row_id``
-      plus the counters). The previous empty ``customExtractionConfiguration``
-      payload could never add the key.
+    - Otherwise widen it in place via ``UpdateMemory``'s
+      ``memoryStrategies.modifyMemoryStrategies`` (the only strategy-schema
+      mutation the SDK actually exposes — there is no per-strategy update
+      operation), sending the FULL :data:`SEMANTIC_METADATA_SCHEMA` (which
+      declares ``source_row_id`` plus the counters).
     - After the update, RE-READ the memory and CONFIRM ``source_row_id`` is now
       declared. AWS may accept a malformed / no-op update without raising; if
       the key is still not declared (or the schema is not introspectable so we
@@ -747,15 +748,17 @@ def _ensure_semantic_schema(
             "widening its schema in place..."
         )
     try:
-        control.update_memory_strategy(
+        control.update_memory(
             memoryId=cfg.semantic.memory_id,
-            memoryStrategyId=strategy_id,
-            configuration={
-                "userPreferenceOverride": {
-                    "memoryRecordSchema": {
-                        "metadataSchema": SEMANTIC_METADATA_SCHEMA
+            memoryStrategies={
+                "modifyMemoryStrategies": [
+                    {
+                        "memoryStrategyId": strategy_id,
+                        "memoryRecordSchema": {
+                            "metadataSchema": SEMANTIC_METADATA_SCHEMA
+                        },
                     }
-                }
+                ]
             },
         )
     except Exception as exc:  # noqa: BLE001 — re-raised as actionable guidance
@@ -779,7 +782,7 @@ def _ensure_semantic_schema(
     if redeclared is None or "source_row_id" not in redeclared:
         raise RuntimeError(
             "Widening the semantic strategy schema did not take effect: "
-            "'source_row_id' is still not declared after update_memory_strategy "
+            "'source_row_id' is still not declared after the UpdateMemory widen "
             "(AWS accepted the call without adding the key, or the schema is not "
             f"introspectable so retention cannot be guaranteed). "
             f"{_REPROVISION_GUIDANCE}"

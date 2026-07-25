@@ -163,23 +163,26 @@ class _Control:
     def get_memory(self, *, memoryId):
         return {"memory": self._mems[memoryId]}
 
-    def update_memory_strategy(self, *, memoryId, memoryStrategyId, configuration, **kw):
+    # Mirrors the REAL bedrock-agentcore-control surface: there is no
+    # update_memory_strategy operation — strategy schemas are widened via
+    # UpdateMemory's memoryStrategies.modifyMemoryStrategies. (The previous
+    # fake exposed a nonexistent method and masked exactly that bug.)
+    def update_memory(self, *, memoryId, memoryStrategies, **kw):
         self.update_strategy_calls.append(
-            {"memoryId": memoryId, "memoryStrategyId": memoryStrategyId,
-             "configuration": configuration, **kw}
+            {"memoryId": memoryId, "memoryStrategies": memoryStrategies, **kw}
         )
         # Model a successful in-place widen: adopt the metadataSchema keys the
         # caller declared so the post-update re-read confirms source_row_id.
         # widen_effective=False models AWS accepting the call as a no-op (the
         # key is NOT actually added) — the confirm re-read must then fail.
-        override = configuration.get("userPreferenceOverride", {})
-        schema = (override.get("memoryRecordSchema") or {}).get("metadataSchema")
-        if schema is not None and self._widen_effective:
-            self._mems[memoryId]["strategies"][0]["configuration"] = {
-                "userPreferenceOverride": {
-                    "memoryRecordSchema": {"metadataSchema": schema}
+        for entry in memoryStrategies.get("modifyMemoryStrategies", []):
+            schema = (entry.get("memoryRecordSchema") or {}).get("metadataSchema")
+            if schema is not None and self._widen_effective:
+                self._mems[memoryId]["strategies"][0]["configuration"] = {
+                    "userPreferenceOverride": {
+                        "memoryRecordSchema": {"metadataSchema": schema}
+                    }
                 }
-            }
         return {}
 
 
@@ -398,13 +401,17 @@ def test_narrow_semantic_schema_widened_in_place_then_migrates(
     rc = cli._handle_migrate(_args(tmp_path, include="semantic"))
     assert rc == 0
 
-    # update_memory_strategy was called with the FULL schema declaring
-    # source_row_id (not an empty customExtractionConfiguration).
+    # UpdateMemory was called with one modifyMemoryStrategies entry carrying
+    # the FULL schema declaring source_row_id.
     assert len(control.update_strategy_calls) == 1
-    sent = control.update_strategy_calls[0]["configuration"]
+    entries = control.update_strategy_calls[0]["memoryStrategies"][
+        "modifyMemoryStrategies"
+    ]
+    assert len(entries) == 1
+    assert entries[0]["memoryStrategyId"] == "sem-strat"
     declared = {
         e["key"]
-        for e in sent["userPreferenceOverride"]["memoryRecordSchema"]["metadataSchema"]
+        for e in entries[0]["memoryRecordSchema"]["metadataSchema"]
     }
     assert "source_row_id" in declared
 
