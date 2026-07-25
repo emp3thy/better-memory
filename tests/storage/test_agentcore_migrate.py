@@ -52,6 +52,8 @@ def _reflection_row(**over):
         "last_misled_at": "2026-07-08T00:00:00+00:00",
         "times_overlooked": 2,
         "last_overlooked_at": "2026-07-11T00:00:00+00:00",
+        "times_ignored": 6,
+        "last_ignored_at": "2026-07-12T00:00:00+00:00",
     }
     row.update(over)
     return row
@@ -71,6 +73,8 @@ def _semantic_row(**over):
         "last_misled_at": None,
         "times_overlooked": 1,
         "last_overlooked_at": "2026-07-06T00:00:00+00:00",
+        "times_ignored": 2,
+        "last_ignored_at": "2026-07-07T00:00:00+00:00",
     }
     row.update(over)
     return row
@@ -98,13 +102,17 @@ def test_reflection_all_state_in_body_no_metadata():
     for key in (
         "title", "use_cases", "hints", "confidence", "tech", "phase",
         "evidence_count", "updated_at", "polarity", "status", "useful_count",
-        "times_misled", "times_overlooked", "source_row_id", "source_backend",
+        "times_misled", "times_overlooked", "ignored_count", "source_row_id",
+        "source_backend",
     ):
         assert key in body, f"{key} missing from body"
 
     assert body["hints"] == ["hint one", "hint two"]  # decoded to a list
     assert body["confidence"] == 0.8
     assert body["evidence_count"] == 5
+    # Written under the read path's body key (agentcore.py reads body
+    # ``ignored_count`` into times_ignored — the Wilson denominator).
+    assert body["ignored_count"] == 6
     assert body["source_row_id"] == "refl-123"
     assert body["source_backend"] == "sqlite"
     assert rec["memoryStrategyId"] == "strat-episodic"
@@ -182,6 +190,9 @@ def test_semantic_declares_source_row_id_and_counters_in_metadata():
     # times_overlooked renamed to overlooked_count.
     assert md["overlooked_count"] == {"numberValue": 1}
     assert "times_overlooked" not in md
+    # times_ignored renamed to the declared key ignored_count.
+    assert md["ignored_count"] == {"numberValue": 2}
+    assert "times_ignored" not in md
     assert md["status"] == {"stringValue": "active"}
 
 
