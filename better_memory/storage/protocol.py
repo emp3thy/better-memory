@@ -104,15 +104,20 @@ class StorageBackend(Protocol):
         ignored_count counter — body-first for migrated reflections, metadata
         numberValue for AWS-extracted). Sync —
         no embedder call (reflections are pre-extracted in both backends;
-        sqlite mode ranks by Wilson lower bound on (useful+overlooked)/rated,
-        computed in Python; agentcore mode applies the legacy linear formula
-        client-side over metadata counters).
+        both backends rank by the SAME Wilson lower bound on
+        (useful+overlooked)/rated formula and tiebreaks — sqlite computes it
+        in Python over its columns, agentcore computes it client-side over
+        the metadata/body counters it read back; the exploration slot is
+        identical on both).
 
         ``query`` optionally supplies a natural-language description of the
         task at hand. sqlite mode fuses a BM25 relevance ranking over
         title / use_cases / hints into the Wilson-prior via RRF; agentcore
-        mode ignores it. Omitting it yields the Wilson-prior alone, which
-        is identical for every caller regardless of the work being done.
+        mode fuses a server-side semantic-search ranking instead
+        (`RetrieveMemoryRecords`, no BM25 leg — the semantic search
+        subsumes it), same RRF shape, degrading to the Wilson-only order on
+        an AWS error. Omitting it yields the Wilson-prior alone, which is
+        identical for every caller regardless of the work being done.
 
         This method is the canonical path for the MCP ``memory.retrieve``
         tool handler and the ``memory.start_episode`` handler in
@@ -312,11 +317,15 @@ class StorageBackend(Protocol):
         """Apply a single rating for an exposed memory. Returns ApplyOutcome.
 
         `evidence` is a one-line string (what the memory changed, or a
-        quote); non-ignored classes require a non-empty value —
-        SqliteBackend forwards it to MemoryRatingService, which validates
-        and stores it. AgentCoreBackend accepts the parameter for
-        signature parity but has no evidence storage (no exposure table)
-        and does not validate or persist it — see AgentCoreBackend.credit_one.
+        quote); non-ignored classes require a non-empty value, validated
+        identically on both backends (`services.memory_rating.validate_evidence`
+        underneath both SqliteBackend and AgentCoreBackend). Both backends
+        also reject `classification='ignored'` here — 'ignored' is the
+        session-end sweep's exclusive write path
+        (`apply_session_ratings`). On a successful AWS counter push,
+        AgentCoreBackend best-effort stamps the local exposure row
+        (`rated_at`/`classification`/`evidence`) when a local ledger is
+        wired — see AgentCoreBackend.credit_one.
         """
         ...
 

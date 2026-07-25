@@ -1,8 +1,10 @@
 """Per-session seen-store for contextual memory injection dedup.
 
-Backend-independent (works in agentcore mode where there is no exposure
-table) and cheap: one small JSON file per session under
-``<better-memory home>/state``. Never raises: corrupt or unwritable state
+Backend-independent and cheap: one small JSON file per session under
+``<better-memory home>/state``, deliberately separate from the
+``session_memory_exposure`` ledger (which now backs both backends — see
+``services/exposure_log.py``) since this dedup state is per-hook-firing
+scratch, not a rating record. Never raises: corrupt or unwritable state
 degrades to "nothing seen".
 
 File format: ``context_seen_<session_id>.json`` ->
