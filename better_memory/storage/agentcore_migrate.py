@@ -166,6 +166,10 @@ def build_reflection_record(
         "useful_count": _get(row, "useful_count", 0),
         "times_misled": _get(row, "times_misled", 0),
         "times_overlooked": _get(row, "times_overlooked", 0),
+        # Body key ``ignored_count`` — the reader's key for times_ignored
+        # (the Wilson denominator; dropping it makes every migrated memory
+        # look never-ignored).
+        "ignored_count": _get(row, "times_ignored", 0),
         "source_row_id": str(sqlite_id),
         "source_backend": "sqlite",
     }
@@ -202,6 +206,8 @@ def build_semantic_record(
         "times_misled": {"numberValue": int(_get(row, "times_misled", 0))},
         # SQLite ``times_overlooked`` -> declared key ``overlooked_count`` (§3.2).
         "overlooked_count": {"numberValue": int(_get(row, "times_overlooked", 0))},
+        # SQLite ``times_ignored`` -> declared key ``ignored_count``.
+        "ignored_count": {"numberValue": int(_get(row, "times_ignored", 0))},
         "source_row_id": {"stringValue": str(sqlite_id)},
         "status": {"stringValue": "active"},
     }

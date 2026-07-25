@@ -2021,8 +2021,8 @@ def test_parse_reflection_body_state_record_uses_body(backend) -> None:
     assert parsed["useful_count"] == 7
     assert parsed["times_misled"] == 2
     assert parsed["_overlooked_count"] == 5
-    # Public times_overlooked mirrors the internal counter; times_ignored
-    # is always 0 on agentcore (no exposure/rating sweep to derive it from).
+    # Public times_overlooked mirrors the internal counter; this body has
+    # no ignored_count key, so times_ignored falls back to 0.
     assert parsed["times_overlooked"] == 5
     assert parsed["times_ignored"] == 0
     # evidence_count taken from the body (NOT recomputed as useful+missed=7).
@@ -2060,6 +2060,46 @@ def test_parse_reflection_body_ignored_count(backend) -> None:
 
     parsed = backend._parse_reflection_record(rec)
     assert parsed["times_ignored"] == 3
+
+
+def test_migrated_record_round_trips_all_wilson_counters(backend) -> None:
+    """build_reflection_record output parses back with every Wilson input
+    intact — locks the migration builder's body keys to the reader's keys
+    (a drift here silently zeroes counters for every migrated memory)."""
+    from better_memory.storage.agentcore_migrate import build_reflection_record
+
+    row = {
+        "id": "refl-rt-1",
+        "project": "testproj",
+        "title": "Round trip",
+        "use_cases": "when migrating",
+        "hints": "[]",
+        "confidence": 0.7,
+        "status": "confirmed",
+        "evidence_count": 9,
+        "updated_at": "2026-07-01T00:00:00+00:00",
+        "scope": "project",
+        "polarity": "do",
+        "useful_count": 4,
+        "times_misled": 1,
+        "times_overlooked": 2,
+        "times_ignored": 6,
+    }
+    built = build_reflection_record(row, strategy_id="strat-episodic")
+    assert built is not None
+
+    parsed = backend._parse_reflection_record({
+        "memoryRecordId": "rec-rt-1",
+        "content": built["content"],
+        "namespaces": built["namespaces"],
+        "createdAt": datetime(2026, 7, 1, tzinfo=UTC),
+        "metadata": {},
+    })
+
+    assert parsed["useful_count"] == 4
+    assert parsed["times_misled"] == 1
+    assert parsed["times_overlooked"] == 2
+    assert parsed["times_ignored"] == 6
 
 
 def test_parse_reflection_metadata_ignored_count(backend) -> None:
