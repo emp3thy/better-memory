@@ -136,6 +136,19 @@ def _seed_local_reflection(conn, rid: str, *, title: str) -> None:
     conn.commit()
 
 
+class _FakeClientError(Exception):
+    """Stand-in for botocore.exceptions.ClientError, mirroring the pattern
+    already established in test_agentcore_unit.py (e.g.
+    test_record_use_retries_on_transient_404): carries the `.response`
+    dict boto3 errors expose, and is wired in via monkeypatching
+    `agentcore._ClientError` so the source's `isinstance(exc, _ClientError)`
+    check matches it regardless of whether real botocore is installed."""
+
+    def __init__(self, code: str = "ThrottlingException", message: str = "rate exceeded") -> None:
+        super().__init__(message)
+        self.response = {"Error": {"Code": code, "Message": message}}
+
+
 class TestFullSweepE2E:
     def test_sweep_stamps_local_rows_bumps_counters_and_emits_one_event(
         self, backend_with_ledger, local_conn, mock_data_client
@@ -315,6 +328,145 @@ class TestEventFailureIsolation:
             "SELECT rated_at FROM session_memory_exposure WHERE memory_id = 'r1'"
         ).fetchone()
         assert row["rated_at"] is not None
+
+
+class TestCounterPushFailureIsolation:
+    """Reviewer finding: apply_session_ratings' AWS counter push used to
+    catch only ResourceNotFoundException — any other ClientError (a
+    throttle, an access-denied; batch APIs share a 20 TPS pool, so
+    throttling is plausible) raised out of the sweep mid-loop, aborting
+    remaining entries even though the local stamp for the failing entry
+    had already committed. Fixed: the local-stamp-then-AWS-push ORDER is
+    unchanged (spec: local stamps are the session's evidence-of-record and
+    must not be lost to a throttled/denied AWS call — "counters are
+    statistics, not ledgers"); the AWS push's catch widened to
+    best-effort-Exception, counting the entry as applied (it WAS applied
+    to the local ledger) and continuing the sweep."""
+
+    def test_non_404_client_error_on_one_entry_does_not_abort_the_sweep(
+        self, backend_with_ledger, local_conn, mock_data_client, monkeypatch
+    ) -> None:
+        from better_memory.storage import agentcore as ac_module
+
+        monkeypatch.setattr(ac_module, "_ClientError", _FakeClientError)
+
+        for rid in ("r1", "r2", "r3"):
+            _seed_local_reflection(local_conn, rid, title=f"title-{rid}")
+        backend_with_ledger.record_exposures(
+            session_id="test-session-xyz",
+            items=[("reflection", "r1"), ("reflection", "r2"), ("reflection", "r3")],
+            source="contextual",
+        )
+
+        mock_data_client.get_memory_record.side_effect = [
+            _make_record_response("r1"),
+            _make_record_response("r2"),
+            _make_record_response("r3"),
+        ]
+        mock_data_client.batch_update_memory_records.side_effect = [
+            _ok_update_response("r1"),
+            _FakeClientError(code="ThrottlingException", message="rate exceeded"),
+            _ok_update_response("r3"),
+        ]
+        mock_data_client.create_event.return_value = {"event": {"eventId": "evt-1"}}
+
+        # Must not raise.
+        result = backend_with_ledger.apply_session_ratings(
+            session_id="test-session-xyz",
+            ratings=[
+                {"kind": "reflection", "id": "r1", "class": "cited",
+                 "evidence": "cited it"},
+                {"kind": "reflection", "id": "r2", "class": "shaped",
+                 "evidence": "throttled mid-sweep"},
+                {"kind": "reflection", "id": "r3", "class": "misled",
+                 "evidence": "led me astray"},
+            ],
+        )
+
+        # All three entries were attempted (no abort), and all three count
+        # as applied — r2's counter push failed, but its local stamp is
+        # the session's evidence-of-record and the rating IS applied.
+        assert result["applied"] == {
+            "cited": 1, "shaped": 1, "ignored": 0, "misled": 1, "overlooked": 0,
+        }
+        assert result["skipped"] == {
+            "not_exposed": 0, "already_rated": 0,
+            "memory_missing": 0, "memory_retired": 0,
+        }
+        assert mock_data_client.batch_update_memory_records.call_count == 3
+
+        # r2's local stamp is intact despite the AWS failure.
+        rows = {
+            r["memory_id"]: r
+            for r in local_conn.execute(
+                "SELECT memory_id, rated_at, classification FROM session_memory_exposure"
+            ).fetchall()
+        }
+        for rid, cls in (("r1", "cited"), ("r2", "shaped"), ("r3", "misled")):
+            assert rows[rid]["rated_at"] is not None
+            assert rows[rid]["classification"] == cls
+
+        # The receipt event still fires exactly once, including r2.
+        mock_data_client.create_event.assert_called_once()
+        payload: list[dict[str, Any]] = mock_data_client.create_event.call_args.kwargs["payload"]
+        blob: dict[str, Any] = payload[0]["blob"]
+        rated_ids = {r["id"] for r in blob["ratings"]}
+        assert rated_ids == {"r1", "r2", "r3"}
+
+    def test_all_counter_pushes_failing_still_returns_normally(
+        self, backend_with_ledger, local_conn, mock_data_client, monkeypatch
+    ) -> None:
+        from better_memory.storage import agentcore as ac_module
+
+        monkeypatch.setattr(ac_module, "_ClientError", _FakeClientError)
+
+        for rid in ("r1", "r2"):
+            _seed_local_reflection(local_conn, rid, title=f"title-{rid}")
+        backend_with_ledger.record_exposures(
+            session_id="test-session-xyz",
+            items=[("reflection", "r1"), ("reflection", "r2")],
+            source="contextual",
+        )
+
+        mock_data_client.get_memory_record.side_effect = [
+            _make_record_response("r1"),
+            _make_record_response("r2"),
+        ]
+        mock_data_client.batch_update_memory_records.side_effect = [
+            _FakeClientError(code="AccessDeniedException", message="not authorized"),
+            _FakeClientError(code="ThrottlingException", message="rate exceeded"),
+        ]
+        mock_data_client.create_event.return_value = {"event": {"eventId": "evt-1"}}
+
+        # Must not raise even though every single counter push fails.
+        result = backend_with_ledger.apply_session_ratings(
+            session_id="test-session-xyz",
+            ratings=[
+                {"kind": "reflection", "id": "r1", "class": "cited",
+                 "evidence": "cited it"},
+                {"kind": "reflection", "id": "r2", "class": "overlooked",
+                 "evidence": "retrieved, never used"},
+            ],
+        )
+
+        assert result["applied"] == {
+            "cited": 1, "shaped": 0, "ignored": 0, "misled": 0, "overlooked": 1,
+        }
+        assert result["skipped"] == {
+            "not_exposed": 0, "already_rated": 0,
+            "memory_missing": 0, "memory_retired": 0,
+        }
+
+        rows = {
+            r["memory_id"]: r
+            for r in local_conn.execute(
+                "SELECT memory_id, rated_at FROM session_memory_exposure"
+            ).fetchall()
+        }
+        assert rows["r1"]["rated_at"] is not None
+        assert rows["r2"]["rated_at"] is not None
+
+        mock_data_client.create_event.assert_called_once()
 
 
 class TestSkipBuckets:

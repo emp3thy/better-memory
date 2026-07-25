@@ -1971,8 +1971,16 @@ class AgentCoreBackend:
             wire mechanics credit_one also uses — INCLUDING
             classification='ignored' → ignored_count; the sweep is the
             only legitimate writer of ignores (credit_one rejects it). A
-            hard 404 or a per-record batch-update failure counts as
-            skipped.memory_missing; the rest of the batch keeps going.
+            hard 404 (ResourceNotFoundException, or a per-record
+            batch-update failedRecords entry) counts as
+            skipped.memory_missing. Any OTHER AWS failure (throttling,
+            access-denied, a transient network error — batch APIs share a
+            20 TPS pool, so throttling is plausible) is best-effort: the
+            local stamp from (b) already committed and is NOT lost, the
+            entry counts as applied (design's error-handling section:
+            "All AWS calls best-effort ... counters are statistics, not
+            ledgers"), and the sweep keeps going. Nothing raised by step
+            (c) ever aborts the sweep.
         (d) After the loop, ONE best-effort CreateEvent receipt
             (extractionMode='SKIP' so AgentCore's built-in extraction
             ignores it; metadata={'type': {'stringValue': 'ratings'}};
@@ -1993,7 +2001,9 @@ class AgentCoreBackend:
         memory_retired never fires here — agentcore reflections carry no
         equivalent "superseded before rating" lifecycle check on this
         path. There is no AWS-side atomicity for step (c) — entries
-        already credited/stamped stay that way if a later entry raises."""
+        already credited/stamped stay that way regardless of what happens
+        to a later entry, and this method itself never raises once past
+        the up-front batch validation in step (a)."""
         if not session_id:
             raise ValueError("session_id must be non-empty")
         if not ratings:
@@ -2046,14 +2056,33 @@ class AgentCoreBackend:
 
             try:
                 result = self._credit_counter(kind=kind, id=rid, classification=cls)
-            except _ClientError as exc:
-                code = exc.response.get("Error", {}).get("Code", "")
-                if code != "ResourceNotFoundException":
-                    raise
-                # The record no longer exists — sqlite calls this
-                # memory_missing; keep rating the rest of the batch. The
-                # local stamp above (if any) is NOT rolled back.
-                skipped["memory_missing"] += 1
+            except Exception as exc:  # noqa: BLE001 - AWS counter push must never abort the sweep
+                if isinstance(exc, _ClientError):
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code == "ResourceNotFoundException":
+                        # The record no longer exists — sqlite calls this
+                        # memory_missing; keep rating the rest of the batch.
+                        # The local stamp above (if any) is NOT rolled back.
+                        skipped["memory_missing"] += 1
+                        continue
+                # Any OTHER AWS failure — throttling, access-denied, a
+                # transient network error, anything besides a confirmed
+                # "the record is gone" 404 (batch APIs share a 20 TPS pool,
+                # so throttling is plausible). Per the design's
+                # error-handling section ("All AWS calls best-effort ...
+                # counters are statistics, not ledgers"): the local stamp
+                # committed above is the session's evidence-of-record
+                # (classification + evidence, feeding the UI and the
+                # skip-bucket accounting) and must NOT be lost to a
+                # throttled/denied AWS call. The rating IS applied — from
+                # the ledger's and the rater's perspective — even though
+                # this one counter increment was not; count it and keep
+                # sweeping the rest of the batch. apply_session_ratings
+                # must never raise from an AWS failure.
+                applied[cls] += 1
+                rated_entries.append(
+                    {"kind": kind, "id": rid, "class": cls, "evidence": evidence}
+                )
                 continue
             if result["applied"] is None:
                 # Per-record batch-update failure (failedRecords) — the
