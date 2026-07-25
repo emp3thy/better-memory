@@ -1781,25 +1781,99 @@ class AgentCoreBackend:
         classification: str,
         evidence: str | None = None,
     ) -> dict[str, Any]:
-        """Apply one classification → counter increment on a record.
+        """Apply one classification → counter increment on a record,
+        mid-session (the memory.credit MCP tool path).
 
         Counter mapping (spec Rating model section):
             cited / shaped → useful_count
-            ignored        → ignored_count
             misled         → times_misled
             overlooked     → overlooked_count
 
-        `evidence` is accepted for StorageBackend protocol parity only.
-        Agentcore mode has no exposure table (see list_session_exposures)
-        and therefore nowhere to store a rating-evidence line; it is not
-        validated or persisted here — sqlite is the only backend with an
-        evidence contract (MemoryRatingService)."""
-        counter_key = _RATING_TO_COUNTER.get(classification)
-        if counter_key is None:
+        Sqlite parity (services/memory_rating.py MemoryRatingService.
+        credit_one), added by agentcore-parity Task 7:
+        - classification='ignored' is REJECTED here with the same error
+          text sqlite uses — 'ignored' is the session-end sweep's
+          exclusive write path (apply_session_ratings); accepting it here
+          would let a single mid-session call bump ignored_count outside
+          the sweep's skip-bucket accounting.
+        - `evidence` is now validated via the shared
+          services.memory_rating.validate_evidence helper (non-empty,
+          post-strip, <=EVIDENCE_MAX_CHARS) — the same contract sqlite
+          enforces. `evidence` defaults to None only as a compat shim for
+          callers not yet updated to pass it; None fails validation with a
+          clear ValueError rather than a crash (mirrors sqlite's
+          credit_one docstring).
+
+        On a successful AWS counter push, best-effort stamps the local
+        exposure row (rated_at/classification/evidence) via
+        exposure_log.stamp when a local ledger is wired (self._local_conn)
+        — never raises; mirrors the write-then-best-effort-ledger pattern
+        used elsewhere in this class (record_exposures,
+        _record_retrieve_exposures). Agentcore has no skip-bucket concept
+        on this path (not_exposed/already_rated are sweep-only — see
+        apply_session_ratings); exposure_log.stamp is itself a no-op when
+        no matching unrated row exists, so this call is safe regardless of
+        ledger state.
+        """
+        from better_memory.services.memory_rating import validate_evidence
+
+        if classification == "ignored":
+            raise ValueError(
+                "credit_one does not accept classification='ignored'; "
+                "'ignored' is the session-end sweep default."
+            )
+        if classification not in _RATING_TO_COUNTER:
             raise ValueError(
                 f"classification={classification!r} is not one of "
                 f"{sorted(_RATING_TO_COUNTER)}"
             )
+        trimmed_evidence = validate_evidence(classification, evidence, where="credit")
+
+        result = self._credit_counter(kind=kind, id=id, classification=classification)
+
+        if result["applied"] is not None and self._local_conn is not None:
+            try:
+                from better_memory.services import exposure_log
+
+                exposure_log.stamp(
+                    self._local_conn,
+                    session_id=session_id,
+                    kind=kind,
+                    memory_id=id,
+                    classification=classification,
+                    evidence=trimmed_evidence,
+                    now=datetime.now(UTC).isoformat(),
+                )
+                self._local_conn.commit()
+            except Exception:  # noqa: BLE001 - local stamp must never block credit_one
+                pass
+
+        return result
+
+    def _credit_counter(
+        self, *, kind: str, id: str, classification: str
+    ) -> dict[str, Any]:
+        """AWS-side counter bump for one (kind, id, classification) — the
+        wire mechanics shared by credit_one (mid-session, rejects
+        'ignored') and apply_session_ratings (the session-end sweep, the
+        only caller that reaches this with classification='ignored' —
+        'ignored' → ignored_count is legitimate only via the sweep, design
+        §3.2/§4). Callers are responsible for validating `classification`
+        before calling this (it is a dict lookup here, not re-validated).
+
+        Routes by kind (semantic vs episodic memory), and — for episodic
+        reflections — by source_backend: migrated (SQLite-origin) records
+        read-modify-write the JSON content BODY (metadata writes are
+        silently dropped there); AWS-extracted / semantic records use the
+        declared metadata path.
+
+        Returns {"applied": classification, "skipped": None} on success or
+        {"applied": None, "skipped": <error message>} on a per-record
+        batch-update failure (failedRecords). Raises _ClientError on a hard
+        404 (ResourceNotFoundException) after the transient-404 retry is
+        exhausted — callers decide whether that counts as memory_missing.
+        """
+        counter_key = _RATING_TO_COUNTER[classification]
 
         # Route the lookup + update to the right memory based on kind.
         # Semantic records live in self._cfg.semantic.memory_id; looking
@@ -1872,15 +1946,41 @@ class AgentCoreBackend:
         self,
         *,
         session_id: str,
-        ratings: list[dict[str, str]],
+        ratings: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Batch rating apply — sqlite-parity validation and return shape.
+        """The real session-end rating sweep (agentcore-parity Task 7,
+        design §2). Runs, in order:
 
-        Mirrors MemoryRatingService.apply_session_ratings: the whole batch
-        is validated BEFORE any wire call (non-empty session_id/ratings,
-        kind in {reflection, semantic}, class in the five rating classes,
-        non-empty string id, no duplicate (kind, id) pairs — ValueError on
-        any violation), then each entry runs through credit_one.
+        (a) Validate the WHOLE batch via the shared
+            services.memory_rating.validate_ratings_batch helper — batch-
+            atomic (ValueError on the first violation, zero wire calls,
+            nothing applied), identical error text and evidence contract
+            to sqlite's MemoryRatingService.apply_session_ratings.
+        (b) Per entry, when a local exposure ledger is wired
+            (self._local_conn): look up its exposure rows for
+            (session_id, kind, id). No rows → skipped.not_exposed. Rows
+            all already rated → skipped.already_rated. Otherwise stamp
+            every unrated row via exposure_log.stamp (rated_at,
+            classification, evidence) BEFORE the AWS push — a later AWS
+            counter failure does not roll this stamp back (best-effort,
+            per-item, matching this file's established style elsewhere).
+            Without a local ledger (self._local_conn is None), this step
+            is skipped entirely — not_exposed/already_rated never fire,
+            matching the pre-Task-7 behaviour.
+        (c) Push the counter bump to AWS via the shared `_credit_counter`
+            wire mechanics credit_one also uses — INCLUDING
+            classification='ignored' → ignored_count; the sweep is the
+            only legitimate writer of ignores (credit_one rejects it). A
+            hard 404 or a per-record batch-update failure counts as
+            skipped.memory_missing; the rest of the batch keeps going.
+        (d) After the loop, ONE best-effort CreateEvent receipt
+            (extractionMode='SKIP' so AgentCore's built-in extraction
+            ignores it; metadata={'type': {'stringValue': 'ratings'}};
+            sessionId=the resolved session; payload = one blob item with
+            the JSON of every entry that was actually applied, including
+            evidence) — only when at least one entry applied. Event
+            failure is swallowed and never affects the sweep's return
+            value.
 
         Returns the sqlite shape::
 
@@ -1890,43 +1990,18 @@ class AgentCoreBackend:
              "skipped":  {"not_exposed": int, "already_rated": int,
                           "memory_missing": int, "memory_retired": int}}
 
-        Agentcore has no exposure log, so not_exposed / already_rated /
-        memory_retired never fire here; a missing record (GetMemoryRecord
-        404) or a per-record batch-update failure counts as
-        memory_missing. There is no AWS-side atomicity — entries already
-        credited stay credited if a later entry raises."""
+        memory_retired never fires here — agentcore reflections carry no
+        equivalent "superseded before rating" lifecycle check on this
+        path. There is no AWS-side atomicity for step (c) — entries
+        already credited/stamped stay that way if a later entry raises."""
         if not session_id:
             raise ValueError("session_id must be non-empty")
         if not ratings:
             raise ValueError("ratings must be non-empty")
 
-        valid_kinds = {"reflection", "semantic"}
-        seen: set[tuple[str, str]] = set()
-        for i, r in enumerate(ratings):
-            for field_name in ("kind", "class", "id"):
-                if field_name not in r:
-                    raise ValueError(
-                        f"ratings[{i}].{field_name}: missing required field"
-                    )
-            kind = r["kind"]
-            rid = r["id"]
-            cls = r["class"]
-            if kind not in valid_kinds:
-                raise ValueError(
-                    f"ratings[{i}].kind: invalid {kind!r}; "
-                    f"expected one of {valid_kinds}"
-                )
-            if cls not in _RATING_TO_COUNTER:
-                raise ValueError(
-                    f"ratings[{i}].class: invalid {cls!r}; "
-                    f"expected one of {set(_RATING_TO_COUNTER)}"
-                )
-            if not isinstance(rid, str) or not rid:
-                raise ValueError(f"ratings[{i}].id: must be non-empty string")
-            key = (kind, rid)
-            if key in seen:
-                raise ValueError(f"ratings[{i}]: duplicate (kind, id) = {key!r}")
-            seen.add(key)
+        from better_memory.services.memory_rating import validate_ratings_batch
+
+        ratings = validate_ratings_batch(ratings)
 
         applied: dict[str, int] = {cls: 0 for cls in _RATING_TO_COUNTER}
         skipped: dict[str, int] = {
@@ -1935,29 +2010,90 @@ class AgentCoreBackend:
             "memory_missing": 0,
             "memory_retired": 0,
         }
+        now_iso = datetime.now(UTC).isoformat()
+        rated_entries: list[dict[str, Any]] = []
+
         for r in ratings:
-            try:
-                result = self.credit_one(
+            kind = r["kind"]
+            rid = r["id"]
+            cls = r["class"]
+            evidence = r["_evidence"]
+
+            if self._local_conn is not None:
+                from better_memory.services import exposure_log
+
+                rows = self._local_conn.execute(
+                    "SELECT rated_at FROM session_memory_exposure "
+                    "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?",
+                    (session_id, kind, rid),
+                ).fetchall()
+                if not rows:
+                    skipped["not_exposed"] += 1
+                    continue
+                if all(row["rated_at"] is not None for row in rows):
+                    skipped["already_rated"] += 1
+                    continue
+                exposure_log.stamp(
+                    self._local_conn,
                     session_id=session_id,
-                    kind=r["kind"],
-                    id=r["id"],
-                    classification=r["class"],
+                    kind=kind,
+                    memory_id=rid,
+                    classification=cls,
+                    evidence=evidence,
+                    now=now_iso,
                 )
+                self._local_conn.commit()
+
+            try:
+                result = self._credit_counter(kind=kind, id=rid, classification=cls)
             except _ClientError as exc:
                 code = exc.response.get("Error", {}).get("Code", "")
                 if code != "ResourceNotFoundException":
                     raise
                 # The record no longer exists — sqlite calls this
-                # memory_missing; keep rating the rest of the batch.
+                # memory_missing; keep rating the rest of the batch. The
+                # local stamp above (if any) is NOT rolled back.
                 skipped["memory_missing"] += 1
                 continue
-            if result["applied"] is not None:
-                applied[r["class"]] += 1
-            else:
+            if result["applied"] is None:
                 # Per-record batch-update failure (failedRecords) — the
                 # closest sqlite skip reason is memory_missing.
                 skipped["memory_missing"] += 1
+                continue
+
+            applied[cls] += 1
+            rated_entries.append(
+                {"kind": kind, "id": rid, "class": cls, "evidence": evidence}
+            )
+
+        if rated_entries:
+            try:
+                self._emit_ratings_event(session_id=session_id, rated=rated_entries)
+            except Exception:  # noqa: BLE001 - receipt event must never block the sweep
+                pass
+
         return {"session_id": session_id, "applied": applied, "skipped": skipped}
+
+    def _emit_ratings_event(
+        self, *, session_id: str, rated: list[dict[str, Any]]
+    ) -> None:
+        """Best-effort CreateEvent receipt for a successful rating sweep
+        (design §3.2/§4 "Ratings event (C-lite)"). extractionMode='SKIP'
+        keeps this out of AgentCore's built-in episodicMemoryStrategy
+        extraction — it is a durable, team-visible receipt only; the
+        read/UI path is deferred to a future PR. Callers wrap this in a
+        try/except — a failure here must never affect the sweep's return
+        value."""
+        actor_id = resolve_actor_id(self._project)
+        self._data.create_event(
+            memoryId=self._cfg.episodic.memory_id,
+            actorId=actor_id,
+            sessionId=session_id,
+            eventTimestamp=datetime.now(UTC),
+            extractionMode="SKIP",
+            payload=[{"blob": {"ratings": rated}}],
+            metadata={"type": {"stringValue": "ratings"}},
+        )
 
     # ----- Synthesis: no-ops in agentcore mode -----
 

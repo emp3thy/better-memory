@@ -617,6 +617,22 @@ async def test_j6_rating_loop_guard_and_empty_exposures(
                 )
 
                 # --- semantic-kind rating routes to SEM ------------------
+                # agentcore-parity Task 7: apply_session_ratings now consults
+                # the local exposure ledger (memory.db, wired via local_conn)
+                # for skip-bucket accounting — an id with no exposure row
+                # lands in skipped.not_exposed rather than applying. Seed one
+                # directly (mirrors the DB-poking pattern already used by
+                # test_agentcore_t2.py's premigrated-db case) so this rating
+                # applies, exactly as it did before local-ledger wiring.
+                with closing(sqlite3.connect(bm_home / "memory.db")) as seed:
+                    seed.execute(
+                        "INSERT INTO session_memory_exposure "
+                        "(session_id, memory_kind, memory_id, exposed_at, source) "
+                        "VALUES (?, 'semantic', ?, '2026-01-01T00:00:00Z', 'retrieve')",
+                        ("e2e-session-1", _SEM_ID),
+                    )
+                    seed.commit()
+
                 fake.set_response(
                     "GetMemoryRecord",
                     {
@@ -641,7 +657,8 @@ async def test_j6_rating_loop_guard_and_empty_exposures(
                         "memory.apply_session_ratings",
                         {
                             "ratings": [
-                                {"kind": "semantic", "id": _SEM_ID, "class": "cited"}
+                                {"kind": "semantic", "id": _SEM_ID, "class": "cited",
+                                 "evidence": "matched the userPreference schema"}
                             ]
                         },
                     )

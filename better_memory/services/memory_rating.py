@@ -64,12 +64,17 @@ _CREDIT_CLASSES: set[str] = {"cited", "shaped", "misled", "overlooked"}
 EVIDENCE_MAX_CHARS = 500
 
 
-def _validate_evidence(cls: str, evidence: object, *, where: str) -> str | None:
+def validate_evidence(cls: str, evidence: object, *, where: str) -> str | None:
     """Trim + enforce the evidence contract for one rating.
 
     Non-ignored classes require a non-empty line; `ignored` may carry one.
     Returns the trimmed value (or None). Raises ValueError with the
     caller-supplied position prefix on violation.
+
+    Public (no leading underscore): shared across BOTH storage backends —
+    sqlite's MemoryRatingService and AgentCoreBackend (storage/agentcore.py)
+    call this directly so the evidence contract has a single implementation
+    and identical error text everywhere (design §2, agentcore-parity Task 7).
     """
     trimmed = evidence.strip() if isinstance(evidence, str) else None
     if cls != "ignored" and not trimmed:
@@ -82,6 +87,66 @@ def _validate_evidence(cls: str, evidence: object, *, where: str) -> str | None:
             f"{where}: evidence exceeds {EVIDENCE_MAX_CHARS} chars "
             f"({len(trimmed)})")
     return trimmed or None
+
+
+def validate_ratings_batch(ratings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate + normalize a full session-end ratings batch, batch-atomic.
+
+    Shared by MemoryRatingService.apply_session_ratings (sqlite) and
+    AgentCoreBackend.apply_session_ratings (agentcore) — single
+    implementation, so error text and the evidence contract stay identical
+    across both backends (design §2, agentcore-parity Task 7). Raises
+    ValueError on the FIRST violation found (nothing is applied when this
+    raises):
+
+    - each entry must have kind in {'reflection', 'semantic'}, class in
+      {'cited', 'shaped', 'ignored', 'misled', 'overlooked'}, and a string id.
+    - each entry may carry an optional "evidence" string, enforced via
+      `validate_evidence`: non-ignored classes require a non-empty
+      (post-strip), <=EVIDENCE_MAX_CHARS evidence line; 'ignored' may carry
+      one or omit it.
+    - id must be a non-empty string.
+    - no duplicate (kind, id) pairs in one batch.
+
+    Mutates each entry in place, adding "_evidence" (the trimmed evidence
+    value, or None) for the caller's apply loop to read — the trimmed value
+    is what gets stored on session_memory_exposure.evidence. Returns the
+    same list object (for chaining convenience); callers keep using their
+    original `ratings` reference either way.
+    """
+    seen: set[tuple[str, str]] = set()
+    for i, r in enumerate(ratings):
+        if "kind" not in r:
+            raise ValueError(f"ratings[{i}].kind: missing required field")
+        if "class" not in r:
+            raise ValueError(f"ratings[{i}].class: missing required field")
+        if "id" not in r:
+            raise ValueError(f"ratings[{i}].id: missing required field")
+        kind = r["kind"]
+        rid = r["id"]
+        cls = r["class"]
+        if kind not in _VALID_KINDS:
+            raise ValueError(
+                f"ratings[{i}].kind: invalid {kind!r}; "
+                f"expected one of {_VALID_KINDS}"
+            )
+        if cls not in _VALID_CLASSES:
+            raise ValueError(
+                f"ratings[{i}].class: invalid {cls!r}; "
+                f"expected one of {_VALID_CLASSES}"
+            )
+        r["_evidence"] = validate_evidence(
+            cls, r.get("evidence"), where=f"ratings[{i}]"
+        )
+        if not isinstance(rid, str) or not rid:
+            raise ValueError(f"ratings[{i}].id: must be non-empty string")
+        key = (kind, rid)
+        if key in seen:
+            raise ValueError(
+                f"ratings[{i}]: duplicate (kind, id) = {key!r}"
+            )
+        seen.add(key)
+    return ratings
 
 
 class MemoryRatingService:
@@ -153,7 +218,7 @@ class MemoryRatingService:
                 f"Invalid classification: {classification!r}. "
                 f"Expected one of {_CREDIT_CLASSES}"
             )
-        trimmed_evidence = _validate_evidence(
+        trimmed_evidence = validate_evidence(
             classification, evidence, where="credit"
         )
 
@@ -304,38 +369,7 @@ class MemoryRatingService:
         if not ratings:
             raise ValueError("ratings must be non-empty")
 
-        seen: set[tuple[str, str]] = set()
-        for i, r in enumerate(ratings):
-            if "kind" not in r:
-                raise ValueError(f"ratings[{i}].kind: missing required field")
-            if "class" not in r:
-                raise ValueError(f"ratings[{i}].class: missing required field")
-            if "id" not in r:
-                raise ValueError(f"ratings[{i}].id: missing required field")
-            kind = r["kind"]
-            rid = r["id"]
-            cls = r["class"]
-            if kind not in _VALID_KINDS:
-                raise ValueError(
-                    f"ratings[{i}].kind: invalid {kind!r}; "
-                    f"expected one of {_VALID_KINDS}"
-                )
-            if cls not in _VALID_CLASSES:
-                raise ValueError(
-                    f"ratings[{i}].class: invalid {cls!r}; "
-                    f"expected one of {_VALID_CLASSES}"
-                )
-            r["_evidence"] = _validate_evidence(
-                cls, r.get("evidence"), where=f"ratings[{i}]"
-            )
-            if not isinstance(rid, str) or not rid:
-                raise ValueError(f"ratings[{i}].id: must be non-empty string")
-            key = (kind, rid)
-            if key in seen:
-                raise ValueError(
-                    f"ratings[{i}]: duplicate (kind, id) = {key!r}"
-                )
-            seen.add(key)
+        ratings = validate_ratings_batch(ratings)
 
         now = self._clock().isoformat()
         applied: AppliedCounts = {

@@ -595,6 +595,7 @@ class TestBackendWireFidelity:
                 kind="semantic",
                 id=_SEM_RECORD_ID,
                 classification="cited",
+                evidence="matched the userPreference schema",
             )
             # Sqlite parity: the applied CLASSIFICATION, not the record id.
             assert result == {"applied": "cited", "skipped": None}

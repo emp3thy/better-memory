@@ -1201,9 +1201,14 @@ def test_record_exposures_is_noop(
     assert mock_control_client.method_calls == []
 
 
+_MID_SESSION_CLASSES = {
+    k: v for k, v in _RATING_TO_COUNTER.items() if k != "ignored"
+}
+
+
 @pytest.mark.parametrize(
     "classification,counter_key",
-    list(_RATING_TO_COUNTER.items()),
+    list(_MID_SESSION_CLASSES.items()),
 )
 def test_credit_one_bumps_correct_counter(
     backend, mock_data_client, classification, counter_key
@@ -1218,6 +1223,7 @@ def test_credit_one_bumps_correct_counter(
         kind="reflection",
         id="rec-c",
         classification=classification,
+        evidence="the memory changed my approach",
     )
     # Sqlite parity: credit_one returns the applied CLASSIFICATION.
     assert result == {"applied": classification, "skipped": None}
@@ -1235,6 +1241,39 @@ def test_credit_one_rejects_unknown_classification(backend) -> None:
             id="rec-c",
             classification="bogus",
         )
+
+
+def test_credit_one_rejects_ignored_classification(backend, mock_data_client) -> None:
+    """Sqlite parity: 'ignored' is the session-end sweep's exclusive write
+    path (apply_session_ratings) — credit_one must reject it mid-session
+    with the same error text sqlite's MemoryRatingService.credit_one uses,
+    and must not touch AWS."""
+    with pytest.raises(
+        ValueError,
+        match=r"credit_one does not accept classification='ignored'",
+    ):
+        backend.credit_one(
+            session_id="s",
+            kind="reflection",
+            id="rec-c",
+            classification="ignored",
+        )
+    mock_data_client.get_memory_record.assert_not_called()
+    mock_data_client.batch_update_memory_records.assert_not_called()
+
+
+def test_credit_one_requires_evidence_for_non_ignored_class(backend, mock_data_client) -> None:
+    """Evidence is now validated (shared services.memory_rating.validate_evidence
+    helper) on the credit_one path too — matching sqlite's contract."""
+    with pytest.raises(ValueError, match="evidence"):
+        backend.credit_one(
+            session_id="s",
+            kind="reflection",
+            id="rec-c",
+            classification="cited",
+        )
+    mock_data_client.get_memory_record.assert_not_called()
+    mock_data_client.batch_update_memory_records.assert_not_called()
 
 
 def test_credit_one_routes_semantic_kind_to_semantic_memory(backend, mock_data_client) -> None:
@@ -1266,6 +1305,7 @@ def test_credit_one_routes_semantic_kind_to_semantic_memory(backend, mock_data_c
         kind="semantic",
         id="sm-rec",
         classification="cited",
+        evidence="matched the userPreference schema",
     )
     assert result == {"applied": "cited", "skipped": None}
 
@@ -1291,8 +1331,10 @@ def test_apply_session_ratings_credits_each_rating(backend, mock_data_client) ->
     result = backend.apply_session_ratings(
         session_id="test-session-xyz",
         ratings=[
-            {"kind": "reflection", "id": "rec-1", "class": "cited"},
-            {"kind": "reflection", "id": "rec-2", "class": "overlooked"},
+            {"kind": "reflection", "id": "rec-1", "class": "cited",
+             "evidence": "cited it directly"},
+            {"kind": "reflection", "id": "rec-2", "class": "overlooked",
+             "evidence": "was retrieved but never used"},
         ],
     )
     assert mock_data_client.batch_update_memory_records.call_count == 2
@@ -1322,13 +1364,23 @@ def test_apply_session_ratings_empty_raises_like_sqlite(backend) -> None:
         ([{"kind": "reflection", "id": "rec-x"}], "missing required field"),
         ([{"kind": "reflection", "id": "rec-x", "class": "bogus"}], "invalid 'bogus'"),
         ([{"kind": "widget", "id": "rec-x", "class": "cited"}], "invalid 'widget'"),
-        ([{"kind": "reflection", "id": "", "class": "cited"}], "non-empty string"),
+        (
+            [{"kind": "reflection", "id": "", "class": "cited",
+              "evidence": "some evidence"}],
+            "non-empty string",
+        ),
         (
             [
-                {"kind": "reflection", "id": "rec-x", "class": "cited"},
-                {"kind": "reflection", "id": "rec-x", "class": "misled"},
+                {"kind": "reflection", "id": "rec-x", "class": "cited",
+                 "evidence": "e1"},
+                {"kind": "reflection", "id": "rec-x", "class": "misled",
+                 "evidence": "e2"},
             ],
             "duplicate",
+        ),
+        (
+            [{"kind": "reflection", "id": "rec-x", "class": "cited"}],
+            "evidence",
         ),
     ],
 )
@@ -1371,8 +1423,10 @@ def test_apply_session_ratings_counts_wire_failures_as_memory_missing(
     result = backend.apply_session_ratings(
         session_id="test-session-xyz",
         ratings=[
-            {"kind": "reflection", "id": "rec-fail", "class": "cited"},
-            {"kind": "reflection", "id": "rec-ok", "class": "shaped"},
+            {"kind": "reflection", "id": "rec-fail", "class": "cited",
+             "evidence": "e1"},
+            {"kind": "reflection", "id": "rec-ok", "class": "shaped",
+             "evidence": "e2"},
         ],
     )
     assert result["applied"]["shaped"] == 1
@@ -2195,7 +2249,8 @@ def test_t2_credit_one_migrated_rewrites_body_counter(
     fake = backend._data
 
     result = backend.credit_one(
-        session_id="s", kind="reflection", id="mig-1", classification="cited"
+        session_id="s", kind="reflection", id="mig-1", classification="cited",
+        evidence="cited the migrated reflection",
     )
     assert result == {"applied": "cited", "skipped": None}
 
@@ -2234,7 +2289,8 @@ def test_t2_credit_one_migrated_overlooked_bumps_times_overlooked(
     fake = backend._data
 
     result = backend.credit_one(
-        session_id="s", kind="reflection", id="mig-o", classification="overlooked"
+        session_id="s", kind="reflection", id="mig-o", classification="overlooked",
+        evidence="retrieved but not acted on",
     )
     assert result == {"applied": "overlooked", "skipped": None}
 
@@ -2320,7 +2376,8 @@ def test_t2_credit_one_extracted_uses_metadata_path_unchanged(
         "failedRecords": [],
     }
     result = backend.credit_one(
-        session_id="s", kind="reflection", id="ext-1", classification="cited"
+        session_id="s", kind="reflection", id="ext-1", classification="cited",
+        evidence="cited the extracted reflection",
     )
     assert result == {"applied": "cited", "skipped": None}
 
