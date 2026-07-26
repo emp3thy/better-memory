@@ -253,7 +253,13 @@ class StorageBackend(Protocol):
         ...
 
     def semantic_get(self, *, id: str) -> Any | None:
-        """Single semantic memory (SemanticMemory) by id, or None when absent."""
+        """Single semantic memory (SemanticMemory) by id, or None when absent.
+        sqlite delegates to SemanticMemoryService.get (a direct row SELECT by
+        id, same field set list_for_project returns); agentcore fetches the
+        record by id (GetMemoryRecord via the same lookup semantic_update_text
+        / semantic_set_scope use) and maps it through the same
+        summary-to-model path semantic_list uses, treating a
+        ResourceNotFoundException as the None case."""
         ...
 
     # ----- Episodes -----
