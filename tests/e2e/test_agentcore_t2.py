@@ -721,24 +721,22 @@ class TestFakeDialectEnforcement:
 
 
 # ---------------------------------------------------------------------------
-# D5 — session_close closure event + env gate
+# D5 — session_close no-op in agentcore mode + env gate
 # ---------------------------------------------------------------------------
 
 
 class TestSessionCloseClosureAndEnvGate:
-    def test_stop_hook_fires_one_closure_event_signed_with_json_region(
+    def test_stop_hook_env_agentcore_fires_no_closure_event(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
-        """Case A: the Stop hook builds a REAL boto3 client (zero coverage
-        elsewhere — the hook unit tests MagicMock it) and fires exactly one
-        role=OTHER closure CreateEvent, SigV4-signed with agentcore.json's
-        region (json says us-east-1, deliberately not the fabrication
-        default eu-west-2 — proving cfg.region drives the hook client);
-        the spool marker is still written. Env-precedence regression
-        guard: BETTER_MEMORY_STORAGE_BACKEND=agentcore is set here."""
+        """Case A: agentcore-mode session-lifecycle emissions are a no-op
+        (user directive) — the Stop hook makes ZERO AWS requests even
+        though agentcore.json is fully provisioned and
+        BETTER_MEMORY_STORAGE_BACKEND=agentcore is set explicitly
+        (env-precedence regression guard). It only writes the local
+        session_end spool marker."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
-            # Deliberately different from the fabrication default region.
             write_fake_agentcore_json(bm_home, region="us-east-1")
             env = agentcore_env(clean_slate_home, fake.port)
 
@@ -757,43 +755,27 @@ class TestSessionCloseClosureAndEnvGate:
             assert out == ""
             assert "Traceback" not in err
 
-            requests = list(fake.requests)
-            assert len(requests) == 1
-            request = requests[0]
-            assert request.operation == "CreateEvent"
-            assert "EPI-FAKE-0001" in request.path
-            conversational = request.body["payload"][0]["conversational"]
-            assert conversational["role"] == "OTHER"
-            # env CLAUDE_SESSION_ID wins over the stdin payload session_id.
-            assert request.body["sessionId"] == "e2e-session-1"
-            # The hook signs with agentcore.json's region (session_close.py
-            # builds its client from cfg.region) — the hook half of the
-            # convergence asserted in TestRegionSingleSource.
-            assert request.sigv4_region == "us-east-1"
+            assert fake.requests == []
 
         markers = list((bm_home / "spool").glob("*_session_end_*.json"))
         assert len(markers) == 1
         marker_body = json.loads(markers[0].read_text(encoding="utf-8"))
         assert marker_body["event_type"] == "session_end"
-        # Closure succeeded → no hook_errors write → no memory.db at all.
+        # No AWS touch → no hook_errors write → no memory.db at all.
         assert not (bm_home / "memory.db").exists()
 
-    def test_stop_hook_without_backend_env_resolves_settings_and_fires_closure(
+    def test_stop_hook_without_backend_env_resolves_settings_fires_no_closure(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
-        """Case B — INVERTED from the defect-4 KNOWN-DEFECT PIN (design
-        section 4 item 5, hook env-propagation gap): the installer still
-        writes NO env into hook commands, but the Stop hook now resolves
-        the backend from settings.json (written by ``agentcore init``,
+        """Case B: the installer writes NO env into hook commands, and the
+        backend resolves from settings.json (written by ``agentcore init``,
         fabricated here via ``write_backend_settings``) when
-        BETTER_MEMORY_STORAGE_BACKEND is absent — so a real onboarded
-        user's closure event FIRES: exactly one CreateEvent (role=OTHER,
-        EPI-FAKE-0001 in path) SigV4-signed with agentcore.json's region.
-        The spool marker is still written and no memory.db is created."""
+        BETTER_MEMORY_STORAGE_BACKEND is absent — a real onboarded user's
+        Stop hook still fires NO AWS event: session-lifecycle emissions are
+        a no-op regardless of how the backend was resolved. The spool
+        marker is still written and no memory.db is created."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
-            # Non-default json region: proves the closure client signs the
-            # json's region on the settings-resolved path too.
             write_fake_agentcore_json(bm_home, region="us-east-1")
             write_backend_settings(bm_home)
             env = agentcore_env(
@@ -813,18 +795,11 @@ class TestSessionCloseClosureAndEnvGate:
             assert out == ""
             assert "Traceback" not in err
 
-            requests = list(fake.requests)
-            assert len(requests) == 1
-            request = requests[0]
-            assert request.operation == "CreateEvent"
-            assert "EPI-FAKE-0001" in request.path
-            conversational = request.body["payload"][0]["conversational"]
-            assert conversational["role"] == "OTHER"
-            assert request.sigv4_region == "us-east-1"
+            assert fake.requests == []
 
         markers = list((bm_home / "spool").glob("*_session_end_*.json"))
         assert len(markers) == 1
-        # Closure succeeded → no hook_errors write → no memory.db at all.
+        # No AWS touch → no hook_errors write → no memory.db at all.
         assert not (bm_home / "memory.db").exists()
 
     def test_stop_hook_sqlite_default_ignores_agentcore_json_existence(
@@ -1083,17 +1058,18 @@ class TestContextualInjectWireAndDegradation:
 
 
 class TestRegionSingleSource:
-    async def test_server_and_hook_both_sign_json_region(
+    async def test_server_signs_json_region_hook_fires_no_closure(
         self, clean_slate_home: Path, tmp_path: Path
     ) -> None:
         """INVERTED from the old region-split-brain KNOWN-DEFECT PIN
         (design section 4 item 4): the region env var was deleted and the
-        factory now signs with agentcore.json's region, so with json
-        region=us-east-1 BOTH planes converge — (a) the MCP server's
-        ``memory.retrieve`` signs SigV4 with us-east-1 while consuming the
-        json's memory id (MEM-EPI-JSON on the wire — id provenance proof);
-        (b) the session_close hook signs us-east-1 too (json-derived, as
-        it always did — the convergence target)."""
+        factory now signs with agentcore.json's region — (a) the MCP
+        server's ``memory.retrieve`` signs SigV4 with us-east-1 while
+        consuming the json's memory id (MEM-EPI-JSON on the wire — id
+        provenance proof); (b) the session_close hook plane no longer
+        signs anything at all: agentcore-mode session-lifecycle emissions
+        are a no-op (user directive), so the Stop hook makes zero AWS
+        requests regardless of the configured region."""
         bm_home = _bm_home(clean_slate_home)
         with FakeAgentCore() as fake:
             write_fake_agentcore_json(
@@ -1119,7 +1095,7 @@ class TestRegionSingleSource:
                 # Runtime IDs come from agentcore.json too — id provenance.
                 assert "MEM-EPI-JSON" in request.path
 
-            # (b) hook plane — session_close signs the same json region.
+            # (b) hook plane — session_close fires no AWS request at all.
             fake.clear()
             rc, out, _err = run_hook(
                 "better_memory.hooks.session_close",
@@ -1132,7 +1108,4 @@ class TestRegionSingleSource:
             )
             assert rc == 0
             assert out == ""
-            closures = fake.requests_for("CreateEvent")
-            assert len(closures) == 1
-            assert closures[0].sigv4_region == "us-east-1"
-            assert "MEM-EPI-JSON" in closures[0].path
+            assert fake.requests == []
