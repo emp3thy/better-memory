@@ -2762,3 +2762,121 @@ def test_reflection_get_returns_none_on_404(backend, mock_data_client, monkeypat
         code="ResourceNotFoundException", message="missing"
     )
     assert backend.reflection_get(reflection_id="gone") is None
+
+
+# ===== reflection_list: flat, Wilson-ordered accessor + status remap =====
+
+
+def _retired_record(rec_id):
+    import json
+    return {
+        "memoryRecordId": rec_id,
+        "content": {"text": json.dumps({
+            "title": rec_id, "use_cases": "u", "hints": "h",
+            "confidence": "0.9", "polarity": "do", "status": "retired",
+        })},
+        "namespaces": ["projects/testproj/retired/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {"status": {"stringValue": "retired"}},
+    }
+
+
+def test_reflection_list_flat_wilson_order(backend, mock_data_client) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-workhorse", useful=67, ignored=125),
+                _wilson_ranking_record("r-newcomer", useful=3, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-newcomer", "r-workhorse"]
+    # row-key completeness against the template's field list
+    assert set(rows[0]) == {
+        "id", "title", "project", "tech", "phase", "polarity", "confidence",
+        "status", "use_cases", "evidence_count", "updated_at",
+        "useful_count", "times_misled", "times_overlooked",
+    }
+    assert not any(k.startswith("_") for k in rows[0])
+
+
+def test_reflection_list_default_status_is_active_promoted(backend, mock_data_client) -> None:
+    """[[status-remap]] status=None on agentcore admits {active, promoted}
+    -- NOT sqlite's {pending_review, confirmed}, since agentcore has no
+    pending_review state. A record with status=promoted must be included
+    by default; a status the set does not admit must be excluded.
+
+    _wilson_ranking_record hardcodes status=active; patch one record's
+    metadata to promoted to exercise the {active, promoted} admit set."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-active", useful=5, ignored=1),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            rec = _wilson_ranking_record("r-promoted", useful=5, ignored=1)
+            rec["metadata"]["status"] = {"stringValue": "promoted"}
+            return {"memoryRecordSummaries": [rec]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert {r["id"] for r in rows} == {"r-active", "r-promoted"}
+    assert {r["status"] for r in rows} == {"active", "promoted"}
+
+
+def test_reflection_list_default_excludes_retired(backend, mock_data_client) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-active", useful=5, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-active"]
+    # retired namespaces are NOT queried under the default status set
+    queried = {c.kwargs["namespace"] for c in mock_data_client.list_memory_records.call_args_list}
+    assert "projects/testproj/retired/" not in queried
+
+
+def test_reflection_list_status_retired_queries_retired_namespaces(
+    backend, mock_data_client
+) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/retired/":
+            return {"memoryRecordSummaries": [_retired_record("r-old")]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj", status="retired")
+    assert [r["id"] for r in rows] == ["r-old"]
+    assert rows[0]["status"] == "retired"
+    queried = {c.kwargs["namespace"] for c in mock_data_client.list_memory_records.call_args_list}
+    assert {"projects/testproj/retired/", "general/retired/"} <= queried
+
+
+def test_reflection_list_polarity_filter_drops_non_matches(backend, mock_data_client) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-do", useful=5, ignored=1),  # polarity 'do'
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    assert backend.reflection_list(project="testproj", polarity="dont") == []
+
+
+def test_reflection_list_best_effort_degrades_on_namespace_error(backend, mock_data_client) -> None:
+    """[[guard-needs-triggering-test]] One namespace raising must NOT 500 the
+    whole list -- the surviving namespace's rows come through."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "general/reflections/":
+            raise _FakeClientError(code="ThrottlingException", message="rate exceeded")
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-survivor", useful=5, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-survivor"]

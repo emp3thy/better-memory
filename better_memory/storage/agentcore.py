@@ -916,6 +916,132 @@ class AgentCoreBackend:
             "_status": status_value,
         }
 
+    def _list_records_paginated(
+        self, namespace: str, max_results: int = 200
+    ) -> list[dict[str, Any]]:
+        """Page ``list_memory_records`` for one namespace until either
+        ``max_results`` rows have been collected or the namespace's index
+        is exhausted. Mirrors the inner ``_fetch`` closure in
+        ``_fetch_reflection_buckets`` (same 100-row-per-call cap, same
+        nextToken loop) as a reusable method for callers -- like
+        ``reflection_list`` -- that need it outside that closure's scope."""
+        summaries: list[dict[str, Any]] = []
+        token: str | None = None
+        while len(summaries) < max_results:
+            kwargs: dict[str, Any] = {
+                "memoryId": self._cfg.episodic.memory_id,
+                "namespace": namespace,
+                "maxResults": min(100, max_results - len(summaries)),
+            }
+            if token:
+                kwargs["nextToken"] = token
+            response = self._data.list_memory_records(**kwargs)
+            summaries.extend(response.get("memoryRecordSummaries", []))
+            token = response.get("nextToken")
+            if not token:
+                break
+        return summaries
+
+    def reflection_list(
+        self,
+        *,
+        project: str | None = None,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        status: str | None = None,
+        min_confidence: float = 0.0,
+        useful_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Flat, Wilson-ordered reflection list for the UI panel.
+
+        Fans out ``list_memory_records`` over the reflections namespaces
+        (project + general, same pair ``retrieve`` uses) and, only when the
+        resolved status set admits ``"retired"``, the retired namespaces too
+        -- querying retired/ unconditionally would waste a wire call on
+        every default-view page load. Each summary is parsed via
+        ``_parse_reflection_record`` (the same sqlite-shaped mapping
+        ``retrieve``/``reflection_get`` use), deduped by id (project
+        namespace wins, mirroring ``_fetch_reflection_buckets``), then
+        filtered client-side on tech/phase (inside the parse call),
+        polarity/min_confidence/useful_only/status-set membership.
+
+        Status remap: agentcore's vocabulary is active/promoted/retired
+        (no pending_review). ``status=None`` resolves to ``{"active",
+        "promoted"}`` -- sqlite's own default set (``pending_review``,
+        ``confirmed``) lives entirely inside ``queries.reflection_list_for_ui``
+        and is never used here; the two defaults are intentionally
+        different views of "the live/active reflections" for their
+        respective status vocabularies.
+
+        Ordering: shared Wilson lower bound (``services/scoring.py``) on
+        (useful+overlooked)/(useful+overlooked+ignored) DESC, confidence
+        DESC, updated_at DESC -- identical formula/tiebreaks to
+        ``retrieve``'s per-bucket ordering, just flattened across polarity
+        instead of bucketed.
+
+        Best-effort per namespace: a namespace whose ``list_memory_records``
+        call raises is skipped (degrade, not a 500) -- the surviving
+        namespaces' rows are still returned."""
+        actor_id = resolve_actor_id(project or self._project)
+        wanted = {"active", "promoted"} if status is None else {status}
+
+        refl_project = resolve_namespace(actor_id, "reflections")
+        refl_general = resolve_namespace("general", "reflections")
+        namespaces = [refl_project]
+        if refl_general != refl_project:
+            namespaces.append(refl_general)
+        if "retired" in wanted:
+            ret_project = resolve_namespace(actor_id, "retired")
+            ret_general = resolve_namespace("general", "retired")
+            namespaces.append(ret_project)
+            if ret_general != ret_project:
+                namespaces.append(ret_general)
+
+        seen: set[str] = set()
+        rows: list[dict[str, Any]] = []
+        for namespace in namespaces:
+            try:
+                summaries = self._list_records_paginated(namespace, max_results=limit * 2)
+            except Exception:  # noqa: BLE001 - best-effort; one namespace failing must not 500
+                continue
+            for rec in summaries:
+                parsed = self._parse_reflection_record(rec, tech_filter=tech, phase_filter=phase)
+                if parsed is None or parsed["id"] in seen:
+                    continue
+                if parsed["_status"] not in wanted:
+                    continue
+                if polarity is not None and parsed["_polarity"] != polarity:
+                    continue
+                if parsed["confidence"] < min_confidence:
+                    continue
+                if useful_only and parsed["useful_count"] <= 0:
+                    continue
+                seen.add(parsed["id"])
+                rows.append(parsed)
+
+        rows.sort(key=lambda r: (
+            -wilson_lower_bound(
+                r["useful_count"] + r["times_overlooked"],
+                r["useful_count"] + r["times_overlooked"] + r["times_ignored"],
+            ),
+            -r["confidence"],
+            -r["_updated_at_ts"],
+        ))
+        resolved_project = project or self._project
+        return [
+            {
+                "id": r["id"], "title": r["title"], "project": resolved_project,
+                "tech": r["tech"], "phase": r["phase"], "polarity": r["_polarity"],
+                "confidence": r["confidence"], "status": r["_status"],
+                "use_cases": r["use_cases"], "evidence_count": r["evidence_count"],
+                "updated_at": r["updated_at"], "useful_count": r["useful_count"],
+                "times_misled": r["times_misled"], "times_overlooked": r["times_overlooked"],
+            }
+            for r in rows[:limit]
+        ]
+
     async def list_observations(
         self,
         *,

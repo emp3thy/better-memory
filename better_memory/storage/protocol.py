@@ -174,6 +174,26 @@ class StorageBackend(Protocol):
         (queries.reflection_provenance on the local conn, flag-gated in PR 3)."""
         ...
 
+    def reflection_list(
+        self,
+        *,
+        project: str | None = None,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        status: str | None = None,
+        min_confidence: float = 0.0,
+        useful_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Flat reflection list for the UI panel, ordered by the shared Wilson
+        lower bound desc / confidence desc / updated_at desc. sqlite delegates to
+        queries.reflection_list_for_ui; agentcore fans out over the reflections
+        (+ retired, when the status set admits it) namespaces and filters/orders
+        client-side. status=None admits the live set (sqlite pending_review/
+        confirmed; agentcore active/promoted)."""
+        ...
+
     async def list_observations(
         self,
         *,

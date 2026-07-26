@@ -384,3 +384,29 @@ def test_reflection_get_missing_returns_none(backend):
     assert backend.reflection_get(reflection_id="nope") is None
 
 
+def test_reflection_list_matches_queries_for_ui(backend, memory_conn):
+    from dataclasses import asdict
+
+    from better_memory.ui import queries
+
+    memory_conn.executemany(
+        "INSERT INTO reflections (id, title, project, phase, polarity, "
+        "use_cases, hints, confidence, status, evidence_count, scope, "
+        "created_at, updated_at) VALUES "
+        "(?, ?, 'testproj', 'general', 'do', 'uc', '[]', ?, ?, 0, 'project', "
+        "'2026-04-01T00:00:00+00:00', '2026-04-01T00:00:00+00:00')",
+        [("a", "A", 0.9, "confirmed"),
+         ("b", "B", 0.5, "confirmed"),
+         ("c", "C", 0.5, "retired")],
+    )
+    memory_conn.commit()
+    got = backend.reflection_list(project="testproj")
+    expect = [asdict(r) for r in queries.reflection_list_for_ui(
+        memory_conn, project="testproj")]
+    assert got == expect
+    # default excludes retired; explicit status='retired' surfaces it
+    assert [r["id"] for r in got] == ["a", "b"]
+    retired = backend.reflection_list(project="testproj", status="retired")
+    assert [r["id"] for r in retired] == ["c"]
+
+

@@ -376,6 +376,29 @@ class SqliteBackend:
         row = queries.reflection_row(self._conn, reflection_id=reflection_id)
         return None if row is None else asdict(row)
 
+    def reflection_list(
+        self,
+        *,
+        project: str | None = None,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        status: str | None = None,
+        min_confidence: float = 0.0,
+        useful_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        from dataclasses import asdict
+
+        from better_memory.ui import queries
+
+        rows = queries.reflection_list_for_ui(
+            self._conn, project=project or self._project, tech=tech, phase=phase,
+            polarity=polarity, status=status, min_confidence=min_confidence,
+            useful_only=useful_only, limit=limit,
+        )
+        return [asdict(r) for r in rows]
+
     # ----- Session lifecycle -----
 
     def session_bootstrap(
