@@ -322,13 +322,13 @@ class TestSemanticHandlersRemoteBranch:
         )
         svc.list_for_project.assert_not_called()
 
-    async def test_semantic_retrieve_dedupes_duplicate_ids(self, remote) -> None:
-        remote.semantic_list = MagicMock(
-            return_value=[_sm(id="dup-1", content="same", scope="general")]
-        )
-        handlers = SemanticToolHandlers(semantic=MagicMock(), remote=remote)
-        rows = _payload(await handlers.semantic_retrieve({}))
-        assert [r["id"] for r in rows] == ["dup-1"]
+    # test_semantic_retrieve_dedupes_duplicate_ids removed: it predated UD-2
+    # and exercised the handler's own manual dedup/merge loop, which no
+    # longer exists (semantic_retrieve now makes a single pass-through call,
+    # covered above by test_semantic_retrieve_passes_through_backend_merged_list_with_stable_keys).
+    # Cross-namespace id dedup (project wins) is backend-owned and covered by
+    # test_semantic_list_default_view_dedups_project_wins in
+    # tests/storage/test_agentcore_unit.py.
 
     async def test_semantic_update_routes_to_remote(self, remote) -> None:
         svc = MagicMock(name="SemanticMemoryService")
