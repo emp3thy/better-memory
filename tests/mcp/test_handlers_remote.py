@@ -285,21 +285,25 @@ class TestSemanticHandlersRemoteBranch:
         assert kwargs["content"] == "pref"
         assert kwargs["scope"] == "general"
 
-    async def test_semantic_retrieve_merges_project_and_general_with_stable_keys(
+    async def test_semantic_retrieve_passes_through_backend_merged_list_with_stable_keys(
         self, remote
     ) -> None:
-        """UD-2: two backend calls (project namespace + general namespace)
-        merged, payload keeps the sqlite key set with None placeholders."""
+        """UD-2: AgentCoreBackend.semantic_list's scope_filter=None view now
+        performs the project+general merge/dedup itself (project wins) --
+        see storage/agentcore.py::semantic_list. The handler makes a single
+        call and just reshapes each SemanticMemory into the stable sqlite
+        key set with None placeholders for fields agentcore doesn't carry.
 
-        def _semantic_list(**kwargs: Any) -> list[SemanticMemory]:
-            # §6.3: agentcore semantic_list returns SemanticMemory objects,
-            # matching the sqlite backend — the handler reads them via
-            # attribute access.
-            if kwargs.get("scope_filter") == "general":
-                return [_sm(id="g1", content="general fact", scope="general")]
-            return [_sm(id="p1", content="project fact", scope="project")]
-
-        remote.semantic_list = MagicMock(side_effect=_semantic_list)
+        (Previously the handler looped scope_filter over (None, "general")
+        itself to work around semantic_list's old project-only default;
+        that loop is gone now that semantic_list owns the merge -- keeping
+        it would re-query the general namespace a second, redundant time.)"""
+        remote.semantic_list = MagicMock(
+            return_value=[
+                _sm(id="p1", content="project fact", scope="project"),
+                _sm(id="g1", content="general fact", scope="general"),
+            ]
+        )
         svc = MagicMock(name="SemanticMemoryService")
         handlers = SemanticToolHandlers(semantic=svc, remote=remote)
 
@@ -313,11 +317,9 @@ class TestSemanticHandlersRemoteBranch:
             assert row["project"] is None
             assert row["created_at"] is None
             assert row["updated_at"] is None
-        scope_filters = [
-            call.kwargs.get("scope_filter")
-            for call in remote.semantic_list.call_args_list
-        ]
-        assert scope_filters == [None, "general"]
+        remote.semantic_list.assert_called_once_with(
+            project="projx", scope_filter=None
+        )
         svc.list_for_project.assert_not_called()
 
     async def test_semantic_retrieve_dedupes_duplicate_ids(self, remote) -> None:

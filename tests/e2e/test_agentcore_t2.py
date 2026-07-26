@@ -965,12 +965,13 @@ class TestContextualInjectWireAndDegradation:
             # WITHOUT a query so it never itself triggers a relevance
             # search) + 2 RetrieveMemoryRecords calls (relevance_ranks'
             # "reflection" kind, same project + general namespace pair) = 4.
-            # SEM-FAKE-0001: 1 ListMemoryRecords call (backend.
-            # semantic_list, project namespace only — semantic_list never
-            # fans out to general) + 2 RetrieveMemoryRecords calls
-            # (relevance_ranks' "semantic" kind, project + general) = 3.
+            # SEM-FAKE-0001: 2 ListMemoryRecords calls (backend.
+            # semantic_list's scope_filter=None default now fans out over
+            # project + general, restoring sqlite parity per the C1 fix)
+            # + 2 RetrieveMemoryRecords calls (relevance_ranks' "semantic"
+            # kind, project + general) = 4.
             assert sum("EPI-FAKE-0001" in p for p in paths) == 4
-            assert sum("SEM-FAKE-0001" in p for p in paths) == 3
+            assert sum("SEM-FAKE-0001" in p for p in paths) == 4
 
     def test_case_b_misconfig_clean_slate_silent_noop_with_stray_db(
         self, clean_slate_home: Path, tmp_path: Path
