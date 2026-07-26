@@ -88,10 +88,12 @@
       <span class="rail-brand-name">[ better-memory ]</span>
     </div>
     <nav class="rail-nav">
+      {% if caps.supports_episodes %}
       <a class="rail-link {% if active_tab == 'episodes' %}active{% endif %}" href="{{ url_for('episodes') }}">
         <span class="rail-num">01</span>
         <span class="rail-label">Episodes</span>
       </a>
+      {% endif %}
       <a class="rail-link {% if active_tab == 'observations' %}active{% endif %}" href="{{ url_for('observations') }}">
         <span class="rail-num">02</span>
         <span class="rail-label">Observations</span>

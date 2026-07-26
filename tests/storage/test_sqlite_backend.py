@@ -344,3 +344,19 @@ def test_relevance_ranks_kinds_filter(backend, memory_conn) -> None:
     assert result == {}
 
 
+def test_new_capability_flags_all_true(backend) -> None:
+    """The five UI content-capability flags are all True on sqlite --
+    sqlite is the full-feature backend."""
+    assert backend.supports_observations is True
+    assert backend.supports_provenance is True
+    assert backend.supports_retention_runs is True
+    assert backend.supports_reflection_review is True
+    assert backend.supports_reflection_text_edit is True
+
+
+def test_supports_episodes_unchanged_regression(backend) -> None:
+    """Regression pin: the pre-existing episodes flag is untouched by the
+    flag-addition phase."""
+    assert backend.supports_episodes is True
+
+

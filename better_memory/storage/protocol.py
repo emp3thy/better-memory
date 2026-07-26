@@ -63,6 +63,49 @@ class StorageBackend(Protocol):
         tab when this is False."""
         ...
 
+    @property
+    def supports_observations(self) -> bool:
+        """True when the backend stores raw observations as a first-class,
+        listable record type (the Observations tab and observation drawers).
+        False in agentcore mode, where AgentCore ingests events and exposes
+        only extracted memory records -- there is no raw-observation store to
+        list. The management UI hides the Observations tab when this is
+        False."""
+        ...
+
+    @property
+    def supports_provenance(self) -> bool:
+        """True when a memory can be traced to the observations / episode it
+        was synthesised from (the provenance joins shown in drawers). False in
+        agentcore mode, where extraction happens inside AgentCore and no
+        per-memory provenance chain is returned. The UI hides provenance
+        sections when this is False."""
+        ...
+
+    @property
+    def supports_retention_runs(self) -> bool:
+        """True when retention / pruning executes as recorded local runs the
+        UI can list (the Diagnostics retention panel). False in agentcore
+        mode, where pruning is event-expiry managed by AgentCore with no local
+        run ledger."""
+        ...
+
+    @property
+    def supports_reflection_review(self) -> bool:
+        """True when reflections pass through a local pending_review ->
+        confirmed lifecycle the UI can action (the confirm control). False in
+        agentcore mode, whose status vocabulary is active / promoted / retired
+        with NO pending_review state -- reflections are born active."""
+        ...
+
+    @property
+    def supports_reflection_text_edit(self) -> bool:
+        """True when a reflection's use_cases / hints text is user-editable in
+        place (the edit form). False in agentcore mode, where reflection
+        bodies are AI-managed by AgentCore extraction and not free-text
+        editable."""
+        ...
+
     # ----- Observations -----
 
     async def observe(

@@ -87,6 +87,26 @@ class SqliteBackend:
     def supports_episodes(self) -> bool:
         return True
 
+    @property
+    def supports_observations(self) -> bool:
+        return True
+
+    @property
+    def supports_provenance(self) -> bool:
+        return True
+
+    @property
+    def supports_retention_runs(self) -> bool:
+        return True
+
+    @property
+    def supports_reflection_review(self) -> bool:
+        return True
+
+    @property
+    def supports_reflection_text_edit(self) -> bool:
+        return True
+
     # ----- Observations -----
 
     async def observe(

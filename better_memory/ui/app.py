@@ -18,6 +18,7 @@ from better_memory.embeddings.ollama import OllamaEmbedder
 from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.episode import EpisodeService
 from better_memory.services.reflection import ReflectionService
+from better_memory.storage.factory import build_backend
 from better_memory.ui import queries
 
 
@@ -96,6 +97,25 @@ def create_app(
     )
     app.extensions["sync_embedder"] = resolved_sync_embedder
     app.extensions["db_path"] = resolved_db
+    app.extensions["backend"] = build_backend(
+        config=get_config(),
+        memory_conn=db_conn,
+        sync_embedder=resolved_sync_embedder,
+        session_id=None,
+        project=project_name(),
+    )
+
+    @app.context_processor
+    def _inject_caps() -> dict[str, object]:
+        b = app.extensions["backend"]
+        return {"caps": {
+            "supports_episodes": b.supports_episodes,
+            "supports_observations": b.supports_observations,
+            "supports_provenance": b.supports_provenance,
+            "supports_retention_runs": b.supports_retention_runs,
+            "supports_reflection_review": b.supports_reflection_review,
+            "supports_reflection_text_edit": b.supports_reflection_text_edit,
+        }}
 
     @app.teardown_appcontext
     def _close_db_on_teardown(_exc: BaseException | None) -> None:

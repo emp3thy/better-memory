@@ -110,6 +110,49 @@ class TestNav:
             assert f">{label}<" not in body
 
 
+class TestEpisodesGate:
+    _RAIL_LINK = '<span class="rail-label">Episodes</span>'
+
+    def test_episodes_link_present_in_sqlite_mode(
+        self, client: FlaskClient
+    ) -> None:
+        # sqlite backend -> supports_episodes True -> link renders as today.
+        body = client.get("/episodes").get_data(as_text=True)
+        assert self._RAIL_LINK in body
+
+    def test_episodes_link_hidden_when_flag_false(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # [[guard-needs-triggering-test]]: seed supports_episodes=False to
+        # trigger the {% if %} false branch. [[playwright-domtext]]: assert
+        # on nav-element markup presence/absence, not CSS visibility.
+        from unittest.mock import MagicMock
+
+        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+        StubBackend = type("StubBackend", (), {})
+        stub = StubBackend()
+        # Only Episodes is gated this phase; the other five stay True so
+        # the rest of the rail renders normally.
+        setattr(type(stub), "supports_episodes", property(lambda self: False))
+        for name in (
+            "supports_observations", "supports_provenance",
+            "supports_retention_runs", "supports_reflection_review",
+            "supports_reflection_text_edit",
+        ):
+            setattr(type(stub), name, property(lambda self: True))
+        monkeypatch.setattr(
+            "better_memory.ui.app.build_backend",
+            MagicMock(return_value=stub),
+        )
+        app = create_app(start_watchdog=False, db_path=tmp_db)
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            body = c.get("/episodes").get_data(as_text=True)
+        assert self._RAIL_LINK not in body
+        # Sibling links unaffected -- prove only Episodes was gated.
+        assert '<span class="rail-label">Reflections</span>' in body
+
+
 class TestOriginCheck:
     def test_post_without_origin_or_referer_is_rejected(
         self, client: FlaskClient
@@ -250,4 +293,77 @@ class TestInactivityTimeout:
         app = create_app(start_watchdog=False, db_path=tmp_path / "memory.db")
         assert app.config["_check_idle"]  # helper still registered
 
+
+class TestBackendWiring:
+    def test_create_app_builds_sqlite_backend_and_retains_conn(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from better_memory.storage.sqlite import SqliteBackend
+
+        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+        app = create_app(start_watchdog=False, db_path=tmp_db)
+        backend = app.extensions["backend"]
+        assert isinstance(backend, SqliteBackend)
+        # Operational conn retained and still usable.
+        conn = app.extensions["db_connection"]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM observations"
+        ).fetchone()[0] == 0
+        # Sqlite path shares the single connection -- no second store.
+        assert backend._conn is conn
+
+    def test_build_backend_called_with_canonical_kwargs(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from better_memory.config import project_name
+
+        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+        stub = MagicMock(name="stub-backend")
+        spy = MagicMock(return_value=stub)
+        monkeypatch.setattr("better_memory.ui.app.build_backend", spy)
+        app = create_app(start_watchdog=False, db_path=tmp_db)
+        assert app.extensions["backend"] is stub
+        spy.assert_called_once()
+        _, kwargs = spy.call_args
+        assert kwargs["memory_conn"] is app.extensions["db_connection"]
+        assert kwargs["sync_embedder"] is app.extensions["sync_embedder"]
+        assert kwargs["session_id"] is None
+        assert kwargs["project"] == project_name()
+        assert "config" in kwargs  # get_config() forwarded to the factory
+
+    def test_caps_read_from_backend_on_a_real_route(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # [[server-boot-real-call]]: drive an ACTUAL route through a stubbed
+        # agentcore backend and prove the six caps were sourced FROM the
+        # backend during the render -- no leaked local-content read.
+        from unittest.mock import MagicMock, PropertyMock
+
+        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+        # Fresh throwaway type per test so PropertyMocks don't leak.
+        StubBackend = type("StubBackend", (), {})
+        stub = StubBackend()
+        props: dict[str, PropertyMock] = {}
+        for name in (
+            "supports_episodes", "supports_observations",
+            "supports_provenance", "supports_retention_runs",
+            "supports_reflection_review", "supports_reflection_text_edit",
+        ):
+            p = PropertyMock(return_value=False)
+            setattr(StubBackend, name, p)
+            props[name] = p
+        monkeypatch.setattr(
+            "better_memory.ui.app.build_backend",
+            MagicMock(return_value=stub),
+        )
+        app = create_app(start_watchdog=False, db_path=tmp_db)
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            resp = c.get("/episodes")
+        assert resp.status_code == 200
+        # Every cap was read off the backend object during the real render.
+        for name, p in props.items():
+            p.assert_called()
 
