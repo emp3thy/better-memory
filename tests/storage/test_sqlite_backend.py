@@ -375,6 +375,7 @@ def test_reflection_get_returns_row_without_sources(backend, memory_conn):
     memory_conn.commit()
     got = backend.reflection_get(reflection_id="r1")
     detail = queries.reflection_detail(memory_conn, reflection_id="r1")
+    assert detail is not None
     assert got == asdict(detail.reflection)
     assert "sources" not in got
 
