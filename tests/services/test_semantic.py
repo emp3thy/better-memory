@@ -595,3 +595,13 @@ class TestSemanticWilsonRanking:
         unrated = svc.create(content="unrated", project="p")
         ids = [m.id for m in svc.list_for_project(project="p", track_exposure=False)]
         assert ids == [rated, unrated]
+
+
+def test_semantic_service_get_returns_model_or_none(conn):
+    from better_memory.services.semantic import SemanticMemory, SemanticMemoryService
+    svc = SemanticMemoryService(conn)
+    mid = svc.create(content="a rule", project="p", scope="general")
+    got = svc.get(id=mid)
+    assert isinstance(got, SemanticMemory)
+    assert got.id == mid and got.content == "a rule" and got.scope == "general"
+    assert svc.get(id="missing") is None

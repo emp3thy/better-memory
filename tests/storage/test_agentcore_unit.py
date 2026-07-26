@@ -2926,3 +2926,29 @@ def test_reflection_list_dedups_across_namespaces_project_wins(backend, mock_dat
     assert [r["id"] for r in rows] == ["r-dupe"]
     assert rows[0]["title"] == "project-copy"
     assert rows[0]["confidence"] == pytest.approx(0.9)
+
+
+# ===== semantic_get: single-record accessor =====
+
+
+def test_semantic_get_maps_record(backend, mock_data_client):
+    from better_memory.services.semantic import SemanticMemory
+    mock_data_client.get_memory_record.return_value = {"memoryRecord": {
+        "memoryRecordId": "sm-1",
+        "content": {"text": "prefer uv"},
+        "namespaces": ["/general/semantic/"],
+        "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+        "metadata": {"useful_count": {"numberValue": 2}},
+    }}
+    got = backend.semantic_get(id="sm-1")
+    assert isinstance(got, SemanticMemory)
+    assert got.id == "sm-1" and got.scope == "general" and got.useful_count == 2
+
+
+def test_semantic_get_returns_none_on_404(backend, mock_data_client, monkeypatch):
+    import better_memory.storage.agentcore as ac_module
+    monkeypatch.setattr(ac_module, "_ClientError", _FakeClientError)
+    mock_data_client.get_memory_record.side_effect = _FakeClientError(
+        code="ResourceNotFoundException", message="missing"
+    )
+    assert backend.semantic_get(id="gone") is None

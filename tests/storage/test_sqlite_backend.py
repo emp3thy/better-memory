@@ -410,3 +410,18 @@ def test_reflection_list_matches_queries_for_ui(backend, memory_conn):
     assert [r["id"] for r in retired] == ["c"]
 
 
+def test_semantic_get_returns_model(backend, memory_conn):
+    from better_memory.services.semantic import SemanticMemory
+    memory_conn.execute(
+        "INSERT INTO semantic_memories "
+        "(id, content, project, scope, created_at, updated_at) VALUES "
+        "('s1','the rule','testproj','project',"
+        "'2026-05-01T00:00:00+00:00','2026-05-01T00:00:00+00:00')"
+    )
+    memory_conn.commit()
+    got = backend.semantic_get(id="s1")
+    assert isinstance(got, SemanticMemory)
+    assert got.content == "the rule"
+    assert backend.semantic_get(id="nope") is None
+
+

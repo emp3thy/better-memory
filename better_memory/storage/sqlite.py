@@ -223,6 +223,9 @@ class SqliteBackend:
     def semantic_delete(self, *, id: str) -> None:
         self._semantic.delete(id=id)
 
+    def semantic_get(self, *, id: str) -> Any | None:
+        return self._semantic.get(id=id)
+
     # ----- Episodes -----
 
     def open_background_episode(

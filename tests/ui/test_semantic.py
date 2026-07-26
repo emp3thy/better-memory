@@ -665,6 +665,10 @@ class _SemanticStubBackend(_CapsStub):
     def semantic_update_text(self, *, id, content):
         self.calls.append(("update", id, content))
 
+    def semantic_get(self, *, id) -> SemanticMemory | None:
+        self.calls.append(("get", id))
+        return None
+
 
 def _semantic_row(id="ac-1", content="agentcore rule", scope="project"):
     return SemanticMemory(
@@ -717,6 +721,36 @@ def test_semantic_scope_and_delete_and_update_call_backend(client):
     assert ("scope", "x1", "general") in stub.calls
     assert ("delete", "x1") in stub.calls
     assert ("update", "x1", "edited") in stub.calls
+
+
+def test_semantic_drawer_reads_from_backend_not_local(client, tmp_db):
+    import sqlite3
+    with sqlite3.connect(tmp_db) as seed:
+        seed.execute(
+            "INSERT INTO semantic_memories "
+            "(id, content, project, scope, created_at, updated_at) VALUES "
+            "('d1','LOCAL SENTINEL','testproj','project',"
+            "'2026-05-01T00:00:00+00:00','2026-05-01T00:00:00+00:00')"
+        )
+        seed.commit()
+    class _Stub(_SemanticStubBackend):
+        def semantic_get(self, *, id):
+            self.calls.append(("get", id))
+            return _semantic_row(id="d1", content="BACKEND DRAWER ROW")
+    stub = _Stub([])
+    client.application.extensions["backend"] = stub
+    body = client.get("/semantic/d1/drawer").get_data(as_text=True)
+    assert "BACKEND DRAWER ROW" in body
+    assert "LOCAL SENTINEL" not in body
+    assert ("get", "d1") in stub.calls
+
+
+def test_semantic_drawer_404_when_backend_returns_none(client):
+    class _Stub(_SemanticStubBackend):
+        def semantic_get(self, *, id):
+            return None
+    client.application.extensions["backend"] = _Stub([])
+    assert client.get("/semantic/nope/drawer").status_code == 404
 
 
 class TestSemanticUpdate:

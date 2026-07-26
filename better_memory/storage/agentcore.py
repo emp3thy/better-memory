@@ -1625,6 +1625,19 @@ class AgentCoreBackend:
                 f"{failed[0].get('errorMessage', 'unknown')}"
             )
 
+    def semantic_get(self, *, id: str) -> Any | None:
+        """Single semantic record by id, or None on a hard 404. Reuses the
+        same get-then-map path as semantic_update_text/semantic_set_scope
+        (``_get_semantic_record``) and the same read model
+        ``semantic_list`` returns (``_semantic_summary_to_model``)."""
+        try:
+            record = self._get_semantic_record(id)
+        except _ClientError as exc:
+            if exc.response.get("Error", {}).get("Code", "") == "ResourceNotFoundException":
+                return None
+            raise
+        return self._semantic_summary_to_model(record, project=self._project)
+
     # ----- Episodes: no-ops in agentcore mode (this task) -----
 
     def open_background_episode(

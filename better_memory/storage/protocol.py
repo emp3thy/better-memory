@@ -252,6 +252,10 @@ class StorageBackend(Protocol):
         """Permanently delete a semantic memory (idempotent)."""
         ...
 
+    def semantic_get(self, *, id: str) -> Any | None:
+        """Single semantic memory (SemanticMemory) by id, or None when absent."""
+        ...
+
     # ----- Episodes -----
 
     def open_background_episode(

@@ -561,26 +561,9 @@ def create_app(
     @app.get("/semantic/<id>/drawer")
     def semantic_drawer(id: str):
         conn = app.extensions["db_connection"]
-        row = conn.execute(
-            "SELECT id, content, project, scope, created_at, updated_at, "
-            "useful_count, last_useful_at, times_misled, last_misled_at, "
-            "times_overlooked, last_overlooked_at "
-            "FROM semantic_memories WHERE id = ?",
-            (id,),
-        ).fetchone()
-        if row is None:
+        memory = app.extensions["backend"].semantic_get(id=id)
+        if memory is None:
             abort(404)
-        memory = {
-            "id": row["id"], "content": row["content"],
-            "project": row["project"], "scope": row["scope"],
-            "created_at": row["created_at"], "updated_at": row["updated_at"],
-            "useful_count": row["useful_count"] or 0,
-            "last_useful_at": row["last_useful_at"],
-            "times_misled": row["times_misled"] or 0,
-            "last_misled_at": row["last_misled_at"],
-            "times_overlooked": row["times_overlooked"] or 0,
-            "last_overlooked_at": row["last_overlooked_at"],
-        }
         rating_evidence = queries.fetch_rating_evidence(conn, "semantic", id)
         return render_template(
             "fragments/semantic_drawer.html",

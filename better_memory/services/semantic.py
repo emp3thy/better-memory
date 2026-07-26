@@ -217,6 +217,28 @@ class SemanticMemoryService:
         )
         self._conn.commit()
 
+    def get(self, *, id: str) -> SemanticMemory | None:
+        """Single semantic memory by id, or None. Same field set as
+        list_for_project's read model (drives the UI drawer)."""
+        row = self._conn.execute(
+            "SELECT id, content, project, scope, created_at, updated_at, "
+            "useful_count, last_useful_at, times_misled, last_misled_at, "
+            "times_overlooked, last_overlooked_at, times_ignored, last_ignored_at "
+            "FROM semantic_memories WHERE id = ?",
+            (id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SemanticMemory(
+            id=row["id"], content=row["content"], project=row["project"],
+            scope=row["scope"], created_at=row["created_at"], updated_at=row["updated_at"],
+            useful_count=row["useful_count"] or 0, last_useful_at=row["last_useful_at"],
+            times_misled=row["times_misled"] or 0, last_misled_at=row["last_misled_at"],
+            times_overlooked=row["times_overlooked"] or 0,
+            last_overlooked_at=row["last_overlooked_at"],
+            times_ignored=row["times_ignored"] or 0, last_ignored_at=row["last_ignored_at"],
+        )
+
     def list_for_project(
         self,
         *,
