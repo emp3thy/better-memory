@@ -129,7 +129,9 @@ class TestEpisodesGate:
         from unittest.mock import MagicMock
 
         monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
-        StubBackend = type("StubBackend", (), {})
+        StubBackend = type(
+            "StubBackend", (), {"distinct_projects": lambda self: []}
+        )
         stub = StubBackend()
         # Only Episodes is gated this phase; the other five stay True so
         # the rest of the rail renders normally.
@@ -147,7 +149,12 @@ class TestEpisodesGate:
         app = create_app(start_watchdog=False, db_path=tmp_db)
         app.config["TESTING"] = True
         with app.test_client() as c:
-            body = c.get("/episodes").get_data(as_text=True)
+            # Route target is /reflections, not /episodes: PR 3 (see
+            # tests/ui/test_nav_gating.py) added a route guard that 404s
+            # /episodes itself when supports_episodes is False, so the nav
+            # link's visibility must now be observed from a route that
+            # stays reachable regardless of that flag.
+            body = c.get("/reflections").get_data(as_text=True)
         assert self._RAIL_LINK not in body
         # Sibling links unaffected -- prove only Episodes was gated.
         assert '<span class="rail-label">Reflections</span>' in body
@@ -343,7 +350,9 @@ class TestBackendWiring:
 
         monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
         # Fresh throwaway type per test so PropertyMocks don't leak.
-        StubBackend = type("StubBackend", (), {})
+        StubBackend = type(
+            "StubBackend", (), {"distinct_projects": lambda self: []}
+        )
         stub = StubBackend()
         props: dict[str, PropertyMock] = {}
         for name in (
@@ -361,7 +370,13 @@ class TestBackendWiring:
         app = create_app(start_watchdog=False, db_path=tmp_db)
         app.config["TESTING"] = True
         with app.test_client() as c:
-            resp = c.get("/episodes")
+            # Route target is /reflections, not /episodes: PR 3 (see
+            # tests/ui/test_nav_gating.py) added a route guard that 404s
+            # /episodes itself when supports_episodes is False, which would
+            # abort before the caps context processor ever renders.
+            # /reflections is unaffected by any of the six flags, so it
+            # still exercises a real render sourced from the backend.
+            resp = c.get("/reflections")
         assert resp.status_code == 200
         # Every cap was read off the backend object during the real render.
         for name, p in props.items():

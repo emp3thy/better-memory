@@ -9,12 +9,14 @@
        hx-swap="innerHTML">
   </div>
 
+  {% if caps.supports_retention_runs %}
   <h2>Retention runs</h2>
   <div id="retention-runs-panel"
        hx-get="{{ url_for('retention_runs_panel') }}"
        hx-trigger="load, every 60s"
        hx-swap="innerHTML">
   </div>
+  {% endif %}
 
   <div id="hook-error-drawer"></div>
 

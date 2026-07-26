@@ -1820,6 +1820,71 @@ class AgentCoreBackend:
             "last_overlooked_at": None,
         }
 
+    def list_actors(self) -> list[str]:
+        """Actor ids for the episodic memory, best-effort (empty on any
+        error). Powers the Reflections project dropdown alongside the local
+        migration ledger -- AgentCore has no separate "list all projects"
+        API, so actorId (== project, per resolve_actor_id) is the closest
+        native enumeration.
+
+        Pages through ``nextToken`` (mirroring the pattern used elsewhere
+        in this module, e.g. the list_memory_records fan-out above) so
+        actors beyond the first page aren't silently dropped from the
+        dropdown. Best-effort: any AWS error mid-pagination returns
+        whatever actor ids were already collected (or [] if none)."""
+        actor_ids: list[str] = []
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"memoryId": self._cfg.episodic.memory_id}
+            if token:
+                kwargs["nextToken"] = token
+            try:
+                resp = self._data.list_actors(**kwargs)
+            except Exception:  # noqa: BLE001 - best-effort; keep what we have
+                break
+            actor_ids.extend(
+                s.get("actorId", "")
+                for s in resp.get("actorSummaries", [])
+                if s.get("actorId")
+            )
+            token = resp.get("nextToken")
+            if not token:
+                break
+        return actor_ids
+
+    def _ledger_projects(self) -> set[str]:
+        """Projects parsed from the local agentcore_migration.namespace column.
+
+        projects/{p}/... -> {p}; general/... -> 'general'. Parent namespaces
+        do NOT roll up. Best-effort: no local conn / query error -> empty set."""
+        if self._local_conn is None:
+            return set()
+        try:
+            rows = self._local_conn.execute(
+                "SELECT DISTINCT namespace FROM agentcore_migration"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - ledger missing/unreadable -> empty
+            return set()
+        out: set[str] = set()
+        for row in rows:
+            ns = (row[0] or "").lstrip("/")
+            if ns.startswith("projects/"):
+                rest = ns[len("projects/"):]
+                head = rest.split("/", 1)[0]
+                if head:
+                    out.add(head)
+            elif ns.startswith("general/"):
+                out.add("general")
+        return out
+
+    def distinct_projects(self) -> list[str]:
+        """Distinct project names for the Reflections project dropdown:
+        sorted-casefold union of ListActors and the local migration ledger's
+        namespace-derived project set. Both best-effort; both empty/failing
+        yields []."""
+        projects = set(self.list_actors()) | self._ledger_projects()
+        return sorted(projects, key=lambda s: s.casefold())
+
     # ----- Session lifecycle: Tasks 9, 12 -----
 
     def session_bootstrap(

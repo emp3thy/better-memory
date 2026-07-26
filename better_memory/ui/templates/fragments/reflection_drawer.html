@@ -48,7 +48,7 @@
 
   {% if detail.reflection.status in ('pending_review', 'confirmed') %}
     <div class="drawer-actions">
-      {% if detail.reflection.status == 'pending_review' %}
+      {% if caps.supports_reflection_review and detail.reflection.status == 'pending_review' %}
         <button type="button"
                 class="action-confirm"
                 hx-post="{{ url_for('reflection_confirm', id=detail.reflection.id) }}"
@@ -64,13 +64,15 @@
               hx-swap="innerHTML">
         Retire
       </button>
-      <button type="button"
-              class="action-edit"
-              hx-get="{{ url_for('reflection_edit_form', id=detail.reflection.id) }}"
-              hx-target="#reflection-drawer"
-              hx-swap="innerHTML">
-        Edit
-      </button>
+      {% if caps.supports_reflection_text_edit %}
+        <button type="button"
+                class="action-edit"
+                hx-get="{{ url_for('reflection_edit_form', id=detail.reflection.id) }}"
+                hx-target="#reflection-drawer"
+                hx-swap="innerHTML">
+          Edit
+        </button>
+      {% endif %}
       {% if detail.reflection.scope == 'project' %}
         <button type="button"
                 class="action-promote"
@@ -83,41 +85,43 @@
     </div>
   {% endif %}
 
-  <section class="drawer-section">
-    <h4>Source observations ({{ detail.sources | length }})</h4>
-    {% if detail.sources %}
-      <ul class="source-list">
-        {% for src in detail.sources %}
-          <li class="source-item outcome-{{ src.outcome }}">
-            <div class="src-content">{{ src.content }}</div>
-            <div class="src-meta">
-              {% if src.component %}<span>{{ src.component }}</span>{% endif %}
-              {% if src.theme %}<span>{{ src.theme }}</span>{% endif %}
-              <span>obs {{ src.outcome }}</span>
-              <span>{{ src.created_at }}</span>
-            </div>
-            <div class="src-episode">
-              {% if src.episode_goal %}
-                from episode <em>{{ src.episode_goal }}</em>
-              {% else %}
-                from background session
-              {% endif %}
-              {% if src.episode_outcome %}
-                — closed <span class="outcome-badge outcome-{{ src.episode_outcome }}">{{ src.episode_outcome }}</span>
-                {% if src.episode_close_reason %}
-                  ({{ src.episode_close_reason }})
+  {% if caps.supports_provenance %}
+    <section class="drawer-section">
+      <h4>Source observations ({{ detail.sources | length }})</h4>
+      {% if detail.sources %}
+        <ul class="source-list">
+          {% for src in detail.sources %}
+            <li class="source-item outcome-{{ src.outcome }}">
+              <div class="src-content">{{ src.content }}</div>
+              <div class="src-meta">
+                {% if src.component %}<span>{{ src.component }}</span>{% endif %}
+                {% if src.theme %}<span>{{ src.theme }}</span>{% endif %}
+                <span>obs {{ src.outcome }}</span>
+                <span>{{ src.created_at }}</span>
+              </div>
+              <div class="src-episode">
+                {% if src.episode_goal %}
+                  from episode <em>{{ src.episode_goal }}</em>
+                {% else %}
+                  from background session
                 {% endif %}
-              {% else %}
-                — still open
-              {% endif %}
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="empty-inline">No source observations linked yet.</p>
-    {% endif %}
-  </section>
+                {% if src.episode_outcome %}
+                  — closed <span class="outcome-badge outcome-{{ src.episode_outcome }}">{{ src.episode_outcome }}</span>
+                  {% if src.episode_close_reason %}
+                    ({{ src.episode_close_reason }})
+                  {% endif %}
+                {% else %}
+                  — still open
+                {% endif %}
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="empty-inline">No source observations linked yet.</p>
+      {% endif %}
+    </section>
+  {% endif %}
 
   {% if rating_evidence %}
     <section class="drawer-section">

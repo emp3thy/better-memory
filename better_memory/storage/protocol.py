@@ -194,6 +194,13 @@ class StorageBackend(Protocol):
         confirmed; agentcore active/promoted)."""
         ...
 
+    def distinct_projects(self) -> list[str]:
+        """Distinct project names for the Reflections project dropdown.
+
+        sqlite: SELECT DISTINCT project FROM reflections. agentcore:
+        ListActors UNION the migration-ledger namespaces (best-effort)."""
+        ...
+
     async def list_observations(
         self,
         *,

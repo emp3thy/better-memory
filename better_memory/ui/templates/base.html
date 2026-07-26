@@ -94,10 +94,12 @@
         <span class="rail-label">Episodes</span>
       </a>
       {% endif %}
+      {% if caps.supports_observations %}
       <a class="rail-link {% if active_tab == 'observations' %}active{% endif %}" href="{{ url_for('observations') }}">
         <span class="rail-num">02</span>
         <span class="rail-label">Observations</span>
       </a>
+      {% endif %}
       <a class="rail-link {% if active_tab == 'reflections' %}active{% endif %}" href="{{ url_for('reflections') }}">
         <span class="rail-num">03</span>
         <span class="rail-label">Reflections</span>

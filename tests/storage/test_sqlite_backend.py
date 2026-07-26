@@ -410,6 +410,25 @@ def test_reflection_list_matches_queries_for_ui(backend, memory_conn):
     assert [r["id"] for r in retired] == ["c"]
 
 
+def test_distinct_projects_matches_reflection_query(backend, memory_conn):
+    """Identity pin: SqliteBackend.distinct_projects == reflection_distinct_projects."""
+    from better_memory.ui import queries
+
+    memory_conn.executemany(
+        "INSERT INTO reflections (id, title, project, phase, polarity, "
+        "use_cases, hints, confidence, status, evidence_count, scope, "
+        "created_at, updated_at) VALUES "
+        "(?, ?, ?, 'general', 'do', 'uc', '[]', 0.9, 'confirmed', 0, "
+        "'project', '2026-04-01T00:00:00+00:00', '2026-04-01T00:00:00+00:00')",
+        [("a", "A", "zeta-proj"), ("b", "B", "alpha-proj")],
+    )
+    memory_conn.commit()
+    expected = queries.reflection_distinct_projects(memory_conn)
+    assert backend.distinct_projects() == expected
+    # Must be non-empty for the identity pin to be meaningful.
+    assert expected
+
+
 def test_semantic_get_returns_model(backend, memory_conn):
     from better_memory.services.semantic import SemanticMemory
     memory_conn.execute(

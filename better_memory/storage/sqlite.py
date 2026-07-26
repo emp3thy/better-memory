@@ -402,6 +402,18 @@ class SqliteBackend:
         )
         return [asdict(r) for r in rows]
 
+    def distinct_projects(self) -> list[str]:
+        """Distinct project names for the Reflections project dropdown:
+        SELECT DISTINCT project FROM reflections, sorted casefold."""
+        return [
+            r["project"]
+            for r in self._conn.execute(
+                "SELECT DISTINCT project FROM reflections "
+                "WHERE project IS NOT NULL AND project != '' "
+                "ORDER BY project COLLATE NOCASE"
+            ).fetchall()
+        ]
+
     # ----- Session lifecycle -----
 
     def session_bootstrap(

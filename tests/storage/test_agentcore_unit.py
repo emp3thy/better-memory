@@ -2952,3 +2952,93 @@ def test_semantic_get_returns_none_on_404(backend, mock_data_client, monkeypatch
         code="ResourceNotFoundException", message="missing"
     )
     assert backend.semantic_get(id="gone") is None
+
+
+# ===== distinct_projects: list_actors + migration-ledger namespace parse =====
+
+
+def test_list_actors_parses_actor_summaries(backend, mock_data_client, ac_config) -> None:
+    mock_data_client.list_actors.return_value = {
+        "actorSummaries": [{"actorId": "alpha"}, {"actorId": "beta"}],
+    }
+    assert sorted(backend.list_actors()) == ["alpha", "beta"]
+    mock_data_client.list_actors.assert_called_once_with(
+        memoryId=ac_config.episodic.memory_id
+    )
+
+
+def test_list_actors_pages_through_nexttoken(
+    backend, mock_data_client, ac_config
+) -> None:
+    """M1: list_actors must page through ListActors -- actors on page 2+
+    were silently dropped when only the first page was read."""
+    mock_data_client.list_actors.side_effect = [
+        {
+            "actorSummaries": [{"actorId": "alpha"}],
+            "nextToken": "page-2",
+        },
+        {
+            "actorSummaries": [{"actorId": "beta"}],
+        },
+    ]
+    assert sorted(backend.list_actors()) == ["alpha", "beta"]
+    assert mock_data_client.list_actors.call_count == 2
+    first_kwargs = mock_data_client.list_actors.call_args_list[0].kwargs
+    second_kwargs = mock_data_client.list_actors.call_args_list[1].kwargs
+    assert first_kwargs == {"memoryId": ac_config.episodic.memory_id}
+    assert second_kwargs == {
+        "memoryId": ac_config.episodic.memory_id,
+        "nextToken": "page-2",
+    }
+
+
+def test_distinct_projects_unions_actors_and_ledger_namespaces(
+    backend_with_local_conn, local_conn, mock_data_client
+) -> None:
+    """Guard: namespace-parse rule (projects/{p}/... -> p; general/... ->
+    general) feeds distinct_projects alongside ListActors."""
+    from better_memory.storage.agentcore_migrate import ensure_ledger
+
+    ensure_ledger(local_conn)
+    local_conn.executemany(
+        "INSERT INTO agentcore_migration "
+        "(source_kind, source_id, namespace, content_hash, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            ("reflection", "r1", "projects/gamma/reflections/", "h1", "active"),
+            ("semantic", "s1", "general/semantic/", "h2", "active"),
+        ],
+    )
+    local_conn.commit()
+    mock_data_client.list_actors.return_value = {
+        "actorSummaries": [{"actorId": "alpha"}, {"actorId": "beta"}],
+    }
+    assert backend_with_local_conn.distinct_projects() == [
+        "alpha", "beta", "gamma", "general",
+    ]
+
+
+def test_distinct_projects_degrades_to_ledger_when_listactors_raises(
+    backend_with_local_conn, local_conn, mock_data_client
+) -> None:
+    """Guard: a ListActors error (e.g. AWS throttling) must not raise into
+    the dropdown -- it degrades to the ledger-only project set."""
+    from better_memory.storage.agentcore_migrate import ensure_ledger
+
+    ensure_ledger(local_conn)
+    local_conn.execute(
+        "INSERT INTO agentcore_migration "
+        "(source_kind, source_id, namespace, content_hash, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("reflection", "r1", "projects/gamma/reflections/", "h1", "active"),
+    )
+    local_conn.commit()
+    mock_data_client.list_actors.side_effect = RuntimeError("throttled")
+    assert backend_with_local_conn.distinct_projects() == ["gamma"]
+
+
+def test_distinct_projects_empty_when_both_fail(backend, mock_data_client) -> None:
+    """Guard: ListActors failing AND no local ledger (the plain `backend`
+    fixture has no local_conn) degrades all the way to an empty list."""
+    mock_data_client.list_actors.side_effect = RuntimeError("throttled")
+    assert backend.distinct_projects() == []

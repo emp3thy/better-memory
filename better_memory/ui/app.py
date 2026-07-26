@@ -50,14 +50,17 @@ def _build_sync_embedder() -> SyncEmbedder | None:
 
 
 def _reflection_drawer_detail(app: Flask, id: str) -> SimpleNamespace | None:
-    """Compose the drawer view model: row via backend.reflection_get (row +
-    existence), provenance via the local conn (flag-gated in PR 3). Returns
-    None when the reflection does not exist."""
-    row = app.extensions["backend"].reflection_get(reflection_id=id)
+    """Compose the drawer view model: row via backend.reflection_get; provenance
+    via the local conn ONLY when the backend supports it (gated out in
+    agentcore). Returns None when the reflection does not exist."""
+    backend = app.extensions["backend"]
+    row = backend.reflection_get(reflection_id=id)
     if row is None:
         return None
-    sources = queries.reflection_provenance(
-        app.extensions["db_connection"], reflection_id=id,
+    sources = (
+        queries.reflection_provenance(app.extensions["db_connection"], reflection_id=id)
+        if backend.supports_provenance
+        else []
     )
     return SimpleNamespace(reflection=SimpleNamespace(**row), sources=sources)
 
@@ -234,14 +237,30 @@ def create_app(
 
     @app.get("/")
     def root() -> Response:
-        return redirect(url_for("episodes"))
+        """Redirect to the first supported tab.
+
+        ``episodes`` 404s in agentcore mode (no local episode grouping),
+        so a bare redirect there would dead-end the launcher's opening
+        request. Reflections is always visible regardless of backend, so
+        it is the agentcore fallback target.
+        """
+        if app.extensions["backend"].supports_episodes:
+            return redirect(url_for("episodes"))
+        return redirect(url_for("reflections"))
 
     @app.get("/episodes")
     def episodes() -> str:
+        """Gated on supports_episodes: 404 in agentcore mode (episode
+        grouping is internal to AgentCore's sessionId, no local table)."""
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         return render_template("episodes.html", active_tab="episodes")
 
     @app.get("/episodes/panel")
     def episodes_panel() -> str:
+        """Gated on supports_episodes, same as episodes()."""
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         conn = app.extensions["db_connection"]
         rows = queries.episode_list_for_ui(conn, project=project_name())
         # Group by ISO date prefix (YYYY-MM-DD) of started_at, preserving
@@ -261,6 +280,9 @@ def create_app(
 
     @app.get("/episodes/banner")
     def episodes_banner() -> str:
+        """Gated on supports_episodes, same as episodes()."""
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         conn = app.extensions["db_connection"]
         count = queries.unclosed_episode_count(
             conn, project=project_name()
@@ -271,6 +293,9 @@ def create_app(
 
     @app.get("/episodes/<id>/drawer")
     def episodes_drawer(id: str) -> str:
+        """Gated on supports_episodes, same as episodes()."""
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         conn = app.extensions["db_connection"]
         detail = queries.episode_detail(conn, episode_id=id)
         if detail is None:
@@ -288,6 +313,9 @@ def create_app(
 
     @app.post("/episodes/<id>/close")
     def episode_close(id: str) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_episodes, same as episodes()."""
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         outcome = request.args.get("outcome", "")
         if outcome not in _DEFAULT_CLOSE_REASONS:
             return (
@@ -323,9 +351,9 @@ def create_app(
 
     @app.get("/reflections")
     def reflections() -> str:
-        conn = app.extensions["db_connection"]
+        backend = app.extensions["backend"]
         current = project_name()
-        db_projects = queries.reflection_distinct_projects(conn)
+        db_projects = backend.distinct_projects()
         # Union + sort so the current project is always selectable, even
         # when no reflections exist for it yet.
         projects = sorted(
@@ -399,6 +427,10 @@ def create_app(
 
     @app.post("/reflections/<id>/confirm")
     def reflection_confirm(id: str) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_reflection_review: 404 in agentcore mode (no
+        pending_review status to confirm out of)."""
+        if not app.extensions["backend"].supports_reflection_review:
+            abort(404)
         conn = app.extensions["db_connection"]
         if queries.reflection_detail(conn, reflection_id=id) is None:
             abort(404)
@@ -444,6 +476,10 @@ def create_app(
 
     @app.get("/reflections/<id>/edit")
     def reflection_edit_form(id: str) -> str:
+        """Gated on supports_reflection_text_edit: 404 in agentcore mode
+        (agentcore reflection content is not locally editable)."""
+        if not app.extensions["backend"].supports_reflection_text_edit:
+            abort(404)
         conn = app.extensions["db_connection"]
         detail = queries.reflection_detail(conn, reflection_id=id)
         if detail is None:
@@ -454,6 +490,10 @@ def create_app(
 
     @app.post("/reflections/<id>/edit")
     def reflection_edit_save(id: str) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_reflection_text_edit, same as
+        reflection_edit_form()."""
+        if not app.extensions["backend"].supports_reflection_text_edit:
+            abort(404)
         conn = app.extensions["db_connection"]
         if queries.reflection_detail(conn, reflection_id=id) is None:
             abort(404)
@@ -600,6 +640,10 @@ def create_app(
 
     @app.get("/observations")
     def observations() -> str:
+        """Gated on supports_observations: 404 in agentcore mode (no local
+        observation table to browse)."""
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         conn = app.extensions["db_connection"]
         return render_template(
             "observations.html",
@@ -609,6 +653,9 @@ def create_app(
 
     @app.get("/observations/panel")
     def observations_panel() -> str:
+        """Gated on supports_observations, same as observations()."""
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         conn = app.extensions["db_connection"]
         args = request.args
 
@@ -635,6 +682,9 @@ def create_app(
 
     @app.get("/observations/<id>/drawer")
     def observation_drawer(id: str) -> str:
+        """Gated on supports_observations, same as observations()."""
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         conn = app.extensions["db_connection"]
         detail = queries.observation_detail(conn, observation_id=id)
         if detail is None:
@@ -647,6 +697,9 @@ def create_app(
     def observation_promote_to_semantic(
         id: str,
     ) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_observations, same as observations()."""
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         from better_memory.services.semantic import SemanticMemoryService
         from markupsafe import escape
         conn = app.extensions["db_connection"]
@@ -721,6 +774,10 @@ def create_app(
 
     @app.get("/diagnostics/panel/retention-runs")
     def retention_runs_panel() -> str:
+        """Gated on supports_retention_runs: 404 in agentcore mode (no local
+        retention_runs table; AgentCore expiry is managed internally)."""
+        if not app.extensions["backend"].supports_retention_runs:
+            abort(404)
         conn = app.extensions["db_connection"]
         rows = queries.retention_runs_list_for_ui(conn)
         from itertools import groupby
