@@ -2967,6 +2967,31 @@ def test_list_actors_parses_actor_summaries(backend, mock_data_client, ac_config
     )
 
 
+def test_list_actors_pages_through_nexttoken(
+    backend, mock_data_client, ac_config
+) -> None:
+    """M1: list_actors must page through ListActors -- actors on page 2+
+    were silently dropped when only the first page was read."""
+    mock_data_client.list_actors.side_effect = [
+        {
+            "actorSummaries": [{"actorId": "alpha"}],
+            "nextToken": "page-2",
+        },
+        {
+            "actorSummaries": [{"actorId": "beta"}],
+        },
+    ]
+    assert sorted(backend.list_actors()) == ["alpha", "beta"]
+    assert mock_data_client.list_actors.call_count == 2
+    first_kwargs = mock_data_client.list_actors.call_args_list[0].kwargs
+    second_kwargs = mock_data_client.list_actors.call_args_list[1].kwargs
+    assert first_kwargs == {"memoryId": ac_config.episodic.memory_id}
+    assert second_kwargs == {
+        "memoryId": ac_config.episodic.memory_id,
+        "nextToken": "page-2",
+    }
+
+
 def test_distinct_projects_unions_actors_and_ledger_namespaces(
     backend_with_local_conn, local_conn, mock_data_client
 ) -> None:

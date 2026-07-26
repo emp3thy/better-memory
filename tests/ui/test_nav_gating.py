@@ -63,3 +63,47 @@ def test_agentcore_observations_routes_404(agentcore_client: FlaskClient) -> Non
 def test_sqlite_episodes_and_observations_reachable(client: FlaskClient) -> None:
     assert client.get("/episodes").status_code == 200
     assert client.get("/observations").status_code == 200
+
+
+def test_sqlite_root_redirects_to_episodes(client: FlaskClient) -> None:
+    """Root redirect target is unchanged on sqlite: still /episodes."""
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/episodes")
+
+
+def test_agentcore_root_redirects_to_reflections_not_episodes(
+    agentcore_client: FlaskClient,
+) -> None:
+    """C1: root() must not dead-end into the gated /episodes 404 in
+    agentcore mode -- it should redirect to /reflections (always visible)
+    and following the redirect must yield 200, not 404."""
+    resp = agentcore_client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/reflections")
+    followed = agentcore_client.get("/", follow_redirects=True)
+    assert followed.status_code == 200
+
+
+def test_agentcore_episodes_drawer_and_close_route_404(
+    agentcore_client: FlaskClient,
+) -> None:
+    """M2: guarded episode-detail routes also 404 in agentcore mode."""
+    assert agentcore_client.get("/episodes/some-id/drawer").status_code == 404
+    resp = agentcore_client.post(
+        "/episodes/some-id/close?outcome=success",
+        headers={"Origin": "http://localhost"},
+    )
+    assert resp.status_code == 404
+
+
+def test_agentcore_observations_drawer_and_promote_route_404(
+    agentcore_client: FlaskClient,
+) -> None:
+    """M2: guarded observation-detail routes also 404 in agentcore mode."""
+    assert agentcore_client.get("/observations/some-id/drawer").status_code == 404
+    resp = agentcore_client.post(
+        "/observations/some-id/promote-to-semantic",
+        headers={"Origin": "http://localhost"},
+    )
+    assert resp.status_code == 404

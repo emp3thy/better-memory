@@ -1825,16 +1825,32 @@ class AgentCoreBackend:
         error). Powers the Reflections project dropdown alongside the local
         migration ledger -- AgentCore has no separate "list all projects"
         API, so actorId (== project, per resolve_actor_id) is the closest
-        native enumeration."""
-        try:
-            resp = self._data.list_actors(memoryId=self._cfg.episodic.memory_id)
-        except Exception:  # noqa: BLE001 - best-effort; empty signals "lookup failed"
-            return []
-        return [
-            s.get("actorId", "")
-            for s in resp.get("actorSummaries", [])
-            if s.get("actorId")
-        ]
+        native enumeration.
+
+        Pages through ``nextToken`` (mirroring the pattern used elsewhere
+        in this module, e.g. the list_memory_records fan-out above) so
+        actors beyond the first page aren't silently dropped from the
+        dropdown. Best-effort: any AWS error mid-pagination returns
+        whatever actor ids were already collected (or [] if none)."""
+        actor_ids: list[str] = []
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"memoryId": self._cfg.episodic.memory_id}
+            if token:
+                kwargs["nextToken"] = token
+            try:
+                resp = self._data.list_actors(**kwargs)
+            except Exception:  # noqa: BLE001 - best-effort; keep what we have
+                break
+            actor_ids.extend(
+                s.get("actorId", "")
+                for s in resp.get("actorSummaries", [])
+                if s.get("actorId")
+            )
+            token = resp.get("nextToken")
+            if not token:
+                break
+        return actor_ids
 
     def _ledger_projects(self) -> set[str]:
         """Projects parsed from the local agentcore_migration.namespace column.

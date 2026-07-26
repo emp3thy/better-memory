@@ -237,7 +237,16 @@ def create_app(
 
     @app.get("/")
     def root() -> Response:
-        return redirect(url_for("episodes"))
+        """Redirect to the first supported tab.
+
+        ``episodes`` 404s in agentcore mode (no local episode grouping),
+        so a bare redirect there would dead-end the launcher's opening
+        request. Reflections is always visible regardless of backend, so
+        it is the agentcore fallback target.
+        """
+        if app.extensions["backend"].supports_episodes:
+            return redirect(url_for("episodes"))
+        return redirect(url_for("reflections"))
 
     @app.get("/episodes")
     def episodes() -> str:
