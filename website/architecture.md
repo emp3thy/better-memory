@@ -45,6 +45,8 @@ flowchart LR
 
 Migrating with `better-memory agentcore migrate` is distinct from activating: it only writes records to AWS and never flips `storage_backend`. A migrated reflection carries its rating counters, `status`, and `source_row_id` in the record's JSON **content body** — the built-in episodic strategy owns the metadata schema — whereas cloud-extracted records (and migrated semantic records) keep that state in record **metadata**. See [AgentCore setup > Migrate](agentcore-setup.md#migrate-existing-memory-optional).
 
+The management UI's `create_app` (`better_memory/ui/app.py`) builds a `StorageBackend` via `factory.build_backend`, sharing the same sqlite connection and `sync_embedder` the UI already constructs, and stores it at `app.extensions["backend"]`. `app.extensions["db_connection"]` is retained unchanged — it is what every UI route still queries directly, both for content and for session-operational state (exposure ledger, migration ledger); no content route is re-routed through the backend yet. A `caps` context processor reads six capability flags off `app.extensions["backend"]` (`supports_episodes`, `supports_observations`, `supports_provenance`, `supports_retention_runs`, `supports_reflection_review`, `supports_reflection_text_edit`) and exposes them to every template as `caps`. The Episodes nav link in `base.html` is the first consumer — wrapped in `{% if caps.supports_episodes %}`, it disappears when the active backend is agentcore (episode grouping is internal to AgentCore's `sessionId` there). The other five flags are wired but not yet consumed by any template gate.
+
 See [Configuration](configuration.md) for env vars and [AgentCore setup](agentcore-setup.md) for the agentcore path.
 
 ## Retrieval
