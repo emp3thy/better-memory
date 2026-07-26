@@ -1538,9 +1538,67 @@ def test_semantic_list_with_search_uses_retrieve_memory_records(backend, mock_da
 
 def test_semantic_list_without_search_uses_list_memory_records(backend, mock_data_client) -> None:
     mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
-    backend.semantic_list()
+    backend.semantic_list(scope_filter="project")
     mock_data_client.list_memory_records.assert_called_once()
     mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_semantic_list_default_view_fans_out_over_project_and_general(
+    backend, mock_data_client
+) -> None:
+    """[[guard-needs-triggering-test]] Bug regression: scope_filter=None (the
+    UI default) must include general-scope records, mirroring sqlite's
+    (project OR scope='general'). Project namespace has 0 records; general/
+    semantic has 1 -> the default view must return that 1, not 0."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "general/semantic/":
+            return {"memoryRecordSummaries": [
+                {
+                    "memoryRecordId": "sem-general-1",
+                    "content": {"text": "prefer uv over pip"},
+                    "namespaces": ["/general/semantic/"],
+                    "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+                    "metadata": {"useful_count": {"numberValue": 0}},
+                }
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.semantic_list(project="testproj", scope_filter=None)
+    assert [m.id for m in result] == ["sem-general-1"]
+    assert result[0].scope == "general"
+    namespaces = {
+        c.kwargs["namespace"]
+        for c in mock_data_client.list_memory_records.call_args_list
+    }
+    assert namespaces == {"projects/testproj/semantic/", "general/semantic/"}
+
+
+def test_semantic_list_default_view_dedups_project_wins(
+    backend, mock_data_client
+) -> None:
+    """A record served by BOTH namespaces (lagging index) appears once."""
+    rec = {
+        "memoryRecordId": "sem-dup",
+        "content": {"text": "dup"},
+        "namespaces": ["/projects/testproj/semantic/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {"useful_count": {"numberValue": 0}},
+    }
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": [rec]}
+    result = backend.semantic_list(project="testproj", scope_filter=None)
+    assert [m.id for m in result] == ["sem-dup"]
+
+
+def test_semantic_list_project_filter_queries_only_project_namespace(
+    backend, mock_data_client
+) -> None:
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.semantic_list(project="testproj", scope_filter="project")
+    assert mock_data_client.list_memory_records.call_count == 1
+    assert (
+        mock_data_client.list_memory_records.call_args.kwargs["namespace"]
+        == "projects/testproj/semantic/"
+    )
 
 
 def test_semantic_list_scope_classification_normalizes_leading_slash(

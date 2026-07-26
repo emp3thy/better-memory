@@ -1283,36 +1283,49 @@ class AgentCoreBackend:
         search: str | None = None,
         track_exposure: bool = True,
     ) -> list[Any]:
-        """List semantic records. With search → retrieve_memory_records;
-        without → list_memory_records."""
+        """List semantic records. With search -> retrieve_memory_records;
+        without -> list_memory_records.
+
+        scope_filter=None mirrors the sqlite default view
+        (project OR scope='general'): fan out over BOTH the project/semantic and
+        general/semantic namespaces and dedup by record id (project wins). A
+        single-scope filter queries only that one namespace."""
         actor_id = resolve_actor_id(project or self._project)
+        project_ns = resolve_namespace(actor_id, "semantic")
+        general_ns = resolve_namespace("general", "semantic")
         if scope_filter == "general":
-            namespace = resolve_namespace("general", "semantic")
+            namespaces = [general_ns]
+        elif scope_filter == "project":
+            namespaces = [project_ns]
         else:
-            namespace = resolve_namespace(actor_id, "semantic")
+            namespaces = [project_ns]
+            if general_ns != project_ns:
+                namespaces.append(general_ns)
 
-        if search and search.strip():
-            response = self._data.retrieve_memory_records(
-                memoryId=self._cfg.semantic.memory_id,
-                namespace=namespace,
-                searchCriteria={
-                    "searchQuery": search.strip(),
-                    "topK": 50,
-                },
-            )
-        else:
-            response = self._data.list_memory_records(
-                memoryId=self._cfg.semantic.memory_id,
-                namespace=namespace,
-                maxResults=100,
-            )
-
-        return [
-            self._semantic_summary_to_model(
-                rec, project=project or self._project
-            )
-            for rec in response.get("memoryRecordSummaries", [])
-        ]
+        seen: set[str] = set()
+        results: list[Any] = []
+        for namespace in namespaces:
+            if search and search.strip():
+                response = self._data.retrieve_memory_records(
+                    memoryId=self._cfg.semantic.memory_id,
+                    namespace=namespace,
+                    searchCriteria={"searchQuery": search.strip(), "topK": 50},
+                )
+            else:
+                response = self._data.list_memory_records(
+                    memoryId=self._cfg.semantic.memory_id,
+                    namespace=namespace,
+                    maxResults=100,
+                )
+            for rec in response.get("memoryRecordSummaries", []):
+                rid = rec.get("memoryRecordId")
+                if rid in seen:
+                    continue
+                seen.add(rid)
+                results.append(
+                    self._semantic_summary_to_model(rec, project=project or self._project)
+                )
+        return results
 
     def _semantic_summary_to_model(
         self, rec: dict[str, Any], *, project: str

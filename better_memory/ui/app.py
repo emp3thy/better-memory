@@ -514,17 +514,13 @@ def create_app(
 
     @app.get("/semantic/panel")
     def semantic_panel() -> str:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         project = request.args.get("project") or project_name()
         scope_filter = (request.args.get("scope_filter") or "").strip() or None
         if scope_filter not in ("project", "general", None):
             scope_filter = None
         search = (request.args.get("search") or "").strip() or None
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
-        rows = svc.list_for_project(
+        backend = app.extensions["backend"]
+        rows = backend.semantic_list(
             project=project, scope_filter=scope_filter, search=search,
         )
         return render_template(
@@ -533,16 +529,13 @@ def create_app(
 
     @app.post("/semantic")
     def semantic_create() -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         project = project_name()
         content = request.form.get("content", "").strip()
         scope = request.form.get("scope") or "project"
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
         try:
-            svc.create(content=content, project=project, scope=scope)
+            app.extensions["backend"].semantic_observe(
+                content=content, project=project, scope=scope,
+            )
         except ValueError as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
@@ -552,14 +545,9 @@ def create_app(
 
     @app.post("/semantic/<id>/scope")
     def semantic_scope(id: str) -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         scope = request.form.get("scope") or "project"
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
         try:
-            svc.set_scope(id=id, scope=scope)
+            app.extensions["backend"].semantic_set_scope(id=id, scope=scope)
         except ValueError as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
@@ -569,12 +557,7 @@ def create_app(
 
     @app.post("/semantic/<id>/delete")
     def semantic_delete(id: str) -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
-        svc.delete(id=id)  # idempotent
+        app.extensions["backend"].semantic_delete(id=id)  # idempotent
         return ("", 200, {"HX-Trigger": "semantic-changed"})
 
     @app.get("/semantic/<id>/drawer")
@@ -608,14 +591,9 @@ def create_app(
 
     @app.post("/semantic/<id>/update")
     def semantic_update(id: str) -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         content = request.form.get("content", "").strip()
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
         try:
-            svc.update_text(id=id, content=content)
+            app.extensions["backend"].semantic_update_text(id=id, content=content)
         except ValueError as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
