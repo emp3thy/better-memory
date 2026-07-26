@@ -42,9 +42,10 @@ NO backend/region/id env vars — the shipped onboarding state:
   only live credit against a genuine AWS record id).
 * E6 — session_bootstrap + contextual_inject hooks reach AWS under the
   onboarding config (well-formed envelopes; no hook_errors rows).
-* E7 — session_close Stop hook fires exactly one closure
-  CreateEvent(role=OTHER) with settings.json only, verified by a direct
-  ``list_events`` readback on the throwaway episodic memory.
+* E7 — session_close Stop hook fires NO AWS event at all under the
+  onboarding config (settings.json only, no backend env var):
+  agentcore-mode session-lifecycle emissions are a no-op, so the hook
+  writes only the local session_end spool marker.
 
 What the live tier deliberately SKIPS (journey design section 5):
 
@@ -789,15 +790,16 @@ def test_live_e6_bootstrap_and_inject_hooks_reach_aws(
     assert _local_row_count(bm_home, "semantic_memories") == 0
 
 
-def test_live_e7_session_close_closure_with_settings_only(
+def test_live_e7_session_close_writes_marker_no_closure_with_settings_only(
     tmp_path: Path, agentcore_throwaway_memories, agentcore_region: str
 ) -> None:
-    """E7: the live version of hermetic J8 (fix plan section 4 item 6):
-    with settings.json only (no backend env var) the Stop hook fires
-    exactly one closure CreateEvent(role=OTHER) against the REAL episodic
-    memory — verified by a direct ``list_events`` readback on the unique
-    per-run session id — and writes the spool marker. The closure event
-    rides the throwaway memory's teardown.
+    """E7: the live version of hermetic J8 (now a no-op invariant, not a
+    closure-fires assertion — user directive: agentcore-mode session-
+    lifecycle emissions must not touch AWS at all). With settings.json
+    only (no backend env var) the Stop hook writes ONLY the local
+    session_end spool marker; it makes zero requests against the REAL
+    episodic memory — verified by a direct ``list_events`` readback on
+    the unique per-run session id coming back empty.
     """
     import boto3
     from botocore.config import Config as BotoConfig
@@ -806,9 +808,10 @@ def test_live_e7_session_close_closure_with_settings_only(
         tmp_path, agentcore_throwaway_memories, agentcore_region
     )
     session_id = _journey_session_id()
-    # The hook derives the closure actorId from the canonical project_name()
-    # resolution (repair-wave major 7) — BETTER_MEMORY_PROJECT wins here, so
-    # the closure lands under the SAME actor the MCP server uses.
+    # BETTER_MEMORY_PROJECT is set here to mirror the actor the MCP server
+    # would use for this project, even though the hook no longer emits
+    # anything under it — kept so the readback below queries the actor a
+    # regression (closure re-added) would actually write to.
     proj_dir = tmp_path / "bmintclose"
     proj_dir.mkdir()
     env = _live_env(
@@ -834,11 +837,11 @@ def test_live_e7_session_close_closure_with_settings_only(
     assert len(markers) == 1, f"expected exactly one session_end marker: {markers}"
     marker_body = json.loads(markers[0].read_text(encoding="utf-8"))
     assert marker_body["event_type"] == "session_end"
-    # Closure succeeded → no hook_errors write → no memory.db at all.
+    # No AWS touch → no hook_errors write → no memory.db at all.
     assert not (bm_home / "memory.db").exists()
 
-    # Ground truth: exactly one role=OTHER closure event landed on the real
-    # episodic memory under this run's unique session id.
+    # Ground truth: zero events landed on the real episodic memory under
+    # this run's unique session id — the hook never called CreateEvent.
     _sem_record, epi_record = agentcore_throwaway_memories
     data = boto3.client(
         "bedrock-agentcore",
@@ -856,5 +859,4 @@ def test_live_e7_session_close_closure_with_settings_only(
         includePayloads=True,
         maxResults=10,
     )["events"]
-    assert len(events) == 1, events
-    assert events[0]["payload"][0]["conversational"]["role"] == "OTHER"
+    assert events == []
