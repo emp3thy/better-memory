@@ -769,22 +769,25 @@ def test_j7_contextual_inject_honours_settings_activation(
 
 
 # ---------------------------------------------------------------------------
-# J8 — session_close closure under activation (sequence terminus)
+# J8 — session_close writes only the marker under activation (sequence
+#      terminus)
 # ---------------------------------------------------------------------------
 
 
-def test_j8_session_close_fires_closure_and_marker(
+def test_j8_session_close_writes_marker_no_closure(
     clean_slate_home: Path, tmp_path: Path
 ) -> None:
     """The terminal narrative step under the onboarding config: the Stop
-    hook fires exactly one closure CreateEvent (role=OTHER, EPI) resolved
-    from settings.json, writes the session_end spool marker, and never
-    creates memory.db. The full env-gate matrix + json-region signing are
-    owned by D5.
+    hook fires NO AWS event — agentcore-mode session-lifecycle emissions
+    are a no-op (user directive: the old closure marker was often the
+    ONLY event in a thin/empty/system-only session, so AWS extracted a
+    low-value "no actionable content" reflection from it). It writes only
+    the session_end spool marker, and never creates memory.db. The full
+    env-gate matrix is owned by D5.
 
-    regression_caught: reverting session_close's settings-aware gate makes
-    the env-absent hook return before the closure — zero wire (the exact
-    pre-fix defect-4 behavior).
+    regression_caught: reintroducing the closure CreateEvent would put
+    wire traffic back on the zero-AWS-touch Stop-hook path this test
+    pins.
     """
     with FakeAgentCore() as fake:
         bm_home = _onboard(clean_slate_home)
@@ -805,17 +808,11 @@ def test_j8_session_close_fires_closure_and_marker(
         assert out == ""  # no rating block, no noise — the marker path
         assert "Traceback" not in err
 
-        closures = fake.requests_for("CreateEvent")
-        assert len(closures) == 1
-        assert len(fake.requests) == 1
-        assert "EPI-FAKE-0001" in closures[0].path
-        conversational = closures[0].body["payload"][0]["conversational"]
-        assert conversational["role"] == "OTHER"
-        assert closures[0].body["sessionId"] == "e2e-session-1"
+        assert fake.requests == []
 
     markers = _session_end_markers(bm_home / "spool")
     assert len(markers) == 1, f"expected exactly one session_end marker: {markers}"
     body = json.loads(markers[0].read_text(encoding="utf-8"))
     assert body["event_type"] == "session_end"
-    # Closure succeeded → no hook_errors write → no memory.db at all.
+    # No AWS touch → no hook_errors write → no memory.db at all.
     assert not (bm_home / "memory.db").exists()

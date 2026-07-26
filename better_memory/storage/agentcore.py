@@ -79,6 +79,44 @@ _COUNTER_KEY_TO_BODY_FIELD: dict[str, str] = {
 }
 
 
+def _first_sentence(text: str) -> str:
+    """First sentence of ``text`` (up to and including the first .!? followed by
+    a space), else the whole string. Used to derive a title from a prose field."""
+    text = text.strip()
+    best = len(text)
+    for sep in (". ", "! ", "? "):
+        i = text.find(sep)
+        if i != -1:
+            best = min(best, i + 1)
+    return text[:best]
+
+
+def _derive_aws_reflection_fields(
+    body: dict[str, Any],
+) -> tuple[str, str, list[str]]:
+    """Map AgentCore's ``episodicReflections`` extraction schema
+    (``{situation, intent, assessment, justification, reflection, turns}``) onto
+    the ``(title, use_cases, hints)`` the UI and retrieve render.
+
+    AgentCore auto-extracts these records SERVER-SIDE from session events, in its
+    own body shape that carries NONE of our body keys (``title``/``use_cases``/
+    ``hints``). Without this mapping they render blank. The learning-loop
+    counters (useful/overlooked/misled/ignored) are UNAFFECTED — they live in
+    record metadata and are read separately, so credit/rating/Wilson work on
+    these records exactly as on migrated ones.
+
+    - ``title``   <- first sentence of ``reflection`` (the lesson), else ``situation``
+    - ``use_cases`` <- ``situation`` (the "when this happened" context)
+    - ``hints``   <- ``[reflection]`` (the full lesson), empty list if absent
+    """
+    reflection = str(body.get("reflection") or "").strip()
+    situation = str(body.get("situation") or "").strip()
+    lesson = reflection or situation
+    title = _first_sentence(lesson)[:120]
+    hints = [reflection] if reflection else []
+    return title, situation, hints
+
+
 class AgentCoreBackend:
     """boto3-backed StorageBackend implementation."""
 
@@ -814,12 +852,29 @@ class AgentCoreBackend:
         if phase_filter is not None and phase_value != phase_filter:
             return None
 
+        # AgentCore's episodicReflections strategy auto-extracts records in its
+        # OWN body schema ({situation, reflection, ...}) carrying NONE of our
+        # body keys. Detect that shape (no title, but situation/reflection
+        # present) and derive title/use_cases/hints from it so the record shows
+        # real content instead of a blank row. The learning-loop counters read
+        # below (from metadata) are unaffected, so credit/rating/Wilson work on
+        # these records identically to migrated ones.
+        aws_title = ""
+        aws_use_cases = ""
+        aws_hints: list[str] = []
+        if isinstance(body, dict) and not body.get("title") and (
+            body.get("situation") or body.get("reflection")
+        ):
+            aws_title, aws_use_cases, aws_hints = _derive_aws_reflection_fields(body)
+
         hints_value = body.get("hints", "") if isinstance(body, dict) else ""
         hints_list = (
             parse_hints_prose(hints_value) if isinstance(hints_value, str)
             else list(hints_value) if isinstance(hints_value, list)
             else []
         )
+        if not hints_list and aws_hints:
+            hints_list = aws_hints
 
         try:
             confidence = float(body.get("confidence", 0)) if isinstance(body, dict) else 0.0
@@ -893,9 +948,9 @@ class AgentCoreBackend:
             #          tech, evidence_count, useful_count, times_overlooked,
             #          times_ignored, times_misled, updated_at}
             "id": rec["memoryRecordId"],
-            "title": body.get("title", "") if isinstance(body, dict) else "",
+            "title": (body.get("title", "") if isinstance(body, dict) else "") or aws_title,
             "phase": phase_value,
-            "use_cases": body.get("use_cases", "") if isinstance(body, dict) else "",
+            "use_cases": (body.get("use_cases", "") if isinstance(body, dict) else "") or aws_use_cases,
             "hints": hints_list,
             "confidence": confidence,
             "tech": tech_value,

@@ -2043,6 +2043,77 @@ def test_parse_reflection_extracted_record_unchanged(backend) -> None:
     }
 
 
+def test_parse_reflection_aws_situation_schema_renders_content(backend) -> None:
+    """AgentCore's episodicReflections strategy auto-extracts records with its
+    OWN body schema {situation, intent, assessment, justification, reflection,
+    turns} -- NONE of our body keys (title/use_cases/hints). Before the dual-
+    schema parse these rendered blank in the UI and retrieve. Assert the parser
+    now derives real title/use_cases/hints from the AWS body, AND still reads
+    the learning-loop counters from metadata (so credit/Wilson are unaffected)."""
+    import json
+
+    created = datetime(2026, 7, 1, 9, 0, 0, tzinfo=UTC)
+    rec = {
+        "memoryRecordId": "rec-aws",
+        "content": {"text": json.dumps({
+            "situation": "The user submitted two dense technical specs.",
+            "intent": "Have the assistant record the architectural decisions.",
+            "assessment": "No",
+            "justification": "The session was closed by a system signal first.",
+            "reflection": (
+                "Sessions closed before a reply lose the submitted spec. "
+                "Persist inbound specs on receipt."
+            ),
+            "turns": [{"situation": "detail"}],
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": created,
+        "metadata": {
+            "useful_count": {"numberValue": 5},
+            "overlooked_count": {"numberValue": 2},
+            "times_misled": {"numberValue": 0},
+        },
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+
+    # Content derived from the AWS body (was blank before this change).
+    assert parsed["title"], "AWS-extracted record must not render a blank title"
+    assert "Sessions closed" in parsed["title"]  # from `reflection`
+    assert parsed["use_cases"] == "The user submitted two dense technical specs."
+    assert parsed["hints"], "AWS-extracted record must not render blank hints"
+    assert any("Persist inbound specs" in h for h in parsed["hints"])
+    # Learning-loop counters STILL read from metadata -> credit/Wilson unchanged.
+    assert parsed["useful_count"] == 5
+    assert parsed["times_overlooked"] == 2
+    assert parsed["id"] == "rec-aws"
+
+
+def test_parse_reflection_our_body_schema_not_touched_by_aws_branch(backend) -> None:
+    """Regression: a record whose body carries OUR `title` key must NOT be
+    rewritten by the AWS-schema branch -- title/use_cases/hints come straight
+    from the body even if a stray `situation` key is also present."""
+    import json
+
+    rec = {
+        "memoryRecordId": "rec-ours",
+        "content": {"text": json.dumps({
+            "title": "Real curated title",
+            "use_cases": "When doing X",
+            "hints": "Do the thing.",
+            "situation": "should be ignored -- the body has a real title",
+        })},
+        "namespaces": ["projects/testproj/reflections/"],
+        "metadata": {},
+    }
+
+    parsed = backend._parse_reflection_record(rec)
+
+    assert parsed["title"] == "Real curated title"
+    assert parsed["use_cases"] == "When doing X"
+    assert parsed["hints"] == ["Do the thing."]
+
+
 def test_parse_reflection_body_state_record_uses_body(backend) -> None:
     """A migrated record carries ALL reflection state in the JSON body and
     an EMPTY metadata map. It must parse from the body: polarity/status,
