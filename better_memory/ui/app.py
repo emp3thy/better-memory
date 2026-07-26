@@ -241,12 +241,15 @@ def create_app(
 
     @app.get("/episodes")
     def episodes() -> str:
+        """Gated on supports_episodes: 404 in agentcore mode (episode
+        grouping is internal to AgentCore's sessionId, no local table)."""
         if not app.extensions["backend"].supports_episodes:
             abort(404)
         return render_template("episodes.html", active_tab="episodes")
 
     @app.get("/episodes/panel")
     def episodes_panel() -> str:
+        """Gated on supports_episodes, same as episodes()."""
         if not app.extensions["backend"].supports_episodes:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -268,6 +271,7 @@ def create_app(
 
     @app.get("/episodes/banner")
     def episodes_banner() -> str:
+        """Gated on supports_episodes, same as episodes()."""
         if not app.extensions["backend"].supports_episodes:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -280,6 +284,7 @@ def create_app(
 
     @app.get("/episodes/<id>/drawer")
     def episodes_drawer(id: str) -> str:
+        """Gated on supports_episodes, same as episodes()."""
         if not app.extensions["backend"].supports_episodes:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -299,6 +304,7 @@ def create_app(
 
     @app.post("/episodes/<id>/close")
     def episode_close(id: str) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_episodes, same as episodes()."""
         if not app.extensions["backend"].supports_episodes:
             abort(404)
         outcome = request.args.get("outcome", "")
@@ -412,6 +418,8 @@ def create_app(
 
     @app.post("/reflections/<id>/confirm")
     def reflection_confirm(id: str) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_reflection_review: 404 in agentcore mode (no
+        pending_review status to confirm out of)."""
         if not app.extensions["backend"].supports_reflection_review:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -459,6 +467,8 @@ def create_app(
 
     @app.get("/reflections/<id>/edit")
     def reflection_edit_form(id: str) -> str:
+        """Gated on supports_reflection_text_edit: 404 in agentcore mode
+        (agentcore reflection content is not locally editable)."""
         if not app.extensions["backend"].supports_reflection_text_edit:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -471,6 +481,8 @@ def create_app(
 
     @app.post("/reflections/<id>/edit")
     def reflection_edit_save(id: str) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_reflection_text_edit, same as
+        reflection_edit_form()."""
         if not app.extensions["backend"].supports_reflection_text_edit:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -619,6 +631,8 @@ def create_app(
 
     @app.get("/observations")
     def observations() -> str:
+        """Gated on supports_observations: 404 in agentcore mode (no local
+        observation table to browse)."""
         if not app.extensions["backend"].supports_observations:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -630,6 +644,7 @@ def create_app(
 
     @app.get("/observations/panel")
     def observations_panel() -> str:
+        """Gated on supports_observations, same as observations()."""
         if not app.extensions["backend"].supports_observations:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -658,6 +673,7 @@ def create_app(
 
     @app.get("/observations/<id>/drawer")
     def observation_drawer(id: str) -> str:
+        """Gated on supports_observations, same as observations()."""
         if not app.extensions["backend"].supports_observations:
             abort(404)
         conn = app.extensions["db_connection"]
@@ -672,6 +688,7 @@ def create_app(
     def observation_promote_to_semantic(
         id: str,
     ) -> tuple[str, int, dict[str, str]]:
+        """Gated on supports_observations, same as observations()."""
         if not app.extensions["backend"].supports_observations:
             abort(404)
         from better_memory.services.semantic import SemanticMemoryService
@@ -748,6 +765,8 @@ def create_app(
 
     @app.get("/diagnostics/panel/retention-runs")
     def retention_runs_panel() -> str:
+        """Gated on supports_retention_runs: 404 in agentcore mode (no local
+        retention_runs table; AgentCore expiry is managed internally)."""
         if not app.extensions["backend"].supports_retention_runs:
             abort(404)
         conn = app.extensions["db_connection"]

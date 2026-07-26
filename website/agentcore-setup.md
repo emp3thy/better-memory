@@ -130,9 +130,23 @@ The self-rating / learning loop is **backend-agnostic**: agentcore mode runs the
 
 ## UI capability flags
 
-The management UI's `create_app` builds a `StorageBackend` and reads six `@property -> bool` capability flags off it through a `caps` template context processor: `supports_episodes`, `supports_observations`, `supports_provenance`, `supports_retention_runs`, `supports_reflection_review`, `supports_reflection_text_edit`. All six are `False` in agentcore mode (all `True` on sqlite). In this release only the Episodes nav link is gated on `caps.supports_episodes`; the remaining five flags are wired into every template already but have no consuming gate yet — they are reserved for later UI work that hides the Observations/Provenance/Retention/Reflection-review/Reflection-edit surfaces agentcore mode has no backing data for.
+The management UI's `create_app` builds a `StorageBackend` and reads six `@property -> bool` capability flags off it through a `caps` template context processor: `supports_episodes`, `supports_observations`, `supports_provenance`, `supports_retention_runs`, `supports_reflection_review`, `supports_reflection_text_edit`. All six are `False` in agentcore mode (all `True` on sqlite). Every flag now gates a real surface — nav link, route, and template block together — so an agentcore session cannot reach a page whose data the backend does not carry, and cannot land on a page whose gated block would otherwise render empty. The capability table below lists what each flag hides.
 
-**Content routing (this release).** The Reflections tab (list, detail, promote, retire) and the Semantic tab (create, list, detail, edit, scope toggle, delete) now read and write agentcore-mode memory content through `AgentCoreBackend` instead of any local table — when the active backend is `agentcore`, the management UI shows AgentCore-resident reflections and semantic memories, not local `memory.db` rows. This is content routing only: no surface is hidden yet, and reflection status still shows the agentcore vocabulary (`active`/`promoted`/`retired`, no `pending_review`) rather than a sqlite-shaped one. Surface hiding driven by the six capability flags above (Observations tab, provenance sections, retention panel, reflection confirm/edit controls) is the next PR. Along the way, `AgentCoreBackend.semantic_list(scope_filter=None)` was fixed to fan out over both the project and `general/semantic/` namespaces and dedup by id (project wins) — it previously queried only the project namespace, silently dropping general-scope semantic memories that sqlite's equivalent default view (`project OR scope='general'`) always included.
+**Content routing.** The Reflections tab (list, detail, promote, retire) and the Semantic tab (create, list, detail, edit, scope toggle, delete) read and write agentcore-mode memory content through `AgentCoreBackend` instead of any local table — when the active backend is `agentcore`, the management UI shows AgentCore-resident reflections and semantic memories, not local `memory.db` rows. Reflection status shows the agentcore vocabulary (`active`/`promoted`/`retired`, no `pending_review`) rather than a sqlite-shaped one. `AgentCoreBackend.semantic_list(scope_filter=None)` fans out over both the project and `general/semantic/` namespaces and dedups by id (project wins), matching sqlite's default view (`project OR scope='general'`).
+
+### UI surface gating table
+
+| Surface | Flag | sqlite | agentcore |
+|---|---|---|---|
+| Episodes nav link + `/episodes*` routes | `supports_episodes` | Shown | Hidden — nav link absent, routes 404 |
+| Observations nav link + `/observations*` routes | `supports_observations` | Shown | Hidden — nav link absent, routes 404 |
+| Reflection drawer "Source observations" section + its provenance fetch | `supports_provenance` | Shown | Hidden — section omitted, `queries.reflection_provenance` never called |
+| Observation drawer "Linked reflections" section | `supports_provenance` | Shown | Hidden (route itself is also unreachable via `supports_observations`) |
+| Diagnostics retention-runs panel + `/diagnostics/panel/retention-runs` route | `supports_retention_runs` | Shown | Hidden — panel omitted, route 404s |
+| Reflection drawer Confirm button + `/reflections/<id>/confirm` route | `supports_reflection_review` | Shown (when `status == 'pending_review'`) | Hidden — button omitted, route 404s (agentcore has no `pending_review` status) |
+| Reflection drawer inline Edit button + `/reflections/<id>/edit` (GET/POST) | `supports_reflection_text_edit` | Shown | Hidden — button omitted, both routes 404 |
+| Diagnostics hook-errors panel, recent-ratings table, rating-diagnostics counters | none (always on) | Shown | Shown — these read session-operational state from the local `memory.db` on both backends |
+| Reflections project dropdown | n/a (content routing, not a caps flag) | `SELECT DISTINCT project FROM reflections` | `ListActors` (best-effort) UNION the `agentcore_migration` ledger's namespace-parsed project set, sorted casefold |
 
 ## What changes in agentcore mode
 
