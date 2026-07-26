@@ -932,3 +932,29 @@ def test_reflections_drawer_404_when_backend_none(client: FlaskClient):
     stub = _ReflectionStubBackend([], None)
     client.application.extensions["backend"] = stub
     assert client.get("/reflections/nope/drawer").status_code == 404
+
+
+def test_reflection_promote_runtimeerror_maps_to_409_card(client, tmp_db, monkeypatch):
+    from better_memory.ui import app as app_module
+    monkeypatch.setattr(app_module, "project_name", lambda: "testproj")
+    class _Stub(_ReflectionStubBackend):
+        def reflection_get(self, *, reflection_id):
+            return dict(_row_dict(id=reflection_id), hints="[]",
+                        created_at="2026-06-01T00:00:00+00:00",
+                        last_useful_at=None, last_misled_at=None,
+                        last_overlooked_at=None)
+        def promote_reflection(self, *, reflection_id):
+            raise RuntimeError("AgentCore promote_reflection failed: blocked")
+    client.application.extensions["backend"] = _Stub([], None)
+    resp = client.post("/reflections/r1/promote", headers={"Origin": "http://localhost"})
+    assert resp.status_code == 409
+    assert "card-error" in resp.get_data(as_text=True)
+
+
+def test_reflection_promote_missing_id_404(client):
+    class _Stub(_ReflectionStubBackend):
+        def reflection_get(self, *, reflection_id):
+            return None
+    client.application.extensions["backend"] = _Stub([], None)
+    resp = client.post("/reflections/gone/promote", headers={"Origin": "http://localhost"})
+    assert resp.status_code == 404

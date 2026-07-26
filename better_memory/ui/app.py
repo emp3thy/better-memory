@@ -425,7 +425,7 @@ def create_app(
             abort(404)
         try:
             app.extensions["backend"].retire_reflection(reflection_id=id)
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">'
                 f"<p>{escape(str(exc))}</p>"
@@ -495,7 +495,7 @@ def create_app(
             abort(404)
         try:
             app.extensions["backend"].promote_reflection(reflection_id=id)
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">'
                 f"<p>{escape(str(exc))}</p>"
@@ -543,7 +543,7 @@ def create_app(
             app.extensions["backend"].semantic_observe(
                 content=content, project=project, scope=scope,
             )
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
                 400, {},
@@ -555,7 +555,7 @@ def create_app(
         scope = request.form.get("scope") or "project"
         try:
             app.extensions["backend"].semantic_set_scope(id=id, scope=scope)
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
                 400, {},
@@ -584,7 +584,7 @@ def create_app(
         content = request.form.get("content", "").strip()
         try:
             app.extensions["backend"].semantic_update_text(id=id, content=content)
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
                 400, {},

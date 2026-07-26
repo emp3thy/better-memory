@@ -792,3 +792,14 @@ class TestSemanticUpdate:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 400
+
+
+def test_semantic_create_runtimeerror_maps_to_400_card(client):
+    class _Stub(_SemanticStubBackend):
+        def semantic_observe(self, *, content, project=None, scope="project"):
+            raise RuntimeError("AgentCore semantic_observe failed: bad")
+    client.application.extensions["backend"] = _Stub([])
+    resp = client.post("/semantic", data={"content": "x", "scope": "project"},
+                       headers={"Origin": "http://localhost"})
+    assert resp.status_code == 400
+    assert "card-error" in resp.get_data(as_text=True)
