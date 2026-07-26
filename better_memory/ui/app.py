@@ -336,9 +336,9 @@ def create_app(
 
     @app.get("/reflections")
     def reflections() -> str:
-        conn = app.extensions["db_connection"]
+        backend = app.extensions["backend"]
         current = project_name()
-        db_projects = queries.reflection_distinct_projects(conn)
+        db_projects = backend.distinct_projects()
         # Union + sort so the current project is always selectable, even
         # when no reflections exist for it yet.
         projects = sorted(

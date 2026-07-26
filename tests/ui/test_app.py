@@ -129,7 +129,9 @@ class TestEpisodesGate:
         from unittest.mock import MagicMock
 
         monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
-        StubBackend = type("StubBackend", (), {})
+        StubBackend = type(
+            "StubBackend", (), {"distinct_projects": lambda self: []}
+        )
         stub = StubBackend()
         # Only Episodes is gated this phase; the other five stay True so
         # the rest of the rail renders normally.
@@ -348,7 +350,9 @@ class TestBackendWiring:
 
         monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
         # Fresh throwaway type per test so PropertyMocks don't leak.
-        StubBackend = type("StubBackend", (), {})
+        StubBackend = type(
+            "StubBackend", (), {"distinct_projects": lambda self: []}
+        )
         stub = StubBackend()
         props: dict[str, PropertyMock] = {}
         for name in (
