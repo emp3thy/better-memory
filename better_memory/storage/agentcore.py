@@ -13,6 +13,18 @@ Capability flags:
   sessionId; the better-memory episodes table has no equivalent record
   type. Episode lifecycle methods are no-ops returning synthetic ids /
   empty results; the management UI hides the Episodes tab.
+- supports_observations = False -- AgentCore ingests events and exposes only
+  extracted memory records; there is no raw-observation store to list.
+- supports_provenance = False -- extraction happens inside AgentCore, so no
+  per-memory provenance chain (observations / episode a memory came from)
+  is returned.
+- supports_retention_runs = False -- pruning is event-expiry managed by
+  AgentCore; there is no local retention-run ledger for the UI to list.
+- supports_reflection_review = False -- AgentCore's status vocabulary is
+  active / promoted / retired with no pending_review state; reflections
+  are born active.
+- supports_reflection_text_edit = False -- reflection bodies are AI-managed
+  by AgentCore extraction and are not free-text editable.
 """
 
 from __future__ import annotations
@@ -104,6 +116,26 @@ class AgentCoreBackend:
 
     @property
     def supports_episodes(self) -> bool:
+        return False
+
+    @property
+    def supports_observations(self) -> bool:
+        return False
+
+    @property
+    def supports_provenance(self) -> bool:
+        return False
+
+    @property
+    def supports_retention_runs(self) -> bool:
+        return False
+
+    @property
+    def supports_reflection_review(self) -> bool:
+        return False
+
+    @property
+    def supports_reflection_text_edit(self) -> bool:
         return False
 
     # ----- Session-id per-operation re-resolution -----

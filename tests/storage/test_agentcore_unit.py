@@ -2649,3 +2649,19 @@ def test_retrieve_track_exposure_false_writes_nothing(
         "SELECT COUNT(*) AS n FROM session_memory_exposure"
     ).fetchone()
     assert row["n"] == 0
+
+
+def test_new_capability_flags_all_false(backend) -> None:
+    """AgentCore exposes only extracted memory records: no raw-observation
+    store, no provenance chain, no local retention-run ledger, no
+    pending_review lifecycle, no free-text reflection edit."""
+    assert backend.supports_observations is False
+    assert backend.supports_provenance is False
+    assert backend.supports_retention_runs is False
+    assert backend.supports_reflection_review is False
+    assert backend.supports_reflection_text_edit is False
+
+
+def test_supports_episodes_still_false_regression(backend) -> None:
+    """Regression pin: the pre-existing episodes flag stays False."""
+    assert backend.supports_episodes is False
