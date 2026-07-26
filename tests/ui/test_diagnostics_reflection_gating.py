@@ -10,11 +10,17 @@ from flask.testing import FlaskClient
 from better_memory.db.connection import connect
 
 
-def _seed_reflection(db_path: str) -> str:
-    """Insert a fresh pending_review reflection directly (mirrors the
-    raw-SQL seeding pattern in ``tests/ui/test_reflections.py``; there is
-    no ``ReflectionService.create`` - that class only exposes the four
-    lifecycle actions confirm/retire/update_text/promote_to_general)."""
+def _seed_reflection(db_path: str, status: str = "pending_review") -> str:
+    """Insert a fresh reflection directly (mirrors the raw-SQL seeding
+    pattern in ``tests/ui/test_reflections.py``; there is no
+    ``ReflectionService.create`` - that class only exposes the four
+    lifecycle actions confirm/retire/update_text/promote_to_general).
+
+    ``status`` defaults to ``pending_review`` (the original behaviour);
+    pass ``status="confirmed"`` to seed a row the drawer's outer
+    ``{% if detail.reflection.status in ('pending_review', 'confirmed') %}``
+    wrapper also admits.
+    """
     rid = str(uuid.uuid4())
     conn = connect(Path(db_path))
     try:
@@ -28,7 +34,7 @@ def _seed_reflection(db_path: str) -> str:
             (
                 rid, "Prefer batched writes", "testproj", "sqlite",
                 "implementation", "do", "When writing many records",
-                '["batch them"]', 0.8, "pending_review", 0, "project", 0,
+                '["batch them"]', 0.8, status, 0, "project", 0,
                 0, 0,
             ),
         )
@@ -101,6 +107,61 @@ def test_agentcore_reflection_drawer_hides_confirm_and_edit(
         ).get_data(as_text=True)
     assert "action-confirm" not in html
     assert "action-edit" not in html
+
+
+def test_agentcore_reflection_drawer_hides_confirm_and_edit_when_pending_review(
+    agentcore_client: FlaskClient, tmp_db,
+) -> None:
+    """``pending_review`` is a status the outer wrapper
+    (``{% if detail.reflection.status in ('pending_review', 'confirmed') %}``)
+    ADMITS, and it is also the one status for which the Confirm button's
+    own inner check (``caps.supports_reflection_review and
+    detail.reflection.status == 'pending_review'``) can possibly pass.
+    (``status="confirmed"`` would NOT work here: the Confirm button's
+    inner check requires status == 'pending_review' regardless of caps,
+    so with status="confirmed" the Confirm assertion would be vacuously
+    true even with the caps gate deleted - only the Edit gate would be
+    proven.) So with caps all False here, if Confirm/Edit are still
+    absent it can only be because the caps gates fired - unlike the
+    ``status="active"`` case above, which the outer wrapper already
+    excludes on its own regardless of caps."""
+    rid = _seed_reflection(str(tmp_db))
+    fake = agentcore_client.application.extensions["backend"]
+
+    def _pending_review_row(*, reflection_id: str):
+        return {
+            "id": reflection_id, "project": "testproj", "title": "t",
+            "tech": None, "phase": "implementation", "polarity": "do",
+            "confidence": 0.8, "status": "pending_review", "scope": "project",
+            "evidence_count": 0, "updated_at": "x",
+            "use_cases": "u", "hints": '["h"]',
+            "useful_count": 0, "last_useful_at": None,
+            "times_overlooked": 0, "last_overlooked_at": None,
+            "times_misled": 0, "last_misled_at": None,
+        }
+
+    from unittest.mock import patch
+
+    with patch.object(fake, "reflection_get", side_effect=_pending_review_row):
+        html = agentcore_client.get(
+            f"/reflections/{rid}/drawer"
+        ).get_data(as_text=True)
+    assert "action-confirm" not in html
+    assert "action-edit" not in html
+
+
+def test_sqlite_reflection_drawer_shows_confirm_and_edit_when_pending_review(
+    client: FlaskClient, tmp_db,
+) -> None:
+    """Discriminating counterpart to the agentcore test above: same
+    ``pending_review`` status, but the plain sqlite ``client`` fixture has
+    all caps True, so Confirm/Edit must be PRESENT. Proves the caps gates
+    don't affect sqlite mode and that the test setup itself can produce a
+    drawer with the controls rendered."""
+    rid = _seed_reflection(str(tmp_db), status="pending_review")
+    html = client.get(f"/reflections/{rid}/drawer").get_data(as_text=True)
+    assert "action-confirm" in html
+    assert "action-edit" in html
 
 
 def test_agentcore_confirm_and_edit_routes_404(
