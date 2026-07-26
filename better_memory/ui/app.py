@@ -378,6 +378,7 @@ def create_app(
             status=status,
             min_confidence=min_confidence,
             useful_only=useful_only,
+            limit=100,
         )
         return render_template(
             "fragments/panel_reflections.html", rows=rows
@@ -564,7 +565,13 @@ def create_app(
 
     @app.post("/semantic/<id>/delete")
     def semantic_delete(id: str) -> tuple[str, int, dict[str, str]]:
-        app.extensions["backend"].semantic_delete(id=id)  # idempotent
+        try:
+            app.extensions["backend"].semantic_delete(id=id)  # sqlite: idempotent
+        except (ValueError, RuntimeError) as exc:
+            return (
+                f'<div class="card card-error">{escape(str(exc))}</div>',
+                400, {},
+            )
         return ("", 200, {"HX-Trigger": "semantic-changed"})
 
     @app.get("/semantic/<id>/drawer")

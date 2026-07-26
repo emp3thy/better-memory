@@ -958,3 +958,32 @@ def test_reflection_promote_missing_id_404(client):
     client.application.extensions["backend"] = _Stub([], None)
     resp = client.post("/reflections/gone/promote", headers={"Origin": "http://localhost"})
     assert resp.status_code == 404
+
+
+def test_reflections_panel_caps_limit_at_100(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch,
+):
+    """The panel row cap must stay at 100 in both storage modes. The old
+    sqlite-only route called queries.reflection_list_for_ui with no limit
+    (default 100); the backend-routed reflection_list defaults to 200 when
+    no limit is passed, which would silently double sqlite panel output --
+    a byte-identical-output break. The route must pass limit=100 explicitly.
+    """
+    from better_memory.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "project_name", lambda: "testproj")
+    captured: dict[str, object] = {}
+
+    class _Stub(_ReflectionStubBackend):
+        def reflection_list(
+            self, *, project=None, tech=None, phase=None,
+            polarity=None, status=None, min_confidence=0.0,
+            useful_only=False, limit=200,
+        ):
+            captured["limit"] = limit
+            return []
+
+    client.application.extensions["backend"] = _Stub([], None)
+    resp = client.get("/reflections/panel")
+    assert resp.status_code == 200
+    assert captured["limit"] == 100

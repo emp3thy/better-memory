@@ -803,3 +803,18 @@ def test_semantic_create_runtimeerror_maps_to_400_card(client):
                        headers={"Origin": "http://localhost"})
     assert resp.status_code == 400
     assert "card-error" in resp.get_data(as_text=True)
+
+
+def test_semantic_delete_runtimeerror_maps_to_400_card(client):
+    """AgentCoreBackend.semantic_delete raises RuntimeError on failedRecords
+    (unlike sqlite, which is idempotent and never raises). semantic_delete
+    is the only content write that wasn't mapped to the shared RuntimeError
+    -> error-card contract, so a failed AWS delete would 500 instead of
+    rendering the same 400 error card the other semantic writes produce."""
+    class _Stub(_SemanticStubBackend):
+        def semantic_delete(self, *, id):
+            raise RuntimeError("AgentCore semantic_delete failed: bad")
+    client.application.extensions["backend"] = _Stub([])
+    resp = client.post("/semantic/x1/delete", headers={"Origin": "http://localhost"})
+    assert resp.status_code == 400
+    assert "card-error" in resp.get_data(as_text=True)
