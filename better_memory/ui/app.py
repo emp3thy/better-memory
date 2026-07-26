@@ -414,7 +414,7 @@ def create_app(
         if queries.reflection_detail(conn, reflection_id=id) is None:
             abort(404)
         try:
-            app.extensions["reflection_service"].retire(reflection_id=id)
+            app.extensions["backend"].retire_reflection(reflection_id=id)
         except ValueError as exc:
             return (
                 f'<div class="card card-error">'
@@ -485,9 +485,7 @@ def create_app(
         if queries.reflection_detail(conn, reflection_id=id) is None:
             abort(404)
         try:
-            app.extensions["reflection_service"].promote_to_general(
-                reflection_id=id,
-            )
+            app.extensions["backend"].promote_reflection(reflection_id=id)
         except ValueError as exc:
             return (
                 f'<div class="card card-error">'

@@ -785,3 +785,64 @@ class TestReflectionDrawerOverlookedAlwaysShown:
         # (dates, confidence) cannot satisfy the assertion.
         m = re.search(r"<dt>Overlooked</dt>\s*<dd>\s*(\d+)", body)
         assert m is not None and m.group(1) == "4"
+
+
+class _CapsStub:
+    supports_episodes = True
+    supports_observations = True
+    supports_provenance = True
+    supports_retention_runs = True
+    supports_reflection_review = True
+    supports_reflection_text_edit = True
+
+
+class _ReflectionMutationStub(_CapsStub):
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def promote_reflection(self, *, reflection_id):
+        self.calls.append(("promote", reflection_id))
+
+    def retire_reflection(self, *, reflection_id):
+        self.calls.append(("retire", reflection_id))
+
+
+def test_reflection_promote_routes_through_backend(
+    client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from better_memory.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "project_name", lambda: "testproj")
+    _seed_reflection(tmp_db, rid="r-promote", project="testproj", scope="project")
+    stub = _ReflectionMutationStub()
+    client.application.extensions["backend"] = stub
+
+    # The reflection_service must NOT be the mutation path anymore.
+    def _boom(**_):
+        raise AssertionError("reflection_service must not be called")
+
+    client.application.extensions["reflection_service"].promote_to_general = _boom
+    resp = client.post(
+        "/reflections/r-promote/promote",
+        headers={"Origin": "http://localhost"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["HX-Trigger"] == "reflection-changed"
+    assert ("promote", "r-promote") in stub.calls
+
+
+def test_reflection_retire_routes_through_backend(
+    client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from better_memory.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "project_name", lambda: "testproj")
+    _seed_reflection(tmp_db, rid="r-retire", project="testproj")
+    stub = _ReflectionMutationStub()
+    client.application.extensions["backend"] = stub
+    resp = client.post(
+        "/reflections/r-retire/retire",
+        headers={"Origin": "http://localhost"},
+    )
+    assert resp.status_code == 200
+    assert ("retire", "r-retire") in stub.calls
