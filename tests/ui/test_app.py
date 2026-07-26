@@ -110,6 +110,49 @@ class TestNav:
             assert f">{label}<" not in body
 
 
+class TestEpisodesGate:
+    _RAIL_LINK = '<span class="rail-label">Episodes</span>'
+
+    def test_episodes_link_present_in_sqlite_mode(
+        self, client: FlaskClient
+    ) -> None:
+        # sqlite backend -> supports_episodes True -> link renders as today.
+        body = client.get("/episodes").get_data(as_text=True)
+        assert self._RAIL_LINK in body
+
+    def test_episodes_link_hidden_when_flag_false(
+        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # [[guard-needs-triggering-test]]: seed supports_episodes=False to
+        # trigger the {% if %} false branch. [[playwright-domtext]]: assert
+        # on nav-element markup presence/absence, not CSS visibility.
+        from unittest.mock import MagicMock
+
+        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+        StubBackend = type("StubBackend", (), {})
+        stub = StubBackend()
+        # Only Episodes is gated this phase; the other five stay True so
+        # the rest of the rail renders normally.
+        setattr(type(stub), "supports_episodes", property(lambda self: False))
+        for name in (
+            "supports_observations", "supports_provenance",
+            "supports_retention_runs", "supports_reflection_review",
+            "supports_reflection_text_edit",
+        ):
+            setattr(type(stub), name, property(lambda self: True))
+        monkeypatch.setattr(
+            "better_memory.ui.app.build_backend",
+            MagicMock(return_value=stub),
+        )
+        app = create_app(start_watchdog=False, db_path=tmp_db)
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            body = c.get("/episodes").get_data(as_text=True)
+        assert self._RAIL_LINK not in body
+        # Sibling links unaffected -- prove only Episodes was gated.
+        assert '<span class="rail-label">Reflections</span>' in body
+
+
 class TestOriginCheck:
     def test_post_without_origin_or_referer_is_rejected(
         self, client: FlaskClient
