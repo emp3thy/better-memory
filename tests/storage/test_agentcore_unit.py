@@ -2880,3 +2880,49 @@ def test_reflection_list_best_effort_degrades_on_namespace_error(backend, mock_d
     mock_data_client.list_memory_records.side_effect = stub
     rows = backend.reflection_list(project="testproj")
     assert [r["id"] for r in rows] == ["r-survivor"]
+
+
+def test_reflection_list_dedups_across_namespaces_project_wins(backend, mock_data_client) -> None:
+    """[[dedup-project-wins]] The same reflection id present in BOTH the
+    project reflections namespace and the general reflections namespace
+    must collapse to a single row -- the PROJECT namespace's copy wins.
+    ``namespaces`` is iterated project-first (refl_project before
+    refl_general) and ``seen`` short-circuits on first-seen id, so the
+    general copy (deliberately given a different title/confidence here)
+    must not survive into the merged result. If the namespace order or
+    the seen-check were reversed, this would assert on the general copy's
+    values instead and fail."""
+    def _dupe_record(rec_id: str, *, title: str, confidence: str) -> dict:
+        return {
+            "memoryRecordId": rec_id,
+            "content": {"text": json.dumps({
+                "title": title, "use_cases": "u", "hints": "h", "confidence": confidence,
+            })},
+            "memoryStrategyId": "x",
+            "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+            "metadata": {
+                "polarity": {"stringValue": "do"},
+                "useful_count": {"numberValue": 5},
+                "missed_count": {"numberValue": 0},
+                "ignored_count": {"numberValue": 1},
+                "times_misled": {"numberValue": 0},
+                "overlooked_count": {"numberValue": 0},
+                "status": {"stringValue": "active"},
+            },
+        }
+
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _dupe_record("r-dupe", title="project-copy", confidence="0.9"),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _dupe_record("r-dupe", title="general-copy", confidence="0.4"),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-dupe"]
+    assert rows[0]["title"] == "project-copy"
+    assert rows[0]["confidence"] == pytest.approx(0.9)
