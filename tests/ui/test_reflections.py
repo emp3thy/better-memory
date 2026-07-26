@@ -800,6 +800,20 @@ class _ReflectionMutationStub(_CapsStub):
     def __init__(self):
         self.calls: list[tuple] = []
 
+    def reflection_get(self, *, reflection_id):
+        self.calls.append(("get", reflection_id))
+        return {
+            "id": reflection_id, "title": "t", "project": "testproj",
+            "tech": None, "phase": "general", "polarity": "do",
+            "confidence": 0.5, "status": "active", "use_cases": "uc",
+            "hints": "[]", "evidence_count": 0, "scope": "project",
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "updated_at": "2026-06-01T00:00:00+00:00",
+            "useful_count": 0, "last_useful_at": None,
+            "times_misled": 0, "last_misled_at": None,
+            "times_overlooked": 0, "last_overlooked_at": None,
+        }
+
     def promote_reflection(self, *, reflection_id):
         self.calls.append(("promote", reflection_id))
 
@@ -846,3 +860,75 @@ def test_reflection_retire_routes_through_backend(
     )
     assert resp.status_code == 200
     assert ("retire", "r-retire") in stub.calls
+
+
+class _ReflectionStubBackend(_CapsStub):
+    def __init__(self, list_rows, get_row):
+        self._list_rows = list_rows
+        self._get_row = get_row
+        self.calls: list[tuple] = []
+
+    def reflection_list(
+        self, *, project=None, tech=None, phase=None,
+        polarity=None, status=None, min_confidence=0.0,
+        useful_only=False, limit=200,
+    ):
+        self.calls.append(("list", project, status))
+        return self._list_rows
+
+    def reflection_get(self, *, reflection_id):
+        self.calls.append(("get", reflection_id))
+        return self._get_row
+
+    def promote_reflection(self, *, reflection_id):
+        self.calls.append(("promote", reflection_id))
+
+    def retire_reflection(self, *, reflection_id):
+        self.calls.append(("retire", reflection_id))
+
+
+def _row_dict(id="ac-r1", title="BACKEND REFLECTION", status="active", scope="project"):
+    return {
+        "id": id, "title": title, "project": "testproj", "tech": None,
+        "phase": "general", "polarity": "do", "confidence": 0.5,
+        "status": status, "use_cases": "uc", "evidence_count": 0,
+        "updated_at": "2026-06-01T00:00:00+00:00", "useful_count": 0,
+        "times_misled": 0, "times_overlooked": 0,
+    }
+
+
+def test_reflections_panel_lists_from_backend_not_local(
+    client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """[[server-boot-real-call]] dead-content-table: a local reflections row
+    must never render; the panel comes from backend.reflection_list."""
+    from better_memory.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "project_name", lambda: "testproj")
+    _seed_reflection(tmp_db, rid="local-sentinel")  # title 't' in local table
+    stub = _ReflectionStubBackend([_row_dict()], None)
+    client.application.extensions["backend"] = stub
+    body = client.get("/reflections/panel").get_data(as_text=True)
+    assert "BACKEND REFLECTION" in body
+    assert "local-sentinel" not in body
+    assert stub.calls[0][0] == "list"
+
+
+def test_reflections_drawer_reads_from_backend(
+    client: FlaskClient, tmp_db: Path,
+):
+    drawer_row = dict(
+        _row_dict(), hints="[]", created_at="2026-06-01T00:00:00+00:00",
+        last_useful_at=None, last_misled_at=None, last_overlooked_at=None,
+    )
+    stub = _ReflectionStubBackend([], drawer_row)
+    client.application.extensions["backend"] = stub
+    body = client.get("/reflections/ac-r1/drawer").get_data(as_text=True)
+    assert "BACKEND REFLECTION" in body
+    assert ("get", "ac-r1") in stub.calls
+
+
+def test_reflections_drawer_404_when_backend_none(client: FlaskClient):
+    stub = _ReflectionStubBackend([], None)
+    client.application.extensions["backend"] = stub
+    assert client.get("/reflections/nope/drawer").status_code == 404

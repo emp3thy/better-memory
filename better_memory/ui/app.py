@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from flask import Flask, abort, redirect, render_template, request, url_for
@@ -46,6 +47,19 @@ def _build_sync_embedder() -> SyncEmbedder | None:
     if get_config().embeddings_backend != "ollama":
         return None
     return SyncEmbedder(lambda: OllamaEmbedder(timeout=5.0, max_retries=1))
+
+
+def _reflection_drawer_detail(app: Flask, id: str) -> SimpleNamespace | None:
+    """Compose the drawer view model: row via backend.reflection_get (row +
+    existence), provenance via the local conn (flag-gated in PR 3). Returns
+    None when the reflection does not exist."""
+    row = app.extensions["backend"].reflection_get(reflection_id=id)
+    if row is None:
+        return None
+    sources = queries.reflection_provenance(
+        app.extensions["db_connection"], reflection_id=id,
+    )
+    return SimpleNamespace(reflection=SimpleNamespace(**row), sources=sources)
 
 
 def create_app(
@@ -336,7 +350,6 @@ def create_app(
 
     @app.get("/reflections/panel")
     def reflections_panel() -> str:
-        conn = app.extensions["db_connection"]
         args = request.args
 
         def _arg(name: str) -> str | None:
@@ -357,8 +370,7 @@ def create_app(
 
         useful_only = args.get("useful_only") == "1"
 
-        rows = queries.reflection_list_for_ui(
-            conn,
+        rows = app.extensions["backend"].reflection_list(
             project=project,
             tech=tech,
             phase=phase,
@@ -373,12 +385,11 @@ def create_app(
 
     @app.get("/reflections/<id>/drawer")
     def reflections_drawer(id: str) -> str:
-        conn = app.extensions["db_connection"]
-        detail = queries.reflection_detail(conn, reflection_id=id)
+        detail = _reflection_drawer_detail(app, id)
         if detail is None:
             abort(404)
         rating_evidence = queries.fetch_rating_evidence(
-            conn, "reflection", id
+            app.extensions["db_connection"], "reflection", id
         )
         return render_template(
             "fragments/reflection_drawer.html",
@@ -410,8 +421,7 @@ def create_app(
 
     @app.post("/reflections/<id>/retire")
     def reflection_retire(id: str) -> tuple[str, int, dict[str, str]]:
-        conn = app.extensions["db_connection"]
-        if queries.reflection_detail(conn, reflection_id=id) is None:
+        if _reflection_drawer_detail(app, id) is None:
             abort(404)
         try:
             app.extensions["backend"].retire_reflection(reflection_id=id)
@@ -421,9 +431,9 @@ def create_app(
                 f"<p>{escape(str(exc))}</p>"
                 "</div>"
             ), 409, {}
-        detail = queries.reflection_detail(conn, reflection_id=id)
+        detail = _reflection_drawer_detail(app, id)
         rating_evidence = queries.fetch_rating_evidence(
-            conn, "reflection", id
+            app.extensions["db_connection"], "reflection", id
         )
         rendered = render_template(
             "fragments/reflection_drawer.html",
@@ -481,8 +491,7 @@ def create_app(
 
     @app.post("/reflections/<id>/promote")
     def reflection_promote(id: str) -> tuple[str, int, dict[str, str]]:
-        conn = app.extensions["db_connection"]
-        if queries.reflection_detail(conn, reflection_id=id) is None:
+        if _reflection_drawer_detail(app, id) is None:
             abort(404)
         try:
             app.extensions["backend"].promote_reflection(reflection_id=id)
@@ -492,9 +501,9 @@ def create_app(
                 f"<p>{escape(str(exc))}</p>"
                 "</div>"
             ), 409, {}
-        detail = queries.reflection_detail(conn, reflection_id=id)
+        detail = _reflection_drawer_detail(app, id)
         rating_evidence = queries.fetch_rating_evidence(
-            conn, "reflection", id
+            app.extensions["db_connection"], "reflection", id
         )
         rendered = render_template(
             "fragments/reflection_drawer.html",
