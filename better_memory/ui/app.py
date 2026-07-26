@@ -50,14 +50,17 @@ def _build_sync_embedder() -> SyncEmbedder | None:
 
 
 def _reflection_drawer_detail(app: Flask, id: str) -> SimpleNamespace | None:
-    """Compose the drawer view model: row via backend.reflection_get (row +
-    existence), provenance via the local conn (flag-gated in PR 3). Returns
-    None when the reflection does not exist."""
-    row = app.extensions["backend"].reflection_get(reflection_id=id)
+    """Compose the drawer view model: row via backend.reflection_get; provenance
+    via the local conn ONLY when the backend supports it (gated out in
+    agentcore). Returns None when the reflection does not exist."""
+    backend = app.extensions["backend"]
+    row = backend.reflection_get(reflection_id=id)
     if row is None:
         return None
-    sources = queries.reflection_provenance(
-        app.extensions["db_connection"], reflection_id=id,
+    sources = (
+        queries.reflection_provenance(app.extensions["db_connection"], reflection_id=id)
+        if backend.supports_provenance
+        else []
     )
     return SimpleNamespace(reflection=SimpleNamespace(**row), sources=sources)
 
