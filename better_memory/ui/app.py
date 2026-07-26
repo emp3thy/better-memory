@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from flask import Flask, abort, redirect, render_template, request, url_for
@@ -46,6 +47,19 @@ def _build_sync_embedder() -> SyncEmbedder | None:
     if get_config().embeddings_backend != "ollama":
         return None
     return SyncEmbedder(lambda: OllamaEmbedder(timeout=5.0, max_retries=1))
+
+
+def _reflection_drawer_detail(app: Flask, id: str) -> SimpleNamespace | None:
+    """Compose the drawer view model: row via backend.reflection_get (row +
+    existence), provenance via the local conn (flag-gated in PR 3). Returns
+    None when the reflection does not exist."""
+    row = app.extensions["backend"].reflection_get(reflection_id=id)
+    if row is None:
+        return None
+    sources = queries.reflection_provenance(
+        app.extensions["db_connection"], reflection_id=id,
+    )
+    return SimpleNamespace(reflection=SimpleNamespace(**row), sources=sources)
 
 
 def create_app(
@@ -336,7 +350,6 @@ def create_app(
 
     @app.get("/reflections/panel")
     def reflections_panel() -> str:
-        conn = app.extensions["db_connection"]
         args = request.args
 
         def _arg(name: str) -> str | None:
@@ -357,8 +370,7 @@ def create_app(
 
         useful_only = args.get("useful_only") == "1"
 
-        rows = queries.reflection_list_for_ui(
-            conn,
+        rows = app.extensions["backend"].reflection_list(
             project=project,
             tech=tech,
             phase=phase,
@@ -366,6 +378,7 @@ def create_app(
             status=status,
             min_confidence=min_confidence,
             useful_only=useful_only,
+            limit=100,
         )
         return render_template(
             "fragments/panel_reflections.html", rows=rows
@@ -373,12 +386,11 @@ def create_app(
 
     @app.get("/reflections/<id>/drawer")
     def reflections_drawer(id: str) -> str:
-        conn = app.extensions["db_connection"]
-        detail = queries.reflection_detail(conn, reflection_id=id)
+        detail = _reflection_drawer_detail(app, id)
         if detail is None:
             abort(404)
         rating_evidence = queries.fetch_rating_evidence(
-            conn, "reflection", id
+            app.extensions["db_connection"], "reflection", id
         )
         return render_template(
             "fragments/reflection_drawer.html",
@@ -410,20 +422,19 @@ def create_app(
 
     @app.post("/reflections/<id>/retire")
     def reflection_retire(id: str) -> tuple[str, int, dict[str, str]]:
-        conn = app.extensions["db_connection"]
-        if queries.reflection_detail(conn, reflection_id=id) is None:
+        if _reflection_drawer_detail(app, id) is None:
             abort(404)
         try:
-            app.extensions["reflection_service"].retire(reflection_id=id)
-        except ValueError as exc:
+            app.extensions["backend"].retire_reflection(reflection_id=id)
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">'
                 f"<p>{escape(str(exc))}</p>"
                 "</div>"
             ), 409, {}
-        detail = queries.reflection_detail(conn, reflection_id=id)
+        detail = _reflection_drawer_detail(app, id)
         rating_evidence = queries.fetch_rating_evidence(
-            conn, "reflection", id
+            app.extensions["db_connection"], "reflection", id
         )
         rendered = render_template(
             "fragments/reflection_drawer.html",
@@ -481,22 +492,19 @@ def create_app(
 
     @app.post("/reflections/<id>/promote")
     def reflection_promote(id: str) -> tuple[str, int, dict[str, str]]:
-        conn = app.extensions["db_connection"]
-        if queries.reflection_detail(conn, reflection_id=id) is None:
+        if _reflection_drawer_detail(app, id) is None:
             abort(404)
         try:
-            app.extensions["reflection_service"].promote_to_general(
-                reflection_id=id,
-            )
-        except ValueError as exc:
+            app.extensions["backend"].promote_reflection(reflection_id=id)
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">'
                 f"<p>{escape(str(exc))}</p>"
                 "</div>"
             ), 409, {}
-        detail = queries.reflection_detail(conn, reflection_id=id)
+        detail = _reflection_drawer_detail(app, id)
         rating_evidence = queries.fetch_rating_evidence(
-            conn, "reflection", id
+            app.extensions["db_connection"], "reflection", id
         )
         rendered = render_template(
             "fragments/reflection_drawer.html",
@@ -514,17 +522,13 @@ def create_app(
 
     @app.get("/semantic/panel")
     def semantic_panel() -> str:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         project = request.args.get("project") or project_name()
         scope_filter = (request.args.get("scope_filter") or "").strip() or None
         if scope_filter not in ("project", "general", None):
             scope_filter = None
         search = (request.args.get("search") or "").strip() or None
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
-        rows = svc.list_for_project(
+        backend = app.extensions["backend"]
+        rows = backend.semantic_list(
             project=project, scope_filter=scope_filter, search=search,
         )
         return render_template(
@@ -533,17 +537,14 @@ def create_app(
 
     @app.post("/semantic")
     def semantic_create() -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         project = project_name()
         content = request.form.get("content", "").strip()
         scope = request.form.get("scope") or "project"
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
         try:
-            svc.create(content=content, project=project, scope=scope)
-        except ValueError as exc:
+            app.extensions["backend"].semantic_observe(
+                content=content, project=project, scope=scope,
+            )
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
                 400, {},
@@ -552,15 +553,10 @@ def create_app(
 
     @app.post("/semantic/<id>/scope")
     def semantic_scope(id: str) -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         scope = request.form.get("scope") or "project"
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
         try:
-            svc.set_scope(id=id, scope=scope)
-        except ValueError as exc:
+            app.extensions["backend"].semantic_set_scope(id=id, scope=scope)
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
                 400, {},
@@ -569,37 +565,21 @@ def create_app(
 
     @app.post("/semantic/<id>/delete")
     def semantic_delete(id: str) -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
-        svc.delete(id=id)  # idempotent
+        try:
+            app.extensions["backend"].semantic_delete(id=id)  # sqlite: idempotent
+        except (ValueError, RuntimeError) as exc:
+            return (
+                f'<div class="card card-error">{escape(str(exc))}</div>',
+                400, {},
+            )
         return ("", 200, {"HX-Trigger": "semantic-changed"})
 
     @app.get("/semantic/<id>/drawer")
     def semantic_drawer(id: str):
         conn = app.extensions["db_connection"]
-        row = conn.execute(
-            "SELECT id, content, project, scope, created_at, updated_at, "
-            "useful_count, last_useful_at, times_misled, last_misled_at, "
-            "times_overlooked, last_overlooked_at "
-            "FROM semantic_memories WHERE id = ?",
-            (id,),
-        ).fetchone()
-        if row is None:
+        memory = app.extensions["backend"].semantic_get(id=id)
+        if memory is None:
             abort(404)
-        memory = {
-            "id": row["id"], "content": row["content"],
-            "project": row["project"], "scope": row["scope"],
-            "created_at": row["created_at"], "updated_at": row["updated_at"],
-            "useful_count": row["useful_count"] or 0,
-            "last_useful_at": row["last_useful_at"],
-            "times_misled": row["times_misled"] or 0,
-            "last_misled_at": row["last_misled_at"],
-            "times_overlooked": row["times_overlooked"] or 0,
-            "last_overlooked_at": row["last_overlooked_at"],
-        }
         rating_evidence = queries.fetch_rating_evidence(conn, "semantic", id)
         return render_template(
             "fragments/semantic_drawer.html",
@@ -608,15 +588,10 @@ def create_app(
 
     @app.post("/semantic/<id>/update")
     def semantic_update(id: str) -> tuple[str, int, dict[str, str]]:
-        from better_memory.services.semantic import SemanticMemoryService
-        conn = app.extensions["db_connection"]
         content = request.form.get("content", "").strip()
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
         try:
-            svc.update_text(id=id, content=content)
-        except ValueError as exc:
+            app.extensions["backend"].semantic_update_text(id=id, content=content)
+        except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
                 400, {},

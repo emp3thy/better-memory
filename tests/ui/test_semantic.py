@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from flask.testing import FlaskClient
 
+from better_memory.services.semantic import SemanticMemory
+
 
 class TestSemanticPage:
     def test_returns_200_with_active_nav_tab(
@@ -628,6 +630,129 @@ class TestSemanticEmbeddingWiring:
         assert fake.calls == ["new text"]
 
 
+class _CapsStub:
+    """Exposes the six capability flags the PR1 caps context-processor reads
+    at render time (all True: PR2 does no gating, values are irrelevant, but
+    the attributes MUST exist or rendering KeyErrors)."""
+    supports_episodes = True
+    supports_observations = True
+    supports_provenance = True
+    supports_retention_runs = True
+    supports_reflection_review = True
+    supports_reflection_text_edit = True
+
+
+class _SemanticStubBackend(_CapsStub):
+    def __init__(self, rows):
+        self._rows = rows
+        self.calls: list[tuple] = []
+
+    def semantic_list(self, *, project=None, scope_filter=None, search=None,
+                      track_exposure=True):
+        self.calls.append(("list", project, scope_filter, search))
+        return self._rows
+
+    def semantic_observe(self, *, content, project=None, scope="project"):
+        self.calls.append(("observe", content, scope))
+        return "new-id"
+
+    def semantic_set_scope(self, *, id, scope):
+        self.calls.append(("scope", id, scope))
+
+    def semantic_delete(self, *, id):
+        self.calls.append(("delete", id))
+
+    def semantic_update_text(self, *, id, content):
+        self.calls.append(("update", id, content))
+
+    def semantic_get(self, *, id) -> SemanticMemory | None:
+        self.calls.append(("get", id))
+        return None
+
+
+def _semantic_row(id="ac-1", content="agentcore rule", scope="project"):
+    return SemanticMemory(
+        id=id, content=content, project="testproj", scope=scope,
+        created_at="2026-06-01T00:00:00+00:00",
+        updated_at="2026-06-01T00:00:00+00:00",
+    )
+
+
+def test_semantic_panel_lists_from_backend_not_local_sqlite(
+    client, tmp_db, monkeypatch
+):
+    """[[server-boot-real-call]] dead-content-table: a sentinel row in the
+    LOCAL semantic_memories table must NEVER render; the panel content comes
+    from the stubbed backend."""
+    import sqlite3
+    with sqlite3.connect(tmp_db) as seed:
+        seed.execute(
+            "INSERT INTO semantic_memories "
+            "(id, content, project, scope, created_at, updated_at) VALUES "
+            "('local-sentinel','LOCAL SENTINEL ROW','testproj','project',"
+            " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00')"
+        )
+        seed.commit()
+    stub = _SemanticStubBackend([_semantic_row(content="BACKEND ROW")])
+    client.application.extensions["backend"] = stub
+    body = client.get("/semantic/panel").get_data(as_text=True)
+    assert "BACKEND ROW" in body
+    assert "LOCAL SENTINEL ROW" not in body
+    assert stub.calls and stub.calls[0][0] == "list"
+
+
+def test_semantic_create_calls_backend_observe(client):
+    stub = _SemanticStubBackend([])
+    client.application.extensions["backend"] = stub
+    resp = client.post("/semantic", data={"content": "new fact", "scope": "general"},
+                       headers={"Origin": "http://localhost"})
+    assert resp.status_code == 200
+    assert resp.headers["HX-Trigger"] == "semantic-changed"
+    assert ("observe", "new fact", "general") in stub.calls
+
+
+def test_semantic_scope_and_delete_and_update_call_backend(client):
+    stub = _SemanticStubBackend([])
+    client.application.extensions["backend"] = stub
+    h = {"Origin": "http://localhost"}
+    client.post("/semantic/x1/scope", data={"scope": "general"}, headers=h)
+    client.post("/semantic/x1/delete", headers=h)
+    client.post("/semantic/x1/update", data={"content": "edited"}, headers=h)
+    assert ("scope", "x1", "general") in stub.calls
+    assert ("delete", "x1") in stub.calls
+    assert ("update", "x1", "edited") in stub.calls
+
+
+def test_semantic_drawer_reads_from_backend_not_local(client, tmp_db):
+    import sqlite3
+    with sqlite3.connect(tmp_db) as seed:
+        seed.execute(
+            "INSERT INTO semantic_memories "
+            "(id, content, project, scope, created_at, updated_at) VALUES "
+            "('d1','LOCAL SENTINEL','testproj','project',"
+            "'2026-05-01T00:00:00+00:00','2026-05-01T00:00:00+00:00')"
+        )
+        seed.commit()
+    class _Stub(_SemanticStubBackend):
+        def semantic_get(self, *, id):
+            self.calls.append(("get", id))
+            return _semantic_row(id="d1", content="BACKEND DRAWER ROW")
+    stub = _Stub([])
+    client.application.extensions["backend"] = stub
+    body = client.get("/semantic/d1/drawer").get_data(as_text=True)
+    assert "BACKEND DRAWER ROW" in body
+    assert "LOCAL SENTINEL" not in body
+    assert ("get", "d1") in stub.calls
+
+
+def test_semantic_drawer_404_when_backend_returns_none(client):
+    class _Stub(_SemanticStubBackend):
+        def semantic_get(self, *, id):
+            return None
+    client.application.extensions["backend"] = _Stub([])
+    assert client.get("/semantic/nope/drawer").status_code == 404
+
+
 class TestSemanticUpdate:
     def test_update_changes_content(
         self, client: FlaskClient, tmp_db: Path,
@@ -667,3 +792,29 @@ class TestSemanticUpdate:
             headers={"Origin": "http://localhost"},
         )
         assert response.status_code == 400
+
+
+def test_semantic_create_runtimeerror_maps_to_400_card(client):
+    class _Stub(_SemanticStubBackend):
+        def semantic_observe(self, *, content, project=None, scope="project"):
+            raise RuntimeError("AgentCore semantic_observe failed: bad")
+    client.application.extensions["backend"] = _Stub([])
+    resp = client.post("/semantic", data={"content": "x", "scope": "project"},
+                       headers={"Origin": "http://localhost"})
+    assert resp.status_code == 400
+    assert "card-error" in resp.get_data(as_text=True)
+
+
+def test_semantic_delete_runtimeerror_maps_to_400_card(client):
+    """AgentCoreBackend.semantic_delete raises RuntimeError on failedRecords
+    (unlike sqlite, which is idempotent and never raises). semantic_delete
+    is the only content write that wasn't mapped to the shared RuntimeError
+    -> error-card contract, so a failed AWS delete would 500 instead of
+    rendering the same 400 error card the other semantic writes produce."""
+    class _Stub(_SemanticStubBackend):
+        def semantic_delete(self, *, id):
+            raise RuntimeError("AgentCore semantic_delete failed: bad")
+    client.application.extensions["backend"] = _Stub([])
+    resp = client.post("/semantic/x1/delete", headers={"Origin": "http://localhost"})
+    assert resp.status_code == 400
+    assert "card-error" in resp.get_data(as_text=True)

@@ -760,11 +760,12 @@ def test_j7_contextual_inject_honours_settings_activation(
         # fetch, project + general/promoted, no query so no relevance
         # search of its own) + 2 RetrieveMemoryRecords (relevance_ranks'
         # "reflection" kind, project + general) = 4.
-        # SEM-FAKE-0001: 1 ListMemoryRecords (backend.semantic_list,
-        # project namespace only) + 2 RetrieveMemoryRecords
-        # (relevance_ranks' "semantic" kind, project + general) = 3.
+        # SEM-FAKE-0001: 2 ListMemoryRecords (backend.semantic_list's
+        # scope_filter=None default now fans out over project + general,
+        # sqlite parity restored by the C1 fix) + 2 RetrieveMemoryRecords
+        # (relevance_ranks' "semantic" kind, project + general) = 4.
         assert sum("EPI-FAKE-0001" in p for p in paths) == 4
-        assert sum("SEM-FAKE-0001" in p for p in paths) == 3
+        assert sum("SEM-FAKE-0001" in p for p in paths) == 4
 
 
 # ---------------------------------------------------------------------------

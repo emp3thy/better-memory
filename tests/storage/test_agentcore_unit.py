@@ -1538,9 +1538,67 @@ def test_semantic_list_with_search_uses_retrieve_memory_records(backend, mock_da
 
 def test_semantic_list_without_search_uses_list_memory_records(backend, mock_data_client) -> None:
     mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
-    backend.semantic_list()
+    backend.semantic_list(scope_filter="project")
     mock_data_client.list_memory_records.assert_called_once()
     mock_data_client.retrieve_memory_records.assert_not_called()
+
+
+def test_semantic_list_default_view_fans_out_over_project_and_general(
+    backend, mock_data_client
+) -> None:
+    """[[guard-needs-triggering-test]] Bug regression: scope_filter=None (the
+    UI default) must include general-scope records, mirroring sqlite's
+    (project OR scope='general'). Project namespace has 0 records; general/
+    semantic has 1 -> the default view must return that 1, not 0."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "general/semantic/":
+            return {"memoryRecordSummaries": [
+                {
+                    "memoryRecordId": "sem-general-1",
+                    "content": {"text": "prefer uv over pip"},
+                    "namespaces": ["/general/semantic/"],
+                    "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+                    "metadata": {"useful_count": {"numberValue": 0}},
+                }
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.semantic_list(project="testproj", scope_filter=None)
+    assert [m.id for m in result] == ["sem-general-1"]
+    assert result[0].scope == "general"
+    namespaces = {
+        c.kwargs["namespace"]
+        for c in mock_data_client.list_memory_records.call_args_list
+    }
+    assert namespaces == {"projects/testproj/semantic/", "general/semantic/"}
+
+
+def test_semantic_list_default_view_dedups_project_wins(
+    backend, mock_data_client
+) -> None:
+    """A record served by BOTH namespaces (lagging index) appears once."""
+    rec = {
+        "memoryRecordId": "sem-dup",
+        "content": {"text": "dup"},
+        "namespaces": ["/projects/testproj/semantic/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {"useful_count": {"numberValue": 0}},
+    }
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": [rec]}
+    result = backend.semantic_list(project="testproj", scope_filter=None)
+    assert [m.id for m in result] == ["sem-dup"]
+
+
+def test_semantic_list_project_filter_queries_only_project_namespace(
+    backend, mock_data_client
+) -> None:
+    mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
+    backend.semantic_list(project="testproj", scope_filter="project")
+    assert mock_data_client.list_memory_records.call_count == 1
+    assert (
+        mock_data_client.list_memory_records.call_args.kwargs["namespace"]
+        == "projects/testproj/semantic/"
+    )
 
 
 def test_semantic_list_scope_classification_normalizes_leading_slash(
@@ -2665,3 +2723,232 @@ def test_new_capability_flags_all_false(backend) -> None:
 def test_supports_episodes_still_false_regression(backend) -> None:
     """Regression pin: the pre-existing episodes flag stays False."""
     assert backend.supports_episodes is False
+
+
+# ===== reflection_get: row-only accessor (no provenance) =====
+
+
+def test_reflection_get_parses_body_record(backend, mock_data_client) -> None:
+    body = json.dumps({
+        "title": "Body reflection", "use_cases": "when X",
+        "hints": ["h1", "h2"], "confidence": "0.8", "polarity": "do",
+        "status": "active", "phase": "planning",
+    })
+    mock_data_client.get_memory_record.return_value = {"memoryRecord": {
+        "memoryRecordId": "rec-1",
+        "content": {"text": body},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {"useful_count": {"numberValue": 4}},
+    }}
+    got = backend.reflection_get(reflection_id="rec-1")
+    assert got["id"] == "rec-1"
+    assert got["title"] == "Body reflection"
+    assert got["status"] == "active"
+    assert got["polarity"] == "do"
+    assert got["scope"] == "project"
+    assert got["useful_count"] == 4
+    assert got["last_useful_at"] is None
+    # hints serialized as a JSON string so the drawer's decode_hints filter
+    # decodes it identically to the sqlite column shape.
+    assert json.loads(got["hints"]) == ["h1", "h2"]
+
+
+def test_reflection_get_returns_none_on_404(backend, mock_data_client, monkeypatch) -> None:
+    from better_memory.storage import agentcore as ac_module
+
+    monkeypatch.setattr(ac_module, "_ClientError", _FakeClientError)
+    mock_data_client.get_memory_record.side_effect = _FakeClientError(
+        code="ResourceNotFoundException", message="missing"
+    )
+    assert backend.reflection_get(reflection_id="gone") is None
+
+
+# ===== reflection_list: flat, Wilson-ordered accessor + status remap =====
+
+
+def _retired_record(rec_id):
+    import json
+    return {
+        "memoryRecordId": rec_id,
+        "content": {"text": json.dumps({
+            "title": rec_id, "use_cases": "u", "hints": "h",
+            "confidence": "0.9", "polarity": "do", "status": "retired",
+        })},
+        "namespaces": ["projects/testproj/retired/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {"status": {"stringValue": "retired"}},
+    }
+
+
+def test_reflection_list_flat_wilson_order(backend, mock_data_client) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-workhorse", useful=67, ignored=125),
+                _wilson_ranking_record("r-newcomer", useful=3, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-newcomer", "r-workhorse"]
+    # row-key completeness against the template's field list
+    assert set(rows[0]) == {
+        "id", "title", "project", "tech", "phase", "polarity", "confidence",
+        "status", "use_cases", "evidence_count", "updated_at",
+        "useful_count", "times_misled", "times_overlooked",
+    }
+    assert not any(k.startswith("_") for k in rows[0])
+
+
+def test_reflection_list_default_status_is_active_promoted(backend, mock_data_client) -> None:
+    """[[status-remap]] status=None on agentcore admits {active, promoted}
+    -- NOT sqlite's {pending_review, confirmed}, since agentcore has no
+    pending_review state. A record with status=promoted must be included
+    by default; a status the set does not admit must be excluded.
+
+    _wilson_ranking_record hardcodes status=active; patch one record's
+    metadata to promoted to exercise the {active, promoted} admit set."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-active", useful=5, ignored=1),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            rec = _wilson_ranking_record("r-promoted", useful=5, ignored=1)
+            rec["metadata"]["status"] = {"stringValue": "promoted"}
+            return {"memoryRecordSummaries": [rec]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert {r["id"] for r in rows} == {"r-active", "r-promoted"}
+    assert {r["status"] for r in rows} == {"active", "promoted"}
+
+
+def test_reflection_list_default_excludes_retired(backend, mock_data_client) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-active", useful=5, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-active"]
+    # retired namespaces are NOT queried under the default status set
+    queried = {c.kwargs["namespace"] for c in mock_data_client.list_memory_records.call_args_list}
+    assert "projects/testproj/retired/" not in queried
+
+
+def test_reflection_list_status_retired_queries_retired_namespaces(
+    backend, mock_data_client
+) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/retired/":
+            return {"memoryRecordSummaries": [_retired_record("r-old")]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj", status="retired")
+    assert [r["id"] for r in rows] == ["r-old"]
+    assert rows[0]["status"] == "retired"
+    queried = {c.kwargs["namespace"] for c in mock_data_client.list_memory_records.call_args_list}
+    assert {"projects/testproj/retired/", "general/retired/"} <= queried
+
+
+def test_reflection_list_polarity_filter_drops_non_matches(backend, mock_data_client) -> None:
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-do", useful=5, ignored=1),  # polarity 'do'
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    assert backend.reflection_list(project="testproj", polarity="dont") == []
+
+
+def test_reflection_list_best_effort_degrades_on_namespace_error(backend, mock_data_client) -> None:
+    """[[guard-needs-triggering-test]] One namespace raising must NOT 500 the
+    whole list -- the surviving namespace's rows come through."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "general/reflections/":
+            raise _FakeClientError(code="ThrottlingException", message="rate exceeded")
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _wilson_ranking_record("r-survivor", useful=5, ignored=1),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-survivor"]
+
+
+def test_reflection_list_dedups_across_namespaces_project_wins(backend, mock_data_client) -> None:
+    """[[dedup-project-wins]] The same reflection id present in BOTH the
+    project reflections namespace and the general reflections namespace
+    must collapse to a single row -- the PROJECT namespace's copy wins.
+    ``namespaces`` is iterated project-first (refl_project before
+    refl_general) and ``seen`` short-circuits on first-seen id, so the
+    general copy (deliberately given a different title/confidence here)
+    must not survive into the merged result. If the namespace order or
+    the seen-check were reversed, this would assert on the general copy's
+    values instead and fail."""
+    def _dupe_record(rec_id: str, *, title: str, confidence: str) -> dict:
+        return {
+            "memoryRecordId": rec_id,
+            "content": {"text": json.dumps({
+                "title": title, "use_cases": "u", "hints": "h", "confidence": confidence,
+            })},
+            "memoryStrategyId": "x",
+            "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+            "metadata": {
+                "polarity": {"stringValue": "do"},
+                "useful_count": {"numberValue": 5},
+                "missed_count": {"numberValue": 0},
+                "ignored_count": {"numberValue": 1},
+                "times_misled": {"numberValue": 0},
+                "overlooked_count": {"numberValue": 0},
+                "status": {"stringValue": "active"},
+            },
+        }
+
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _dupe_record("r-dupe", title="project-copy", confidence="0.9"),
+            ]}
+        if kwargs["namespace"] == "general/reflections/":
+            return {"memoryRecordSummaries": [
+                _dupe_record("r-dupe", title="general-copy", confidence="0.4"),
+            ]}
+        return {"memoryRecordSummaries": []}
+    mock_data_client.list_memory_records.side_effect = stub
+    rows = backend.reflection_list(project="testproj")
+    assert [r["id"] for r in rows] == ["r-dupe"]
+    assert rows[0]["title"] == "project-copy"
+    assert rows[0]["confidence"] == pytest.approx(0.9)
+
+
+# ===== semantic_get: single-record accessor =====
+
+
+def test_semantic_get_maps_record(backend, mock_data_client):
+    from better_memory.services.semantic import SemanticMemory
+    mock_data_client.get_memory_record.return_value = {"memoryRecord": {
+        "memoryRecordId": "sm-1",
+        "content": {"text": "prefer uv"},
+        "namespaces": ["/general/semantic/"],
+        "createdAt": datetime(2026, 5, 25, tzinfo=UTC),
+        "metadata": {"useful_count": {"numberValue": 2}},
+    }}
+    got = backend.semantic_get(id="sm-1")
+    assert isinstance(got, SemanticMemory)
+    assert got.id == "sm-1" and got.scope == "general" and got.useful_count == 2
+
+
+def test_semantic_get_returns_none_on_404(backend, mock_data_client, monkeypatch):
+    import better_memory.storage.agentcore as ac_module
+    monkeypatch.setattr(ac_module, "_ClientError", _FakeClientError)
+    mock_data_client.get_memory_record.side_effect = _FakeClientError(
+        code="ResourceNotFoundException", message="missing"
+    )
+    assert backend.semantic_get(id="gone") is None

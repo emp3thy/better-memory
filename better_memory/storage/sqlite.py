@@ -223,6 +223,9 @@ class SqliteBackend:
     def semantic_delete(self, *, id: str) -> None:
         self._semantic.delete(id=id)
 
+    def semantic_get(self, *, id: str) -> Any | None:
+        return self._semantic.get(id=id)
+
     # ----- Episodes -----
 
     def open_background_episode(
@@ -367,6 +370,37 @@ class SqliteBackend:
 
     def retire_reflection(self, *, reflection_id: str) -> None:
         self._reflection.retire(reflection_id=reflection_id)
+
+    def reflection_get(self, *, reflection_id: str) -> dict[str, Any] | None:
+        from dataclasses import asdict
+
+        from better_memory.ui import queries
+
+        row = queries.reflection_row(self._conn, reflection_id=reflection_id)
+        return None if row is None else asdict(row)
+
+    def reflection_list(
+        self,
+        *,
+        project: str | None = None,
+        tech: str | None = None,
+        phase: str | None = None,
+        polarity: str | None = None,
+        status: str | None = None,
+        min_confidence: float = 0.0,
+        useful_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        from dataclasses import asdict
+
+        from better_memory.ui import queries
+
+        rows = queries.reflection_list_for_ui(
+            self._conn, project=project or self._project, tech=tech, phase=phase,
+            polarity=polarity, status=status, min_confidence=min_confidence,
+            useful_only=useful_only, limit=limit,
+        )
+        return [asdict(r) for r in rows]
 
     # ----- Session lifecycle -----
 

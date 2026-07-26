@@ -66,36 +66,35 @@ class SemanticToolHandlers:
     async def semantic_retrieve(self, args: dict[str, Any]) -> list[TextContent]:
         project = args.get("project") or project_name()
         if self._remote is not None:
-            # Sqlite parity (fix plan UD-2): merge the project namespace
-            # with the general namespace via two backend calls. AgentCore
-            # records carry no project/created_at/updated_at — keep the
-            # payload keys stable with None so downstream consumers
+            # Sqlite parity (fix plan UD-2): AgentCoreBackend.semantic_list's
+            # scope_filter=None view now performs the project+general merge
+            # itself (fan out over both namespaces, dedup by id, project
+            # wins — see storage/agentcore.py::semantic_list). A single call
+            # here is sufficient; this handler used to do its own manual
+            # merge over (None, "general") to work around semantic_list's
+            # old project-only default, which now double-queries the
+            # general namespace on top of semantic_list's own fan-out.
+            # AgentCore records carry no project/created_at/updated_at —
+            # keep the payload keys stable with None so downstream consumers
             # (rate-session-memories skill, management UI) don't KeyError.
-            merged: list[dict[str, Any]] = []
-            seen: set[str] = set()
-            for scope_filter in (None, "general"):
+            merged = [
+                # semantic_list now returns SemanticMemory objects (§6.3),
+                # matching the sqlite path below — attribute access, not
+                # dict subscripting. created_at/updated_at stay None: the
+                # stable UD-2 payload contract keeps agentcore semantic
+                # rows key-identical to sqlite with placeholder timestamps.
+                {
+                    "id": record.id,
+                    "content": record.content,
+                    "project": None,
+                    "scope": record.scope,
+                    "created_at": None,
+                    "updated_at": None,
+                }
                 for record in self._remote.semantic_list(
-                    project=project, scope_filter=scope_filter
-                ):
-                    # semantic_list now returns SemanticMemory objects (§6.3),
-                    # matching the sqlite path below — attribute access, not
-                    # dict subscripting. created_at/updated_at stay None: the
-                    # stable UD-2 payload contract keeps agentcore semantic
-                    # rows key-identical to sqlite with placeholder timestamps.
-                    record_id = record.id
-                    if record_id in seen:
-                        continue
-                    seen.add(record_id)
-                    merged.append(
-                        {
-                            "id": record_id,
-                            "content": record.content,
-                            "project": None,
-                            "scope": record.scope,
-                            "created_at": None,
-                            "updated_at": None,
-                        }
-                    )
+                    project=project, scope_filter=None
+                )
+            ]
             return [TextContent(type="text", text=json.dumps(merged))]
         memories = self._semantic.list_for_project(project=project)
         payload = [
