@@ -412,6 +412,8 @@ def create_app(
 
     @app.post("/reflections/<id>/confirm")
     def reflection_confirm(id: str) -> tuple[str, int, dict[str, str]]:
+        if not app.extensions["backend"].supports_reflection_review:
+            abort(404)
         conn = app.extensions["db_connection"]
         if queries.reflection_detail(conn, reflection_id=id) is None:
             abort(404)
@@ -457,6 +459,8 @@ def create_app(
 
     @app.get("/reflections/<id>/edit")
     def reflection_edit_form(id: str) -> str:
+        if not app.extensions["backend"].supports_reflection_text_edit:
+            abort(404)
         conn = app.extensions["db_connection"]
         detail = queries.reflection_detail(conn, reflection_id=id)
         if detail is None:
@@ -467,6 +471,8 @@ def create_app(
 
     @app.post("/reflections/<id>/edit")
     def reflection_edit_save(id: str) -> tuple[str, int, dict[str, str]]:
+        if not app.extensions["backend"].supports_reflection_text_edit:
+            abort(404)
         conn = app.extensions["db_connection"]
         if queries.reflection_detail(conn, reflection_id=id) is None:
             abort(404)
@@ -742,6 +748,8 @@ def create_app(
 
     @app.get("/diagnostics/panel/retention-runs")
     def retention_runs_panel() -> str:
+        if not app.extensions["backend"].supports_retention_runs:
+            abort(404)
         conn = app.extensions["db_connection"]
         rows = queries.retention_runs_list_for_ui(conn)
         from itertools import groupby

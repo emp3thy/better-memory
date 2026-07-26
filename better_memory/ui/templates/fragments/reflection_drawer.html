@@ -48,7 +48,7 @@
 
   {% if detail.reflection.status in ('pending_review', 'confirmed') %}
     <div class="drawer-actions">
-      {% if detail.reflection.status == 'pending_review' %}
+      {% if caps.supports_reflection_review and detail.reflection.status == 'pending_review' %}
         <button type="button"
                 class="action-confirm"
                 hx-post="{{ url_for('reflection_confirm', id=detail.reflection.id) }}"
@@ -64,13 +64,15 @@
               hx-swap="innerHTML">
         Retire
       </button>
-      <button type="button"
-              class="action-edit"
-              hx-get="{{ url_for('reflection_edit_form', id=detail.reflection.id) }}"
-              hx-target="#reflection-drawer"
-              hx-swap="innerHTML">
-        Edit
-      </button>
+      {% if caps.supports_reflection_text_edit %}
+        <button type="button"
+                class="action-edit"
+                hx-get="{{ url_for('reflection_edit_form', id=detail.reflection.id) }}"
+                hx-target="#reflection-drawer"
+                hx-swap="innerHTML">
+          Edit
+        </button>
+      {% endif %}
       {% if detail.reflection.scope == 'project' %}
         <button type="button"
                 class="action-promote"
