@@ -17,6 +17,8 @@ from better_memory.ui.queries import (
     fetch_rating_evidence,
     reflection_detail,
     reflection_list_for_ui,
+    reflection_provenance,
+    reflection_row,
 )
 
 
@@ -286,6 +288,37 @@ class TestReflectionDetail:
         detail = reflection_detail(conn, reflection_id="r-1")
         assert detail is not None
         assert detail.reflection.scope == "general"
+
+    def test_reflection_detail_composes_from_row_and_provenance(self, conn):
+        """Composition pin: reflection_detail is recomposed from
+        reflection_row + reflection_provenance and must produce the exact
+        same objects those two helpers would produce independently."""
+        ep_id = EpisodeService(conn).open_background(
+            session_id="s1", project="proj-a"
+        )
+        conn.execute(
+            "INSERT INTO observations "
+            "(id, content, project, episode_id) VALUES "
+            "('obs-1', 'obs body', 'proj-a', ?)",
+            (ep_id,),
+        )
+        _seed(conn, rid="r-1")
+        conn.execute(
+            "INSERT INTO reflection_sources (reflection_id, observation_id) "
+            "VALUES ('r-1', 'obs-1')"
+        )
+        conn.commit()
+
+        detail = reflection_detail(conn, reflection_id="r-1")
+        row = reflection_row(conn, reflection_id="r-1")
+        prov = reflection_provenance(conn, reflection_id="r-1")
+        assert detail is not None and row is not None
+        assert detail.reflection == row
+        assert detail.sources == prov
+
+    def test_reflection_row_and_provenance_none_and_empty_for_missing(self, conn):
+        assert reflection_row(conn, reflection_id="nope") is None
+        assert reflection_provenance(conn, reflection_id="nope") == []
 
 
 class TestUsefulCountInReadModel:

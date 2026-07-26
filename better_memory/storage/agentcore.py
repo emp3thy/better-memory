@@ -1635,6 +1635,52 @@ class AgentCoreBackend:
             new_status="retired",
         )
 
+    def reflection_get(self, *, reflection_id: str) -> dict[str, Any] | None:
+        """Row-only accessor (no provenance): fetch + parse a single
+        reflection record. None on a hard 404. Maps the internal
+        _parse_reflection_record shape to the ReflectionFull dict keys the
+        drawer needs: scope is derived from the record's namespaces, hints
+        is re-serialised to a JSON string (matching the sqlite column
+        shape so the drawer's decode_hints filter works unchanged), and
+        the four last_*_at timestamps -- which AgentCore does not track --
+        are always None."""
+        try:
+            record = self._get_record(reflection_id)
+        except _ClientError as exc:
+            if exc.response.get("Error", {}).get("Code", "") == "ResourceNotFoundException":
+                return None
+            raise
+        parsed = self._parse_reflection_record(record)
+        if parsed is None:
+            return None
+        namespaces = record.get("namespaces") or []
+        first_ns = next(iter(namespaces or [""]), "")
+        scope = "general" if first_ns.lstrip("/").startswith("general/") else "project"
+        created = record.get("createdAt")
+        created_at = created.isoformat() if isinstance(created, datetime) else (created or "")
+        return {
+            "id": parsed["id"],
+            "title": parsed["title"],
+            "project": self._project,
+            "tech": parsed["tech"],
+            "phase": parsed["phase"],
+            "polarity": parsed["_polarity"],
+            "confidence": parsed["confidence"],
+            "status": parsed["_status"],
+            "use_cases": parsed["use_cases"],
+            "hints": json.dumps(parsed["hints"]),
+            "evidence_count": parsed["evidence_count"],
+            "scope": scope,
+            "created_at": created_at,
+            "updated_at": parsed["updated_at"],
+            "useful_count": parsed["useful_count"],
+            "last_useful_at": None,
+            "times_misled": parsed["times_misled"],
+            "last_misled_at": None,
+            "times_overlooked": parsed["times_overlooked"],
+            "last_overlooked_at": None,
+        }
+
     # ----- Session lifecycle: Tasks 9, 12 -----
 
     def session_bootstrap(

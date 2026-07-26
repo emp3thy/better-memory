@@ -2723,3 +2723,42 @@ def test_new_capability_flags_all_false(backend) -> None:
 def test_supports_episodes_still_false_regression(backend) -> None:
     """Regression pin: the pre-existing episodes flag stays False."""
     assert backend.supports_episodes is False
+
+
+# ===== reflection_get: row-only accessor (no provenance) =====
+
+
+def test_reflection_get_parses_body_record(backend, mock_data_client) -> None:
+    body = json.dumps({
+        "title": "Body reflection", "use_cases": "when X",
+        "hints": ["h1", "h2"], "confidence": "0.8", "polarity": "do",
+        "status": "active", "phase": "planning",
+    })
+    mock_data_client.get_memory_record.return_value = {"memoryRecord": {
+        "memoryRecordId": "rec-1",
+        "content": {"text": body},
+        "namespaces": ["projects/testproj/reflections/"],
+        "createdAt": datetime(2026, 5, 24, tzinfo=UTC),
+        "metadata": {"useful_count": {"numberValue": 4}},
+    }}
+    got = backend.reflection_get(reflection_id="rec-1")
+    assert got["id"] == "rec-1"
+    assert got["title"] == "Body reflection"
+    assert got["status"] == "active"
+    assert got["polarity"] == "do"
+    assert got["scope"] == "project"
+    assert got["useful_count"] == 4
+    assert got["last_useful_at"] is None
+    # hints serialized as a JSON string so the drawer's decode_hints filter
+    # decodes it identically to the sqlite column shape.
+    assert json.loads(got["hints"]) == ["h1", "h2"]
+
+
+def test_reflection_get_returns_none_on_404(backend, mock_data_client, monkeypatch) -> None:
+    from better_memory.storage import agentcore as ac_module
+
+    monkeypatch.setattr(ac_module, "_ClientError", _FakeClientError)
+    mock_data_client.get_memory_record.side_effect = _FakeClientError(
+        code="ResourceNotFoundException", message="missing"
+    )
+    assert backend.reflection_get(reflection_id="gone") is None

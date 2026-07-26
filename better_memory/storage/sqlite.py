@@ -368,6 +368,14 @@ class SqliteBackend:
     def retire_reflection(self, *, reflection_id: str) -> None:
         self._reflection.retire(reflection_id=reflection_id)
 
+    def reflection_get(self, *, reflection_id: str) -> dict[str, Any] | None:
+        from dataclasses import asdict
+
+        from better_memory.ui import queries
+
+        row = queries.reflection_row(self._conn, reflection_id=reflection_id)
+        return None if row is None else asdict(row)
+
     # ----- Session lifecycle -----
 
     def session_bootstrap(

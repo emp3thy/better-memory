@@ -360,3 +360,26 @@ def test_supports_episodes_unchanged_regression(backend) -> None:
     assert backend.supports_episodes is True
 
 
+def test_reflection_get_returns_row_without_sources(backend, memory_conn):
+    from dataclasses import asdict
+
+    from better_memory.ui import queries
+
+    memory_conn.execute(
+        "INSERT INTO reflections (id, title, project, phase, polarity, "
+        "use_cases, hints, confidence, status, evidence_count, scope, "
+        "created_at, updated_at) VALUES "
+        "('r1','t','testproj','general','do','uc','[]',0.5,'confirmed',0,"
+        "'project','2026-04-01T00:00:00+00:00','2026-04-01T00:00:00+00:00')"
+    )
+    memory_conn.commit()
+    got = backend.reflection_get(reflection_id="r1")
+    detail = queries.reflection_detail(memory_conn, reflection_id="r1")
+    assert got == asdict(detail.reflection)
+    assert "sources" not in got
+
+
+def test_reflection_get_missing_returns_none(backend):
+    assert backend.reflection_get(reflection_id="nope") is None
+
+

@@ -382,21 +382,11 @@ class ReflectionDetail:
         return self.reflection.last_overlooked_at
 
 
-def reflection_detail(
+def reflection_row(
     conn: sqlite3.Connection, *, reflection_id: str
-) -> ReflectionDetail | None:
-    """Return one reflection with its source observations.
-
-    Sources are joined through ``reflection_sources`` to ``observations``
-    and from there to ``episodes`` so the drawer can show the owning
-    episode's goal + outcome + close_reason for each piece of evidence.
-
-    Returns ``None`` if no reflection with this id exists.
-
-    Source ordering: ``observations.created_at DESC, observations.rowid DESC``.
-    Same-status policy as Phase 8's episode_detail: ALL source
-    observations are returned regardless of ``observations.status``.
-    """
+) -> ReflectionFull | None:
+    """The single-row half of reflection_detail: the reflections row mapped
+    to ReflectionFull, or None if absent. No provenance."""
     r_row = conn.execute(
         "SELECT id, title, project, tech, phase, polarity, "
         "confidence, status, use_cases, hints, evidence_count, scope, "
@@ -408,7 +398,44 @@ def reflection_detail(
     ).fetchone()
     if r_row is None:
         return None
+    return ReflectionFull(
+        id=r_row["id"],
+        title=r_row["title"],
+        project=r_row["project"],
+        tech=r_row["tech"],
+        phase=r_row["phase"],
+        polarity=r_row["polarity"],
+        confidence=r_row["confidence"],
+        status=r_row["status"],
+        use_cases=r_row["use_cases"],
+        hints=r_row["hints"],
+        evidence_count=r_row["evidence_count"],
+        scope=r_row["scope"],
+        created_at=r_row["created_at"],
+        updated_at=r_row["updated_at"],
+        useful_count=r_row["useful_count"] or 0,
+        last_useful_at=r_row["last_useful_at"],
+        times_misled=r_row["times_misled"] or 0,
+        last_misled_at=r_row["last_misled_at"],
+        times_overlooked=r_row["times_overlooked"] or 0,
+        last_overlooked_at=r_row["last_overlooked_at"],
+    )
 
+
+def reflection_provenance(
+    conn: sqlite3.Connection, *, reflection_id: str
+) -> list[ReflectionSourceObservation]:
+    """The source-observation half of reflection_detail. Empty list when the
+    reflection has no sources (or does not exist).
+
+    Sources are joined through ``reflection_sources`` to ``observations``
+    and from there to ``episodes`` so the drawer can show the owning
+    episode's goal + outcome + close_reason for each piece of evidence.
+
+    Source ordering: ``observations.created_at DESC, observations.rowid DESC``.
+    Same-status policy as Phase 8's episode_detail: ALL source
+    observations are returned regardless of ``observations.status``.
+    """
     src_rows = conn.execute(
         """
         SELECT
@@ -430,7 +457,7 @@ def reflection_detail(
         """,
         (reflection_id,),
     ).fetchall()
-    sources = [
+    return [
         ReflectionSourceObservation(
             observation_id=r["observation_id"],
             content=r["content"],
@@ -445,30 +472,23 @@ def reflection_detail(
         )
         for r in src_rows
     ]
+
+
+def reflection_detail(
+    conn: sqlite3.Connection, *, reflection_id: str
+) -> ReflectionDetail | None:
+    """Return one reflection with its source observations, or None.
+
+    Recomposed from reflection_row + reflection_provenance — output is
+    byte-identical to the pre-split version (pinned by
+    test_reflection_detail_composes_from_row_and_provenance).
+    """
+    reflection = reflection_row(conn, reflection_id=reflection_id)
+    if reflection is None:
+        return None
     return ReflectionDetail(
-        reflection=ReflectionFull(
-            id=r_row["id"],
-            title=r_row["title"],
-            project=r_row["project"],
-            tech=r_row["tech"],
-            phase=r_row["phase"],
-            polarity=r_row["polarity"],
-            confidence=r_row["confidence"],
-            status=r_row["status"],
-            use_cases=r_row["use_cases"],
-            hints=r_row["hints"],
-            evidence_count=r_row["evidence_count"],
-            scope=r_row["scope"],
-            created_at=r_row["created_at"],
-            updated_at=r_row["updated_at"],
-            useful_count=r_row["useful_count"] or 0,
-            last_useful_at=r_row["last_useful_at"],
-            times_misled=r_row["times_misled"] or 0,
-            last_misled_at=r_row["last_misled_at"],
-            times_overlooked=r_row["times_overlooked"] or 0,
-            last_overlooked_at=r_row["last_overlooked_at"],
-        ),
-        sources=sources,
+        reflection=reflection,
+        sources=reflection_provenance(conn, reflection_id=reflection_id),
     )
 
 

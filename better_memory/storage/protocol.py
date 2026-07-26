@@ -167,6 +167,13 @@ class StorageBackend(Protocol):
         ``better_memory/mcp/server.py``."""
         ...
 
+    def reflection_get(self, *, reflection_id: str) -> dict[str, Any] | None:
+        """Single reflection row as a dict (ReflectionFull field shape), NO
+        provenance; None when absent. sqlite reads its row; agentcore fetches +
+        parses the record. The drawer route composes provenance separately
+        (queries.reflection_provenance on the local conn, flag-gated in PR 3)."""
+        ...
+
     async def list_observations(
         self,
         *,
