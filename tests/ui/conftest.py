@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -48,6 +49,53 @@ def client(
     monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
     app = create_app(start_watchdog=False, db_path=tmp_db)
     app.config["TESTING"] = True
+    with patch("better_memory.ui.app.threading.Timer"):
+        with app.test_client() as c:
+            yield c
+
+
+class _FakeAgentCoreBackend:
+    """Flags-all-False stand-in for AgentCoreBackend used by gating tests.
+
+    Only the content methods the *still-reachable* agentcore routes call
+    are stubbed; gated-off routes 404 before touching the backend.
+    """
+
+    supports_episodes = False
+    supports_observations = False
+    supports_provenance = False
+    supports_retention_runs = False
+    supports_reflection_review = False
+    supports_reflection_text_edit = False
+
+    def reflection_list(self, **_kwargs: Any) -> list[Any]:
+        return []
+
+    def reflection_get(self, *, reflection_id: str) -> dict[str, Any] | None:
+        return None
+
+    def semantic_list(self, **_kwargs: Any) -> list[Any]:
+        return []
+
+    def distinct_projects(self) -> list[str]:
+        return []
+
+
+@pytest.fixture
+def agentcore_client(
+    tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[FlaskClient]:
+    """Flask client whose ``app.extensions['backend']`` is the all-False
+    fake, so every ``caps.*`` gate reads False and every route guard fires.
+
+    The context processor reads ``caps`` off ``app.extensions['backend']``
+    at render time (PR 2 wiring), so swapping the extension flips the gates
+    without a live boto/factory build.
+    """
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+    app = create_app(start_watchdog=False, db_path=tmp_db)
+    app.config["TESTING"] = True
+    app.extensions["backend"] = _FakeAgentCoreBackend()
     with patch("better_memory.ui.app.threading.Timer"):
         with app.test_client() as c:
             yield c

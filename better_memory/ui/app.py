@@ -238,10 +238,14 @@ def create_app(
 
     @app.get("/episodes")
     def episodes() -> str:
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         return render_template("episodes.html", active_tab="episodes")
 
     @app.get("/episodes/panel")
     def episodes_panel() -> str:
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         conn = app.extensions["db_connection"]
         rows = queries.episode_list_for_ui(conn, project=project_name())
         # Group by ISO date prefix (YYYY-MM-DD) of started_at, preserving
@@ -261,6 +265,8 @@ def create_app(
 
     @app.get("/episodes/banner")
     def episodes_banner() -> str:
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         conn = app.extensions["db_connection"]
         count = queries.unclosed_episode_count(
             conn, project=project_name()
@@ -271,6 +277,8 @@ def create_app(
 
     @app.get("/episodes/<id>/drawer")
     def episodes_drawer(id: str) -> str:
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         conn = app.extensions["db_connection"]
         detail = queries.episode_detail(conn, episode_id=id)
         if detail is None:
@@ -288,6 +296,8 @@ def create_app(
 
     @app.post("/episodes/<id>/close")
     def episode_close(id: str) -> tuple[str, int, dict[str, str]]:
+        if not app.extensions["backend"].supports_episodes:
+            abort(404)
         outcome = request.args.get("outcome", "")
         if outcome not in _DEFAULT_CLOSE_REASONS:
             return (
@@ -600,6 +610,8 @@ def create_app(
 
     @app.get("/observations")
     def observations() -> str:
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         conn = app.extensions["db_connection"]
         return render_template(
             "observations.html",
@@ -609,6 +621,8 @@ def create_app(
 
     @app.get("/observations/panel")
     def observations_panel() -> str:
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         conn = app.extensions["db_connection"]
         args = request.args
 
@@ -635,6 +649,8 @@ def create_app(
 
     @app.get("/observations/<id>/drawer")
     def observation_drawer(id: str) -> str:
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         conn = app.extensions["db_connection"]
         detail = queries.observation_detail(conn, observation_id=id)
         if detail is None:
@@ -647,6 +663,8 @@ def create_app(
     def observation_promote_to_semantic(
         id: str,
     ) -> tuple[str, int, dict[str, str]]:
+        if not app.extensions["backend"].supports_observations:
+            abort(404)
         from better_memory.services.semantic import SemanticMemoryService
         from markupsafe import escape
         conn = app.extensions["db_connection"]
