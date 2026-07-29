@@ -39,6 +39,39 @@ from better_memory.services.episode import EpisodeService
 # ``content_snippet``, ``cwd`` and ``session_id``.
 _REQUIRED_FIELDS: tuple[str, ...] = ("event_type", "timestamp")
 
+# sqlite3.OperationalError covers both transient contention (busy/locked/
+# disk-full — worth retrying) and permanent misconfiguration (no such
+# table/column, malformed SQL — retrying loops forever). Only the transient
+# codes leave a file in place; the rest quarantine like any other bad row.
+_TRANSIENT_SQLITE_ERROR_NAMES: frozenset[str] = frozenset({
+    "SQLITE_BUSY",
+    "SQLITE_BUSY_RECOVERY",
+    "SQLITE_BUSY_SNAPSHOT",
+    "SQLITE_BUSY_TIMEOUT",
+    "SQLITE_LOCKED",
+    "SQLITE_LOCKED_SHAREDCACHE",
+    "SQLITE_FULL",
+})
+
+
+def _is_transient_sqlite_error(exc: sqlite3.OperationalError) -> bool:
+    """True iff the OperationalError is one we should retry (busy/locked/full).
+
+    Python 3.11+ exposes the extended result code and its symbolic name on
+    the exception (``sqlite_errorname``). A missing attribute (e.g. an
+    exception constructed by test code without going through the C
+    extension) falls back to a text-substring check on the message.
+    """
+    name = getattr(exc, "sqlite_errorname", None)
+    if isinstance(name, str):
+        return name in _TRANSIENT_SQLITE_ERROR_NAMES
+    msg = str(exc).lower()
+    return (
+        "database is locked" in msg
+        or "database is busy" in msg
+        or "database or disk is full" in msg
+    )
+
 
 @dataclass(frozen=True)
 class DrainReport:
@@ -120,14 +153,22 @@ class SpoolService:
             # (busy/locked/full) leave the file in place so the next drain
             # retries it. Losing an event to a five-second lock contention
             # would violate the module rule that "a row must never be lost".
+            # A non-transient OperationalError (missing table/column,
+            # malformed SQL) is a permanent configuration bug — quarantine
+            # it so an operator sees the file rather than looping forever.
             inserted_payloads: list[dict[str, object]] = []
             _diag.step(fn, "pass1_begin")
             for path in files:
                 try:
                     payload = self._insert_one(path)
-                except sqlite3.OperationalError:
-                    # Transient: leave the file for the next drain to retry.
-                    _diag.step(fn, "pass1_transient_sqlite_error", path=str(path))
+                except sqlite3.OperationalError as exc:
+                    if _is_transient_sqlite_error(exc):
+                        _diag.step(
+                            fn, "pass1_transient_sqlite_error", path=str(path)
+                        )
+                    else:
+                        self._quarantine(path, quarantine)
+                        quarantined += 1
                 except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                     self._quarantine(path, quarantine)
                     quarantined += 1
