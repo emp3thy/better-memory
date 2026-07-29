@@ -570,6 +570,7 @@ def create_app(
         backend = app.extensions["backend"]
         rows = backend.semantic_list(
             project=project, scope_filter=scope_filter, search=search,
+            track_exposure=False,
         )
         return render_template(
             "fragments/panel_semantic.html", rows=rows, project=project,
