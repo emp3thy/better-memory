@@ -107,3 +107,82 @@ def test_insert_error_on_one_row_does_not_kill_the_whole_batch(conn):
     assert conn.execute(
         "SELECT COUNT(*) FROM reflection_embeddings"
     ).fetchone()[0] == 1
+
+
+def test_failed_insert_does_not_destroy_race_landed_pre_existing_embedding(
+    conn,
+):
+    """The precise race #101 defends against: SELECT-snapshot picks r1
+    (no embedding), a concurrent memory.retrieve self-heal writes r1's
+    embedding, then backfill's DELETE-then-INSERT arrives. If the INSERT
+    fails, the DELETE must be rolled back — otherwise the batch-level
+    commit() would durably erase the race-landed embedding, leaving r1
+    with no vector at all. The per-row SAVEPOINT is what keeps that from
+    happening.
+    """
+    import sqlite3
+
+    import sqlite_vec
+
+    _seed_reflection(conn, "r1")
+    _seed_reflection(conn, "r2")
+
+    class _RacyConn:
+        """Simulate the self-heal race: after backfill's SELECT-missing
+        picks up r1, insert r1's embedding via a side channel (the
+        concurrent writer), then fail backfill's own INSERT for r1."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._race_landed = False
+
+        def execute(self, sql, *args, **kwargs):
+            result = self._inner.execute(sql, *args, **kwargs)
+            # After the SELECT-missing snapshot, land the race row.
+            if (
+                not self._race_landed
+                and sql.lstrip().upper().startswith("SELECT R.ID")
+            ):
+                self._race_landed = True
+                self._inner.execute(
+                    "INSERT INTO reflection_embeddings "
+                    "(reflection_id, embedding) VALUES (?, ?)",
+                    ("r1", sqlite_vec.serialize_float32([0.5] * 768)),
+                )
+                self._inner.commit()
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    # Also fail r1's INSERT after DELETE — simulates the UNIQUE collision
+    # the self-heal race can raise on real sqlite-vec builds. Compose the
+    # two proxies.
+    class _AlsoFailR1Insert:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("INSERT INTO reflection_embeddings") and (
+                args and args[0] and args[0][0] == "r1"
+            ):
+                raise sqlite3.IntegrityError("UNIQUE constraint failed")
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    proxy = _AlsoFailR1Insert(_RacyConn(conn))
+    stats = backfill(proxy, FakeEmbedder())
+
+    assert stats["reflections"] == 1  # r2
+    assert stats["skipped"] == 1  # r1
+    # The pre-existing race-landed embedding for r1 must have survived
+    # the failed DELETE-then-INSERT via the per-row SAVEPOINT rollback.
+    r1_rows = conn.execute(
+        "SELECT COUNT(*) FROM reflection_embeddings WHERE reflection_id = 'r1'"
+    ).fetchone()[0]
+    assert r1_rows == 1, (
+        "SAVEPOINT rollback failed: race-landed r1 embedding was durably "
+        "erased by the batch commit"
+    )
