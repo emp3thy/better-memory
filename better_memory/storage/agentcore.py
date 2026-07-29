@@ -1977,32 +1977,65 @@ class AgentCoreBackend:
 
             project = project_name(Path(cwd))
         actor_id = resolve_actor_id(project or self._project)
-        semantic_namespace = resolve_namespace(actor_id, "semantic")
+        # Fan out over BOTH project and general semantic namespaces (matches
+        # semantic_list at :1474-1484 and the sqlite bootstrap's project OR
+        # scope='general' union at session_bootstrap.py:232-239). The prior
+        # single-namespace maxResults=10 both dropped general-scope semantics
+        # and clamped the count itself to 10; pages via nextToken so the
+        # returned count reflects the true corpus size.
+        project_semantic_ns = resolve_namespace(actor_id, "semantic")
+        general_semantic_ns = resolve_namespace("general", "semantic")
+        semantic_namespaces = [project_semantic_ns]
+        if general_semantic_ns != project_semantic_ns:
+            semantic_namespaces.append(general_semantic_ns)
 
-        def _fetch_semantic() -> dict[str, Any]:
-            return self._data.list_memory_records(
-                memoryId=self._cfg.semantic.memory_id,
-                namespace=semantic_namespace,
-                maxResults=10,
-            )
+        def _fetch_semantic_ns(namespace: str) -> list[dict[str, Any]]:
+            summaries: list[dict[str, Any]] = []
+            token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {
+                    "memoryId": self._cfg.semantic.memory_id,
+                    "namespace": namespace,
+                    "maxResults": 100,
+                }
+                if token:
+                    kwargs["nextToken"] = token
+                response = self._data.list_memory_records(**kwargs)
+                summaries.extend(response.get("memoryRecordSummaries", []))
+                token = response.get("nextToken")
+                if not token:
+                    break
+            return summaries
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=1 + len(semantic_namespaces)
+        ) as pool:
             reflections_future = pool.submit(
                 self._fetch_reflection_buckets,
                 actor_id=actor_id,
                 limit_per_bucket=5,
             )
-            semantic_future = pool.submit(_fetch_semantic)
+            semantic_futures = [
+                pool.submit(_fetch_semantic_ns, ns) for ns in semantic_namespaces
+            ]
 
             reflection_buckets = reflections_future.result()
-            semantic_response = semantic_future.result()
+            semantic_summaries_per_ns = [f.result() for f in semantic_futures]
 
         reflections_counts = {
             polarity: len(reflection_buckets[polarity])
             for polarity in _POLARITIES
         }
-        semantic_items = semantic_response.get("memoryRecordSummaries", [])
-        semantic_count = len(semantic_items)
+        # Dedup by memoryRecordId in case a record appears in both namespaces
+        # (project wins the natural iteration order — matches semantic_list's
+        # "seen" pattern at :1486-1487).
+        seen_semantic_ids: set[str] = set()
+        for summaries in semantic_summaries_per_ns:
+            for summary in summaries:
+                rec_id = summary.get("memoryRecordId")
+                if isinstance(rec_id, str):
+                    seen_semantic_ids.add(rec_id)
+        semantic_count = len(seen_semantic_ids)
 
         # additional_context is the JSON-serialized payload Claude sees on
         # SessionStart. Format matches what the MCP handler emits today: a
