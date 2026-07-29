@@ -115,11 +115,22 @@ class SpoolService:
             inserted: list[Path] = []
 
             # ---- Pass 1: parse + insert (no file unlinks yet) -------------
+            # Discriminate error classes: schema/parse errors (bad payload,
+            # will never succeed on retry) quarantine; transient sqlite errors
+            # (busy/locked/full) leave the file in place so the next drain
+            # retries it. Losing an event to a five-second lock contention
+            # would violate the module rule that "a row must never be lost".
             inserted_payloads: list[dict[str, object]] = []
             _diag.step(fn, "pass1_begin")
             for path in files:
                 try:
                     payload = self._insert_one(path)
+                except sqlite3.OperationalError:
+                    # Transient: leave the file for the next drain to retry.
+                    _diag.step(fn, "pass1_transient_sqlite_error", path=str(path))
+                except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+                    self._quarantine(path, quarantine)
+                    quarantined += 1
                 except Exception:
                     self._quarantine(path, quarantine)
                     quarantined += 1

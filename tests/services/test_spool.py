@@ -346,6 +346,48 @@ def test_drain_commit_failure_leaves_files_in_spool_and_no_rows(
     assert count == 0
 
 
+def test_drain_transient_sqlite_error_leaves_file_in_spool(
+    conn: sqlite3.Connection, tmp_spool: Path
+) -> None:
+    """A transient sqlite3.OperationalError (busy/locked/disk-full) during
+    INSERT must NOT quarantine the source file — the next drain has to be
+    able to retry it. Only bad payloads (malformed JSON, missing required
+    fields) belong in .quarantine.
+    """
+
+    class _LockedConn:
+        """Delegates everything but raises OperationalError from execute."""
+
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self._inner = inner
+
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        def commit(self) -> None:
+            self._inner.commit()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    _write_event(
+        tmp_spool,
+        name="2026-04-18T12-00-00Z_Edit_transient.json",
+        timestamp="2026-04-18T12:00:00Z",
+    )
+
+    proxy = _LockedConn(conn)
+    service = SpoolService(proxy, spool_dir=tmp_spool)  # type: ignore[arg-type]
+    report = service.drain()
+
+    # Not quarantined, not drained — file is still on disk for the retry.
+    assert report == DrainReport(drained=0, quarantined=0)
+    remaining = list(tmp_spool.glob("*.json"))
+    assert len(remaining) == 1
+    quarantined = list((tmp_spool / ".quarantine").glob("*.json"))
+    assert quarantined == []
+
+
 def test_drain_defaults_spool_dir_from_config(
     conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
