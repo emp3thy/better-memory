@@ -1042,13 +1042,20 @@ class ReflectionSynthesisService:
                 continue
 
             tgt = self._conn.execute(
-                "SELECT useful_count, last_useful_at, "
+                "SELECT status, useful_count, last_useful_at, "
                 "       times_misled, last_misled_at, "
                 "       times_overlooked, last_overlooked_at "
                 "FROM reflections WHERE id = ?",
                 (action.target_id,),
             ).fetchone()
             if tgt is None:
+                continue
+            # Refuse to merge into a target the user or a previous merge
+            # already killed. Otherwise an active, evidence-backed source
+            # would be superseded pointing at a dead row, and its sources
+            # copied into the retired target — annihilating the source's
+            # contribution. Mirrors _apply_augment's same-shape refusal.
+            if tgt["status"] in ("retired", "superseded"):
                 continue
 
             # Move source's sources into target.
