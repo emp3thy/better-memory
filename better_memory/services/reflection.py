@@ -1032,7 +1032,8 @@ class ReflectionSynthesisService:
             src = self._conn.execute(
                 "SELECT status, useful_count, last_useful_at, "
                 "       times_misled, last_misled_at, "
-                "       times_overlooked, last_overlooked_at "
+                "       times_overlooked, last_overlooked_at, "
+                "       times_ignored, last_ignored_at "
                 "FROM reflections WHERE id = ?",
                 (action.source_id,),
             ).fetchone()
@@ -1044,7 +1045,8 @@ class ReflectionSynthesisService:
             tgt = self._conn.execute(
                 "SELECT status, useful_count, last_useful_at, "
                 "       times_misled, last_misled_at, "
-                "       times_overlooked, last_overlooked_at "
+                "       times_overlooked, last_overlooked_at, "
+                "       times_ignored, last_ignored_at "
                 "FROM reflections WHERE id = ?",
                 (action.target_id,),
             ).fetchone()
@@ -1087,6 +1089,14 @@ class ReflectionSynthesisService:
                 (tgt["times_overlooked"] or 0)
                 + (src["times_overlooked"] or 0)
             )
+            # times_ignored is the score's only negative term — dropping
+            # it here lets a heavily-ignored source hide behind a merge
+            # and inflate the target's Wilson prior. Sum it like every
+            # other counter.
+            new_ignored = (
+                (tgt["times_ignored"] or 0)
+                + (src["times_ignored"] or 0)
+            )
             new_last_useful = _later_ts(
                 tgt["last_useful_at"], src["last_useful_at"]
             )
@@ -1095,6 +1105,9 @@ class ReflectionSynthesisService:
             )
             new_last_overlooked = _later_ts(
                 tgt["last_overlooked_at"], src["last_overlooked_at"]
+            )
+            new_last_ignored = _later_ts(
+                tgt["last_ignored_at"], src["last_ignored_at"]
             )
 
             # Update source + target.
@@ -1110,6 +1123,7 @@ class ReflectionSynthesisService:
                 "    useful_count = ?, last_useful_at = ?, "
                 "    times_misled = ?, last_misled_at = ?, "
                 "    times_overlooked = ?, last_overlooked_at = ?, "
+                "    times_ignored = ?, last_ignored_at = ?, "
                 "    updated_at = ? "
                 "WHERE id = ?",
                 (
@@ -1117,6 +1131,7 @@ class ReflectionSynthesisService:
                     new_useful, new_last_useful,
                     new_misled, new_last_misled,
                     new_overlooked, new_last_overlooked,
+                    new_ignored, new_last_ignored,
                     now,
                     action.target_id,
                 ),
