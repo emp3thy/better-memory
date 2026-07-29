@@ -1895,9 +1895,11 @@ def test_retrieve_non_dict_json_content_falls_back_to_valid_shape(
     assert refl["phase"] == "general"
 
 
-def test_session_bootstrap_fires_3_parallel_list_calls(backend, mock_data_client) -> None:
+def test_session_bootstrap_fires_4_parallel_list_calls(backend, mock_data_client) -> None:
     """Two reflection namespace calls (project + general/promoted merge,
-    shared with retrieve()) against episodic + one against semantic. No
+    shared with retrieve()) against episodic + two against semantic
+    (project + general — matches semantic_list at :1474-1484 and the
+    sqlite bootstrap's project OR scope='general' union). No
     metadataFilters anywhere — polarity is not a legal filter key on real
     AWS and status filtering is client-side.
 
@@ -1905,8 +1907,8 @@ def test_session_bootstrap_fires_3_parallel_list_calls(backend, mock_data_client
     bootstrap is recency / metadata-only — no semantic search query."""
     mock_data_client.list_memory_records.return_value = {"memoryRecordSummaries": []}
     backend.session_bootstrap(session_id="test-session", project="testproj")
-    # 3 calls total — 2 reflection (episodic) + 1 semantic
-    assert mock_data_client.list_memory_records.call_count == 3
+    # 4 calls total — 2 reflection (episodic) + 2 semantic (project + general)
+    assert mock_data_client.list_memory_records.call_count == 4
 
     targets = []
     for call in mock_data_client.list_memory_records.call_args_list:
@@ -1916,6 +1918,97 @@ def test_session_bootstrap_fires_3_parallel_list_calls(backend, mock_data_client
     assert ("mem-epi-def4567890", "projects/testproj/reflections/") in targets
     assert ("mem-epi-def4567890", "general/reflections/") in targets
     assert ("mem-sem-abc1234567", "projects/testproj/semantic/") in targets
+    assert ("mem-sem-abc1234567", "general/semantic/") in targets
+
+
+def test_session_bootstrap_semantic_count_fans_out_over_project_and_general(
+    backend, mock_data_client
+) -> None:
+    """The bootstrap semantic count must include BOTH the project namespace
+    AND the general namespace (sqlite parity: project OR scope='general').
+    The pre-fix single-namespace query missed all general-scope semantics —
+    a user with 14 general prefs and 2 project rows saw "Semantic memories: 2".
+    """
+    def stub(**kwargs):
+        ns = kwargs.get("namespace")
+        if ns == "projects/testproj/semantic/":
+            return {"memoryRecordSummaries": [
+                {"memoryRecordId": "s-proj-1"},
+                {"memoryRecordId": "s-proj-2"},
+            ]}
+        if ns == "general/semantic/":
+            return {"memoryRecordSummaries": [
+                {"memoryRecordId": f"s-gen-{i}"} for i in range(14)
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.session_bootstrap(session_id="s", project="testproj")
+    # 2 project + 14 general = 16, not the old maxResults=10 cap.
+    assert result["semantic_count"] == 16
+    assert "Semantic memories: 16" in result["additional_context"]
+
+
+def test_session_bootstrap_semantic_count_pages_past_100_via_nexttoken(
+    backend, mock_data_client
+) -> None:
+    """The prior code passed maxResults=10 with no paging — a corpus of 150
+    would report as 10. Pagination via nextToken must reflect the true
+    count (or at least all rows in the paged sequence).
+    """
+    calls = {"n": 0}
+
+    def stub(**kwargs):
+        ns = kwargs.get("namespace")
+        if ns != "projects/testproj/semantic/":
+            return {"memoryRecordSummaries": []}
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "memoryRecordSummaries": [
+                    {"memoryRecordId": f"s-{i}"} for i in range(100)
+                ],
+                "nextToken": "page-2",
+            }
+        # second page, no token
+        assert kwargs.get("nextToken") == "page-2"
+        return {
+            "memoryRecordSummaries": [
+                {"memoryRecordId": f"s-{i}"} for i in range(100, 150)
+            ]
+        }
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.session_bootstrap(session_id="s", project="testproj")
+    assert result["semantic_count"] == 150
+
+
+def test_session_bootstrap_semantic_count_dedups_across_namespaces(
+    backend, mock_data_client
+) -> None:
+    """A memoryRecordId that appears in both project and general namespaces
+    counts once, not twice — matches semantic_list's dedup at :1486-1487.
+    """
+    shared_id = "s-shared"
+
+    def stub(**kwargs):
+        ns = kwargs.get("namespace")
+        if ns == "projects/testproj/semantic/":
+            return {"memoryRecordSummaries": [
+                {"memoryRecordId": shared_id},
+                {"memoryRecordId": "s-proj-only"},
+            ]}
+        if ns == "general/semantic/":
+            return {"memoryRecordSummaries": [
+                {"memoryRecordId": shared_id},
+                {"memoryRecordId": "s-gen-only"},
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.session_bootstrap(session_id="s", project="testproj")
+    # 3 unique ids: shared, proj-only, gen-only (not 4).
+    assert result["semantic_count"] == 3
 
 
 def test_session_bootstrap_counts_promoted_general_reflections(
