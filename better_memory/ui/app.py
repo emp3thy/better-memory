@@ -468,6 +468,7 @@ def create_app(
         )
         rows = svc.list_for_project(
             project=project, scope_filter=scope_filter, search=search,
+            track_exposure=False,
         )
         return render_template(
             "fragments/panel_semantic.html", rows=rows, project=project,
