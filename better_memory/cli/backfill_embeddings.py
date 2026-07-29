@@ -70,11 +70,37 @@ def backfill(conn, embedder) -> dict[str, int]:
             stats["skipped"] += len(chunk)
             continue
         for (kind, table, col, row_id, _), vec in zip(chunk, vectors):
-            conn.execute(
-                f"INSERT INTO {table} ({col}, embedding) VALUES (?, ?)",
-                (row_id, sqlite_vec.serialize_float32(vec)))
-            stats[kind] += 1
-    conn.commit()
+            # DELETE-then-INSERT under a per-row SAVEPOINT: vec0 tables
+            # historically mishandle UPSERT, and a concurrent writer
+            # (memory.retrieve's self-heal) may have already inserted the same
+            # primary key while we were embedding this snapshot. Without the
+            # DELETE a UNIQUE-constraint collision on one row would previously
+            # abort the whole batch and roll back every row we'd already
+            # written this run.
+            #
+            # The savepoint is load-bearing: without it, a DELETE that
+            # succeeds followed by an INSERT that raises would leave the
+            # DELETE pending in the open transaction, and the batch-level
+            # commit() below would durably erase the pre-existing embedding
+            # (exactly the concurrent-writer row this code claims to defend).
+            # ROLLBACK TO SAVEPOINT undoes the DELETE alongside the failed
+            # INSERT so the pre-existing row survives untouched.
+            sp = f"bf_{bi}_{row_id.replace('-', '')[:16]}"
+            conn.execute(f"SAVEPOINT {sp}")
+            try:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {col} = ?", (row_id,))
+                conn.execute(
+                    f"INSERT INTO {table} ({col}, embedding) VALUES (?, ?)",
+                    (row_id, sqlite_vec.serialize_float32(vec)))
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                conn.execute(f"RELEASE SAVEPOINT {sp}")
+                stats["skipped"] += 1
+            else:
+                conn.execute(f"RELEASE SAVEPOINT {sp}")
+                stats[kind] += 1
+        conn.commit()
     return stats
 
 
