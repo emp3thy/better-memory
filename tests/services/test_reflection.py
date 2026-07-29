@@ -1909,6 +1909,65 @@ class TestApplyDecision:
         ).fetchone()[0]
         assert n == 1
 
+    def test_counts_are_applied_not_requested(self, conn, fixed_clock):
+        """counts must reflect what actually landed in the DB, not what
+        the LLM asked for. When entries are dropped for hallucinated /
+        already-consumed sources or unknown reflection ids, the counts
+        for that bucket drop with them — otherwise the audit record and
+        the driving LLM see a success report for lessons that were
+        never persisted."""
+        conn.execute(
+            "INSERT INTO episodes (id, project, started_at, ended_at, outcome, "
+            "close_reason, goal) VALUES "
+            "('ep1','p1','2026-04-01T00:00:00+00:00','2026-04-01T01:00:00+00:00',"
+            "'success','goal_complete','goal')"
+        )
+        _insert_obs(
+            conn, obs_id="o1", project="p1", episode_id="ep1",
+            content="real obs", status="active",
+        )
+        conn.commit()
+        from better_memory.services.reflection import (
+            AugmentAction, MergeAction, NewAction,
+        )
+        response = SynthesisResponse(
+            new=[
+                # Real → creates 1 reflection.
+                NewAction(
+                    title="real", phase="implementation", polarity="do",
+                    use_cases="uc", hints=[], tech=None, confidence=0.5,
+                    source_observation_ids=["o1"],
+                ),
+                # Sources all hallucinated → dropped by _filter_existing_observations.
+                NewAction(
+                    title="ghost", phase="implementation", polarity="do",
+                    use_cases="uc", hints=[], tech=None, confidence=0.5,
+                    source_observation_ids=["does-not-exist"],
+                ),
+            ],
+            # Unknown reflection_id → dropped by _apply_augment.
+            augment=[AugmentAction(
+                reflection_id="ghost-ref", add_hints=["h"],
+                rewrite_use_cases=None, confidence_delta=0.1,
+                add_source_observation_ids=[],
+            )],
+            # Unknown ids on both sides → dropped by _apply_merge.
+            merge=[MergeAction(
+                source_id="s-ghost", target_id="t-ghost",
+                justification="stub",
+            )],
+            # Non-existent obs → dropped by _filter_existing_observations.
+            ignore=["does-not-exist"],
+        )
+        svc = ReflectionSynthesisService(conn, clock=fixed_clock)
+        step = svc.apply_decision(
+            episode_id="ep1", response=response, project="p1",
+        )
+        assert step.counts["created"] == 1
+        assert step.counts["augmented"] == 0
+        assert step.counts["merged"] == 0
+        assert step.counts["ignored"] == 0
+
     def test_auto_ignores_leftover_active_observations(self, conn, fixed_clock):
         """Active observations the LLM didn't address must flip to consumed_*.
 
