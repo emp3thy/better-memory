@@ -105,10 +105,9 @@ def _vec_qualifiers(
     id_col: str,
     query_vector: list[float] | None,
     vec_floor: float,
-    candidate_ids: list[str],
+    candidate_ids: list[str] | None = None,
 ) -> dict[str, int]:
-    """id -> vec rank for rows within the cosine floor, restricted to
-    ``candidate_ids``.
+    """id -> vec rank for rows within the cosine floor.
 
     Vectors are unit-norm, so cosine >= c  <=>  L2 distance <= sqrt(2*(1-c)).
 
@@ -120,30 +119,37 @@ def _vec_qualifiers(
     plain (unsquared) distance only; the squared-distance branch that a
     defensive dual-check would need is dead code and has been omitted.
 
-    sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` -- no
-    extra predicates -- so we fetch top-k and filter in Python, matching
-    ``ReflectionService._vec_ranks`` (reflection.py). ``k`` scales with the
-    candidate set (min 50) so the window is dense over what the caller
-    actually ranks, instead of being drowned by neighbours from other
-    projects or retired records (whose vectors persist -- retire only
-    UPDATEs status).
+    ``candidate_ids`` scopes the result to the caller's candidate set,
+    matching ``ReflectionService._vec_ranks`` (reflection.py) -- sqlite-vec
+    kNN accepts only ``embedding MATCH ? AND k = ?`` (no extra predicates),
+    so we fetch top-k and filter in Python. ``k`` scales with
+    ``max(len(candidate_ids), 50)`` so the window is dense over what the
+    caller actually ranks, instead of being drowned by neighbours from
+    other projects or retired records (whose vectors persist -- retire
+    only UPDATEs status). ``None`` preserves the global-scope behaviour
+    for callers (e.g. ``SqliteBackend.relevance_ranks``) that intentionally
+    want the unfiltered rank map; ``[]`` short-circuits to ``{}``.
     """
-    if conn is None or query_vector is None or not candidate_ids:
+    if conn is None or query_vector is None:
+        return {}
+    if candidate_ids is not None and not candidate_ids:
         return {}
     max_dist = math.sqrt(2.0 * (1.0 - vec_floor))
+    k = max(len(candidate_ids), 50) if candidate_ids is not None else 50
     try:
         rows = conn.execute(
             f"SELECT {id_col}, distance FROM {table} "
             f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (sqlite_vec.serialize_float32(query_vector),
-             max(len(candidate_ids), 50)),
+            (sqlite_vec.serialize_float32(query_vector), k),
         ).fetchall()
     except sqlite3.OperationalError:
         return {}
-    wanted = set(candidate_ids)
+    wanted: set[str] | None = set(candidate_ids) if candidate_ids is not None else None
     out: dict[str, int] = {}
     for row in rows:
-        if row[0] in wanted and float(row[1]) <= max_dist:
+        if wanted is not None and row[0] not in wanted:
+            continue
+        if float(row[1]) <= max_dist:
             out[row[0]] = len(out)
     return out
 
