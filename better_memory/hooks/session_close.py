@@ -224,9 +224,14 @@ def main() -> None:
         hash_hex = hashlib.sha256(serialised + salt).hexdigest()[:12]
 
         file_name = f"{ts_component}_session_end_{hash_hex}.json"
-        (spool_dir / file_name).write_text(
-            json.dumps(data), encoding="utf-8"
-        )
+        # Publish atomically: write to a sibling ``*.json.tmp`` then
+        # ``os.replace`` onto the final name. ``SpoolService.drain`` globs
+        # ``*.json`` (spool.py:111), so an in-flight tmp file is never
+        # picked up mid-write.
+        final_path = spool_dir / file_name
+        tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp_path, final_path)
     except Exception as _exc:
         # Hooks must never fail. Best-effort: record to hook_errors
         # for /diagnostics visibility.
