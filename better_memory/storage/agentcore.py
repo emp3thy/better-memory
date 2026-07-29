@@ -2415,27 +2415,53 @@ class AgentCoreBackend:
             if self._local_conn is not None:
                 from better_memory.services import exposure_log
 
-                rows = self._local_conn.execute(
-                    "SELECT rated_at FROM session_memory_exposure "
-                    "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?",
-                    (session_id, kind, rid),
-                ).fetchall()
-                if not rows:
-                    skipped["not_exposed"] += 1
+                try:
+                    rows = self._local_conn.execute(
+                        "SELECT rated_at FROM session_memory_exposure "
+                        "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?",
+                        (session_id, kind, rid),
+                    ).fetchall()
+                    if not rows:
+                        skipped["not_exposed"] += 1
+                        continue
+                    if all(row["rated_at"] is not None for row in rows):
+                        skipped["already_rated"] += 1
+                        continue
+                    exposure_log.stamp(
+                        self._local_conn,
+                        session_id=session_id,
+                        kind=kind,
+                        memory_id=rid,
+                        classification=cls,
+                        evidence=evidence,
+                        now=now_iso,
+                    )
+                    self._local_conn.commit()
+                except Exception:  # noqa: BLE001 - step (b) is best-effort, per-item
+                    # A local-ledger op raised (e.g. `database is locked` from
+                    # a concurrent UI writer past the 5000ms busy_timeout).
+                    # Docstring promises this method never raises once past
+                    # step (a) and that step (b) is best-effort per-item;
+                    # drop this entry so a mid-batch ledger failure cannot
+                    # abort the sweep. Skip the AWS push too: without a
+                    # committed stamp the entry is not credited locally,
+                    # so counting it as applied would double-credit on retry.
+                    #
+                    # CRITICAL: roll back explicitly. Python's sqlite3 opens
+                    # an implicit transaction on the first DML, and
+                    # exposure_log.stamp's UPDATE lands in that transaction
+                    # before the commit that failed. Without a rollback the
+                    # pending stamp survives on the shared connection and
+                    # the NEXT entry's successful commit would flush it too
+                    # — the dropped entry would end up stamped
+                    # (`skipped.already_rated` on any retry) without ever
+                    # having received AWS credit, silently losing the
+                    # rating permanently.
+                    try:
+                        self._local_conn.rollback()
+                    except Exception:  # noqa: BLE001 - rollback failures are terminal for this loop iteration only
+                        pass
                     continue
-                if all(row["rated_at"] is not None for row in rows):
-                    skipped["already_rated"] += 1
-                    continue
-                exposure_log.stamp(
-                    self._local_conn,
-                    session_id=session_id,
-                    kind=kind,
-                    memory_id=rid,
-                    classification=cls,
-                    evidence=evidence,
-                    now=now_iso,
-                )
-                self._local_conn.commit()
 
             try:
                 result = self._credit_counter(kind=kind, id=rid, classification=cls)
