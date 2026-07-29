@@ -105,8 +105,10 @@ def _vec_qualifiers(
     id_col: str,
     query_vector: list[float] | None,
     vec_floor: float,
+    candidate_ids: list[str],
 ) -> dict[str, int]:
-    """id -> vec rank for rows within the cosine floor.
+    """id -> vec rank for rows within the cosine floor, restricted to
+    ``candidate_ids``.
 
     Vectors are unit-norm, so cosine >= c  <=>  L2 distance <= sqrt(2*(1-c)).
 
@@ -117,21 +119,31 @@ def _vec_qualifiers(
     L2 distance, NOT squared L2. The floor comparison below is against the
     plain (unsquared) distance only; the squared-distance branch that a
     defensive dual-check would need is dead code and has been omitted.
+
+    sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` -- no
+    extra predicates -- so we fetch top-k and filter in Python, matching
+    ``ReflectionService._vec_ranks`` (reflection.py). ``k`` scales with the
+    candidate set (min 50) so the window is dense over what the caller
+    actually ranks, instead of being drowned by neighbours from other
+    projects or retired records (whose vectors persist -- retire only
+    UPDATEs status).
     """
-    if conn is None or query_vector is None:
+    if conn is None or query_vector is None or not candidate_ids:
         return {}
     max_dist = math.sqrt(2.0 * (1.0 - vec_floor))
     try:
         rows = conn.execute(
             f"SELECT {id_col}, distance FROM {table} "
             f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (sqlite_vec.serialize_float32(query_vector), 50),
+            (sqlite_vec.serialize_float32(query_vector),
+             max(len(candidate_ids), 50)),
         ).fetchall()
     except sqlite3.OperationalError:
         return {}
+    wanted = set(candidate_ids)
     out: dict[str, int] = {}
     for row in rows:
-        if float(row[1]) <= max_dist:
+        if row[0] in wanted and float(row[1]) <= max_dist:
             out[row[0]] = len(out)
     return out
 
@@ -213,8 +225,26 @@ def retrieve_relevant(
 
     bm = _bm25_qualifiers(conn, query)
     qvec = sync_embedder.embed_text(query) if sync_embedder is not None else None
-    vec_r = _vec_qualifiers(conn, "reflection_embeddings", "reflection_id", qvec, vec_floor)
-    vec_s = _vec_qualifiers(conn, "semantic_embeddings", "memory_id", qvec, vec_floor)
+    # Collect the actual candidate id set before the vec query so kNN is
+    # restricted to it (issue #104): the vec tables are global across
+    # projects and retained/retired rows, so an unbounded k=50 kNN can be
+    # entirely filled by neighbours the caller will never rank -- starving
+    # the evidence gate for the caller's own reflections/semantics.
+    refl_bucket_order = ["do", "dont"] + (["neutral"] if include_neutral else [])
+    refl_candidate_ids = [
+        str(r.get("id"))
+        for bucket in refl_bucket_order
+        for r in (buckets.get(bucket) or [])
+    ]
+    sem_candidate_ids = [str(getattr(s, "id", "")) for s in (semantic or [])]
+    vec_r = _vec_qualifiers(
+        conn, "reflection_embeddings", "reflection_id", qvec, vec_floor,
+        refl_candidate_ids,
+    )
+    vec_s = _vec_qualifiers(
+        conn, "semantic_embeddings", "memory_id", qvec, vec_floor,
+        sem_candidate_ids,
+    )
     keywords = extract_keywords(query)     # fallback evidence only
 
     fts_unavailable = conn is None
@@ -255,8 +285,7 @@ def retrieve_relevant(
     rank_map: dict[tuple[str, str], int] = raw_rank_map or {}
 
     refl_candidates: list[dict] = []
-    order = ["do", "dont"] + (["neutral"] if include_neutral else [])
-    for bucket in order:
+    for bucket in refl_bucket_order:
         for r in buckets.get(bucket, []) or []:
             r_id = str(r.get("id"))
             title = str(r.get("title") or "")

@@ -144,6 +144,33 @@ class TestVecGate:
         )
         assert out == []
 
+    def test_orphan_vector_row_does_not_leak_via_vec_gate(self, conn):
+        # Issue #104: the vec table is global and its rows persist across
+        # retire (retire only UPDATEs status; the vector stays). An
+        # "orphan" vector -- one whose metadata row was retired or deleted
+        # so backend.retrieve does not surface it as a candidate -- must
+        # not qualify anything through the vec leg. Prior to the fix,
+        # _vec_qualifiers issued an unfiltered kNN, so the orphan showed
+        # up in vec_r but happened to be harmless only because the RRF
+        # loop keys on the caller's candidate list -- this test locks in
+        # that the candidate scoping is now enforced at the vec-query
+        # layer too, so orphan ids never appear in vec_r at all.
+        from better_memory.services.relevant import _vec_qualifiers
+        emb = DirectedEmbedder("orphan trigger")
+        # Insert a vec row for a reflection id that has NO metadata row.
+        _embed_reflection(conn, "r-orphan", emb._vec("orphan trigger"))
+        qvec = emb._vec("orphan trigger")
+        # candidate_ids empty -> short-circuit
+        assert _vec_qualifiers(
+            conn, "reflection_embeddings", "reflection_id",
+            qvec, 0.55, [],
+        ) == {}
+        # candidate_ids restricts what returns from the kNN scan
+        assert _vec_qualifiers(
+            conn, "reflection_embeddings", "reflection_id",
+            qvec, 0.55, ["r-different"],
+        ) == {}
+
 
 class TestWilsonRanking:
     def test_wilson_ranks_among_qualifiers(self, conn):
