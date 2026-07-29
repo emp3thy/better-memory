@@ -196,8 +196,22 @@ def main() -> None:
         session_id_str = (
             env_session_id() or data.get("session_id") or ""
         )
-        if session_id_str and _emit_rating_directive_if_unrated(
-            str(session_id_str)
+        # Stop hooks fire again after a previous Stop-hook block returns
+        # from the LLM's continuation turn; Claude Code sets
+        # ``stop_hook_active=True`` in the payload on that re-fire (see
+        # Claude Code hook docs). Without this guard the sweep can loop:
+        # the continuation turn's own tool calls (memory.retrieve inserts
+        # source='retrieve' exposures; a first PreToolUse inserts
+        # source='contextual' rows) create fresh unrated rows, the next
+        # Stop finds them and blocks again, ad infinitum. On re-entry we
+        # skip the block check and fall through to write the marker so
+        # the spooler sees session_end and downstream synthesis runs
+        # exactly once. (Bug: #100.)
+        if (
+            not bool(parsed and isinstance(parsed, dict)
+                     and parsed.get("stop_hook_active"))
+            and session_id_str
+            and _emit_rating_directive_if_unrated(str(session_id_str))
         ):
             # Block was emitted — Claude Code re-fires Stop after the
             # rating turn. Skip the spool-marker write so the consumer
