@@ -64,3 +64,46 @@ def test_embed_failure_counted_as_skipped(conn):
     _seed_reflection(conn, "r1")
     stats = backfill(conn, FakeEmbedder(fail=True))
     assert stats == {"reflections": 0, "semantics": 0, "skipped": 1}
+
+
+def test_insert_error_on_one_row_does_not_kill_the_whole_batch(conn):
+    """A per-row INSERT failure (e.g. UNIQUE collision from a concurrent
+    self-heal writer landing between our snapshot and our INSERT, or a plain
+    lock) must be counted as skipped rather than aborting the entire run.
+    Before the fix the exception propagated and rolled back every row we'd
+    already written this run."""
+    import sqlite3
+
+    _seed_reflection(conn, "r1")
+    _seed_reflection(conn, "r2")
+
+    class _FlakyConn:
+        """Proxy the real connection but fail the INSERT for r1 only.
+
+        sqlite3.Connection disallows attribute assignment, so monkeypatch
+        doesn't work — mirror test_spool.py's _ExplodingCommitConn trick."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.calls = 0
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("INSERT INTO reflection_embeddings") and (
+                args and args[0] and args[0][0] == "r1"
+            ):
+                self.calls += 1
+                raise sqlite3.IntegrityError("UNIQUE constraint failed")
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    proxy = _FlakyConn(conn)
+    stats = backfill(proxy, FakeEmbedder())
+    # r1 failed → skipped; r2 landed.
+    assert stats["reflections"] == 1
+    assert stats["skipped"] == 1
+    assert proxy.calls == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM reflection_embeddings"
+    ).fetchone()[0] == 1

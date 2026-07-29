@@ -70,11 +70,27 @@ def backfill(conn, embedder) -> dict[str, int]:
             stats["skipped"] += len(chunk)
             continue
         for (kind, table, col, row_id, _), vec in zip(chunk, vectors):
-            conn.execute(
-                f"INSERT INTO {table} ({col}, embedding) VALUES (?, ?)",
-                (row_id, sqlite_vec.serialize_float32(vec)))
-            stats[kind] += 1
-    conn.commit()
+            # DELETE-then-INSERT: vec0 tables historically mishandle UPSERT,
+            # and a concurrent writer (memory.retrieve's self-heal) may have
+            # already inserted the same primary key while we were embedding
+            # this snapshot. Without the DELETE a UNIQUE-constraint collision
+            # on one row would previously abort the whole batch and roll back
+            # every row we'd already written this run — matches how
+            # reflection.py / semantic.py do it.
+            #
+            # Wrap each row so one collision (or a plain sqlite lock) doesn't
+            # discard the rest, and commit per batch so successful chunks are
+            # durable even if a later batch trips.
+            try:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {col} = ?", (row_id,))
+                conn.execute(
+                    f"INSERT INTO {table} ({col}, embedding) VALUES (?, ?)",
+                    (row_id, sqlite_vec.serialize_float32(vec)))
+                stats[kind] += 1
+            except Exception:
+                stats["skipped"] += 1
+        conn.commit()
     return stats
 
 
