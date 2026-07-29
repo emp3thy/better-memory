@@ -2415,27 +2415,38 @@ class AgentCoreBackend:
             if self._local_conn is not None:
                 from better_memory.services import exposure_log
 
-                rows = self._local_conn.execute(
-                    "SELECT rated_at FROM session_memory_exposure "
-                    "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?",
-                    (session_id, kind, rid),
-                ).fetchall()
-                if not rows:
-                    skipped["not_exposed"] += 1
+                try:
+                    rows = self._local_conn.execute(
+                        "SELECT rated_at FROM session_memory_exposure "
+                        "WHERE session_id = ? AND memory_kind = ? AND memory_id = ?",
+                        (session_id, kind, rid),
+                    ).fetchall()
+                    if not rows:
+                        skipped["not_exposed"] += 1
+                        continue
+                    if all(row["rated_at"] is not None for row in rows):
+                        skipped["already_rated"] += 1
+                        continue
+                    exposure_log.stamp(
+                        self._local_conn,
+                        session_id=session_id,
+                        kind=kind,
+                        memory_id=rid,
+                        classification=cls,
+                        evidence=evidence,
+                        now=now_iso,
+                    )
+                    self._local_conn.commit()
+                except Exception:  # noqa: BLE001 - step (b) is best-effort, per-item
+                    # A local-ledger op raised (e.g. `database is locked` from
+                    # a concurrent UI writer past the 5000ms busy_timeout).
+                    # Docstring promises this method never raises once past
+                    # step (a) and that step (b) is best-effort per-item;
+                    # drop this entry so a mid-batch ledger failure cannot
+                    # abort the sweep. Skip the AWS push too: without a
+                    # committed stamp the entry is not credited locally,
+                    # so counting it as applied would double-credit on retry.
                     continue
-                if all(row["rated_at"] is not None for row in rows):
-                    skipped["already_rated"] += 1
-                    continue
-                exposure_log.stamp(
-                    self._local_conn,
-                    session_id=session_id,
-                    kind=kind,
-                    memory_id=rid,
-                    classification=cls,
-                    evidence=evidence,
-                    now=now_iso,
-                )
-                self._local_conn.commit()
 
             try:
                 result = self._credit_counter(kind=kind, id=rid, classification=cls)

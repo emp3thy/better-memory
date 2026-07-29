@@ -532,6 +532,82 @@ class TestNoLocalConnDegrade:
         assert mock_data_client.batch_update_memory_records.call_count == 1
 
 
+class TestLedgerFailureIsBestEffort:
+    def test_mid_batch_ledger_commit_failure_does_not_abort_sweep(
+        self, backend_with_ledger, local_conn, mock_data_client, monkeypatch
+    ) -> None:
+        """Docstring for apply_session_ratings promises step (b) is
+        "best-effort, per-item" and the method "never raises once past the
+        up-front batch validation in step (a)". A concurrent UI writer
+        holding the write lock past the 5000 ms busy_timeout can make one
+        entry's exposure_log.stamp / _local_conn.commit raise
+        `database is locked` mid-batch — that entry must be dropped and
+        the rest of the batch must keep sweeping, rather than abort the
+        whole sweep and lose entries 4-6 (bug: #108)."""
+        for rid in ("r1", "r2", "r3"):
+            _seed_local_reflection(local_conn, rid, title=f"t-{rid}")
+        backend_with_ledger.record_exposures(
+            session_id="test-session-xyz",
+            items=[("reflection", rid) for rid in ("r1", "r2", "r3")],
+            source="contextual",
+        )
+        mock_data_client.get_memory_record.side_effect = [
+            _make_record_response(rid) for rid in ("r1", "r3")
+        ]
+        mock_data_client.batch_update_memory_records.side_effect = [
+            _ok_update_response(rid) for rid in ("r1", "r3")
+        ]
+        mock_data_client.create_event.return_value = {"event": {"eventId": "evt-1"}}
+
+        # Simulate a ledger op raising on the middle entry only.
+        import better_memory.services.exposure_log as exposure_log
+
+        real_stamp = exposure_log.stamp
+        call_ids: list[str] = []
+
+        def _stamp_maybe_raise(conn, *, session_id, kind, memory_id, **kw):
+            call_ids.append(memory_id)
+            if memory_id == "r2":
+                raise __import__("sqlite3").OperationalError("database is locked")
+            return real_stamp(
+                conn, session_id=session_id, kind=kind, memory_id=memory_id, **kw
+            )
+
+        monkeypatch.setattr(exposure_log, "stamp", _stamp_maybe_raise)
+
+        result = backend_with_ledger.apply_session_ratings(
+            session_id="test-session-xyz",
+            ratings=[
+                {"kind": "reflection", "id": "r1", "class": "cited",
+                 "evidence": "e1"},
+                {"kind": "reflection", "id": "r2", "class": "cited",
+                 "evidence": "e2"},
+                {"kind": "reflection", "id": "r3", "class": "cited",
+                 "evidence": "e3"},
+            ],
+        )
+
+        # r1 and r3 applied; r2 dropped (ledger raised, no AWS push, no
+        # bucket increment because the return-shape SkippedCounts TypedDict
+        # has no bucket for ledger errors — matching the "best-effort,
+        # per-item" contract).
+        assert result["applied"]["cited"] == 2
+        assert result["skipped"] == {
+            "not_exposed": 0, "already_rated": 0,
+            "memory_missing": 0, "memory_retired": 0,
+        }
+        # r2's AWS credit must NOT have fired — that's the whole point:
+        # without a committed stamp we'd double-credit on retry.
+        assert mock_data_client.batch_update_memory_records.call_count == 2
+        credited_ids = [
+            c.kwargs["records"][0]["memoryRecordId"]
+            for c in mock_data_client.batch_update_memory_records.call_args_list
+        ]
+        assert credited_ids == ["r1", "r3"]
+        # The receipt CreateEvent still fires — non-empty rated_entries.
+        assert mock_data_client.create_event.call_count == 1
+
+
 class TestCreateEventSdkGuard:
     def test_botocore_create_event_supports_extraction_mode(self) -> None:
         """Guard against a silent regression, not a functional test: the
