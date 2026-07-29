@@ -159,6 +159,45 @@ class TestRatingDirectiveEmission:
         markers = list(spool.glob("*_session_end_*.json"))
         assert len(markers) == 1
 
+    def test_stop_hook_active_reentry_writes_marker_and_no_directive(
+        self, tmp_path, tmp_memory_db,
+    ):
+        """Claude Code re-fires Stop after the LLM's rating turn with
+        ``stop_hook_active=True`` in the stdin payload. The continuation
+        turn itself can create fresh unrated exposure rows
+        (memory.retrieve inserts source='retrieve' rows; a first
+        PreToolUse inserts source='contextual' rows), so a stop hook
+        without a re-entry guard would find those and block again
+        forever, and the session_end marker would never be spooled.
+        With the guard, the re-fire skips the block and writes the
+        marker even though unrated rows still exist. (Bug: #100.)"""
+        _seed_unrated_exposure(tmp_memory_db, "S1")
+        home = tmp_memory_db.parent
+        spool = home / "spool"
+        spool.mkdir(exist_ok=True)
+        env = {
+            "BETTER_MEMORY_HOME": str(home),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        # Payload with stop_hook_active=True mirrors what Claude Code
+        # sends on Stop re-entry after a prior block returned.
+        payload = json.dumps(
+            {
+                "session_id": "S1",
+                "stop_hook_active": True,
+                "hook_event_name": "Stop",
+            }
+        )
+        result = _run_hook(env, stdin_data=payload)
+        assert result.returncode == 0
+        # No block directive on re-entry — the LLM has already had its
+        # rating turn.
+        assert result.stdout.strip() == ""
+        # Marker MUST be written on the re-entry so downstream synthesis
+        # runs — even though unrated rows still exist.
+        markers = list(spool.glob("*_session_end_*.json"))
+        assert len(markers) == 1
+
     def test_db_error_falls_back_to_marker(self, tmp_path):
         """If the DB doesn't exist, the hook still exits 0 and writes a marker."""
         home = tmp_path / "nonexistent"
