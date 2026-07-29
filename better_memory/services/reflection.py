@@ -774,15 +774,20 @@ class ReflectionSynthesisService:
     # ---------------------------------------------------------------- _apply_new
     def _apply_new(
         self, actions: list[NewAction], *, project: str
-    ) -> None:
+    ) -> int:
         """Insert new reflections + their source links + consume observations.
 
         Idempotency: observation ids in ``source_observation_ids`` that
         don't exist in the DB are dropped. Entries whose entire source
         list turns out to be invalid are skipped silently.
+
+        Returns the count of reflections actually inserted (may be
+        smaller than ``len(actions)`` when entries are dropped for lack
+        of valid sources).
         """
         from uuid import uuid4
 
+        created = 0
         for action in actions:
             # Stamp once per iteration so each new reflection's
             # created_at / updated_at and the consume UPDATE's
@@ -836,6 +841,9 @@ class ReflectionSynthesisService:
                         action.title, action.use_cases, action.hints,
                     )),
                 )
+            created += 1
+
+        return created
 
     def _derive_new_reflection_scope(
         self, source_obs_ids: list[str]
@@ -879,7 +887,7 @@ class ReflectionSynthesisService:
         return [i for i in ids if i in existing]
 
     # ----------------------------------------------------------- _apply_augment
-    def _apply_augment(self, actions: list[AugmentAction]) -> None:
+    def _apply_augment(self, actions: list[AugmentAction]) -> int:
         """Apply augment actions: append hints, rewrite use_cases, bump
         confidence, link new sources, recompute evidence count.
 
@@ -889,7 +897,10 @@ class ReflectionSynthesisService:
           entry skipped (cannot modify a retired lesson).
         - ``add_source_observation_ids`` filtered to existing obs;
           ``INSERT OR IGNORE`` dedupes against existing source rows.
+
+        Returns the count of reflections actually augmented.
         """
+        augmented = 0
         for action in actions:
             # Stamp once per iteration so each reflection's updated_at
             # reflects the time its UPDATE actually executed — not a
@@ -992,9 +1003,12 @@ class ReflectionSynthesisService:
                         row["title"], final_use_cases, merged_hints,
                     )),
                 )
+            augmented += 1
+
+        return augmented
 
     # ------------------------------------------------------------- _apply_merge
-    def _apply_merge(self, actions: list[MergeAction]) -> None:
+    def _apply_merge(self, actions: list[MergeAction]) -> int:
         """Merge source reflection into target, dropping unknown ids.
 
         Semantics per spec §5:
@@ -1016,7 +1030,10 @@ class ReflectionSynthesisService:
         - Source with status in ``{retired, superseded}`` → skipped.
         - source_id == target_id → skipped (would DELETE the target's
           sources and supersede the reflection in place; double damage).
+
+        Returns the count of merges actually applied.
         """
+        merged = 0
         for action in actions:
             # Stamp once per iteration so each merge's UPDATE timestamp
             # reflects the time it actually executed — not the pre-loop
@@ -1144,25 +1161,31 @@ class ReflectionSynthesisService:
                 "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
                 (action.source_id,),
             )
+            merged += 1
+
+        return merged
 
     # ------------------------------------------------------------ _apply_ignore
-    def _apply_ignore(self, observation_ids: list[str]) -> None:
+    def _apply_ignore(self, observation_ids: list[str]) -> int:
         """Mark observations as consumed_without_reflection.
 
         Idempotency: ids that don't exist are silently dropped by the
         IN filter.
+
+        Returns the count of observations actually flipped.
         """
         valid = self._filter_existing_observations(observation_ids)
         if not valid:
-            return
+            return 0
         now = self._clock().isoformat()
         placeholders = ",".join("?" * len(valid))
-        self._conn.execute(
+        cur = self._conn.execute(
             f"UPDATE observations "
             f"SET status = 'consumed_without_reflection', status_changed_at = ? "
             f"WHERE id IN ({placeholders})",
             [now, *valid],
         )
+        return cur.rowcount or 0
 
     # ------------------------------------------------------- _auto_ignore_unused
     def _auto_ignore_unused(self, observation_ids: list[str]) -> int:
@@ -1263,10 +1286,10 @@ class ReflectionSynthesisService:
             ).fetchall()
             active_ids = [r["id"] for r in active_rows]
 
-            self._apply_new(response.new, project=project)
-            self._apply_augment(response.augment)
-            self._apply_merge(response.merge)
-            self._apply_ignore(response.ignore)
+            created = self._apply_new(response.new, project=project)
+            augmented = self._apply_augment(response.augment)
+            merged = self._apply_merge(response.merge)
+            ignored = self._apply_ignore(response.ignore)
             auto_ignored = self._auto_ignore_unused(active_ids)
             self._mark_synthesized(episode_id)
         except BaseException:
@@ -1278,10 +1301,10 @@ class ReflectionSynthesisService:
         self._conn.commit()
 
         counts = {
-            "created": len(response.new),
-            "augmented": len(response.augment),
-            "merged": len(response.merge),
-            "ignored": len(response.ignore),
+            "created": created,
+            "augmented": augmented,
+            "merged": merged,
+            "ignored": ignored,
             "auto_ignored": auto_ignored,
         }
         return SynthesisStep(
