@@ -2446,6 +2446,21 @@ class AgentCoreBackend:
                     # abort the sweep. Skip the AWS push too: without a
                     # committed stamp the entry is not credited locally,
                     # so counting it as applied would double-credit on retry.
+                    #
+                    # CRITICAL: roll back explicitly. Python's sqlite3 opens
+                    # an implicit transaction on the first DML, and
+                    # exposure_log.stamp's UPDATE lands in that transaction
+                    # before the commit that failed. Without a rollback the
+                    # pending stamp survives on the shared connection and
+                    # the NEXT entry's successful commit would flush it too
+                    # — the dropped entry would end up stamped
+                    # (`skipped.already_rated` on any retry) without ever
+                    # having received AWS credit, silently losing the
+                    # rating permanently.
+                    try:
+                        self._local_conn.rollback()
+                    except Exception:  # noqa: BLE001 - rollback failures are terminal for this loop iteration only
+                        pass
                     continue
 
             try:

@@ -607,6 +607,96 @@ class TestLedgerFailureIsBestEffort:
         # The receipt CreateEvent still fires — non-empty rated_entries.
         assert mock_data_client.create_event.call_count == 1
 
+    def test_commit_failure_after_stamp_is_rolled_back(
+        self, backend_with_ledger, local_conn, mock_data_client
+    ) -> None:
+        """Regression: exposure_log.stamp's UPDATE lands in Python
+        sqlite3's implicit deferred transaction. If it succeeds but the
+        subsequent _local_conn.commit() raises (e.g. busy_timeout
+        expires during commit), the pending UPDATE would otherwise ride
+        the NEXT successful commit — flushing the dropped entry's
+        stamp without any AWS credit and permanently losing the rating
+        on retry (`skipped.already_rated`). The rollback in the except
+        block must clear the pending transaction so r2's rated_at stays
+        NULL, matching the docstring's "no committed stamp, no AWS
+        credit" invariant. (Follow-up to review of #118.)"""
+        for rid in ("r1", "r2", "r3"):
+            _seed_local_reflection(local_conn, rid, title=f"t-{rid}")
+        backend_with_ledger.record_exposures(
+            session_id="test-session-xyz",
+            items=[("reflection", rid) for rid in ("r1", "r2", "r3")],
+            source="contextual",
+        )
+        mock_data_client.get_memory_record.side_effect = [
+            _make_record_response(rid) for rid in ("r1", "r3")
+        ]
+        mock_data_client.batch_update_memory_records.side_effect = [
+            _ok_update_response(rid) for rid in ("r1", "r3")
+        ]
+        mock_data_client.create_event.return_value = {"event": {"eventId": "evt-1"}}
+
+        # Simulate a fault AFTER stamp's UPDATE has already been executed
+        # against the shared connection — the exact "commit-time
+        # busy_timeout" pattern the rollback protects. Wrapping stamp
+        # here runs the real UPDATE (opening the deferred transaction),
+        # then raises before commit — so r2's stamp is uncommitted and
+        # pending on the connection when we jump into the except block.
+        import better_memory.services.exposure_log as exposure_log
+
+        real_stamp = exposure_log.stamp
+
+        def _stamp_then_raise(conn, *, session_id, kind, memory_id, **kw):
+            result = real_stamp(
+                conn, session_id=session_id, kind=kind,
+                memory_id=memory_id, **kw,
+            )
+            if memory_id == "r2":
+                raise __import__("sqlite3").OperationalError(
+                    "database is locked"
+                )
+            return result
+
+        import unittest.mock as _mock
+        stamp_patch = _mock.patch.object(exposure_log, "stamp", _stamp_then_raise)
+        stamp_patch.start()
+        try:
+            result = backend_with_ledger.apply_session_ratings(
+                session_id="test-session-xyz",
+                ratings=[
+                    {"kind": "reflection", "id": "r1", "class": "cited",
+                     "evidence": "e1"},
+                    {"kind": "reflection", "id": "r2", "class": "cited",
+                     "evidence": "e2"},
+                    {"kind": "reflection", "id": "r3", "class": "cited",
+                     "evidence": "e3"},
+                ],
+            )
+        finally:
+            stamp_patch.stop()
+
+        # r1 and r3 applied; r2 dropped.
+        assert result["applied"]["cited"] == 2
+
+        # THE ACTUAL POINT of the rollback: r2's exposure row must NOT
+        # have rated_at set. Without the rollback, r3's successful
+        # commit would flush r2's pending stamp too, and we'd read a
+        # non-NULL rated_at here despite the dropped credit.
+        rated_by_id = {
+            row["memory_id"]: row["rated_at"]
+            for row in local_conn.execute(
+                "SELECT memory_id, rated_at FROM session_memory_exposure "
+                "WHERE session_id = ? ORDER BY memory_id",
+                ("test-session-xyz",),
+            ).fetchall()
+        }
+        assert rated_by_id["r1"] is not None
+        assert rated_by_id["r2"] is None, (
+            "r2's pending stamp leaked past its own commit() failure — "
+            "the rollback in the except block is not clearing the "
+            "deferred transaction."
+        )
+        assert rated_by_id["r3"] is not None
+
 
 class TestCreateEventSdkGuard:
     def test_botocore_create_event_supports_extraction_mode(self) -> None:
