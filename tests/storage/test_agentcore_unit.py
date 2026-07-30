@@ -662,12 +662,12 @@ def test_retrieve_includes_promoted_records_from_general_namespace(
     assert [r["id"] for r in result["dont"]] == ["rec-promoted"]
 
 
-def test_retrieve_excludes_non_active_status_in_project_namespace(
+def test_retrieve_excludes_retired_in_project_namespace(
     backend, mock_data_client
 ) -> None:
-    """A project-namespace record whose status is explicitly not active
-    (e.g. retired, or promoted served stale by the lagging index) is
-    excluded — promoted records are only admitted via general/."""
+    """Retired reflections in the project namespace are excluded on
+    retrieve — the admit set is ``{active, promoted}``, matching the
+    ``reflection_list`` vocabulary (see #94)."""
     def stub(**kwargs):
         if kwargs["namespace"] == "projects/testproj/reflections/":
             return {"memoryRecordSummaries": [
@@ -676,17 +676,37 @@ def test_retrieve_excludes_non_active_status_in_project_namespace(
                     namespace="/projects/testproj/reflections/",
                     status="retired",
                 ),
-                _reflection_summary(
-                    "rec-stale-promoted",
-                    namespace="/projects/testproj/reflections/",
-                    status="promoted",
-                ),
             ]}
         return {"memoryRecordSummaries": []}
 
     mock_data_client.list_memory_records.side_effect = stub
     result = backend.retrieve(project="testproj")
     assert result == {"do": [], "dont": [], "neutral": []}
+
+
+def test_retrieve_includes_promoted_records_in_project_namespace(
+    backend, mock_data_client
+) -> None:
+    """Migrated ``confirmed`` reflections land in ``projects/{p}/reflections/``
+    with body status ``promoted`` (see ``agentcore_migrate``: confirmed →
+    promoted, scope drives namespace). The project-namespace admit set must
+    surface them — a narrower ``{active}`` silently drops the entire
+    reviewed corpus. See #94."""
+    def stub(**kwargs):
+        if kwargs["namespace"] == "projects/testproj/reflections/":
+            return {"memoryRecordSummaries": [
+                _reflection_summary(
+                    "rec-migrated-confirmed",
+                    namespace="/projects/testproj/reflections/",
+                    status="promoted",
+                    polarity="do",
+                ),
+            ]}
+        return {"memoryRecordSummaries": []}
+
+    mock_data_client.list_memory_records.side_effect = stub
+    result = backend.retrieve(project="testproj")
+    assert [r["id"] for r in result["do"]] == ["rec-migrated-confirmed"]
 
 
 def test_retrieve_defaults_missing_status_and_polarity(
