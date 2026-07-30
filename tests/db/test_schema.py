@@ -409,6 +409,77 @@ def test_apply_migrations_times_out_on_stuck_peer(
         conn.close()
 
 
+def test_apply_migrations_releases_claim_when_sql_read_fails(
+    tmp_memory_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read_text failure after claiming must not leak the claim row.
+
+    Otherwise the version would poll for the full timeout on every future
+    start until someone hand-cleans schema_migrations.
+    """
+    migrations_dir = tmp_path / "migs"
+    migrations_dir.mkdir()
+    sql_file = migrations_dir / "0001_unreadable.sql"
+    sql_file.write_text("CREATE TABLE ok (id INTEGER PRIMARY KEY);")
+
+    original_read_text = Path.read_text
+
+    def failing_read_text(self, *args, **kwargs):
+        if self == sql_file:
+            raise OSError("simulated read failure")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    conn = connect(tmp_memory_db)
+    try:
+        with pytest.raises(OSError, match="simulated read failure"):
+            apply_migrations(conn, migrations_dir=migrations_dir)
+        rows = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = '0001'"
+        ).fetchall()
+        assert rows == [], "claim row must be released after read failure"
+    finally:
+        conn.close()
+
+
+def test_apply_migrations_releases_claim_when_mark_complete_fails(
+    tmp_memory_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A _mark_complete failure after successful DDL must not leak the claim.
+
+    If the completion UPDATE raises (transient DB error, thread issue),
+    the claim row would otherwise sit at applied_at IS NULL forever.
+    """
+    from better_memory.db import schema as schema_mod
+
+    migrations_dir = tmp_path / "migs"
+    migrations_dir.mkdir()
+    (migrations_dir / "0001_ok.sql").write_text(
+        "CREATE TABLE marked_ok (id INTEGER PRIMARY KEY);"
+    )
+
+    def failing_mark(_conn, _version):
+        raise sqlite3.OperationalError("simulated mark failure")
+
+    monkeypatch.setattr(schema_mod, "_mark_complete", failing_mark)
+
+    conn = connect(tmp_memory_db)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="simulated mark"):
+            apply_migrations(conn, migrations_dir=migrations_dir)
+        rows = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = '0001'"
+        ).fetchall()
+        assert rows == [], "claim row must be released after mark failure"
+    finally:
+        conn.close()
+
+
 def test_applied_versions_excludes_in_progress_claims(
     tmp_memory_db: Path,
 ) -> None:

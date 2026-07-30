@@ -160,14 +160,22 @@ def _apply_one(
     """
     while True:
         if _try_claim(conn, version):
-            sql = sql_file.read_text(encoding="utf-8")
+            # Everything after the claim lands in the same try/except so a
+            # failure in read_text (OSError / UnicodeDecodeError), the DDL
+            # itself, OR _mark_complete releases the claim row. Otherwise
+            # the row would be leaked with applied_at IS NULL and every
+            # future start would poll _CLAIM_WAIT_SECONDS then raise —
+            # permanently blocking the version until someone hand-cleans
+            # schema_migrations.
+            #
+            # ``executescript`` issues its own COMMIT before running, so we
+            # cannot wrap it in an outer BEGIN. On failure, SQLite
+            # auto-rolls back the individual failing statement; a partial
+            # init is equivalent to a corrupt fresh DB — discard and retry.
             try:
-                # ``executescript`` issues its own COMMIT before running,
-                # so we cannot wrap it in an outer BEGIN. On failure,
-                # SQLite auto-rolls back the individual failing statement;
-                # a partial init is equivalent to a corrupt fresh DB —
-                # discard and retry.
+                sql = sql_file.read_text(encoding="utf-8")
                 conn.executescript(sql)
+                _mark_complete(conn, version)
             except Exception:
                 _release_claim(conn, version)
                 try:
@@ -175,7 +183,6 @@ def _apply_one(
                 except sqlite3.Error:
                     pass
                 raise
-            _mark_complete(conn, version)
             return True
 
         # Lost the claim; wait for the peer to finish or release.
