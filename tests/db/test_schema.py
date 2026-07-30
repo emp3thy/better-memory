@@ -238,6 +238,73 @@ def test_apply_migrations_is_idempotent(tmp_memory_db: Path) -> None:
         conn.close()
 
 
+def test_apply_migrations_skips_versions_recorded_after_snapshot(
+    tmp_memory_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent-race regression for #106.
+
+    Reproduces the window between the initial ``_applied_versions`` snapshot
+    and the pre-claim ``INSERT``: a second process commits the version row
+    in between. The first process's ``INSERT OR IGNORE`` must find a
+    conflict (rowcount == 0) and skip the DDL — otherwise it would run
+    ``CREATE VIRTUAL TABLE ... already exists`` and crash server startup.
+    """
+    from better_memory.db import schema as schema_mod
+
+    migrations_dir = tmp_path / "migs"
+    migrations_dir.mkdir()
+    (migrations_dir / "0001_race.sql").write_text(
+        "CREATE TABLE race_table (id INTEGER PRIMARY KEY);"
+    )
+
+    conn = connect(tmp_memory_db)
+    try:
+        schema_mod._ensure_schema_migrations_table(conn)
+        # Simulate the concurrent runner: it committed the row + created
+        # the table between our snapshot and our first pre-claim.
+        conn.execute("CREATE TABLE race_table (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES ('0001')")
+        conn.commit()
+        # Force our snapshot to reflect the pre-race state.
+        monkeypatch.setattr(
+            schema_mod, "_applied_versions", lambda _conn: set()
+        )
+
+        # Must NOT raise ``race_table already exists``.
+        applied = apply_migrations(conn, migrations_dir=migrations_dir)
+        assert applied == []  # We lost the race — didn't run the DDL.
+    finally:
+        conn.close()
+
+
+def test_apply_migrations_releases_claim_on_ddl_failure(
+    tmp_memory_db: Path, tmp_path: Path,
+) -> None:
+    """A DDL failure must remove the pre-claim row so the next run retries."""
+    migrations_dir = tmp_path / "migs"
+    migrations_dir.mkdir()
+    (migrations_dir / "0001_bad.sql").write_text(
+        "CREATE TABLE valid (id INTEGER PRIMARY KEY); "
+        "THIS IS NOT SQL;"
+    )
+
+    conn = connect(tmp_memory_db)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            apply_migrations(conn, migrations_dir=migrations_dir)
+        # Claim must have been released so a fixed migration on the next
+        # start can retry — otherwise the half-applied DB would be silently
+        # skipped forever.
+        rows = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = '0001'"
+        ).fetchall()
+        assert rows == []
+    finally:
+        conn.close()
+
+
 def test_episodic_indexes_exist(tmp_memory_db: Path) -> None:
     """The two episodic indexes are created."""
     conn = connect(tmp_memory_db)

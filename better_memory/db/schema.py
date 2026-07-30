@@ -5,12 +5,18 @@ Migration files live in :mod:`better_memory.db.migrations` and are named
 version (the ``NNNN`` prefix) is recorded in the ``schema_migrations`` table so
 re-running :func:`apply_migrations` is a no-op.
 
+Concurrent starts (two MCP servers pointing at the same DB) contend on the
+version row via ``INSERT OR IGNORE`` before any DDL runs, so only one process
+executes each migration. Losers of that race trust the winner and skip to the
+next file.
+
 Each file is executed via :meth:`sqlite3.Connection.executescript`, which
 issues an implicit ``COMMIT`` before running the script; migrations are
 therefore **not** atomic. On failure the database may be left in a partial
 state — for first-time installs the recovery is to discard the DB file and
-re-run. Multi-file migrations that require atomicity must use a different
-execution path.
+re-run. The claim row is deleted on DDL failure so the next start retries
+cleanly rather than skipping a half-applied version. Multi-file migrations
+that require atomicity must use a different execution path.
 """
 
 from __future__ import annotations
@@ -73,6 +79,21 @@ def apply_migrations(
         if version in applied:
             continue
 
+        # Atomic pre-claim: SQLite serialises writers on the same DB, so if a
+        # second process is racing us on this version, one INSERT wins
+        # (rowcount == 1) and the other is a no-op via OR IGNORE
+        # (rowcount == 0). Only the winner runs the DDL; without this,
+        # both would enter ``executescript`` and the loser would die on
+        # e.g. ``CREATE VIRTUAL TABLE ... already exists`` at server start.
+        claim = conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)",
+            (version,),
+        )
+        conn.commit()
+        if claim.rowcount == 0:
+            # Another process already recorded this version. Trust it.
+            continue
+
         sql = sql_file.read_text(encoding="utf-8")
 
         # ``executescript`` issues its own COMMIT before running, so we cannot
@@ -83,6 +104,16 @@ def apply_migrations(
         try:
             conn.executescript(sql)
         except Exception:
+            # Release the claim so the next start retries this version rather
+            # than skipping past a half-applied migration.
+            try:
+                conn.execute(
+                    "DELETE FROM schema_migrations WHERE version = ?",
+                    (version,),
+                )
+                conn.commit()
+            except sqlite3.Error:
+                pass
             # Defensive: if anything is left pending, clean up.
             try:
                 conn.rollback()
@@ -90,11 +121,6 @@ def apply_migrations(
                 pass
             raise
 
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?)",
-            (version,),
-        )
-        conn.commit()
         applied_now.append(version)
 
     return applied_now
