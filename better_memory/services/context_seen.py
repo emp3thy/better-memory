@@ -25,10 +25,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
-_FILE_RE = re.compile(r"^context_seen_.+\.(json|pretool)$")
+# Matches the state JSON, the pretool sentinel, and stray `.tmp` siblings
+# left behind by a process hard-killed between mkstemp and os.replace.
+_FILE_RE = re.compile(r"^context_seen_.+\.(json|pretool|json\..+\.tmp)$")
 _SAFE_SESSION_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
@@ -59,9 +62,26 @@ class SeenStore:
     def _save(self) -> None:
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-            tmp.write_text(json.dumps(self._data), encoding="utf-8")
-            os.replace(tmp, self._path)
+            # Per-call-unique tmp so concurrent writers to the same
+            # session file don't truncate each other's in-flight temp
+            # and cause one writer's os.replace to silently publish the
+            # other's content (or fail after the other's replace already
+            # moved the shared tmp). Mirrors runtime/session_marker.py.
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f"{self._path.name}.",
+                suffix=".tmp",
+                dir=self._dir,
+            )
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(self._data))
+                os.replace(tmp_path, self._path)
+            except BaseException:  # noqa: BLE001
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except BaseException:  # noqa: BLE001
+                    pass
         except BaseException:  # noqa: BLE001 - best-effort
             pass
 

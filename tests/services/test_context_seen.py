@@ -101,6 +101,28 @@ class TestPretoolLatch:
 
 
 class TestConcurrentMutators:
+    def test_save_uses_per_call_unique_tmp(self, tmp_path, monkeypatch):
+        # #107 (BugBot follow-up): the atomic-write path must derive a
+        # per-call-unique tmp so two concurrent writers don't truncate
+        # each other's in-flight file and lose one write on the second
+        # os.replace ("no such file"). Assert that back-to-back _saves
+        # use distinct source paths at os.replace.
+        import os as _os
+        s = SeenStore(tmp_path, "sess")
+        seen_srcs: list[str] = []
+        orig_replace = _os.replace
+        def spy_replace(src, dst):  # noqa: ANN001 - test spy
+            seen_srcs.append(str(src))
+            return orig_replace(src, dst)
+        monkeypatch.setattr(_os, "replace", spy_replace)
+        s.bump_turn()
+        s.mark_seen([("k", "v")])
+        assert len(seen_srcs) == 2
+        assert seen_srcs[0] != seen_srcs[1]
+        # And no leftover tmp siblings after successful writes.
+        leftovers = [p.name for p in tmp_path.iterdir() if ".tmp" in p.name]
+        assert leftovers == []
+
     def test_save_is_atomic_via_temp_replace(self, tmp_path):
         # #107: previously plain write_text left a window where a
         # concurrent reader could see a truncated file. Assert the temp
@@ -114,8 +136,8 @@ class TestConcurrentMutators:
         loaded = _json.loads(path.read_text(encoding="utf-8"))
         assert loaded["turn"] == 1
         assert loaded["seen"] == {"reflection:r1": 1, "semantic:m1": 1}
-        # temp sibling from atomic write must not linger on success
-        assert not (tmp_path / "context_seen_sess.json.tmp").exists()
+        # No temp sibling from atomic write should linger on success.
+        assert not any(".tmp" in p.name for p in tmp_path.iterdir())
 
     def test_mark_seen_stamps_with_freshly_read_turn_not_stale_local(self, tmp_path):
         # #107 (BugBot follow-up): mark_seen re-reads to preserve a
