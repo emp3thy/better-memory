@@ -246,10 +246,11 @@ def test_apply_migrations_skips_versions_recorded_after_snapshot(
     """Concurrent-race regression for #106.
 
     Reproduces the window between the initial ``_applied_versions`` snapshot
-    and the pre-claim ``INSERT``: a second process commits the version row
-    in between. The first process's ``INSERT OR IGNORE`` must find a
-    conflict (rowcount == 0) and skip the DDL — otherwise it would run
-    ``CREATE VIRTUAL TABLE ... already exists`` and crash server startup.
+    and the pre-claim ``INSERT``: a peer completed the version row (both
+    ``applied_at IS NOT NULL`` and the DDL) between our snapshot and our
+    claim. The ``INSERT OR IGNORE`` must find a conflict and the poll must
+    see ``applied_at IS NOT NULL`` and skip — otherwise executescript
+    would run ``CREATE TABLE ... already exists`` and crash startup.
     """
     from better_memory.db import schema as schema_mod
 
@@ -262,19 +263,19 @@ def test_apply_migrations_skips_versions_recorded_after_snapshot(
     conn = connect(tmp_memory_db)
     try:
         schema_mod._ensure_schema_migrations_table(conn)
-        # Simulate the concurrent runner: it committed the row + created
-        # the table between our snapshot and our first pre-claim.
         conn.execute("CREATE TABLE race_table (id INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_migrations (version) VALUES ('0001')")
+        # Peer completed: applied_at explicitly non-NULL.
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) "
+            "VALUES ('0001', CURRENT_TIMESTAMP)"
+        )
         conn.commit()
-        # Force our snapshot to reflect the pre-race state.
         monkeypatch.setattr(
             schema_mod, "_applied_versions", lambda _conn: set()
         )
 
-        # Must NOT raise ``race_table already exists``.
         applied = apply_migrations(conn, migrations_dir=migrations_dir)
-        assert applied == []  # We lost the race — didn't run the DDL.
+        assert applied == []
     finally:
         conn.close()
 
@@ -294,13 +295,140 @@ def test_apply_migrations_releases_claim_on_ddl_failure(
     try:
         with pytest.raises(sqlite3.OperationalError):
             apply_migrations(conn, migrations_dir=migrations_dir)
-        # Claim must have been released so a fixed migration on the next
-        # start can retry — otherwise the half-applied DB would be silently
-        # skipped forever.
         rows = conn.execute(
             "SELECT version FROM schema_migrations WHERE version = '0001'"
         ).fetchall()
         assert rows == []
+    finally:
+        conn.close()
+
+
+def test_apply_migrations_waits_for_peer_and_retries_after_release(
+    tmp_memory_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Peer's DDL failed → loser must retry the claim, not silently skip.
+
+    Regression against the BugBot finding on the first cut of #106: if a
+    peer holds an in-progress claim (``applied_at IS NULL``) and then
+    fails and deletes the row, a loser that had already skipped would
+    return with a broken schema. The two-phase protocol makes the loser
+    poll until the row disappears, then re-attempt the claim itself.
+    """
+    from better_memory.db import schema as schema_mod
+
+    migrations_dir = tmp_path / "migs"
+    migrations_dir.mkdir()
+    (migrations_dir / "0001_late.sql").write_text(
+        "CREATE TABLE late_table (id INTEGER PRIMARY KEY);"
+    )
+
+    conn = connect(tmp_memory_db)
+    try:
+        schema_mod._ensure_schema_migrations_table(conn)
+        # Peer holds an in-progress claim (applied_at NULL).
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) "
+            "VALUES ('0001', NULL)"
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            schema_mod, "_applied_versions", lambda _conn: set()
+        )
+
+        # On the FIRST sleep, simulate the peer failing and releasing.
+        calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            calls.append(seconds)
+            if len(calls) == 1:
+                conn.execute(
+                    "DELETE FROM schema_migrations WHERE version = '0001'"
+                )
+                conn.commit()
+
+        monkeypatch.setattr(schema_mod.time, "sleep", fake_sleep)
+
+        applied = apply_migrations(conn, migrations_dir=migrations_dir)
+        # Loser detected the release, claimed the version, and ran the DDL.
+        assert applied == ["0001"]
+        assert calls, "loser must have polled while peer held the claim"
+        row = conn.execute(
+            "SELECT applied_at FROM schema_migrations WHERE version = '0001'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] is not None  # completed, not in-progress
+        # And the DDL actually ran.
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'late_table'"
+        ).fetchall()
+        assert tables, "loser did not run the DDL after peer released"
+    finally:
+        conn.close()
+
+
+def test_apply_migrations_times_out_on_stuck_peer(
+    tmp_memory_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A peer that holds the claim forever must produce a loud error.
+
+    The whole point of the two-phase claim is that a losing process never
+    silently returns with a broken schema — a stuck peer surfaces as an
+    ``OperationalError``, not a partial-schema startup.
+    """
+    from better_memory.db import schema as schema_mod
+
+    migrations_dir = tmp_path / "migs"
+    migrations_dir.mkdir()
+    (migrations_dir / "0001_stuck.sql").write_text(
+        "CREATE TABLE stuck_table (id INTEGER PRIMARY KEY);"
+    )
+
+    conn = connect(tmp_memory_db)
+    try:
+        schema_mod._ensure_schema_migrations_table(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) "
+            "VALUES ('0001', NULL)"
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            schema_mod, "_applied_versions", lambda _conn: set()
+        )
+        # Shrink the wait so the test is fast; peer never transitions.
+        monkeypatch.setattr(schema_mod, "_CLAIM_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(schema_mod, "_CLAIM_POLL_INTERVAL", 0.01)
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            apply_migrations(conn, migrations_dir=migrations_dir)
+        assert "0001" in str(excinfo.value)
+    finally:
+        conn.close()
+
+
+def test_applied_versions_excludes_in_progress_claims(
+    tmp_memory_db: Path,
+) -> None:
+    """``_applied_versions`` must not count claims where ``applied_at IS NULL``.
+
+    Otherwise a peer's live claim would look like a completed apply, and
+    the whole polling protocol would collapse to the pre-fix "trust the
+    bare row" behaviour.
+    """
+    from better_memory.db import schema as schema_mod
+
+    conn = connect(tmp_memory_db)
+    try:
+        schema_mod._ensure_schema_migrations_table(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) "
+            "VALUES ('0001', CURRENT_TIMESTAMP), ('0002', NULL)"
+        )
+        conn.commit()
+        assert schema_mod._applied_versions(conn) == {"0001"}
     finally:
         conn.close()
 
