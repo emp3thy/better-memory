@@ -88,16 +88,21 @@ class SeenStore:
 
     def mark_seen(self, ids: list[tuple[str, str]]) -> None:
         # Re-read + merge so a concurrent writer's mark_seen entries are
-        # preserved when we write our own back.
+        # preserved when we write our own back. Stamp new entries with
+        # the freshly-read turn (or our own if it's ahead), never our
+        # possibly-stale local snapshot — otherwise a concurrent bump_turn
+        # between our load and this call would leave the entry stamped
+        # with an older turn and filter_unseen would trip its
+        # (turn - last) > reinject_turns gate one turn early.
         latest = self._load()
-        turn = int(self._data.get("turn") or 0)
+        turn = max(
+            int(latest.get("turn") or 0),
+            int(self._data.get("turn") or 0),
+        )
         merged_seen = dict(latest.get("seen") or {})
         for kind, id_ in ids:
             merged_seen[_key(kind, id_)] = turn
-        self._data = {
-            "turn": max(int(latest.get("turn") or 0), turn),
-            "seen": merged_seen,
-        }
+        self._data = {"turn": turn, "seen": merged_seen}
         self._save()
 
     def try_claim_pretool_fired(self) -> bool:

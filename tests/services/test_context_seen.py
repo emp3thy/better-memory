@@ -117,6 +117,30 @@ class TestConcurrentMutators:
         # temp sibling from atomic write must not linger on success
         assert not (tmp_path / "context_seen_sess.json.tmp").exists()
 
+    def test_mark_seen_stamps_with_freshly_read_turn_not_stale_local(self, tmp_path):
+        # #107 (BugBot follow-up): mark_seen re-reads to preserve a
+        # concurrent writer's seen entries, but the *stamp* for new
+        # entries must also come from the freshly-read turn (or the
+        # local turn if it's ahead), not the possibly-stale local
+        # snapshot alone. Otherwise a concurrent bump_turn between our
+        # load and our mark_seen leaves the entry stamped one turn (or
+        # more) below the file's true turn, and filter_unseen's
+        # (turn - last) > reinject_turns gate opens prematurely.
+        a = SeenStore(tmp_path, "sess")
+        a.bump_turn()  # a and file both at turn=1
+        # A parallel writer bumps the file forward while `a` is
+        # mid-retrieval (a's in-memory _data still says turn=1).
+        b = SeenStore(tmp_path, "sess")
+        b.bump_turn()  # file now at turn=2
+        a.mark_seen([("reflection", "r1")])
+        stamped = SeenStore(tmp_path, "sess")
+        assert stamped._data["seen"]["reflection:r1"] == 2
+        # A next-turn reader with reinject_turns=1 must NOT reinject:
+        # (turn - last) = (2 - 2) = 0, not > 1.
+        assert stamped.filter_unseen(
+            [("reflection", "r1")], reinject_turns=1,
+        ) == []
+
     def test_mark_seen_merges_concurrent_writers_state(self, tmp_path):
         # #107: two hook processes at the same turn each marked disjoint
         # ids; the second _save from a stale snapshot dropped the first
