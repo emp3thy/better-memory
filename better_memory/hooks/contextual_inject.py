@@ -11,11 +11,13 @@ a write failure never blocks injection) and counted in rating_diagnostics for
 observability (contextual_fired_userprompt/pretool, contextual_injected,
 contextual_suppressed_floor, contextual_suppressed_dedup).
 
-PreToolUse is latched to one real firing per session (SeenStore.pretool_fired
-/ mark_pretool_fired): the installed matcher is unscoped (all tools), so
-without the latch every tool call would re-run the full retrieval path.
-Later PreToolUse events in the same session short-circuit on the state file
-before any DB/embedder work. UserPromptSubmit is unaffected by the latch.
+PreToolUse is latched to one real firing per session
+(SeenStore.try_claim_pretool_fired — an atomic O_CREAT|O_EXCL claim on a
+sentinel file, race-safe across parallel hook processes): the installed
+matcher is unscoped (all tools), so without the latch every tool call
+would re-run the full retrieval path. Later PreToolUse events in the same
+session short-circuit on the sentinel before any DB/embedder work.
+UserPromptSubmit is unaffected by the latch.
 """
 from __future__ import annotations
 
@@ -108,9 +110,11 @@ def main() -> None:
             prune_stale(state_dir, now=datetime.now(UTC))
             seen = SeenStore(state_dir, session_id)
             if event == "PreToolUse":
-                if seen.pretool_fired():
+                # Atomic O_CREAT|O_EXCL claim: if another parallel hook
+                # process already fired for this session, we return False
+                # and short-circuit before opening any DB / embedder.
+                if not seen.try_claim_pretool_fired():
                     raise _SkipInjection()  # module-local sentinel; caught below
-                seen.mark_pretool_fired()
             seen.bump_turn()
             # A real local connection is opened in BOTH modes now. Agentcore
             # mode never stores memory CONTENT locally, but session-

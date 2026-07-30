@@ -76,3 +76,60 @@ class TestPretoolLatch:
     def test_corrupt_state_means_not_fired(self, tmp_path):
         (tmp_path / "context_seen_sess.json").write_text("{", encoding="utf-8")
         assert SeenStore(tmp_path, "sess").pretool_fired() is False
+
+    def test_try_claim_pretool_fired_only_first_caller_wins(self, tmp_path):
+        # #107: PreToolUse "one real firing per session" was a check-then-set
+        # across two file operations, so N parallel hook processes could all
+        # observe pretool_fired == False and all proceed. The sentinel-based
+        # atomic claim guarantees exactly one True return.
+        stores = [SeenStore(tmp_path, "sess") for _ in range(4)]
+        wins = [s.try_claim_pretool_fired() for s in stores]
+        assert wins.count(True) == 1
+        assert wins.count(False) == 3
+        # And every subsequent instance sees the latch as fired.
+        assert SeenStore(tmp_path, "sess").pretool_fired() is True
+
+    def test_prune_stale_removes_pretool_sentinel(self, tmp_path):
+        import os
+        SeenStore(tmp_path, "sess").mark_pretool_fired()
+        sentinel = tmp_path / "context_seen_sess.pretool"
+        assert sentinel.exists()
+        ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+        os.utime(sentinel, (ten_days_ago, ten_days_ago))
+        prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
+        assert not sentinel.exists()
+
+
+class TestConcurrentMutators:
+    def test_save_is_atomic_via_temp_replace(self, tmp_path):
+        # #107: previously plain write_text left a window where a
+        # concurrent reader could see a truncated file. Assert the temp
+        # sibling is cleaned up and the final file is complete JSON.
+        s = SeenStore(tmp_path, "sess")
+        s.bump_turn()
+        s.mark_seen([("reflection", "r1"), ("semantic", "m1")])
+        path = tmp_path / "context_seen_sess.json"
+        assert path.exists()
+        import json as _json
+        loaded = _json.loads(path.read_text(encoding="utf-8"))
+        assert loaded["turn"] == 1
+        assert loaded["seen"] == {"reflection:r1": 1, "semantic:m1": 1}
+        # temp sibling from atomic write must not linger on success
+        assert not (tmp_path / "context_seen_sess.json.tmp").exists()
+
+    def test_mark_seen_merges_concurrent_writers_state(self, tmp_path):
+        # #107: two hook processes at the same turn each marked disjoint
+        # ids; the second _save from a stale snapshot dropped the first
+        # process's entries. Both writers now re-read + merge, so the
+        # union survives.
+        a = SeenStore(tmp_path, "sess")
+        b = SeenStore(tmp_path, "sess")
+        a.bump_turn()  # a and b both loaded turn=0; a advances the file to 1
+        b.mark_seen([("reflection", "r1")])  # b writes with its snapshot
+        a.mark_seen([("semantic", "m1")])   # a writes with its snapshot
+        # Union of both writers' entries survives on disk.
+        fresh = SeenStore(tmp_path, "sess")
+        # Neither key should be filter_unseen-visible on a fresh read.
+        assert fresh.filter_unseen(
+            [("reflection", "r1"), ("semantic", "m1")], reinject_turns=0,
+        ) == []
