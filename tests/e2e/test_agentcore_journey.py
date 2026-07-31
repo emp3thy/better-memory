@@ -271,10 +271,14 @@ def test_j2_session_bootstrap_hook_reaches_agentcore(
         assert "Semantic memories:" in ctx
 
         lists = fake.requests_for("ListMemoryRecords")
-        assert len(lists) == 3
-        assert len(fake.requests) == 3
+        # 4 calls: 2 episodic (project + general reflections) and 2 semantic
+        # (project + general). The semantic leg fans out over both namespaces
+        # so general-scope memories are counted and the count is not clamped
+        # to one capped page — see #109 / PR #117.
+        assert len(lists) == 4
+        assert len(fake.requests) == 4
         assert sum("EPI-FAKE-0001" in r.path for r in lists) == 2
-        assert sum("SEM-FAKE-0001" in r.path for r in lists) == 1
+        assert sum("SEM-FAKE-0001" in r.path for r in lists) == 2
         # No metadataFilters anywhere — polarity is not a legal filter key
         # on real AWS (the fake 400s it) and status is client-side.
         assert all("metadataFilters" not in r.body for r in lists)
