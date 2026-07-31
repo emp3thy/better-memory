@@ -446,9 +446,11 @@ class AgentCoreBackend:
         project_ns = resolve_namespace(actor_id, "reflections")
         general_ns = resolve_namespace("general", "reflections")
         allowed_general = frozenset({"active", "promoted"})
-        allowed_project = (
-            allowed_general if actor_id == "general" else frozenset({"active"})
-        )
+        # Same admit set as ``reflection_list`` — a migrated ``confirmed``
+        # reflection lives in ``projects/{p}/reflections/`` with body status
+        # ``promoted`` (see agentcore_migrate: confirmed→promoted, scope→ns);
+        # narrower vocabularies here silently drop the reviewed corpus.
+        allowed_project = allowed_general
         namespaces: list[tuple[str, frozenset[str]]] = [
             (project_ns, allowed_project)
         ]
