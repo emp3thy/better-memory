@@ -76,3 +76,106 @@ class TestPretoolLatch:
     def test_corrupt_state_means_not_fired(self, tmp_path):
         (tmp_path / "context_seen_sess.json").write_text("{", encoding="utf-8")
         assert SeenStore(tmp_path, "sess").pretool_fired() is False
+
+    def test_try_claim_pretool_fired_only_first_caller_wins(self, tmp_path):
+        # #107: PreToolUse "one real firing per session" was a check-then-set
+        # across two file operations, so N parallel hook processes could all
+        # observe pretool_fired == False and all proceed. The sentinel-based
+        # atomic claim guarantees exactly one True return.
+        stores = [SeenStore(tmp_path, "sess") for _ in range(4)]
+        wins = [s.try_claim_pretool_fired() for s in stores]
+        assert wins.count(True) == 1
+        assert wins.count(False) == 3
+        # And every subsequent instance sees the latch as fired.
+        assert SeenStore(tmp_path, "sess").pretool_fired() is True
+
+    def test_prune_stale_removes_pretool_sentinel(self, tmp_path):
+        import os
+        SeenStore(tmp_path, "sess").mark_pretool_fired()
+        sentinel = tmp_path / "context_seen_sess.pretool"
+        assert sentinel.exists()
+        ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+        os.utime(sentinel, (ten_days_ago, ten_days_ago))
+        prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
+        assert not sentinel.exists()
+
+
+class TestConcurrentMutators:
+    def test_save_uses_per_call_unique_tmp(self, tmp_path, monkeypatch):
+        # #107 (BugBot follow-up): the atomic-write path must derive a
+        # per-call-unique tmp so two concurrent writers don't truncate
+        # each other's in-flight file and lose one write on the second
+        # os.replace ("no such file"). Assert that back-to-back _saves
+        # use distinct source paths at os.replace.
+        import os as _os
+        s = SeenStore(tmp_path, "sess")
+        seen_srcs: list[str] = []
+        orig_replace = _os.replace
+        def spy_replace(src, dst):  # noqa: ANN001 - test spy
+            seen_srcs.append(str(src))
+            return orig_replace(src, dst)
+        monkeypatch.setattr(_os, "replace", spy_replace)
+        s.bump_turn()
+        s.mark_seen([("k", "v")])
+        assert len(seen_srcs) == 2
+        assert seen_srcs[0] != seen_srcs[1]
+        # And no leftover tmp siblings after successful writes.
+        leftovers = [p.name for p in tmp_path.iterdir() if ".tmp" in p.name]
+        assert leftovers == []
+
+    def test_save_is_atomic_via_temp_replace(self, tmp_path):
+        # #107: previously plain write_text left a window where a
+        # concurrent reader could see a truncated file. Assert the temp
+        # sibling is cleaned up and the final file is complete JSON.
+        s = SeenStore(tmp_path, "sess")
+        s.bump_turn()
+        s.mark_seen([("reflection", "r1"), ("semantic", "m1")])
+        path = tmp_path / "context_seen_sess.json"
+        assert path.exists()
+        import json as _json
+        loaded = _json.loads(path.read_text(encoding="utf-8"))
+        assert loaded["turn"] == 1
+        assert loaded["seen"] == {"reflection:r1": 1, "semantic:m1": 1}
+        # No temp sibling from atomic write should linger on success.
+        assert not any(".tmp" in p.name for p in tmp_path.iterdir())
+
+    def test_mark_seen_stamps_with_freshly_read_turn_not_stale_local(self, tmp_path):
+        # #107 (BugBot follow-up): mark_seen re-reads to preserve a
+        # concurrent writer's seen entries, but the *stamp* for new
+        # entries must also come from the freshly-read turn (or the
+        # local turn if it's ahead), not the possibly-stale local
+        # snapshot alone. Otherwise a concurrent bump_turn between our
+        # load and our mark_seen leaves the entry stamped one turn (or
+        # more) below the file's true turn, and filter_unseen's
+        # (turn - last) > reinject_turns gate opens prematurely.
+        a = SeenStore(tmp_path, "sess")
+        a.bump_turn()  # a and file both at turn=1
+        # A parallel writer bumps the file forward while `a` is
+        # mid-retrieval (a's in-memory _data still says turn=1).
+        b = SeenStore(tmp_path, "sess")
+        b.bump_turn()  # file now at turn=2
+        a.mark_seen([("reflection", "r1")])
+        stamped = SeenStore(tmp_path, "sess")
+        assert stamped._data["seen"]["reflection:r1"] == 2
+        # A next-turn reader with reinject_turns=1 must NOT reinject:
+        # (turn - last) = (2 - 2) = 0, not > 1.
+        assert stamped.filter_unseen(
+            [("reflection", "r1")], reinject_turns=1,
+        ) == []
+
+    def test_mark_seen_merges_concurrent_writers_state(self, tmp_path):
+        # #107: two hook processes at the same turn each marked disjoint
+        # ids; the second _save from a stale snapshot dropped the first
+        # process's entries. Both writers now re-read + merge, so the
+        # union survives.
+        a = SeenStore(tmp_path, "sess")
+        b = SeenStore(tmp_path, "sess")
+        a.bump_turn()  # a and b both loaded turn=0; a advances the file to 1
+        b.mark_seen([("reflection", "r1")])  # b writes with its snapshot
+        a.mark_seen([("semantic", "m1")])   # a writes with its snapshot
+        # Union of both writers' entries survives on disk.
+        fresh = SeenStore(tmp_path, "sess")
+        # Neither key should be filter_unseen-visible on a fresh read.
+        assert fresh.filter_unseen(
+            [("reflection", "r1"), ("semantic", "m1")], reinject_turns=0,
+        ) == []

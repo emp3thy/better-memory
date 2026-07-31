@@ -8,18 +8,30 @@ scratch, not a rating record. Never raises: corrupt or unwritable state
 degrades to "nothing seen".
 
 File format: ``context_seen_<session_id>.json`` ->
-``{"turn": int, "seen": {"<kind>:<id>": last_injected_turn},
-"pretool_fired": bool}``. ``pretool_fired`` latches PreToolUse to one real
-firing per session (see :meth:`SeenStore.pretool_fired`).
+``{"turn": int, "seen": {"<kind>:<id>": last_injected_turn}}``. Writes go
+through a temp file + :func:`os.replace` so a concurrent reader never sees
+a partial JSON, and mutators re-read the on-disk snapshot before merging
+so a second process's writes are not silently clobbered.
+
+The PreToolUse "one real firing per session" latch is a sibling sentinel
+file ``context_seen_<session_id>.pretool`` claimed atomically via
+``os.open(..., O_CREAT|O_EXCL)``. Only :meth:`SeenStore.try_claim_pretool_fired`
+is race-free; the older read-then-write pair (:meth:`pretool_fired` /
+:meth:`mark_pretool_fired`) is retained for compatibility but callers on
+the concurrent path must use the atomic claim.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
-_FILE_RE = re.compile(r"^context_seen_.+\.json$")
+# Matches the state JSON, the pretool sentinel, and stray `.tmp` siblings
+# left behind by a process hard-killed between mkstemp and os.replace.
+_FILE_RE = re.compile(r"^context_seen_.+\.(json|pretool|json\..+\.tmp)$")
 _SAFE_SESSION_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
@@ -32,6 +44,7 @@ class SeenStore:
         self._dir = state_dir
         safe = _SAFE_SESSION_RE.sub("_", session_id or "unknown")
         self._path = state_dir / f"context_seen_{safe}.json"
+        self._sentinel = state_dir / f"context_seen_{safe}.pretool"
         self._data = self._load()
 
     def _load(self) -> dict:
@@ -41,7 +54,6 @@ class SeenStore:
                 return {
                     "turn": int(raw.get("turn") or 0),
                     "seen": raw["seen"],
-                    "pretool_fired": bool(raw.get("pretool_fired")),
                 }
         except BaseException:  # noqa: BLE001 - corrupt/missing -> empty
             pass
@@ -50,11 +62,33 @@ class SeenStore:
     def _save(self) -> None:
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps(self._data), encoding="utf-8")
+            # Per-call-unique tmp so concurrent writers to the same
+            # session file don't truncate each other's in-flight temp
+            # and cause one writer's os.replace to silently publish the
+            # other's content (or fail after the other's replace already
+            # moved the shared tmp). Mirrors runtime/session_marker.py.
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f"{self._path.name}.",
+                suffix=".tmp",
+                dir=self._dir,
+            )
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(self._data))
+                os.replace(tmp_path, self._path)
+            except BaseException:  # noqa: BLE001
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except BaseException:  # noqa: BLE001
+                    pass
         except BaseException:  # noqa: BLE001 - best-effort
             pass
 
     def bump_turn(self) -> int:
+        # Re-read latest on-disk snapshot so a concurrent process's turn
+        # bump isn't silently overwritten by our stale copy.
+        self._data = self._load()
         self._data["turn"] = int(self._data.get("turn") or 0) + 1
         self._save()
         return self._data["turn"]
@@ -73,21 +107,62 @@ class SeenStore:
         return out
 
     def mark_seen(self, ids: list[tuple[str, str]]) -> None:
-        turn = int(self._data.get("turn") or 0)
+        # Re-read + merge so a concurrent writer's mark_seen entries are
+        # preserved when we write our own back. Stamp new entries with
+        # the freshly-read turn (or our own if it's ahead), never our
+        # possibly-stale local snapshot — otherwise a concurrent bump_turn
+        # between our load and this call would leave the entry stamped
+        # with an older turn and filter_unseen would trip its
+        # (turn - last) > reinject_turns gate one turn early.
+        latest = self._load()
+        turn = max(
+            int(latest.get("turn") or 0),
+            int(self._data.get("turn") or 0),
+        )
+        merged_seen = dict(latest.get("seen") or {})
         for kind, id_ in ids:
-            self._data["seen"][_key(kind, id_)] = turn
+            merged_seen[_key(kind, id_)] = turn
+        self._data = {"turn": turn, "seen": merged_seen}
         self._save()
+
+    def try_claim_pretool_fired(self) -> bool:
+        """Atomic check-and-set on a sentinel file.
+
+        Returns True iff this call created the sentinel (i.e. this process
+        is the first firing this session); False if the sentinel already
+        exists or the claim could not be established. Safe to race across
+        processes: ``O_CREAT|O_EXCL`` guarantees at most one caller sees
+        the True return per session.
+        """
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                str(self._sentinel),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+        except BaseException:  # noqa: BLE001 - best-effort; behave as "already claimed"
+            return False
 
     def pretool_fired(self) -> bool:
-        return bool(self._data.get("pretool_fired"))
+        return self._sentinel.exists()
 
     def mark_pretool_fired(self) -> None:
-        self._data["pretool_fired"] = True
-        self._save()
+        # Retained for compatibility; the sentinel is idempotent so
+        # racing callers converge on the same on-disk state, though only
+        # try_claim_pretool_fired() distinguishes the winner.
+        self.try_claim_pretool_fired()
 
 
 def prune_stale(state_dir: Path, *, now: datetime, max_age_days: int = 7) -> None:
-    """Delete context_seen files older than max_age_days. Never raises."""
+    """Delete context_seen state / pretool sentinels older than max_age_days.
+
+    Never raises.
+    """
     try:
         cutoff = now.timestamp() - max_age_days * 86400
         for f in state_dir.iterdir():
