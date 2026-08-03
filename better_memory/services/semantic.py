@@ -108,6 +108,13 @@ class SemanticMemoryService:
     def update_text(self, *, id: str, content: str) -> None:
         if not content.strip():
             raise ValueError("content must not be empty")
+        # Validate existence BEFORE spending the (blocking) embed. Without
+        # this check a stale id from MCP / UI would pay the full ~15s
+        # Ollama worker timeout before failing — see #125 review.
+        if self._conn.execute(
+            "SELECT 1 FROM semantic_memories WHERE id = ?", (id,),
+        ).fetchone() is None:
+            raise ValueError(f"semantic memory not found: {id}")
         now = self._clock().isoformat()
         # Compute the embedding BEFORE the UPDATE opens sqlite3's implicit
         # write transaction — see #97.
@@ -119,9 +126,9 @@ class SemanticMemoryService:
             (content, now, id),
         )
         if cur.rowcount == 0:
-            # No row updated — roll back the implicit BEGIN that sqlite3
-            # opened before the UPDATE so we don't strand the WAL write
-            # lock for callers sharing this connection. Mirrors
+            # Race: row was deleted between our SELECT and UPDATE. Rare,
+            # but roll back the implicit BEGIN so we don't strand the WAL
+            # write lock for callers sharing this connection. Mirrors
             # ObservationService.set_outcome (better_memory/services/observation.py:435).
             self._conn.rollback()
             raise ValueError(f"semantic memory not found: {id}")
