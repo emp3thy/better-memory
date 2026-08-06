@@ -60,11 +60,13 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
             return False
         conn = connect(cfg.memory_db)
         try:
-            # Dedupe by (memory_kind, memory_id) — a memory can have two
-            # exposure rows (bootstrap + retrieve) in one session. The
-            # MIN(exposed_at) keeps deterministic ordering; the rating
-            # apply path stamps ALL unrated rows per (kind, id) in one
-            # UPDATE, so one rating per unique memory is the correct
+            # Dedupe by (memory_kind, memory_id) — every current writer
+            # enforces at most one exposure row per (session, kind, id) via
+            # a NOT-EXISTS guard, so duplicates here can only be legacy rows
+            # predating that guard. The GROUP BY handles those legacy
+            # duplicates; MIN(exposed_at) keeps deterministic ordering, and
+            # the rating apply path stamps ALL unrated rows per (kind, id)
+            # in one UPDATE, so one rating per unique memory is the correct
             # contract to surface to the LLM.
             # Standalone copy, intentionally not delegated to
             # better_memory.services.exposure_log.list_unrated (see that
@@ -76,7 +78,7 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
                 SELECT e.memory_kind, e.memory_id,
                        MIN(e.exposed_at) AS exposed_at,
                        MIN(e.source) AS source,
-                       COALESCE(e.display, r.title, s.content) AS display
+                       COALESCE(MAX(e.display), r.title, s.content) AS display
                   FROM session_memory_exposure e
                   LEFT JOIN reflections        r ON e.memory_kind='reflection'
                                                 AND e.memory_id = r.id

@@ -93,13 +93,16 @@ def record(
 def list_unrated(conn: sqlite3.Connection, *, session_id: str) -> list[sqlite3.Row]:
     """Return unrated exposure rows for ``session_id``, grouped by memory.
 
-    A memory can have two exposure rows (bootstrap + retrieve) in one
-    session; the rating apply path stamps ALL unrated rows per (kind, id) in
-    one UPDATE, so callers need one entry per unique memory rather than one
-    per raw row. Rows are grouped by (memory_kind, memory_id) with
-    ``MIN(exposed_at)`` / ``MIN(source)`` for deterministic first-exposure
-    values, joined against ``reflections.title`` / ``semantic_memories.content``
-    for display, ordered by first exposure ascending, and rated rows
+    Every current writer enforces at most one exposure row per (session,
+    kind, id) via a NOT-EXISTS guard, so a memory having more than one row
+    here can only be a legacy duplicate predating that guard. The GROUP BY
+    handles those legacy duplicates; the rating apply path stamps ALL
+    unrated rows per (kind, id) in one UPDATE, so callers need one entry per
+    unique memory rather than one per raw row. Rows are grouped by
+    (memory_kind, memory_id) with ``MIN(exposed_at)`` / ``MIN(source)`` for
+    deterministic first-exposure values, joined against
+    ``reflections.title`` / ``semantic_memories.content`` for display,
+    ordered by first exposure ascending, and rated rows
     (``rated_at IS NOT NULL``) excluded.
 
     Returns rows with columns: ``memory_kind``, ``memory_id``, ``exposed_at``,
@@ -110,7 +113,7 @@ def list_unrated(conn: sqlite3.Connection, *, session_id: str) -> list[sqlite3.R
         SELECT e.memory_kind, e.memory_id,
                MIN(e.exposed_at) AS exposed_at,
                MIN(e.source) AS source,
-               COALESCE(e.display, r.title, s.content) AS display
+               COALESCE(MAX(e.display), r.title, s.content) AS display
           FROM session_memory_exposure e
           LEFT JOIN reflections        r ON e.memory_kind='reflection'
                                         AND e.memory_id = r.id

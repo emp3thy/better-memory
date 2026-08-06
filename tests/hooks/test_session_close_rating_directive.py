@@ -281,5 +281,20 @@ class TestRatingDirectiveEmission:
         result = _run_hook(env)
         payload = json.loads(result.stdout)
         directive = payload["hookSpecificOutput"]["additionalContext"]
-        assert "Semantic" not in directive
+        assert "Semantic (" not in directive
         assert "(none)" not in directive
+
+    def test_empty_reflection_bucket_omitted(self, tmp_path, tmp_memory_db):
+        c = connect(tmp_memory_db)
+        apply_migrations(c)
+        c.close()
+        _seed_semantic_exposure(tmp_memory_db, "S1")  # semantic only
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Reflections (" not in directive
+        assert "My Semantic Fact" in directive
