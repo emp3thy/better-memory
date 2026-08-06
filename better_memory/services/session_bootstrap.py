@@ -18,7 +18,7 @@ in an outer transaction they intend to roll back.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -147,7 +147,7 @@ class SessionBootstrapService:
         self,
         *,
         session_id: str,
-        items: list[tuple[str, str, str | None]],
+        items: Sequence[tuple[str, str, str | None]],
         source: str,
     ) -> None:
         """Write one session_memory_exposure row per (kind, id, display) triple.

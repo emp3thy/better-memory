@@ -34,6 +34,7 @@ so callers must continue to do so here.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 
 _DISPLAY_TRUNC = 120
 
@@ -42,7 +43,7 @@ def record(
     conn: sqlite3.Connection,
     *,
     session_id: str,
-    items: list[tuple[str, str, str | None]],
+    items: Sequence[tuple[str, str, str | None]],
     source: str,
     now: str,
     exploration_ids: frozenset[str] = frozenset(),
