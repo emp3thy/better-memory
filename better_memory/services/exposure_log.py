@@ -1,9 +1,12 @@
 """Shared exposure-ledger SQL: one implementation for every storage backend.
 
-Three primitives, lifted verbatim from their original call sites so sqlite
-behaviour stays byte-identical (this module is a pure extraction, pinned by
-``tests/services/test_exposure_log.py`` + the four other suites listed in its
-docstring):
+Three primitives, largely lifted from their original call sites (this module is
+pinned by ``tests/services/test_exposure_log.py`` + the four other suites
+listed in its docstring). Extended with display-column snapshot support:
+``record`` writes a ``display`` column (title/content captured at exposure time,
+truncated to 120 chars); ``list_unrated`` COALESCEs the snapshot over joined
+title/content. These extensions mean the module is no longer byte-identical to
+the original inline SQL:
 
 - ``record``: the first-source-wins ``INSERT..WHERE NOT EXISTS`` dedup guard
   originally inline in ``SessionBootstrapService.record_exposures``
