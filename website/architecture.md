@@ -201,11 +201,12 @@ described below:
    [`session_close`](https://github.com/emp3thy/better-memory/blob/main/better_memory/hooks/session_close.py)
    hook checks for unrated exposures. If any exist, it emits a `Stop`
    block directive triggering the `rate-session-memories` skill. The
-   directive opens with an `Evidence line first; none possible = ignored`
-   instruction, then lists pending exposures grouped by kind
-   (`Reflections (N):` / `Semantic (N):`), one line per exposure —
-   `- {id} [{source}] {display}`, `display` truncated to 80 chars and
-   read via `COALESCE(e.display, r.title, s.content)` off the
+   directive opens with a `RATE_MEMORIES: {n} unrated. Invoke skill
+   rate-session-memories.` header line, followed by an `Evidence line
+   first; none possible = ignored.` rule line, then pending exposures
+   grouped by kind (`Reflections (N):` / `Semantic (N):`), one line per
+   exposure — `- {id} [{source}] {display}`, `display` truncated to 80
+   chars and read via `COALESCE(e.display, r.title, s.content)` off the
    `session_memory_exposure` row (falling back to the live title/content
    only when no display snapshot was captured at exposure time). The
    skill then calls `memory.list_session_exposures` and
