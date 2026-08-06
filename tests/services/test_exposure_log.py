@@ -15,6 +15,7 @@ implementation:
 
 No commits inside the module — callers own the transaction.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -77,7 +78,7 @@ class TestRecord:
         exposure_log.record(
             conn,
             session_id="s1",
-            items=[("reflection", "r-a"), ("semantic", "s-a")],
+            items=[("reflection", "r-a", None), ("semantic", "s-a", None)],
             source="bootstrap",
             now="2026-01-01T00:00:00Z",
         )
@@ -88,15 +89,21 @@ class TestRecord:
 
     def test_no_op_when_session_id_empty(self, conn):
         exposure_log.record(
-            conn, session_id="", items=[("reflection", "r-a")],
-            source="bootstrap", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="",
+            items=[("reflection", "r-a", None)],
+            source="bootstrap",
+            now="2026-01-01T00:00:00Z",
         )
         conn.commit()
         assert _rows(conn, session_id="") == []
 
     def test_no_op_when_items_empty(self, conn):
         exposure_log.record(
-            conn, session_id="s1", items=[], source="bootstrap",
+            conn,
+            session_id="s1",
+            items=[],
+            source="bootstrap",
             now="2026-01-01T00:00:00Z",
         )
         conn.commit()
@@ -104,12 +111,18 @@ class TestRecord:
 
     def test_first_source_wins_dedup(self, conn):
         exposure_log.record(
-            conn, session_id="s1", items=[("reflection", "r-a")],
-            source="bootstrap", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-a", None)],
+            source="bootstrap",
+            now="2026-01-01T00:00:00Z",
         )
         exposure_log.record(
-            conn, session_id="s1", items=[("reflection", "r-a")],
-            source="retrieve", now="2026-01-01T00:01:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-a", None)],
+            source="retrieve",
+            now="2026-01-01T00:01:00Z",
         )
         conn.commit()
         rows = _rows(conn)
@@ -118,12 +131,18 @@ class TestRecord:
 
     def test_other_sessions_unaffected(self, conn):
         exposure_log.record(
-            conn, session_id="s1", items=[("reflection", "r-a")],
-            source="bootstrap", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-a", None)],
+            source="bootstrap",
+            now="2026-01-01T00:00:00Z",
         )
         exposure_log.record(
-            conn, session_id="s2", items=[("reflection", "r-a")],
-            source="bootstrap", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="s2",
+            items=[("reflection", "r-a", None)],
+            source="bootstrap",
+            now="2026-01-01T00:00:00Z",
         )
         conn.commit()
         assert len(_rows(conn, "s1")) == 1
@@ -131,9 +150,11 @@ class TestRecord:
 
     def test_exploration_ids_tag_via_exploration(self, conn):
         exposure_log.record(
-            conn, session_id="s1",
-            items=[("reflection", "r-untested"), ("reflection", "r-proven")],
-            source="retrieve", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-untested", None), ("reflection", "r-proven", None)],
+            source="retrieve",
+            now="2026-01-01T00:00:00Z",
             exploration_ids=frozenset({"r-untested"}),
         )
         conn.commit()
@@ -143,8 +164,11 @@ class TestRecord:
 
     def test_default_exploration_ids_is_empty_frozenset(self, conn):
         exposure_log.record(
-            conn, session_id="s1", items=[("reflection", "r-a")],
-            source="bootstrap", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-a", None)],
+            source="bootstrap",
+            now="2026-01-01T00:00:00Z",
         )
         conn.commit()
         assert _rows(conn)[0]["via_exploration"] == 0
@@ -154,12 +178,18 @@ class TestRecord:
         # would have tagged it as an exploration serve must not retag it;
         # first-source-wins applies to the whole row, tag included.
         exposure_log.record(
-            conn, session_id="s1", items=[("reflection", "r-x")],
-            source="bootstrap", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-x", None)],
+            source="bootstrap",
+            now="2026-01-01T00:00:00Z",
         )
         exposure_log.record(
-            conn, session_id="s1", items=[("reflection", "r-x")],
-            source="retrieve", now="2026-01-01T00:01:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-x", None)],
+            source="retrieve",
+            now="2026-01-01T00:01:00Z",
             exploration_ids=frozenset({"r-x"}),
         )
         conn.commit()
@@ -169,8 +199,11 @@ class TestRecord:
 
     def test_no_commit_inside_record(self, conn):
         exposure_log.record(
-            conn, session_id="s1", items=[("reflection", "r-a")],
-            source="bootstrap", now="2026-01-01T00:00:00Z",
+            conn,
+            session_id="s1",
+            items=[("reflection", "r-a", None)],
+            source="bootstrap",
+            now="2026-01-01T00:00:00Z",
         )
         # The module never commits — the write started an implicit
         # transaction that only the caller's own commit() can close.
@@ -280,8 +313,12 @@ class TestStamp:
         conn.commit()
 
         rowcount = exposure_log.stamp(
-            conn, session_id="s1", kind="reflection", memory_id=rid,
-            classification="cited", evidence="fixed the bug",
+            conn,
+            session_id="s1",
+            kind="reflection",
+            memory_id=rid,
+            classification="cited",
+            evidence="fixed the bug",
             now="2026-01-01T13:00:00Z",
         )
         conn.commit()
@@ -313,8 +350,12 @@ class TestStamp:
         conn.commit()
 
         rowcount = exposure_log.stamp(
-            conn, session_id="s1", kind="reflection", memory_id=rid,
-            classification="shaped", evidence="used it",
+            conn,
+            session_id="s1",
+            kind="reflection",
+            memory_id=rid,
+            classification="shaped",
+            evidence="used it",
             now="2026-01-01T14:00:00Z",
         )
         conn.commit()
@@ -335,8 +376,12 @@ class TestStamp:
         conn.commit()
 
         rowcount = exposure_log.stamp(
-            conn, session_id="s1", kind="reflection", memory_id=rid,
-            classification="shaped", evidence="second pass",
+            conn,
+            session_id="s1",
+            kind="reflection",
+            memory_id=rid,
+            classification="shaped",
+            evidence="second pass",
             now="2026-01-01T15:00:00Z",
         )
         conn.commit()
@@ -355,8 +400,12 @@ class TestStamp:
         conn.commit()
 
         exposure_log.stamp(
-            conn, session_id="s1", kind="reflection", memory_id=rid,
-            classification="cited", evidence="fixed the bug",
+            conn,
+            session_id="s1",
+            kind="reflection",
+            memory_id=rid,
+            classification="cited",
+            evidence="fixed the bug",
             now="2026-01-01T13:00:00Z",
         )
         assert conn.in_transaction is True
@@ -370,9 +419,93 @@ class TestStamp:
 
 class TestDisplayColumn:
     def test_session_memory_exposure_has_display_column(self, conn):
-        cols = {
-            row[1] for row in conn.execute(
-                "PRAGMA table_info(session_memory_exposure)"
-            )
-        }
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(session_memory_exposure)")}
         assert "display" in cols
+
+
+class TestRecordDisplay:
+    def test_display_persisted(self, conn):
+        exposure_log.record(
+            conn,
+            session_id="s1",
+            items=[("reflection", "mem-aws-1", "AWS Title")],
+            source="retrieve",
+            now="2026-08-06T10:00:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT display FROM session_memory_exposure WHERE memory_id = 'mem-aws-1'"
+        ).fetchone()
+        assert row["display"] == "AWS Title"
+
+    def test_display_truncated_to_120(self, conn):
+        exposure_log.record(
+            conn,
+            session_id="s1",
+            items=[("reflection", "mem-aws-2", "x" * 300)],
+            source="retrieve",
+            now="2026-08-06T10:00:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT display FROM session_memory_exposure WHERE memory_id = 'mem-aws-2'"
+        ).fetchone()
+        assert row["display"] == "x" * 120
+
+    def test_display_none_allowed(self, conn):
+        exposure_log.record(
+            conn,
+            session_id="s1",
+            items=[("reflection", "mem-aws-3", None)],
+            source="retrieve",
+            now="2026-08-06T10:00:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT display FROM session_memory_exposure WHERE memory_id = 'mem-aws-3'"
+        ).fetchone()
+        assert row["display"] is None
+
+
+class TestListUnratedDisplayCoalesce:
+    def test_snapshot_beats_join(self, conn):
+        conn.execute(
+            "INSERT INTO reflections (id, title, project, phase, polarity,"
+            " use_cases, hints, confidence, created_at, updated_at)"
+            " VALUES ('r1', 'Live Title', 'p', 'general', 'do', 'uc', '[]',"
+            " 0.5, '2026-01-01', '2026-01-01')"
+        )
+        exposure_log.record(
+            conn,
+            session_id="s1",
+            items=[("reflection", "r1", "Snapshot Title")],
+            source="retrieve",
+            now="2026-08-06T10:00:00+00:00",
+        )
+        rows = exposure_log.list_unrated(conn, session_id="s1")
+        assert rows[0]["display"] == "Snapshot Title"
+
+    def test_null_snapshot_falls_back_to_join(self, conn):
+        conn.execute(
+            "INSERT INTO reflections (id, title, project, phase, polarity,"
+            " use_cases, hints, confidence, created_at, updated_at)"
+            " VALUES ('r2', 'Live Title', 'p', 'general', 'do', 'uc', '[]',"
+            " 0.5, '2026-01-01', '2026-01-01')"
+        )
+        exposure_log.record(
+            conn,
+            session_id="s1",
+            items=[("reflection", "r2", None)],
+            source="retrieve",
+            now="2026-08-06T10:00:00+00:00",
+        )
+        rows = exposure_log.list_unrated(conn, session_id="s1")
+        assert rows[0]["display"] == "Live Title"
+
+    def test_foreign_id_null_snapshot_yields_none(self, conn):
+        exposure_log.record(
+            conn,
+            session_id="s1",
+            items=[("reflection", "mem-aws-9", None)],
+            source="retrieve",
+            now="2026-08-06T10:00:00+00:00",
+        )
+        rows = exposure_log.list_unrated(conn, session_id="s1")
+        assert rows[0]["display"] is None

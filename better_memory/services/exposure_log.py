@@ -11,9 +11,13 @@ docstring):
   mirrors the ``via_exploration`` write in
   ``ReflectionSynthesisService.retrieve_reflections`` (``reflection.py``).
   Passing no ``exploration_ids`` (the default, an empty frozenset) reproduces
-  the original ``record_exposures`` behaviour exactly.
+  the original ``record_exposures`` behaviour exactly. Extended with ``display``
+  column to snapshot title/content at exposure time, truncated to 120 chars —
+  needed because agentcore memory ids do not exist in local content tables.
 - ``list_unrated``: the grouped/deduped/display-joined query originally
-  inline in ``SessionBootstrapService.list_session_exposures``.
+  inline in ``SessionBootstrapService.list_session_exposures``, extended to
+  COALESCE the snapshot ``display`` column over the joined title/content
+  for display values.
 - ``stamp``: the exposure-row ``UPDATE`` originally inline in
   ``MemoryRatingService._apply_one``. Copied, not rewired — the sqlite
   rating service keeps its own inline copy; this one is for the agentcore
@@ -23,27 +27,34 @@ Connection ownership: NONE of these functions call ``conn.commit()``. Every
 existing call site already commits after invoking the original inline SQL,
 so callers must continue to do so here.
 """
+
 from __future__ import annotations
 
 import sqlite3
+
+_DISPLAY_TRUNC = 120
 
 
 def record(
     conn: sqlite3.Connection,
     *,
     session_id: str,
-    items: list[tuple[str, str]],
+    items: list[tuple[str, str, str | None]],
     source: str,
     now: str,
     exploration_ids: frozenset[str] = frozenset(),
 ) -> None:
-    """Write one ``session_memory_exposure`` row per (kind, id) item.
+    """Write one ``session_memory_exposure`` row per (kind, id, display) item.
 
     At most one row per (session, kind, id), regardless of how many times
     the memory is re-served within the session — first source (and first
     ``via_exploration`` value) wins; a later call for an already-exposed
     (session, kind, id) is a no-op, even if it would have tagged the row as
     an exploration serve.
+
+    Display is a snapshot of the memory's title/content captured at exposure
+    time (None when the caller has none), truncated to 120 chars — needed
+    because agentcore memory ids do not exist in local content tables.
 
     Best-effort: no-op when ``session_id`` or ``items`` is empty. Does not
     commit — the caller owns the transaction.
@@ -53,18 +64,25 @@ def record(
     conn.executemany(
         "INSERT INTO session_memory_exposure "
         "(session_id, memory_kind, memory_id, exposed_at, source, "
-        " via_exploration) "
-        "SELECT ?, ?, ?, ?, ?, ? "
+        " via_exploration, display) "
+        "SELECT ?, ?, ?, ?, ?, ?, ? "
         "WHERE NOT EXISTS ("
         "  SELECT 1 FROM session_memory_exposure "
         "  WHERE session_id = ? AND memory_kind = ? AND memory_id = ?)",
         [
             (
-                session_id, kind, mid, now, source,
+                session_id,
+                kind,
+                mid,
+                now,
+                source,
                 1 if mid in exploration_ids else 0,
-                session_id, kind, mid,
+                (display[:_DISPLAY_TRUNC] if display else None),
+                session_id,
+                kind,
+                mid,
             )
-            for kind, mid in items
+            for kind, mid, display in items
         ],
     )
 
@@ -89,7 +107,7 @@ def list_unrated(conn: sqlite3.Connection, *, session_id: str) -> list[sqlite3.R
         SELECT e.memory_kind, e.memory_id,
                MIN(e.exposed_at) AS exposed_at,
                MIN(e.source) AS source,
-               COALESCE(r.title, s.content) AS display
+               COALESCE(e.display, r.title, s.content) AS display
           FROM session_memory_exposure e
           LEFT JOIN reflections        r ON e.memory_kind='reflection'
                                         AND e.memory_id = r.id
