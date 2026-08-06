@@ -361,3 +361,18 @@ class TestStamp:
         )
         assert conn.in_transaction is True
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# display column
+# ---------------------------------------------------------------------------
+
+
+class TestDisplayColumn:
+    def test_session_memory_exposure_has_display_column(self, conn):
+        cols = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(session_memory_exposure)"
+            )
+        }
+        assert "display" in cols
