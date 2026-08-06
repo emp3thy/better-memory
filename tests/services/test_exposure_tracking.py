@@ -223,7 +223,7 @@ class TestRecordExposuresPublicMethod:
         svc = SessionBootstrapService(conn, clock=fixed_clock)
         svc.record_exposures(
             session_id="s-ctx",
-            items=[("reflection", "r1"), ("semantic", "m1")],
+            items=[("reflection", "r1", None), ("semantic", "m1", None)],
             source="contextual",
         )
         rows = conn.execute(
@@ -240,7 +240,7 @@ class TestRecordExposuresPublicMethod:
 
         svc = SessionBootstrapService(conn, clock=fixed_clock)
         svc.record_exposures(
-            session_id="", items=[("reflection", "r1")], source="contextual",
+            session_id="", items=[("reflection", "r1", None)], source="contextual",
         )
         n = conn.execute(
             "SELECT COUNT(*) AS n FROM session_memory_exposure"

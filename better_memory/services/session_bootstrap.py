@@ -147,10 +147,10 @@ class SessionBootstrapService:
         self,
         *,
         session_id: str,
-        items: list[tuple[str, str]],
+        items: list[tuple[str, str, str | None]],
         source: str,
     ) -> None:
-        """Write one session_memory_exposure row per (kind, id) item.
+        """Write one session_memory_exposure row per (kind, id, display) triple.
 
         At most one row per (session, kind, id), regardless of how many times
         the memory is re-served within the session. The rating vocabulary
@@ -182,6 +182,8 @@ class SessionBootstrapService:
         session_id: str,
         reflection_ids: list[str],
         semantic_ids: list[str],
+        reflection_display: dict[str, str | None],
+        semantic_display: dict[str, str | None],
     ) -> None:
         """Write one row per injected memory into session_memory_exposure.
 
@@ -191,8 +193,10 @@ class SessionBootstrapService:
         """
         self.record_exposures(
             session_id=session_id,
-            items=[("reflection", rid) for rid in reflection_ids]
-            + [("semantic", sid) for sid in semantic_ids],
+            items=[("reflection", rid, reflection_display.get(rid))
+                   for rid in reflection_ids]
+            + [("semantic", sid, semantic_display.get(sid))
+               for sid in semantic_ids],
             source="bootstrap",
         )
 
@@ -286,6 +290,8 @@ class SessionBootstrapService:
                 session_id=session_id,
                 reflection_ids=[],
                 semantic_ids=deferred_semantic_ids,
+                reflection_display={},
+                semantic_display={m.id: m.content for m in general_only},
             )
 
             return BootstrapResult(
@@ -358,6 +364,8 @@ class SessionBootstrapService:
             session_id=session_id,
             reflection_ids=reflection_ids,
             semantic_ids=semantic_ids,
+            reflection_display={r["id"]: r.get("title") for _, r in flat_reflections},
+            semantic_display={m.id: m.content for m in semantic},
         )
 
         return BootstrapResult(

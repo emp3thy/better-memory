@@ -428,7 +428,7 @@ def test_agentcore_mode_bootstrap_exposure_lands_in_local_ledger(
             exposure_log.record(
                 self._conn,
                 session_id=kwargs["session_id"],
-                items=[("semantic", "sem-general-1")],
+                items=[("semantic", "sem-general-1", None)],
                 source="bootstrap",
                 now=datetime.now(UTC).isoformat(),
             )

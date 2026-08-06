@@ -378,10 +378,14 @@ class StorageBackend(Protocol):
         self,
         *,
         session_id: str,
-        items: list[tuple[str, str]],
+        items: list[tuple[str, str, str | None]],
         source: str,
     ) -> None:
-        """Record (kind, id) memory exposures for later rating.
+        """Record (kind, id, display) memory exposures for later rating.
+
+        display is a snapshot of the memory's title/content at exposure
+        time (None when unavailable); it makes agentcore-id exposures
+        renderable without any local content row.
 
         Backend-agnostic: both backends write the SAME local
         ``session_memory_exposure`` table via ``services.exposure_log``.

@@ -79,7 +79,7 @@ def test_contextual_injection_full_rating_loop(conn, monkeypatch, tmp_path):
     # 4. Record the contextual exposure for everything just injected.
     backend.record_exposures(
         session_id="e2e-sess",
-        items=[(m.kind, m.id) for m in items],
+        items=[(m.kind, m.id, None) for m in items],
         source="contextual",
     )
 

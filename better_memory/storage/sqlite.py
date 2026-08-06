@@ -440,7 +440,7 @@ class SqliteBackend:
         self,
         *,
         session_id: str,
-        items: list[tuple[str, str]],
+        items: list[tuple[str, str, str | None]],
         source: str,
     ) -> None:
         self._session_bootstrap.record_exposures(
