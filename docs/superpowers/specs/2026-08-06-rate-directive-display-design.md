@@ -56,8 +56,11 @@ the Stop hook — it must stay synchronous and local
 - **Write sites** (all already hold the record content):
   - `storage/agentcore.py` — `_record_retrieve_exposures` (buckets contain
     parsed records with titles) and the bootstrap/`record_exposures` path.
-  - sqlite path — `services/reflection.py` retrieve +
-    `services/session_bootstrap.py`.
+  - sqlite path — `services/session_bootstrap.py` (bootstrap exposures).
+  - NOT changed: the two inline sqlite exposure INSERTs in
+    `services/reflection.py` and `services/semantic.py` retrieve paths.
+    They only ever write local-table ids, which the join fallback resolves
+    live; snapshotting there would freeze titles for no benefit.
   - `storage/protocol.py` `record_exposures` takes the same
     `(kind, id, display)` triples as `exposure_log.record` (one shape
     everywhere, no separate display param); `hooks/contextual_inject.py`
