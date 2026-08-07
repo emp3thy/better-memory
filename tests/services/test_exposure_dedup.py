@@ -52,7 +52,7 @@ def _seed_reflection(conn, rid):
 class TestExposureDedup:
     def test_record_exposures_is_idempotent_per_session(self, conn):
         svc = SessionBootstrapService(conn)
-        items = [("reflection", "r-a"), ("semantic", "s-a")]
+        items = [("reflection", "r-a", None), ("semantic", "s-a", None)]
         svc.record_exposures(session_id="s1", items=items, source="bootstrap")
         svc.record_exposures(session_id="s1", items=items, source="bootstrap")
         assert len(_rows(conn)) == 2
@@ -62,10 +62,10 @@ class TestExposureDedup:
         # not relabel or duplicate it.
         svc = SessionBootstrapService(conn)
         svc.record_exposures(
-            session_id="s1", items=[("reflection", "r-a")], source="bootstrap"
+            session_id="s1", items=[("reflection", "r-a", None)], source="bootstrap"
         )
         svc.record_exposures(
-            session_id="s1", items=[("reflection", "r-a")], source="retrieve"
+            session_id="s1", items=[("reflection", "r-a", None)], source="retrieve"
         )
         rows = _rows(conn)
         assert len(rows) == 1
@@ -74,10 +74,10 @@ class TestExposureDedup:
     def test_other_sessions_unaffected(self, conn):
         svc = SessionBootstrapService(conn)
         svc.record_exposures(
-            session_id="s1", items=[("reflection", "r-a")], source="bootstrap"
+            session_id="s1", items=[("reflection", "r-a", None)], source="bootstrap"
         )
         svc.record_exposures(
-            session_id="s2", items=[("reflection", "r-a")], source="bootstrap"
+            session_id="s2", items=[("reflection", "r-a", None)], source="bootstrap"
         )
         assert len(_rows(conn, "s1")) == 1
         assert len(_rows(conn, "s2")) == 1

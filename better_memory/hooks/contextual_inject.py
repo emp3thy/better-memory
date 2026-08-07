@@ -165,10 +165,11 @@ def main() -> None:
                 if items:
                     rendered = format_relevant(items)
                     survivors = [(m.kind, m.id) for m in items]
+                    exposure_items = [(m.kind, m.id, m.text) for m in items]
                     try:
                         backend.record_exposures(
                             session_id=session_id,
-                            items=survivors,
+                            items=exposure_items,
                             source="contextual",
                         )
                     except BaseException as exc:  # noqa: BLE001 - never block injection

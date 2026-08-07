@@ -1214,7 +1214,7 @@ def test_record_exposures_is_noop(
     """No exposure log in agentcore mode (see list_session_exposures). Must
     not raise and must not call either boto client."""
     result = backend.record_exposures(
-        session_id="s", items=[("reflection", "r1")], source="contextual",
+        session_id="s", items=[("reflection", "r1", None)], source="contextual",
     )
     assert result is None
     assert mock_data_client.method_calls == []
@@ -2739,7 +2739,7 @@ def test_record_exposures_writes_to_local_ledger_when_available(
 
     backend_with_local_conn.record_exposures(
         session_id="test-session-xyz",
-        items=[("reflection", "refl-ledger-1")],
+        items=[("reflection", "refl-ledger-1", None)],
         source="contextual",
     )
 
@@ -2760,11 +2760,24 @@ def test_record_exposures_without_local_conn_stays_legacy_noop(
     """No local_conn wired (the `backend` fixture default) — record_exposures
     must keep the pre-existing no-op contract: no wire calls, no exception."""
     result = backend.record_exposures(
-        session_id="s", items=[("reflection", "r1")], source="contextual",
+        session_id="s", items=[("reflection", "r1", None)], source="contextual",
     )
     assert result is None
     assert mock_data_client.method_calls == []
     assert mock_control_client.method_calls == []
+
+
+def test_record_exposures_persists_display(backend_with_local_conn, local_conn) -> None:
+    backend_with_local_conn.record_exposures(
+        session_id="s-disp",
+        items=[("reflection", "mem-aws-1", "AWS Reflection Title")],
+        source="contextual",
+    )
+    row = local_conn.execute(
+        "SELECT display FROM session_memory_exposure "
+        "WHERE session_id = 's-disp' AND memory_id = 'mem-aws-1'"
+    ).fetchone()
+    assert row["display"] == "AWS Reflection Title"
 
 
 def test_list_session_exposures_without_local_conn_stays_legacy_empty(backend) -> None:
@@ -2780,7 +2793,7 @@ def test_record_exposures_empty_session_id_writes_nothing(
     """Even with a real local_conn available, an empty session_id must not
     write any row (mirrors exposure_log.record's own best-effort guard)."""
     backend_with_local_conn.record_exposures(
-        session_id="", items=[("reflection", "r1")], source="contextual",
+        session_id="", items=[("reflection", "r1", None)], source="contextual",
     )
     row = local_conn.execute("SELECT COUNT(*) AS n FROM session_memory_exposure").fetchone()
     assert row["n"] == 0

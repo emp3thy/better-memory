@@ -402,6 +402,32 @@ def test_exposures_only_for_full_renders(conn, git_repo: Path) -> None:
             assert mid not in exposed_ids
 
 
+def test_bootstrap_exposure_rows_carry_display_snapshots(conn, git_repo: Path) -> None:
+    """Task 3 fix: prove the reflection_display/semantic_display wiring in
+    _record_exposure (r.get("title") / m.content) end to end through a real
+    bootstrap() call, not just a hand-built triple — a future edit swapping
+    the wrong field or the wrong source list would fail this."""
+    proj = git_repo.name
+    rid = _seed_reflection(
+        conn, project=proj, polarity="do", scope="project",
+        title="known reflection title",
+    )
+    sid = _seed_semantic(
+        conn, content="known semantic content", project=proj, scope="project",
+    )
+
+    svc = SessionBootstrapService(conn, top_n=5)
+    svc.bootstrap(source="startup", session_id="sess-display", cwd=git_repo)
+
+    rows = conn.execute(
+        "SELECT memory_id, display FROM session_memory_exposure WHERE session_id = ?",
+        ("sess-display",),
+    ).fetchall()
+    display_by_id = {r["memory_id"]: r["display"] for r in rows}
+    assert display_by_id[rid] == "known reflection title"
+    assert display_by_id[sid] == "known semantic content"
+
+
 # ---------------------------------------------------------------------------
 # list_session_exposures (Task 5a) — extracted from inline MCP handler.
 # ---------------------------------------------------------------------------

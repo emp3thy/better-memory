@@ -211,7 +211,7 @@ class TestRatingDirectiveEmission:
         markers = list((home / "spool").glob("*_session_end_*.json"))
         assert len(markers) == 1
 
-    def test_directive_lists_overlooked_class(self, tmp_path, tmp_memory_db):
+    def test_directive_keeps_one_rule_line(self, tmp_path, tmp_memory_db):
         _seed_unrated_exposure(tmp_memory_db, "S1")
         env = {
             "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
@@ -221,27 +221,13 @@ class TestRatingDirectiveEmission:
         assert result.returncode == 0
         payload = json.loads(result.stdout)
         directive = payload["hookSpecificOutput"]["additionalContext"]
-        assert "overlooked" in directive
+        assert "Evidence line first; none possible = `ignored`." in directive
+        assert "rate-session-memories" in directive
+        # Rules that now live only in the skill must NOT be restated.
+        assert "Non-ignored ratings" not in directive
+        assert "overlooked" not in directive
 
-    def test_directive_requires_evidence_first(self, tmp_path, tmp_memory_db):
-        _seed_unrated_exposure(tmp_memory_db, "S1")
-        env = {
-            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
-            "CLAUDE_SESSION_ID": "S1",
-        }
-        result = _run_hook(env)
-        assert result.returncode == 0
-        payload = json.loads(result.stdout)
-        directive = payload["hookSpecificOutput"]["additionalContext"]
-        assert "evidence" in directive
-        assert (
-            "FIRST write one line of evidence (what the memory changed, "
-            "or a quote)" in directive
-        )
-        assert "if you cannot, the class is `ignored`" in directive
-        assert "Non-ignored ratings without an evidence line are rejected" in directive
-
-    def test_directive_shows_source_labels_and_counts(
+    def test_directive_shows_source_labels_without_counts_line(
         self, tmp_path, tmp_memory_db,
     ):
         _seed_unrated_exposure(tmp_memory_db, "S1", source="bootstrap")
@@ -256,4 +242,59 @@ class TestRatingDirectiveEmission:
         directive = payload["hookSpecificOutput"]["additionalContext"]
         assert "[bootstrap]" in directive
         assert "[contextual]" in directive
-        assert "sources: bootstrap 1, contextual 1" in directive
+        assert "sources:" not in directive
+        assert "My Title" in directive
+        assert "My Semantic Fact" in directive
+
+    def test_display_snapshot_shown_for_foreign_id(
+        self, tmp_path, tmp_memory_db,
+    ):
+        """An agentcore-style exposure (mem-<uuid> id, NO local content row)
+        renders its snapshotted display text."""
+        c = connect(tmp_memory_db)
+        apply_migrations(c)
+        c.execute(
+            """INSERT INTO session_memory_exposure
+               (session_id, memory_kind, memory_id, exposed_at, source, display)
+               VALUES ('S1', 'reflection', 'mem-abc-123',
+                       '2026-08-06T10:00:00+00:00', 'retrieve',
+                       'Snapshotted AWS Title')"""
+        )
+        c.commit()
+        c.close()
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Snapshotted AWS Title" in directive
+
+    def test_empty_semantic_bucket_omitted(self, tmp_path, tmp_memory_db):
+        _seed_unrated_exposure(tmp_memory_db, "S1")  # reflection only
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Semantic (" not in directive
+        assert "(none)" not in directive
+
+    def test_empty_reflection_bucket_omitted(self, tmp_path, tmp_memory_db):
+        c = connect(tmp_memory_db)
+        apply_migrations(c)
+        c.close()
+        _seed_semantic_exposure(tmp_memory_db, "S1")  # semantic only
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        assert "Reflections (" not in directive
+        assert "My Semantic Fact" in directive

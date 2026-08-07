@@ -35,7 +35,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -366,8 +366,11 @@ class AgentCoreBackend:
             return
         if not sid:
             return
-        all_ids = [r["id"] for bucket in buckets.values() for r in bucket]
-        if not all_ids:
+        all_items = [
+            ("reflection", r["id"], r.get("title"))
+            for bucket in buckets.values() for r in bucket
+        ]
+        if not all_items:
             return
         try:
             from better_memory.services import exposure_log
@@ -375,7 +378,7 @@ class AgentCoreBackend:
             exposure_log.record(
                 self._local_conn,
                 session_id=sid,
-                items=[("reflection", rid) for rid in all_ids],
+                items=all_items,
                 source="retrieve",
                 now=datetime.now(UTC).isoformat(),
                 exploration_ids=frozenset(exploration_ids),
@@ -2077,7 +2080,7 @@ class AgentCoreBackend:
         self,
         *,
         session_id: str,
-        items: list[tuple[str, str]],
+        items: Sequence[tuple[str, str, str | None]],
         source: str,
     ) -> None:
         """Write exposures to the local ledger when one is available.

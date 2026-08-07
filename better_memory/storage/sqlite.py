@@ -29,6 +29,7 @@ N×-multiplied allocations on hot paths.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from typing import Any
 
 from better_memory.services.episode import EpisodeService
@@ -440,7 +441,7 @@ class SqliteBackend:
         self,
         *,
         session_id: str,
-        items: list[tuple[str, str]],
+        items: Sequence[tuple[str, str, str | None]],
         source: str,
     ) -> None:
         self._session_bootstrap.record_exposures(

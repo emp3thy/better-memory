@@ -158,9 +158,9 @@ class TestFullSweepE2E:
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
             items=[
-                ("reflection", "r-cited"),
-                ("reflection", "r-ignored"),
-                ("reflection", "r-misled"),
+                ("reflection", "r-cited", None),
+                ("reflection", "r-ignored", None),
+                ("reflection", "r-misled", None),
             ],
             source="contextual",
         )
@@ -252,7 +252,7 @@ class TestEvidenceRejectionParity:
         _seed_local_reflection(local_conn, "r1", title="t1")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", "r1")],
+            items=[("reflection", "r1", None)],
             source="contextual",
         )
         with pytest.raises(ValueError, match="requires a non-empty evidence line"):
@@ -276,7 +276,7 @@ class TestIgnoredSweepOnlyParity:
         _seed_local_reflection(local_conn, "r1", title="t1")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", "r1")],
+            items=[("reflection", "r1", None)],
             source="contextual",
         )
         mock_data_client.get_memory_record.return_value = _make_record_response("r1")
@@ -308,7 +308,7 @@ class TestEventFailureIsolation:
         _seed_local_reflection(local_conn, "r1", title="t1")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", "r1")],
+            items=[("reflection", "r1", None)],
             source="contextual",
         )
         mock_data_client.get_memory_record.return_value = _make_record_response("r1")
@@ -354,7 +354,11 @@ class TestCounterPushFailureIsolation:
             _seed_local_reflection(local_conn, rid, title=f"title-{rid}")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", "r1"), ("reflection", "r2"), ("reflection", "r3")],
+            items=[
+                ("reflection", "r1", None),
+                ("reflection", "r2", None),
+                ("reflection", "r3", None),
+            ],
             source="contextual",
         )
 
@@ -424,7 +428,7 @@ class TestCounterPushFailureIsolation:
             _seed_local_reflection(local_conn, rid, title=f"title-{rid}")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", "r1"), ("reflection", "r2")],
+            items=[("reflection", "r1", None), ("reflection", "r2", None)],
             source="contextual",
         )
 
@@ -476,7 +480,7 @@ class TestSkipBuckets:
         _seed_local_reflection(local_conn, "r1", title="t1")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", "r1")],
+            items=[("reflection", "r1", None)],
             source="contextual",
         )
         mock_data_client.get_memory_record.return_value = _make_record_response("r1")
@@ -548,7 +552,7 @@ class TestLedgerFailureIsBestEffort:
             _seed_local_reflection(local_conn, rid, title=f"t-{rid}")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", rid) for rid in ("r1", "r2", "r3")],
+            items=[("reflection", rid, None) for rid in ("r1", "r2", "r3")],
             source="contextual",
         )
         mock_data_client.get_memory_record.side_effect = [
@@ -624,7 +628,7 @@ class TestLedgerFailureIsBestEffort:
             _seed_local_reflection(local_conn, rid, title=f"t-{rid}")
         backend_with_ledger.record_exposures(
             session_id="test-session-xyz",
-            items=[("reflection", rid) for rid in ("r1", "r2", "r3")],
+            items=[("reflection", rid, None) for rid in ("r1", "r2", "r3")],
             source="contextual",
         )
         mock_data_client.get_memory_record.side_effect = [
