@@ -127,3 +127,31 @@ def test_diff_empty_after_render_applied(tmp_path):
         splice_managed_block("", CLAUDE_MD_BLOCK), encoding="utf-8")
     drifts = diff(PARAMS, paths)
     assert [d for d in drifts if "skill" not in d.lower()] == []
+
+
+def test_diff_reports_drift_for_non_dict_settings_json_without_raising(tmp_path):
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json",
+        settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md",
+        skills_dir=tmp_path / "skills",
+    )
+    paths.settings_json.write_text("5", encoding="utf-8")
+    drifts = diff(PARAMS, paths)
+    assert any(
+        "settings.json" in d and "unparseable" in d.lower() for d in drifts
+    )
+
+
+def test_diff_reports_drift_for_non_dict_claude_json_without_raising(tmp_path):
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json",
+        settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md",
+        skills_dir=tmp_path / "skills",
+    )
+    paths.claude_json.write_text("[1, 2, 3]", encoding="utf-8")
+    drifts = diff(PARAMS, paths)
+    assert any(
+        ".claude.json" in d and "unparseable" in d.lower() for d in drifts
+    )

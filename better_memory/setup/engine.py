@@ -55,8 +55,16 @@ def _repo_skill_source(params: MachineParams, skill_name: str) -> Path:
     return Path(params.repo_root) / ".claude" / "skills" / skill_name
 
 
-def render(params: MachineParams) -> dict:
-    """Build the desired-state dict for every managed surface."""
+def _canonical_hook_groups(params: MachineParams) -> dict[str, list[dict]]:
+    """Build the canonical per-event matcher-group lists for every managed
+    hook spec. Shared by ``render()`` and ``merge_settings()``'s ADD pass so
+    the two can never drift apart from each other.
+
+    SessionStart specs share a single group; every other spec gets its own
+    group, with ``matcher`` copied on when the spec has one. ``if`` is
+    already embedded in the hook entry itself (see ``hook_entry``) and is
+    never duplicated onto the group.
+    """
     hooks: dict[str, list[dict]] = {}
 
     session_start_specs = [s for s in MANAGED_HOOKS if s.event == "SessionStart"]
@@ -73,12 +81,17 @@ def render(params: MachineParams) -> dict:
             group["matcher"] = spec.matcher
         hooks.setdefault(spec.event, []).append(group)
 
+    return hooks
+
+
+def render(params: MachineParams) -> dict:
+    """Build the desired-state dict for every managed surface."""
     skills = tuple(
         (name, str(_repo_skill_source(params, name))) for name in MANAGED_SKILLS
     )
 
     return {
-        "settings_hooks": hooks,
+        "settings_hooks": _canonical_hook_groups(params),
         "settings_env": dict(MANAGED_ENV),
         "mcp_entry": mcp_server_entry(params),
         "claude_md_block": CLAUDE_MD_BLOCK,
@@ -124,19 +137,8 @@ def merge_settings(existing: dict, params: MachineParams) -> dict:
         hooks[event_name] = groups
 
     # Pass 2: ADD canonical groups.
-    session_start_specs = [s for s in MANAGED_HOOKS if s.event == "SessionStart"]
-    if session_start_specs:
-        hooks.setdefault("SessionStart", []).append({
-            "hooks": [hook_entry(s, params) for s in session_start_specs],
-        })
-
-    for spec in MANAGED_HOOKS:
-        if spec.event == "SessionStart":
-            continue
-        group: dict = {"hooks": [hook_entry(spec, params)]}
-        if spec.matcher is not None:
-            group["matcher"] = spec.matcher
-        hooks.setdefault(spec.event, []).append(group)
+    for event_name, canonical_groups in _canonical_hook_groups(params).items():
+        hooks.setdefault(event_name, []).extend(canonical_groups)
 
     config["hooks"] = hooks
 
@@ -211,18 +213,27 @@ def fingerprint(params: MachineParams) -> str:
 
 
 def _load_json_or_drift(path: Path, drifts: list[str]) -> dict | None:
-    """Load JSON from ``path``. Missing -> {}. Malformed -> append a drift
-    line and return None (caller skips further checks for this target)."""
+    """Load JSON from ``path``. Missing -> {}. Malformed, or valid JSON that
+    doesn't parse to an object (e.g. ``5``, ``null``, ``[1,2,3]``) -> append
+    a drift line and return None (caller skips further checks for this
+    target). ``merge_settings``/``patch_mcp_entry`` both do ``dict(existing)``
+    and would raise TypeError on a non-dict, so non-dict shapes must be
+    filtered out here rather than passed through.
+    """
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
     if not text.strip():
         return {}
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
         drifts.append(f"{path}: unparseable JSON (manual fix needed)")
         return None
+    if not isinstance(parsed, dict):
+        drifts.append(f"{path}: unparseable JSON (manual fix needed)")
+        return None
+    return parsed
 
 
 def diff(params: MachineParams, paths: TargetPaths) -> list[str]:
