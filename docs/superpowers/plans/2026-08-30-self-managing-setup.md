@@ -727,7 +727,7 @@ git commit -m "feat(setup): engine render/inspect/diff"
 
 ---
 
-### Task 4: Engine — apply (confidence 90%; mitigations embedded)
+### Task 4: Engine — apply (confidence 93% after lift pass)
 
 **Files:**
 - Modify: `better_memory/setup/engine.py`
@@ -737,9 +737,8 @@ git commit -m "feat(setup): engine render/inspect/diff"
 - Consumes: Task 3's pure functions; `_backup`/`_atomic_write` patterns from `cli/install_hooks.py:301-332` (copy into engine.py — install_hooks becomes a shim in Task 7 and must not be a dependency).
 - Produces:
   - `@dataclass ApplyReport: repaired: list[str]; warnings: list[str]`
-  - `apply(params: MachineParams, paths: TargetPaths, *, backup_dir: Path) -> ApplyReport`
+  - `apply(params: MachineParams, paths: TargetPaths, *, home: Path) -> ApplyReport` — backups go to `home / "install-backups"`, lock file is `home / "state" / "setup-apply.lock"`; apply creates BOTH directories with `mkdir(parents=True, exist_ok=True)` before use (callers cannot be trusted to pre-create them)
   - `install_skills(paths: TargetPaths, params: MachineParams) -> list[str]` (returns warning strings; port of `install_skill_symlinks` from `cli/install_hooks.py:228-279`, parameterized by target dir and repo root, extended to `MANAGED_SKILLS`)
-  - module constant `_LOCK_NAME = "setup-apply.lock"` (lock file under `backup_dir.parent / "state"`)
 
 **Sub-90% risk being mitigated:** `~/.claude.json` concurrent rewrite by Claude Code (spec concern 3) and CLAUDE.md splice damaging user content. Mitigations are IN the steps: key-scoped patch + re-read-before-write + one retry; splice tested against a fixture copy of the real global CLAUDE.md; validate-then-write; lock file with stale timeout.
 
@@ -775,7 +774,7 @@ def _paths(tmp_path) -> TargetPaths:
 
 def test_apply_from_empty_reaches_zero_diff_and_backs_up_nothing(tmp_path):
     paths = _paths(tmp_path)
-    report = apply(PARAMS, paths, backup_dir=tmp_path / "backups")
+    report = apply(PARAMS, paths, home=tmp_path / "home")
     assert report.repaired  # something was written
     drifts = [d for d in diff(PARAMS, paths) if "skill" not in d.lower()]
     assert drifts == []
@@ -784,15 +783,15 @@ def test_apply_from_empty_reaches_zero_diff_and_backs_up_nothing(tmp_path):
 def test_apply_backs_up_existing_files(tmp_path):
     paths = _paths(tmp_path)
     paths.settings_json.write_text("{}", encoding="utf-8")
-    apply(PARAMS, paths, backup_dir=tmp_path / "backups")
-    backups = list((tmp_path / "backups").glob("settings.json.*.bak"))
+    apply(PARAMS, paths, home=tmp_path / "home")
+    backups = list((tmp_path / "home" / "install-backups").glob("settings.json.*.bak"))
     assert len(backups) == 1
 
 
 def test_apply_aborts_file_with_malformed_json_but_repairs_others(tmp_path):
     paths = _paths(tmp_path)
     paths.claude_json.write_text("{not json", encoding="utf-8")
-    report = apply(PARAMS, paths, backup_dir=tmp_path / "backups")
+    report = apply(PARAMS, paths, home=tmp_path / "home")
     assert paths.claude_json.read_text(encoding="utf-8") == "{not json"
     assert any("unparseable" in w for w in report.warnings)
     assert json.loads(paths.settings_json.read_text(encoding="utf-8"))["hooks"]
@@ -816,7 +815,7 @@ def test_apply_retries_once_on_concurrent_claude_json_change(tmp_path, monkeypat
         return data, mtime
 
     monkeypatch.setattr(eng, "_read_json_and_mtime", flaky)
-    apply(PARAMS, paths, backup_dir=tmp_path / "backups")
+    apply(PARAMS, paths, home=tmp_path / "home")
     final = json.loads(paths.claude_json.read_text(encoding="utf-8"))
     assert "better-memory" in final["mcpServers"]
     assert "x" in final["mcpServers"]  # concurrent edit survived
@@ -824,8 +823,8 @@ def test_apply_retries_once_on_concurrent_claude_json_change(tmp_path, monkeypat
 
 def test_apply_is_idempotent_second_run_repairs_nothing(tmp_path):
     paths = _paths(tmp_path)
-    apply(PARAMS, paths, backup_dir=tmp_path / "backups")
-    second = apply(PARAMS, paths, backup_dir=tmp_path / "backups")
+    apply(PARAMS, paths, home=tmp_path / "home")
+    second = apply(PARAMS, paths, home=tmp_path / "home")
     assert [r for r in second.repaired if "skill" not in r.lower()] == []
 ```
 
@@ -852,6 +851,9 @@ def _read_json_and_mtime(path: Path) -> tuple[dict | None, float]:
 
 `apply()` flow (mitigations inline):
 
+0. `backup_dir = home / "install-backups"`; `lock_path = home / "state" / "setup-apply.lock"`;
+   `mkdir(parents=True, exist_ok=True)` on both parent dirs FIRST (fresh
+   machines and tests have neither).
 1. Acquire lock: `os.open(lock_path, os.O_CREAT | os.O_EXCL)`; if it exists
    and is older than 60 s, delete and retry once; if still held, return
    `ApplyReport([], ["another apply in progress; skipped"])`. Release in
@@ -878,6 +880,9 @@ def _read_json_and_mtime(path: Path) -> tuple[dict | None, float]:
 
 - [ ] **Step 3a: Vendor the start-better-memory-ui skill into the repo**
 
+Verified at plan time: `~/.claude/skills/start-better-memory-ui` is a real
+directory (not a link) containing a single `SKILL.md` — a plain copy works.
+
 ```bash
 cp -r ~/.claude/skills/start-better-memory-ui .claude/skills/start-better-memory-ui
 ```
@@ -901,7 +906,14 @@ git commit -m "feat(setup): engine apply with backups, lock, concern-3 retry"
 
 ---
 
-### Task 5: Golden parity fixture + test (confidence 90%)
+### Task 5: Golden parity fixture + test (confidence 93% after lift pass)
+
+**Privacy constraint (repo is PUBLIC):** fixtures must NOT contain the
+user's full private CLAUDE.md nor the real Windows username. The capture
+script below therefore (a) extracts only the managed-relevant subset,
+(b) rewrites `gethi` → `ref` in all paths, and (c) trims CLAUDE.md to the
+managed section plus one foreign heading on each side (enough to prove the
+splice sits among foreign content).
 
 **Files:**
 - Create: `tests/setup/fixtures/reference_settings.json`, `tests/setup/fixtures/reference_claude.json`, `tests/setup/fixtures/reference_claude_md.md`, `tests/setup/test_golden_parity.py`
@@ -915,30 +927,43 @@ git commit -m "feat(setup): engine apply with backups, lock, concern-3 retry"
 Run (from repo root, on the reference PC):
 
 ```bash
-python - <<'EOF'
+uv run python - <<'EOF'
 import json, pathlib
 home = pathlib.Path.home()
 out = pathlib.Path("tests/setup/fixtures")
 out.mkdir(parents=True, exist_ok=True)
+
+def sanitize(text: str) -> str:
+    # Public repo: neutralize the local Windows username in embedded paths.
+    return text.replace("\\\\gethi\\\\", "\\\\ref\\\\").replace("/gethi/", "/ref/").replace("\\gethi\\", "\\ref\\")
+
 settings = json.loads((home/".claude"/"settings.json").read_text(encoding="utf-8"))
 # Managed-relevant subset: hooks + env. Other keys stay out of the fixture.
+subset = {"env": settings.get("env", {}), "hooks": settings.get("hooks", {})}
 (out/"reference_settings.json").write_text(
-    json.dumps({"env": settings.get("env", {}), "hooks": settings.get("hooks", {})},
-               indent=2) + "\n", encoding="utf-8")
+    sanitize(json.dumps(subset, indent=2)) + "\n", encoding="utf-8")
+
 claude = json.loads((home/".claude.json").read_text(encoding="utf-8"))
+mcp = {"mcpServers": {"better-memory": claude["mcpServers"]["better-memory"]}}
 (out/"reference_claude.json").write_text(
-    json.dumps({"mcpServers": {"better-memory": claude["mcpServers"]["better-memory"]}},
-               indent=2) + "\n", encoding="utf-8")
+    sanitize(json.dumps(mcp, indent=2)) + "\n", encoding="utf-8")
+
 md = (home/".claude"/"CLAUDE.md").read_text(encoding="utf-8")
-(out/"reference_claude_md.md").write_text(md, encoding="utf-8")
+# Trim to: the heading immediately before the managed section, the managed
+# section itself, and the first foreign heading after it (structure proof
+# without publishing the user's whole private file).
+start = md.index("# better-memory (MANDATORY)")
+end = md.index("# Process Discipline")
+trimmed = "# Global Preferences\n\n(foreign content elided)\n\n" + md[start:end] + "# Process Discipline\n\n(foreign content elided)\n"
+(out/"reference_claude_md.md").write_text(trimmed, encoding="utf-8")
 EOF
 ```
 
-Inspect the three fixtures. `reference_settings.json` must contain the 7
-hook events and the `BETTER_MEMORY_INJECT_MODE` env; it must NOT contain
-tokens, keys, or credentials (the statusLine/plugins keys are excluded by
-the subset capture). The CLAUDE.md fixture is the user's real file — that
-is the point; it contains no secrets (verify by reading it).
+Inspect the three fixtures before committing. `reference_settings.json`
+must contain the 7 hook events and the `BETTER_MEMORY_INJECT_MODE` env; no
+tokens, keys, credentials, and no occurrence of the real username (grep for
+`gethi` must return nothing across `tests/setup/fixtures/`). The CLAUDE.md
+fixture is the trimmed managed section between two foreign headings.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -966,10 +991,10 @@ from better_memory.setup.manifest import CLAUDE_MD_BLOCK, MachineParams
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REF_PARAMS = MachineParams(
-    venv_py=r"C:\Users\gethi\source\better-memory\.venv\Scripts\python.exe",
-    venv_pyw=r"C:\Users\gethi\source\better-memory\.venv\Scripts\pythonw.exe",
-    home=r"C:\Users\gethi\.better-memory",
-    repo_root=r"C:\Users\gethi\source\better-memory",
+    venv_py=r"C:\Users\ref\source\better-memory\.venv\Scripts\python.exe",
+    venv_pyw=r"C:\Users\ref\source\better-memory\.venv\Scripts\pythonw.exe",
+    home=r"C:\Users\ref\.better-memory",
+    repo_root=r"C:\Users\ref\source\better-memory",
 )
 
 
@@ -1334,7 +1359,7 @@ def handle_setup(args) -> int:
     home = Path(params.home)
     _home_layout(home)
     paths = engine.default_target_paths()
-    report = engine.apply(params, paths, backup_dir=home / "install-backups")
+    report = engine.apply(params, paths, home=home)
     for line in report.repaired:
         print(f"  OK {line}")
     for line in report.warnings:
@@ -1348,7 +1373,7 @@ def handle_doctor(args) -> int:
     paths = engine.default_target_paths()
     if args.fix:
         home = Path(params.home)
-        report = engine.apply(params, paths, backup_dir=home / "install-backups")
+        report = engine.apply(params, paths, home=home)
         for line in report.repaired:
             print(f"  FIXED {line}")
         for line in report.warnings:
@@ -1430,7 +1455,15 @@ git commit -m "feat(cli): better-memory setup + doctor; install_hooks shim"
 
 ---
 
-### Task 8: Bootstrap auto-check + sentinel retirement (confidence 90%; mitigations embedded)
+### Task 8: Bootstrap auto-check + sentinel retirement (confidence 92% after lift pass)
+
+**Lift-pass fix (real bug):** the first draft cached the fingerprint even
+when `apply()` returned warnings (e.g. malformed `~/.claude.json` left in
+place). Next session the mtime+fingerprint cache would hit and the drift
+would never be reported again — a one-shot warning for a persistent
+problem. Rule now: NEVER write the fingerprint cache when
+`report.warnings` is non-empty; the warning then re-surfaces every session
+until the underlying file is fixed.
 
 **Files:**
 - Create: `better_memory/setup/autocheck.py`
@@ -1502,6 +1535,16 @@ def test_cache_invalidated_when_config_touched(tmp_path, monkeypatch):
     paths.settings_json.write_text(json.dumps(settings), encoding="utf-8")
     line = autocheck.maybe_repair(tmp_path / "home", tmp_path)
     assert line and "repaired" in line
+
+
+def test_warnings_prevent_cache_write_so_drift_rereports(tmp_path, monkeypatch):
+    paths, params = _wire(tmp_path, monkeypatch)
+    paths.claude_json.write_text("{not json", encoding="utf-8")
+    first = autocheck.maybe_repair(tmp_path / "home", tmp_path)
+    assert first and "WARN" in first
+    # Nothing changed on disk; a cached fingerprint would silence this.
+    second = autocheck.maybe_repair(tmp_path / "home", tmp_path)
+    assert second and "WARN" in second
 ```
 
 Add to `tests/hooks/test_session_bootstrap.py` (following its existing
@@ -1559,20 +1602,25 @@ def maybe_repair(home: Path, cwd: Path) -> str | None:
     if cached == current and repo_msg is None:
         return None
     messages: list[str] = [repo_msg] if repo_msg else []
+    warnings: list[str] = []
     drift = engine.diff(params, paths)
     if drift:
-        report = engine.apply(params, paths, backup_dir=home / "install-backups")
+        report = engine.apply(params, paths, home=home)
         if report.repaired:
             messages.append(
                 f"better-memory doctor: repaired {len(report.repaired)} "
                 f"item(s): {'; '.join(report.repaired)} (effective next session)"
             )
-        messages.extend(f"better-memory doctor: WARN {w}" for w in report.warnings)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(
-        json.dumps({"fingerprint": fp, "mtimes": _mtimes(paths)}),
-        encoding="utf-8",
-    )
+        warnings = report.warnings
+        messages.extend(f"better-memory doctor: WARN {w}" for w in warnings)
+    if not warnings:
+        # Cache ONLY a clean outcome. A cached fingerprint after warnings
+        # would silence a persistent problem after one report (lift-pass fix).
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"fingerprint": fp, "mtimes": _mtimes(paths)}),
+            encoding="utf-8",
+        )
     return " | ".join(messages) if messages else None
 ```
 
@@ -1608,7 +1656,7 @@ git commit -m "feat(setup): session-start wiring autocheck; retire CLAUDE.md sen
 
 ---
 
-### Task 9: Bootstrap scripts (confidence 90%)
+### Task 9: Bootstrap scripts (confidence 92% after lift pass)
 
 **Files:**
 - Create: `scripts/setup.ps1`
@@ -1622,8 +1670,10 @@ git commit -m "feat(setup): session-start wiring autocheck; retire CLAUDE.md sen
 
 ```powershell
 # better-memory Windows bootstrap: uv -> deps -> wiring. Idempotent.
-# Run from the repo root: powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+# Runnable from anywhere: cds to the repo root itself (lift-pass fix — the
+# first draft assumed the caller's cwd was the repo root).
 $ErrorActionPreference = "Stop"
+Set-Location (Join-Path $PSScriptRoot "..")
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Write-Host "[setup] uv not found - installing..."
