@@ -31,8 +31,22 @@ def _hooks_dir(repo_root: Path) -> Path | None:
         if not path.is_absolute():
             path = repo_root / path
         return path if path.is_dir() else None
-    hooks = git_dir / "hooks" if git_dir.is_dir() else None
-    return hooks
+    # Resolve hooks directory: handles regular repos, worktrees, and bare repos.
+    # Bare repos resolve to None via git rev-parse --git-path (no hooks dir).
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--git-path", "hooks"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    hooks_path = proc.stdout.strip()
+    if not hooks_path:
+        return None
+    path = Path(hooks_path)
+    if not path.is_absolute():
+        path = repo_root / path
+    return path if path.is_dir() else None
 
 
 def ensure_post_commit(repo_root: Path, params: MachineParams) -> str | None:
