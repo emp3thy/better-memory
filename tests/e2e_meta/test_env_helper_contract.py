@@ -546,7 +546,7 @@ class TestContractDSkipDecorations:
 
     def test_symlink_assertions_are_capability_probed(self) -> None:
         """Modules asserting symlink outcomes must gate them behind a probe
-        (mirrors tests/cli/test_install_skill_symlink.py's requires_symlinks):
+        (mirrors tests/setup/test_engine_apply.py's requires_symlinks):
         non-Developer-Mode Windows boxes must skip the symlink ASSERT while
         still running the installer-exit-0 assertions."""
         probe = re.compile(

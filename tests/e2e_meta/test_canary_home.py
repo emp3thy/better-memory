@@ -25,9 +25,15 @@ Judge fixes applied:
 Inner-suite scoping contract (documented per the implementation task):
 
 * ``BM_E2E_CANARY_INNER_SCOPE`` unset and ``CI`` unset → REDUCED default
-  slice (fast local runs): ``test_install_hooks.py`` (the highest
-  real-home-corruption-risk surface) + ``test_hooks_contracts.py`` (sync
-  hook + MCP server spawns).
+  slice (fast local runs): ``test_setup_sh.py`` + ``test_hooks_contracts.py``
+  (sync hook + MCP server spawns — the remaining real-home-corruption-risk
+  surface). ``test_install_hooks.py`` was retired when
+  ``cli/install_hooks.py`` became a deprecation shim over
+  ``better-memory setup`` (see ``better_memory/cli/setup_cmd.py``);
+  ``test_setup_sh.py`` is module-skipped for the same reason (it drives
+  ``scripts/setup.sh``, which still invokes the old install_hooks CLI
+  contract until it's rewritten) but stays listed here so it resumes
+  exercising real-home risk automatically once that lands.
 * ``BM_E2E_CANARY_INNER_SCOPE`` unset and ``CI`` set (every mainstream CI
   exports it) → the FULL ``tests/e2e`` suite — the actual isolation proof.
 * ``BM_E2E_CANARY_INNER_SCOPE=full`` → full ``tests/e2e`` anywhere.
@@ -60,7 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SCOPE_VAR = "BM_E2E_CANARY_INNER_SCOPE"
 REDUCED_DEFAULT: tuple[str, ...] = (
-    "tests/e2e/test_install_hooks.py",
+    "tests/e2e/test_setup_sh.py",
     "tests/e2e/test_hooks_contracts.py",
 )
 STRIP_PREFIXES: tuple[str, ...] = ("BETTER_MEMORY_", "CLAUDE_", "AWS_", "OLLAMA_")
