@@ -1,22 +1,36 @@
-"""Render / inspect / diff half of the self-managing setup engine.
+"""Render / inspect / diff / apply engine for the self-managing setup.
 
-Pure functions that compute the desired managed state (``render``), merge
-it into existing user config (``merge_settings``, ``patch_mcp_entry``,
+Pure functions compute the desired managed state (``render``), merge it
+into existing user config (``merge_settings``, ``patch_mcp_entry``,
 ``splice_managed_block``), and report drift between desired and live state
-(``diff``). No writes happen here — see a later task's ``apply()`` for the
-I/O half.
+(``diff``). ``apply()`` is the I/O half: it writes the managed subset of
+every target file to match ``render(params)``, backing up before every
+write and retrying once if ``~/.claude.json`` is rewritten concurrently by
+Claude Code itself (spec concern 3).
 
 Port of ``better_memory/cli/install_hooks.py``'s ``merge_settings_json``
-(lines 141-215) and ``merge_claude_json`` (lines 90-116), generalized to
-iterate the full ``MANAGED_HOOKS`` table (8 specs, including ``if_filter``
-groups) and to merge ``MANAGED_ENV`` alongside hooks.
+(lines 141-215), ``merge_claude_json`` (lines 90-116), ``_backup`` /
+``_atomic_write`` (lines 301-332), and ``install_skill_symlinks``
+(lines 228-279). The pure merges are generalized to iterate the full
+``MANAGED_HOOKS`` table (8 specs, including ``if_filter`` groups) and to
+merge ``MANAGED_ENV`` alongside hooks; ``install_skill_symlinks`` is
+parameterized by target dir + repo root and extended to loop
+``MANAGED_SKILLS``.
+
+``_backup``/``_atomic_write`` are duplicated here rather than imported from
+``cli/install_hooks`` — that module becomes a thin shim over this engine in
+a later task and must not become a dependency of it (Ruling B).
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from better_memory.setup.manifest import (
@@ -31,6 +45,8 @@ from better_memory.setup.manifest import (
     hook_entry,
     mcp_server_entry,
 )
+
+_LOCK_STALE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -281,3 +297,249 @@ def diff(params: MachineParams, paths: TargetPaths) -> list[str]:
             drifts.append(f"skill {skill_name!r}: link does not resolve to repo skill dir")
 
     return drifts
+
+
+# ------------------------------------------------------------------ apply
+
+
+@dataclass
+class ApplyReport:
+    repaired: list[str]
+    warnings: list[str]
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write to ``{path}.tmp`` then ``os.replace``. Caller handles backups.
+
+    On failure during ``os.replace``, the tmp file persists for forensics
+    and the original (if any) is untouched.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _backup(
+    src: Path,
+    dst_dir: Path,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> Path | None:
+    """Copy ``src`` into ``dst_dir`` with a timestamped name. Idempotent
+    in the sense that missing source → no-op (returns None).
+
+    Timestamp format: ``YYYYMMDD-HHMMSS`` (UTC if no clock injected; local
+    time of injected clock if injected).
+    """
+    if not src.exists():
+        return None
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    now = (clock or datetime.now)()
+    timestamp = now.strftime("%Y%m%d-%H%M%S")
+    dst = dst_dir / f"{src.name}.{timestamp}.bak"
+    shutil.copy2(src, dst)
+    return dst
+
+
+def _read_json_and_mtime(path: Path) -> tuple[dict | None, float]:
+    """None for malformed JSON; ({}, 0.0) for missing file."""
+    if not path.exists():
+        return {}, 0.0
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), path.stat().st_mtime
+    except json.JSONDecodeError:
+        return None, path.stat().st_mtime
+
+
+def _acquire_lock(lock_path: Path) -> int | None:
+    """Acquire the apply lock via O_CREAT|O_EXCL.
+
+    A lock file older than ``_LOCK_STALE_SECONDS`` is treated as abandoned
+    (a prior apply crashed without releasing it): it is removed and
+    acquisition is retried once. Returns the open fd, or ``None`` if the
+    lock is still held by a live apply after that one retry.
+    """
+    try:
+        return os.open(lock_path, os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        pass
+
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except OSError:
+        age = 0.0
+    if age <= _LOCK_STALE_SECONDS:
+        return None
+
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+    try:
+        return os.open(lock_path, os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        return None
+
+
+def _apply_settings_json(
+    paths: TargetPaths,
+    params: MachineParams,
+    backup_dir: Path,
+    repaired: list[str],
+    warnings: list[str],
+) -> None:
+    existing = _load_json_or_drift(paths.settings_json, warnings)
+    if existing is None:
+        return  # Malformed — warning already recorded; never write it.
+    merged = merge_settings(existing, params)
+    if merged == existing:
+        return
+    _backup(paths.settings_json, backup_dir)
+    _atomic_write(paths.settings_json, json.dumps(merged, indent=2) + "\n")
+    repaired.append(f"{paths.settings_json}: hooks + env")
+
+
+def _apply_claude_json(
+    paths: TargetPaths,
+    params: MachineParams,
+    backup_dir: Path,
+    repaired: list[str],
+    warnings: list[str],
+) -> None:
+    """Concern-3 sequence: read, compute patch, backup, RE-READ immediately
+    before write; if the file moved under us (Claude Code itself rewrote it
+    between our read and our write), recompute the patch from the fresh
+    content — one retry — then write atomically.
+    """
+    data, mtime1 = _read_json_and_mtime(paths.claude_json)
+    if data is None or not isinstance(data, dict):
+        warnings.append(f"{paths.claude_json}: unparseable JSON (manual fix needed)")
+        return  # Malformed — never write it.
+
+    patched = patch_mcp_entry(data, params)
+    if patched == data:
+        return
+
+    _backup(paths.claude_json, backup_dir)
+
+    fresh_data, mtime2 = _read_json_and_mtime(paths.claude_json)
+    if fresh_data is None or not isinstance(fresh_data, dict):
+        warnings.append(f"{paths.claude_json}: unparseable JSON (manual fix needed)")
+        return  # Became malformed under us — never write it.
+    if mtime2 != mtime1:
+        patched = patch_mcp_entry(fresh_data, params)  # One retry from fresh content.
+
+    _atomic_write(paths.claude_json, json.dumps(patched, indent=2) + "\n")
+    repaired.append(f"{paths.claude_json}: mcp server entry")
+
+
+def _apply_claude_md(paths: TargetPaths, backup_dir: Path, repaired: list[str]) -> None:
+    text = paths.claude_md.read_text(encoding="utf-8") if paths.claude_md.exists() else ""
+    new_text = splice_managed_block(text, CLAUDE_MD_BLOCK)
+    if new_text == text:
+        return
+    _backup(paths.claude_md, backup_dir)
+    _atomic_write(paths.claude_md, new_text)
+    repaired.append(f"{paths.claude_md}: managed block")
+
+
+def install_skills(paths: TargetPaths, params: MachineParams) -> list[str]:
+    """Symlink each ``MANAGED_SKILLS`` entry from the repo into
+    ``paths.skills_dir``.
+
+    Port of ``cli/install_hooks.py``'s ``install_skill_symlinks``,
+    parameterized by target dir (``paths.skills_dir``) and repo root
+    (``params.repo_root``) instead of hardcoded user-scope paths, and
+    looping the full ``MANAGED_SKILLS`` tuple.
+
+    Idempotent: if a link already points to the right target, nothing
+    happens. If a different symlink, file, or directory exists at the
+    target path, it is removed without backup before recreating the
+    symlink — symlinks have no content to preserve, and a stale or
+    user-replaced skill directory at the same name is treated as obsolete.
+
+    Returns warning strings instead of printing to stderr — for a missing
+    source directory, or for an ``OSError`` on symlink creation (e.g.
+    Windows without symlink privilege: Developer Mode or elevation needed).
+    """
+    warnings: list[str] = []
+    paths.skills_dir.mkdir(parents=True, exist_ok=True)
+
+    for skill_name in MANAGED_SKILLS:
+        source = _repo_skill_source(params, skill_name)
+        if not source.is_dir():
+            warnings.append(f"skill {skill_name!r}: source not found at {source}")
+            continue
+
+        link = paths.skills_dir / skill_name
+        # Junctions (mklink /J) report is_symlink() == False but ARE links:
+        # resolve() follows them and shutil.rmtree refuses them outright.
+        # Treat them exactly like symlinks (see install_hooks.py precedent).
+        if link.is_symlink() or os.path.isjunction(link):
+            if link.resolve() == source.resolve():
+                continue  # Already correct — nothing to do.
+            try:
+                link.unlink()
+            except (OSError, PermissionError):
+                os.rmdir(link)
+        elif link.exists():
+            if link.is_file():
+                link.unlink()
+            elif link.is_dir():
+                shutil.rmtree(link)
+
+        try:
+            link.symlink_to(source, target_is_directory=True)
+        except OSError as exc:
+            warnings.append(
+                f"skill symlink skipped ({skill_name}): {exc}; enable Windows "
+                "Developer Mode or run as administrator to install skill symlinks."
+            )
+
+    return warnings
+
+
+def apply(params: MachineParams, paths: TargetPaths, *, home: Path) -> ApplyReport:
+    """Write the managed subset of every target file to match
+    ``render(params)``.
+
+    Only better-memory's managed entries are touched; foreign entries in
+    each target file are preserved byte-for-byte (see the pure merge
+    functions this delegates to). Every existing file is backed up to
+    ``home / "install-backups"`` before it is overwritten. Malformed JSON
+    in a target file produces a warning and that file is left untouched.
+    ``~/.claude.json`` gets one retry if it is rewritten concurrently by
+    Claude Code itself between the pre-write read and the atomic write
+    (spec concern 3) — see ``_apply_claude_json``.
+
+    Concurrent ``apply()`` calls are serialized via a lock file
+    (``home / "state" / "setup-apply.lock"``) with a 60s stale timeout; if
+    another apply holds the lock, this call is a no-op that returns a
+    single warning.
+    """
+    home = Path(home)
+    backup_dir = home / "install-backups"
+    lock_path = home / "state" / "setup-apply.lock"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd = _acquire_lock(lock_path)
+    if fd is None:
+        return ApplyReport([], ["another apply in progress; skipped"])
+
+    repaired: list[str] = []
+    warnings: list[str] = []
+    try:
+        _apply_settings_json(paths, params, backup_dir, repaired, warnings)
+        _apply_claude_json(paths, params, backup_dir, repaired, warnings)
+        _apply_claude_md(paths, backup_dir, repaired)
+        warnings.extend(install_skills(paths, params))
+    finally:
+        os.close(fd)
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+    return ApplyReport(repaired=repaired, warnings=warnings)
