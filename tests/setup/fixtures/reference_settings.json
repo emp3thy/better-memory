@@ -1,0 +1,91 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "BETTER_MEMORY_INJECT_MODE": "deferred"
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:\\Users\\ref\\.claude\\hooks\\pre-compact-better-memory.py\"",
+            "timeout": 10,
+            "statusMessage": "Saving context to better-memory..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"MEMORY CHECKPOINT before commit: per CLAUDE.md mandatory triggers, if this commit fixes a non-obvious bug, addresses reviewer feedback, or wraps a phase, you MUST call mcp__better-memory__memory_observe BEFORE running git commit. Skipping is a CLAUDE.md violation.\"}}'",
+            "if": "Bash(git commit*)"
+          }
+        ]
+      },
+      {
+        "matcher": "Skill|Task|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ref\\source\\better-memory\\.venv\\Scripts\\python.exe\" -m better_memory.hooks.contextual_inject"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ref\\source\\better-memory\\.venv\\Scripts\\pythonw.exe\" -m better_memory.hooks.observer",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"systemMessage\":\"MEMORY SWEEP: record any non-obvious observations from this session before stopping. See CLAUDE.md mandatory triggers \u2014 review-fix commits, phase boundaries, reviewer-flagged bugs.\"}'"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ref\\source\\better-memory\\.venv\\Scripts\\python.exe\" -m better_memory.hooks.session_close"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ref\\source\\better-memory\\.venv\\Scripts\\python.exe\" -m better_memory.hooks.session_bootstrap"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ref\\source\\better-memory\\.venv\\Scripts\\python.exe\" -m better_memory.hooks.contextual_inject"
+          }
+        ]
+      }
+    ]
+  }
+}
