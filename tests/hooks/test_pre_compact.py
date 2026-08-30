@@ -23,3 +23,15 @@ def test_emits_precompact_additional_context(monkeypatch, capsys):
 def test_survives_empty_stdin(monkeypatch, capsys):
     out = _run(monkeypatch, capsys, "")
     assert out["hookSpecificOutput"]["hookEventName"] == "PreCompact"
+
+
+def test_survives_null_json(monkeypatch, capsys):
+    out = _run(monkeypatch, capsys, "null")
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreCompact"
+    assert "unknown" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_survives_array_json(monkeypatch, capsys):
+    out = _run(monkeypatch, capsys, "[]")
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreCompact"
+    assert "unknown" in out["hookSpecificOutput"]["additionalContext"]

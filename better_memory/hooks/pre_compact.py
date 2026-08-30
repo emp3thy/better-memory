@@ -10,6 +10,8 @@ def main() -> None:
         hook_input = json.load(sys.stdin)
     except BaseException:  # noqa: BLE001 — hooks never fail
         hook_input = {}
+    if not isinstance(hook_input, dict):
+        hook_input = {}
     session_id = hook_input.get("session_id", "unknown")
     print(json.dumps({
         "hookSpecificOutput": {

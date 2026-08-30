@@ -17,7 +17,12 @@ def main() -> None:
         payload = json.load(sys.stdin)
     except BaseException:  # noqa: BLE001
         payload = {}
-    command = str(payload.get("tool_input", {}).get("command", ""))
+    if not isinstance(payload, dict):
+        payload = {}
+    tool_input = payload.get("tool_input", {})
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    command = str(tool_input.get("command", ""))
     if "git commit" not in command:
         return
     print(json.dumps({
