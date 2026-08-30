@@ -46,6 +46,19 @@ can never silently drift. Manual setup steps are eliminated.
    before an atomic temp+replace write; retry once on detected concurrent
    modification (mtime/content changed between read and write); timestamped
    backup before every write.
+4. **Repo-move bootstrap paradox** (hooks embed the venv's absolute path, so
+   moving/re-cloning the repo breaks every hook — including the doctor) →
+   *accept one-command heal*: run `uv run better-memory doctor --fix` once
+   from the new location; it rewrites all absolute paths in the managed
+   surface. Hook failures are visible in Claude Code until then. No shim
+   layer.
+5. **Post-commit auto-install vs `core.hooksPath` / non-sh hooks** → *detect
+   and adapt*: honor `core.hooksPath` when set and writable; chain only when
+   the existing post-commit is a plain sh script; otherwise skip with a
+   one-line warning in the bootstrap report. Never edit hook files we cannot
+   safely parse.
+6. **Fresh PC may lack `uv`** → *setup.ps1 bootstraps uv* when missing
+   (winget, falling back to the official installer script), then proceeds.
 
 ## Architecture
 
@@ -109,8 +122,11 @@ text, compared by content hash).
 - `better-memory doctor [--fix] [--json]` — render + inspect + diff; report
   drift human-readably (or JSON); `--fix` applies. Exit code 0 clean / 1
   drift found (report mode) so it is scriptable.
-- `scripts/setup.ps1` — Windows bootstrap one-liner target: clone → `uv sync`
-  → `uv run better-memory setup` (console script from `[project.scripts]`).
+- `scripts/setup.ps1` — Windows bootstrap one-liner target: install uv if
+  missing (concern 6) → clone → `uv sync` → `uv run better-memory setup`
+  (console script from `[project.scripts]`). Also the documented recovery
+  path after a repo move (concern 4): running doctor from the new location
+  rewrites all absolute paths.
 - `scripts/setup.sh` — reduced to the same three steps for POSIX; all Ollama
   logic deleted.
 
@@ -125,7 +141,8 @@ text, compared by content hash).
    `better-memory doctor: repaired N item(s): <short list> (effective next session)`.
 4. On clean: update fingerprint cache silently.
 5. Repo-level: if cwd is a git repo without our post-commit hook, install it
-   (create or chain) and mention it in the same report line.
+   per the concern-5 rules (honor `core.hooksPath`, chain only plain sh
+   scripts, warn otherwise) and mention it in the same report line.
 6. Any repair failure degrades to a warning in `additionalContext`; the
    session is never blocked and the config file is left untouched (validate
    before write).
@@ -182,6 +199,35 @@ if it describes hooks, and `docs/hooks-setup.md` (manual instructions replaced
 by `better-memory setup` / doctor; post-commit manual section replaced by
 auto-install description). Interactive and scripted setup paths documented
 separately.
+
+## Assumptions
+
+**Verified safe** (how verified):
+
+- Ralph local spawns inherit user scope — read `ralph_executor/claude_spawn.py`:
+  `os.environ.copy()`, no `CLAUDE_CONFIG_DIR`/`--settings`/`--mcp-config`.
+- `BETTER_MEMORY_PROJECT` is top precedence in `project_name()` — `config.py:162`.
+- Wiring is backend-agnostic — hook modules never read `storage_backend`.
+- Config merge preserves foreign entries — existing two-pass merge in
+  `install_hooks.py` plus its tests, folded into the engine.
+- Retrieval works without Ollama — observed live on the reference machine
+  (Ollama not running, contextual injection functioning via backend ranking +
+  BM25/keyword legs).
+- `better-memory` console script exists — `pyproject.toml [project.scripts]`.
+
+**Minor / accepted**:
+
+- Repairs take effect at the *next* session; Claude Code snapshots hooks/MCP
+  configuration at session start. The repair report says so.
+- The canonical CLAUDE.md managed-block text is captured from the reference
+  machine's current section as v1; the golden parity test enforces that the
+  first doctor run changes nothing on that machine.
+- Managed-block markers are HTML comments — invisible in rendered markdown.
+- A tiny clobber window exists if the user edits settings via `/config` at
+  the exact moment of an auto-repair; timestamped backups cover recovery.
+- Runtime default `embeddings_backend="ollama"` string is unchanged; the
+  embed-down breaker degrades gracefully when Ollama is absent.
+- Ollama remains installed on the reference machine — unused and harmless.
 
 ## Out of scope
 
