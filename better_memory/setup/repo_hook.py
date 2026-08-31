@@ -68,7 +68,19 @@ def ensure_post_commit(repo_root: Path, params: MachineParams) -> str | None:
     except (OSError, UnicodeDecodeError):
         return f"post-commit skipped: existing hook in {hooks_dir} is not a text script"
     if _SENTINEL in content or "better_memory.hooks.post_commit" in content:
-        return None
+        lines = content.splitlines()
+        changed = False
+        for i, existing_line in enumerate(lines):
+            if "better_memory.hooks.post_commit" in existing_line and existing_line != line:
+                lines[i] = line
+                changed = True
+        if not changed:
+            return None
+        try:
+            hook.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            return f"post-commit re-point failed in {hooks_dir}: {exc}"
+        return f"post-commit hook re-pointed in {hooks_dir}"
     first = content.lstrip().splitlines()[0] if content.strip() else ""
     if not first.startswith("#!") or "sh" not in first:
         return f"post-commit skipped: existing hook in {hooks_dir} is not a plain sh script"

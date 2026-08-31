@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from better_memory._common import resolve_home
 from better_memory.setup import engine, manifest
 
 
@@ -28,7 +29,7 @@ def _home_layout(home: Path) -> None:
 
 
 def handle_setup(args) -> int:
-    params = manifest.detect_machine_params()
+    params = manifest.detect_machine_params(home=str(resolve_home()))
     home = Path(params.home)
     _home_layout(home)
     paths = engine.default_target_paths()
@@ -42,7 +43,7 @@ def handle_setup(args) -> int:
 
 
 def handle_doctor(args) -> int:
-    params = manifest.detect_machine_params()
+    params = manifest.detect_machine_params(home=str(resolve_home()))
     paths = engine.default_target_paths()
     if args.fix:
         home = Path(params.home)

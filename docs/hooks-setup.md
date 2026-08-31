@@ -106,11 +106,11 @@ hand-edit this file; the JSON below just documents the exact shape
       },
       {
         "matcher": "Bash",
-        "if": "Bash(git commit*)",
         "hooks": [
           {
             "type": "command",
-            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.commit_checkpoint"
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.commit_checkpoint",
+            "if": "Bash(git commit*)"
           }
         ]
       }

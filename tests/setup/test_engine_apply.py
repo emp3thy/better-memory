@@ -364,6 +364,38 @@ def test_install_skills_junction_fallback_warns_when_both_fail(tmp_path, monkeyp
         assert not (skills_dir / name).exists()
 
 
+def test_install_skills_junction_fallback_warns_when_subprocess_raises(tmp_path, monkeypatch):
+    """If the mklink /J fallback subprocess itself raises (e.g. it times
+    out), that must not crash apply() — it's treated as a fallback failure,
+    same as a non-zero exit, and the original symlink-skipped warning is
+    still surfaced."""
+    if sys.platform != "win32":
+        pytest.skip("mklink /J junction fallback is Windows-only")
+    params = _fake_repo_params(tmp_path)
+    skills_dir = tmp_path / "skills"
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json", settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md", skills_dir=skills_dir,
+    )
+
+    def boom(self, target, target_is_directory=False):  # noqa: ARG001
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(Path, "symlink_to", boom)
+
+    def raise_timeout(cmd, **kwargs):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+
+    monkeypatch.setattr(eng.subprocess, "run", raise_timeout)
+
+    warnings = install_skills(paths, params)
+
+    assert len(warnings) == len(MANAGED_SKILLS)
+    assert all("skipped" in w for w in warnings)
+    for name in MANAGED_SKILLS:
+        assert not (skills_dir / name).exists()
+
+
 def test_junction_skill_link_is_recognised_and_skipped(tmp_path):
     """A junction (mklink /J) pointing at the right skill source is treated
     as an already-correct link, not a real directory to rmtree — junctions

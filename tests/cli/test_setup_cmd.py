@@ -59,3 +59,25 @@ def test_doctor_json_output(tmp_path, monkeypatch, capsys):
     cli_main(["doctor", "--json"])
     parsed = json.loads(capsys.readouterr().out)
     assert isinstance(parsed["drift"], list)
+
+
+def test_setup_honors_better_memory_home_env_var(tmp_path, monkeypatch):
+    """Regression: handle_setup must resolve the home via resolve_home()
+    (which honors BETTER_MEMORY_HOME), not hard-default to Path.home().
+    detect_machine_params is deliberately left un-monkeypatched here so the
+    real home-resolution path runs end to end."""
+    env_home = tmp_path / "env-home"
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(env_home))
+    paths = eng.TargetPaths(
+        claude_json=tmp_path / ".claude.json",
+        settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md",
+        skills_dir=tmp_path / "skills",
+    )
+    monkeypatch.setattr(eng, "default_target_paths", lambda: paths)
+
+    assert cli_main(["setup"]) == 0
+
+    assert (env_home / "settings.json").exists()
+    assert (env_home / "spool").is_dir()
+    assert (env_home / "install-backups").is_dir()

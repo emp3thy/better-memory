@@ -130,8 +130,11 @@ def main() -> None:
             autocheck_line = maybe_repair(cfg.home, Path(cwd_str))
             if autocheck_line:
                 rendered = rendered + "\n\n" + autocheck_line
-        except BaseException:  # noqa: BLE001 — autocheck is best-effort
-            pass
+        except BaseException as autocheck_exc:  # noqa: BLE001 — autocheck is best-effort
+            try:
+                record_hook_error(hook_name="wiring_autocheck", exc=autocheck_exc)
+            except BaseException:  # noqa: BLE001
+                pass
     except BaseException as exc:  # noqa: BLE001
         try:
             record_hook_error(hook_name="session_bootstrap", exc=exc)

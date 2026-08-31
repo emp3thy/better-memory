@@ -565,11 +565,14 @@ def install_skills(paths: TargetPaths, params: MachineParams) -> list[str]:
                 # No symlink privilege (Developer Mode/elevation) — a
                 # directory junction needs neither and works just as well
                 # for our purposes (diff()'s os.path.isjunction accepts it).
-                result = subprocess.run(
-                    ["cmd", "/c", "mklink", "/J", str(link), str(source)],
-                    capture_output=True, timeout=10,
-                )
-                healed = result.returncode == 0
+                try:
+                    result = subprocess.run(
+                        ["cmd", "/c", "mklink", "/J", str(link), str(source)],
+                        capture_output=True, timeout=10,
+                    )
+                    healed = result.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    healed = False
             if not healed:
                 warnings.append(
                     f"skill symlink skipped ({skill_name}): {exc}; enable Windows "

@@ -628,3 +628,40 @@ def test_autocheck_raising_still_produces_normal_output(
     text = res["hookSpecificOutput"]["additionalContext"]
     assert "## better-memory: session bootstrap" in text
     assert "doctor" not in text
+
+
+def test_autocheck_failure_is_recorded_via_record_hook_error(
+    home_with_schema, git_cwd, monkeypatch, capsys
+):
+    """Regression: a persistent autocheck failure must not silently vanish
+    forever — record_hook_error(hook_name="wiring_autocheck", ...) is called
+    (best-effort, mirroring the outer handler's pattern), and the bootstrap
+    output is otherwise unaffected."""
+    from better_memory.setup import autocheck
+
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home_with_schema))
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+
+    def _boom(home, cwd):
+        raise RuntimeError("autocheck exploded")
+
+    monkeypatch.setattr(autocheck, "maybe_repair", _boom)
+
+    calls: list[dict] = []
+
+    def _fake_record_hook_error(*, hook_name, exc):
+        calls.append({"hook_name": hook_name, "exc": exc})
+
+    monkeypatch.setattr(hook, "record_hook_error", _fake_record_hook_error)
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "autocheck-sess-3", "cwd": str(git_cwd)},
+        monkeypatch, capsys,
+    )
+    text = res["hookSpecificOutput"]["additionalContext"]
+    assert "## better-memory: session bootstrap" in text
+    assert "doctor" not in text
+
+    assert len(calls) == 1
+    assert calls[0]["hook_name"] == "wiring_autocheck"
+    assert isinstance(calls[0]["exc"], RuntimeError)
