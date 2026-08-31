@@ -8,13 +8,20 @@ from pathlib import Path
 
 import pytest
 
+import better_memory.setup.engine as eng
 from better_memory.setup.engine import (
     TargetPaths,
     apply,
     diff,
     install_skills,
 )
-from better_memory.setup.manifest import MANAGED_SKILLS, MachineParams
+from better_memory.setup.manifest import (
+    BEGIN_MARKER,
+    CLAUDE_MD_BLOCK,
+    END_MARKER,
+    MANAGED_SKILLS,
+    MachineParams,
+)
 
 PARAMS = MachineParams(
     venv_py="/repo/.venv/bin/python", venv_pyw="/repo/.venv/bin/python",
@@ -88,7 +95,6 @@ def test_apply_aborts_file_with_malformed_json_but_repairs_others(tmp_path):
 def test_apply_retries_once_on_concurrent_claude_json_change(tmp_path, monkeypatch):
     paths = _paths(tmp_path)
     paths.claude_json.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-    import better_memory.setup.engine as eng
     original_read = eng._read_json_and_mtime
     calls = {"n": 0}
 
@@ -107,6 +113,31 @@ def test_apply_retries_once_on_concurrent_claude_json_change(tmp_path, monkeypat
     final = json.loads(paths.claude_json.read_text(encoding="utf-8"))
     assert "better-memory" in final["mcpServers"]
     assert "x" in final["mcpServers"]  # concurrent edit survived
+
+
+def test_apply_heals_legacy_claude_md_section_outside_markers(tmp_path):
+    """A CLAUDE.md with BOTH a marked block and a stray legacy section
+    outside it (the exact corruption left by a pre-splice-fix run that
+    appended without excising) is healed by apply(): the legacy section is
+    excised, the heading collapses to one occurrence, and diff() goes
+    clean afterward."""
+    paths = _paths(tmp_path)
+    legacy = "# Global Preferences\n\n- No whimsy.\n\n" + CLAUDE_MD_BLOCK + "\n"
+    doc = legacy + "\n" + BEGIN_MARKER + "\n" + CLAUDE_MD_BLOCK + "\n" + END_MARKER + "\n"
+    paths.claude_md.write_text(doc, encoding="utf-8")
+
+    before = diff(PARAMS, paths)
+    assert any("legacy unmarked" in d.lower() for d in before)
+
+    apply(PARAMS, paths, home=tmp_path / "home")
+
+    healed_text = paths.claude_md.read_text(encoding="utf-8")
+    assert healed_text.count("# better-memory (MANDATORY)") == 1
+    assert healed_text.count(BEGIN_MARKER) == 1
+    assert "# Global Preferences" in healed_text  # foreign content preserved
+
+    after = [d for d in diff(PARAMS, paths) if "skill" not in d.lower()]
+    assert after == []
 
 
 def test_apply_is_idempotent_second_run_repairs_nothing(tmp_path):
@@ -239,7 +270,40 @@ def test_install_skills_already_correct_symlink_is_noop(tmp_path):
 def test_install_skills_wraps_oserror_as_warning_and_continues(tmp_path, monkeypatch):
     """Symlink creation failure (Windows without Developer Mode: WinError
     1314) is non-fatal — a warning per skill, not a crash — and does not
-    stop the rest of the loop."""
+    stop the rest of the loop. The mklink /J fallback is also mocked to
+    fail here so this pins the "everything failed" end of the ladder; the
+    fallback succeeding is covered separately below."""
+    params = _fake_repo_params(tmp_path)
+    skills_dir = tmp_path / "skills"
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json", settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md", skills_dir=skills_dir,
+    )
+
+    def boom(self, target, target_is_directory=False):  # noqa: ARG001
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(Path, "symlink_to", boom)
+    monkeypatch.setattr(
+        eng.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, returncode=1),
+    )
+
+    warnings = install_skills(paths, params)
+
+    assert len(warnings) == len(MANAGED_SKILLS)
+    assert all("skipped" in w for w in warnings)
+    for name in MANAGED_SKILLS:
+        assert not (skills_dir / name).exists()
+    assert skills_dir.is_dir()  # dir creation is separate from link creation
+
+
+def test_install_skills_junction_fallback_heals_when_symlink_denied(tmp_path, monkeypatch):
+    """When symlink_to raises OSError, install_skills falls back to
+    `mklink /J`; a successful junction creation leaves no warning at all —
+    this is what lets a Developer-Mode-less machine reach "wiring clean"."""
+    if sys.platform != "win32":
+        pytest.skip("mklink /J junction fallback is Windows-only")
     params = _fake_repo_params(tmp_path)
     skills_dir = tmp_path / "skills"
     paths = TargetPaths(
@@ -252,13 +316,52 @@ def test_install_skills_wraps_oserror_as_warning_and_continues(tmp_path, monkeyp
 
     monkeypatch.setattr(Path, "symlink_to", boom)
 
+    calls = []
+
+    def fake_run(cmd, **kwargs):  # noqa: ARG001
+        calls.append(cmd)
+        Path(cmd[4]).mkdir(parents=True, exist_ok=True)  # simulate mklink /J
+        return subprocess.CompletedProcess(cmd, returncode=0)
+
+    monkeypatch.setattr(eng.subprocess, "run", fake_run)
+
+    warnings = install_skills(paths, params)
+
+    assert warnings == []
+    assert len(calls) == len(MANAGED_SKILLS)
+    for cmd in calls:
+        assert cmd[:4] == ["cmd", "/c", "mklink", "/J"]
+    for name in MANAGED_SKILLS:
+        assert (skills_dir / name).exists()
+
+
+def test_install_skills_junction_fallback_warns_when_both_fail(tmp_path, monkeypatch):
+    """If the mklink /J fallback also fails (non-zero exit), the original
+    symlink-skipped warning is still surfaced — nothing is swallowed."""
+    if sys.platform != "win32":
+        pytest.skip("mklink /J junction fallback is Windows-only")
+    params = _fake_repo_params(tmp_path)
+    skills_dir = tmp_path / "skills"
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json", settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md", skills_dir=skills_dir,
+    )
+
+    def boom(self, target, target_is_directory=False):  # noqa: ARG001
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(Path, "symlink_to", boom)
+    monkeypatch.setattr(
+        eng.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, returncode=1, stderr=b"denied"),
+    )
+
     warnings = install_skills(paths, params)
 
     assert len(warnings) == len(MANAGED_SKILLS)
     assert all("skipped" in w for w in warnings)
     for name in MANAGED_SKILLS:
         assert not (skills_dir / name).exists()
-    assert skills_dir.is_dir()  # dir creation is separate from link creation
 
 
 def test_junction_skill_link_is_recognised_and_skipped(tmp_path):

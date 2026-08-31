@@ -110,6 +110,40 @@ def test_splice_absorbs_legacy_unmarked_section():
     assert "rules" in spliced
 
 
+def test_splice_dedups_legacy_section_before_existing_marked_block():
+    """Pre-existing corruption: a marked block already present AND a stray
+    unmarked legacy section BEFORE it — left over from a pre-splice-fix
+    migration that appended a marked block without excising the old
+    unmarked one. The markers-present branch must also excise legacy
+    content outside the marker span, not just replace what's between the
+    markers, or the duplicate is permanent across every later run."""
+    legacy = "# Global Preferences\n\n- No whimsy.\n\n" + CLAUDE_MD_BLOCK + "\n"
+    doc = legacy + "\n" + BEGIN_MARKER + "\n" + CLAUDE_MD_BLOCK + "\n" + END_MARKER + "\n"
+    spliced = splice_managed_block(doc, CLAUDE_MD_BLOCK)
+    assert spliced.count("# better-memory (MANDATORY)") == 1
+    assert spliced.count(BEGIN_MARKER) == 1
+    assert spliced.count(END_MARKER) == 1
+    assert extract_managed_block(spliced) == CLAUDE_MD_BLOCK
+    assert "# Global Preferences" in spliced
+    assert "- No whimsy." in spliced
+
+
+def test_splice_dedups_legacy_section_after_existing_marked_block():
+    """Same corruption, but the stray legacy section sits AFTER the marked
+    block instead of before it."""
+    doc = (
+        BEGIN_MARKER + "\n" + CLAUDE_MD_BLOCK + "\n" + END_MARKER
+        + "\n\n" + CLAUDE_MD_BLOCK + "\n# Process Discipline\n\nrules\n"
+    )
+    spliced = splice_managed_block(doc, CLAUDE_MD_BLOCK)
+    assert spliced.count("# better-memory (MANDATORY)") == 1
+    assert spliced.count(BEGIN_MARKER) == 1
+    assert spliced.count(END_MARKER) == 1
+    assert extract_managed_block(spliced) == CLAUDE_MD_BLOCK
+    assert "# Process Discipline" in spliced
+    assert "rules" in spliced
+
+
 def test_splice_absorb_is_idempotent():
     doc = (
         "# Global Preferences\n\n- No whimsy.\n\n"
@@ -169,6 +203,25 @@ def test_diff_reports_drift_for_non_dict_settings_json_without_raising(tmp_path)
     assert any(
         "settings.json" in d and "unparseable" in d.lower() for d in drifts
     )
+
+
+def test_diff_reports_legacy_section_outside_markers(tmp_path):
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json",
+        settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md",
+        skills_dir=tmp_path / "skills",
+    )
+    legacy = "# Global Preferences\n\n- No whimsy.\n\n" + CLAUDE_MD_BLOCK + "\n"
+    doc = legacy + "\n" + BEGIN_MARKER + "\n" + CLAUDE_MD_BLOCK + "\n" + END_MARKER + "\n"
+    paths.claude_md.write_text(doc, encoding="utf-8")
+    drifts = diff(PARAMS, paths)
+    assert any(
+        "claude.md" in d.lower() and "legacy unmarked" in d.lower() for d in drifts
+    )
+    # The managed block itself is up to date (content between the markers
+    # matches) — only the outside-the-markers duplicate should be flagged.
+    assert not any("missing or stale" in d for d in drifts)
 
 
 def test_diff_reports_drift_for_non_dict_claude_json_without_raising(tmp_path):

@@ -28,6 +28,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -226,15 +228,26 @@ def splice_managed_block(text: str, block: str) -> str:
     """Insert/replace the managed block in ``text``.
 
     If both markers are present, everything between them (inclusive) is
-    replaced. Otherwise, a legacy unmarked protocol section (if any) is
-    excised first, then the block is appended at the end.
+    replaced; the ``pre`` and ``post`` spans OUTSIDE the marker pair are
+    each independently scanned for a leftover legacy unmarked protocol
+    section and excised if found. That leftover happens when an earlier
+    (pre-splice-fix) migration appended a marked block without excising the
+    old unmarked one first, corrupting the file with the heading twice —
+    the markers-present branch used to just splice between the markers and
+    never look outside them, so that corruption was permanent across every
+    later run. The heading also legitimately appears once INSIDE the
+    markers, as the first line of ``block`` itself; that occurrence is
+    never touched, since only the pre/post spans are excised.
+
+    Otherwise (no marker pair yet), a legacy unmarked protocol section (if
+    any) is excised first, then the block is appended at the end.
     """
     if BEGIN_MARKER in text and END_MARKER in text:
         start = text.index(BEGIN_MARKER)
         end = text.index(END_MARKER) + len(END_MARKER)
-        return (
-            text[:start] + BEGIN_MARKER + "\n" + block + "\n" + END_MARKER + text[end:]
-        )
+        pre = _excise_legacy_unmarked_section(text[:start])
+        post = _excise_legacy_unmarked_section(text[end:])
+        return pre + BEGIN_MARKER + "\n" + block + "\n" + END_MARKER + post
     text = _excise_legacy_unmarked_section(text)
     return text + "\n\n" + BEGIN_MARKER + "\n" + block + "\n" + END_MARKER + "\n"
 
@@ -254,6 +267,24 @@ def extract_managed_block(text: str) -> str | None:
     if inner.endswith("\n"):
         inner = inner[:-1]
     return inner
+
+
+def _has_legacy_section_outside_markers(text: str) -> bool:
+    """True when a plain (unmarked) ``# better-memory (MANDATORY)`` heading
+    exists outside the managed BEGIN/END span — the corruption
+    ``splice_managed_block`` now heals (see its docstring). The heading
+    legitimately appears once INSIDE the span, as the first line of the
+    managed block itself; that occurrence is not inspected here, only the
+    pre/post spans outside the marker pair (or the whole text, if no marker
+    pair exists yet).
+    """
+    if BEGIN_MARKER in text and END_MARKER in text:
+        start = text.index(BEGIN_MARKER)
+        end = text.index(END_MARKER) + len(END_MARKER)
+        pre, post = text[:start], text[end:]
+    else:
+        pre, post = text, ""
+    return _LEGACY_HEADING in pre.split("\n") or _LEGACY_HEADING in post.split("\n")
 
 
 def fingerprint(params: MachineParams) -> str:
@@ -315,6 +346,10 @@ def diff(params: MachineParams, paths: TargetPaths) -> list[str]:
     live_md = paths.claude_md.read_text(encoding="utf-8") if paths.claude_md.exists() else ""
     if extract_managed_block(live_md) != CLAUDE_MD_BLOCK:
         drifts.append(f"{paths.claude_md}: managed block missing or stale")
+    if _has_legacy_section_outside_markers(live_md):
+        drifts.append(
+            f"{paths.claude_md}: legacy unmarked better-memory section outside managed block"
+        )
 
     for skill_name in MANAGED_SKILLS:
         link = paths.skills_dir / skill_name
@@ -525,10 +560,21 @@ def install_skills(paths: TargetPaths, params: MachineParams) -> list[str]:
         try:
             link.symlink_to(source, target_is_directory=True)
         except OSError as exc:
-            warnings.append(
-                f"skill symlink skipped ({skill_name}): {exc}; enable Windows "
-                "Developer Mode or run as administrator to install skill symlinks."
-            )
+            healed = False
+            if sys.platform == "win32":
+                # No symlink privilege (Developer Mode/elevation) — a
+                # directory junction needs neither and works just as well
+                # for our purposes (diff()'s os.path.isjunction accepts it).
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link), str(source)],
+                    capture_output=True, timeout=10,
+                )
+                healed = result.returncode == 0
+            if not healed:
+                warnings.append(
+                    f"skill symlink skipped ({skill_name}): {exc}; enable Windows "
+                    "Developer Mode or run as administrator to install skill symlinks."
+                )
 
     return warnings
 
