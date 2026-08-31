@@ -222,8 +222,11 @@ history; no scoring reads it) and is unrelated to `evidence_count` on
 reflections/semantic memories, which counts synthesis source
 observations.
 
-Session ids resolve server-side from `CLAUDE_SESSION_ID`; none of these
-tools accept a session id parameter.
+Session ids resolve server-side from `CLAUDE_SESSION_ID` by default;
+`memory.list_session_exposures` and `memory.apply_session_ratings` also
+accept an explicit `session_id` (from the RATE_MEMORIES directive's
+`Session:` line), which overrides env/marker resolution. `memory.credit`
+takes no session id.
 
 ### `memory.credit`
 
