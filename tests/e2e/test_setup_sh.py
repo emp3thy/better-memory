@@ -105,17 +105,23 @@ BASH = _find_bash()
 pytestmark = [
     pytest.mark.skipif(BASH is None, reason="bash (Git Bash / POSIX) not available"),
     pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PATH"),
-    # scripts/setup.sh still shells out to the old
-    # `python -m better_memory.cli.install_hooks --venv-py/--venv-pyw/--home`
-    # contract; that module is now a deprecation shim delegating to
-    # `better-memory setup` (better_memory/cli/setup_cmd.py) and no longer
-    # produces the flag-driven output/exit-code shapes this file asserts on
-    # (e.g. "[install_hooks] Restart Claude Code", exit 1 on malformed JSON).
-    # Self-managing-setup's bootstrap-scripts task rewrites setup.sh to call
-    # `uv run better-memory setup` directly — this file's B1-B4 scenarios get
-    # re-pointed at that new flow then. Skipped rather than deleted so the
-    # scenario coverage isn't lost in the meantime.
-    pytest.mark.skip(reason="scripts/setup.sh not yet migrated off install_hooks"),
+    # scripts/setup.sh (self-managing-setup task 9) was rewritten to a
+    # 3-step body: check/install uv, `uv sync`, `uv run better-memory setup`.
+    # Every B1-B4 scenario here targets behavior that rewrite deleted
+    # outright: the Python-version probe, the win_path() translator, the
+    # full Ollama detect/prompt/install/pull flow (B1's ollama assertions,
+    # B2's EOF-at-`read -rp` abort pin), the runtime-layout mkdir stage, and
+    # the `install_hooks --venv-py/--venv-pyw/--home` flag contract (B3's
+    # env-propagation pin, B4's "[install_hooks] ...", "scripts/setup.sh
+    # aborting" stderr pins). None of that surface exists in the new script
+    # to assert against — `uv run better-memory setup` now owns layout,
+    # backups, and config writes internally (covered by tests/setup and
+    # tests/cli/test_setup_cmd.py instead). Re-pointing B1-B4 at the new
+    # 3-step contract is a full rewrite of this file's scenarios, not a
+    # cheap assertion tweak, so it's left out of task 9's scope. Skipped
+    # rather than deleted so the scenario catalog (design doc section 1.B)
+    # isn't lost in the meantime.
+    pytest.mark.skip(reason="scripts/setup.sh rewritten to 3-step uv contract (task 9); B1-B4 target removed Ollama/win_path/install_hooks-flag behavior and need a full rewrite, not a cheap update"),
 ]
 
 
