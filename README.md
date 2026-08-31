@@ -293,7 +293,7 @@ Open `/hooks` once in Claude Code to reload the hook config — the settings wat
 The spool drains on every `memory.retrieve` call. If you haven't retrieved in a long time, files accumulate — they're tiny JSON, not a concern. Bad files are moved to `spool/.quarantine/` so one corrupt file never blocks the drain.
 
 **Windows console flashes on every tool call.**
-Your hook command is using `python.exe`; switch to `.venv\Scripts\pythonw.exe`. The no-console variant still reads stdin pipes fine and won't flash a window.
+This only applies to the `observer` hook (PostToolUse) — it's the one hook `better-memory setup` assigns `.venv\Scripts\pythonw.exe` to, since it's the only hook that doesn't need to read Claude Code's stdout back. If it's flashing anyway, your `observer` entry is pointing at `python.exe` instead; run `uv run better-memory doctor --fix` to restore the correct interpreter assignments (or fix it by hand and switch just that entry to `pythonw.exe`). Do **not** switch any other hook (`session_bootstrap`, `session_close`, `stop_sweep`, `contextual_inject`, `commit_checkpoint`, `pre_compact`) to `pythonw.exe` — they all need `python.exe` for Claude Code to read their stdout (`additionalContext` / block directives / `systemMessage`); `pythonw.exe` silently nulls stdout and those hooks would go dark.
 
 **Wiring drifted after a repo move, upgrade, or a hand-edit to `~/.claude/settings.json` / `~/.claude.json` / `~/.claude/CLAUDE.md`.**
 Run `uv run better-memory doctor` to see what's stale, or `uv run better-memory doctor --fix` to repair it in place. See [Doctor](#doctor).
