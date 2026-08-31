@@ -25,15 +25,17 @@ Judge fixes applied:
 Inner-suite scoping contract (documented per the implementation task):
 
 * ``BM_E2E_CANARY_INNER_SCOPE`` unset and ``CI`` unset → REDUCED default
-  slice (fast local runs): ``test_setup_sh.py`` + ``test_hooks_contracts.py``
-  (sync hook + MCP server spawns — the remaining real-home-corruption-risk
-  surface). ``test_install_hooks.py`` was retired when
-  ``cli/install_hooks.py`` became a deprecation shim over
-  ``better-memory setup`` (see ``better_memory/cli/setup_cmd.py``);
-  ``test_setup_sh.py`` is module-skipped for the same reason (it drives
-  ``scripts/setup.sh``, which still invokes the old install_hooks CLI
-  contract until it's rewritten) but stays listed here so it resumes
-  exercising real-home risk automatically once that lands.
+  slice (fast local runs): ``test_setup_cli.py`` + ``test_hooks_contracts.py``
+  (real `better-memory setup`/`doctor` CLI spawns + sync hook + MCP server
+  spawns — the remaining real-home-corruption-risk surface).
+  ``test_install_hooks.py`` was retired when ``cli/install_hooks.py``
+  became a deprecation shim over ``better-memory setup`` (see
+  ``better_memory/cli/setup_cmd.py``). ``test_setup_sh.py`` (module-skipped:
+  it drove ``scripts/setup.sh`` against the pre-rewrite Ollama/win_path/
+  install_hooks-flag contract) was deleted outright once the unmocked
+  ``test_setup_cli.py`` landed as its replacement — the real-home risk it
+  used to cover (a bare ``better-memory setup``/``doctor`` invocation) is
+  now exercised directly.
 * ``BM_E2E_CANARY_INNER_SCOPE`` unset and ``CI`` set (every mainstream CI
   exports it) → the FULL ``tests/e2e`` suite — the actual isolation proof.
 * ``BM_E2E_CANARY_INNER_SCOPE=full`` → full ``tests/e2e`` anywhere.
@@ -66,7 +68,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SCOPE_VAR = "BM_E2E_CANARY_INNER_SCOPE"
 REDUCED_DEFAULT: tuple[str, ...] = (
-    "tests/e2e/test_setup_sh.py",
+    "tests/e2e/test_setup_cli.py",
     "tests/e2e/test_hooks_contracts.py",
 )
 STRIP_PREFIXES: tuple[str, ...] = ("BETTER_MEMORY_", "CLAUDE_", "AWS_", "OLLAMA_")
@@ -98,15 +100,14 @@ def _hostile_outer_env(canary: Path) -> dict[str, str]:
     # silently turn the meta-run vacuous — drop it.
     for key in [k for k in env if k.upper() == "PYTEST_ADDOPTS"]:
         del env[key]
-    # Pin uv's cache/python dirs to the HOST's real locations BEFORE the HOME
-    # override below: on POSIX the inner test_setup_sh would otherwise derive
-    # them from $HOME (== the canary), and setup.sh's `uv sync` would populate
-    # a cold cache tree inside the canary — a false HARNESS ISOLATION BREACH
-    # in the file-set diff (plus a multi-minute network download).
-    from tests.e2e.test_setup_sh import _host_uv_dirs
-
-    for key, value in _host_uv_dirs().items():
-        _set_ci(env, key, value)
+    # NOTE: this used to also pin UV_CACHE_DIR/UV_PYTHON_INSTALL_DIR to the
+    # host's real (warm) locations before the HOME override below, because
+    # the now-deleted test_setup_sh.py drove scripts/setup.sh's `uv sync`
+    # against the canary HOME and would otherwise have populated a cold
+    # cache tree inside it (a false HARNESS ISOLATION BREACH, plus a
+    # multi-minute network download). No test in the current REDUCED_DEFAULT
+    # or full tests/e2e scope invokes uv, so that pin is gone; reinstate it
+    # (see git history for `_host_uv_dirs`) if a future e2e test spawns uv.
     _set_ci(env, "HOME", str(canary))
     _set_ci(env, "USERPROFILE", str(canary))
     if sys.platform == "win32":

@@ -166,7 +166,8 @@ def test_trailer_arbitrary_value_writes_no_marker(
 def test_trailer_case_insensitive_key(
     repo: Path, spool_home: Path
 ) -> None:
-    """The trailer key is recognised case-insensitively (`closes-episode`, `CLOSES-EPISODE`, etc.)."""
+    """The trailer key is recognised case-insensitively (`closes-episode`,
+    `CLOSES-EPISODE`, etc.)."""
     _commit(repo, "done\n\ncloses-episode: true")
     result = _run_post_commit(repo, spool_home)
     assert result.returncode == 0, result.stderr
