@@ -93,6 +93,34 @@ def test_splice_appends_block_when_absent_and_replaces_when_stale():
     assert healed.count(BEGIN_MARKER) == 1 and healed.count(END_MARKER) == 1
 
 
+def test_splice_absorbs_legacy_unmarked_section():
+    doc = (
+        "# Global Preferences\n\n- No whimsy.\n\n"
+        + CLAUDE_MD_BLOCK
+        + "\n# Process Discipline\n\nrules\n"
+    )
+    spliced = splice_managed_block(doc, CLAUDE_MD_BLOCK)
+    assert spliced.count("# better-memory (MANDATORY)") == 1
+    assert spliced.count(BEGIN_MARKER) == 1
+    assert spliced.count(END_MARKER) == 1
+    assert extract_managed_block(spliced) == CLAUDE_MD_BLOCK
+    assert "# Global Preferences" in spliced
+    assert "- No whimsy." in spliced
+    assert "# Process Discipline" in spliced
+    assert "rules" in spliced
+
+
+def test_splice_absorb_is_idempotent():
+    doc = (
+        "# Global Preferences\n\n- No whimsy.\n\n"
+        + CLAUDE_MD_BLOCK
+        + "\n# Process Discipline\n\nrules\n"
+    )
+    once = splice_managed_block(doc, CLAUDE_MD_BLOCK)
+    twice = splice_managed_block(once, CLAUDE_MD_BLOCK)
+    assert once == twice
+
+
 def test_fingerprint_stable_and_param_sensitive():
     assert fingerprint(PARAMS) == fingerprint(PARAMS)
     other = MachineParams(venv_py="/x", venv_pyw="/x", home="/h", repo_root="/r")

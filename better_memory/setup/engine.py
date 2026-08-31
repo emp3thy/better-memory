@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 from collections.abc import Callable
@@ -191,11 +192,42 @@ def patch_mcp_entry(existing: dict, params: MachineParams) -> dict:
     return config
 
 
+_LEGACY_HEADING = CLAUDE_MD_BLOCK.splitlines()[0]  # "# better-memory (MANDATORY)"
+
+
+def _excise_legacy_unmarked_section(text: str) -> str:
+    """Remove a pre-migration unmarked better-memory section from ``text``.
+
+    Machines that hand-maintained the protocol text before markers existed
+    have it as a plain ``# better-memory (MANDATORY)`` heading with no
+    surrounding markers. Splicing a fresh marked block on top of that would
+    leave the protocol text twice (old unmarked + new marked). Finds the
+    canonical heading line and excises everything from it up to (but not
+    including) the next top-level ``# `` heading, or EOF if there is none.
+    Surplus blank lines left at the seam are trimmed to at most two.
+    """
+    lines = text.split("\n")
+    try:
+        start = lines.index(_LEGACY_HEADING)
+    except ValueError:
+        return text
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("# "):
+            end = i
+            break
+
+    remaining = "\n".join(lines[:start] + lines[end:])
+    return re.sub(r"\n{4,}", "\n\n\n", remaining)
+
+
 def splice_managed_block(text: str, block: str) -> str:
     """Insert/replace the managed block in ``text``.
 
     If both markers are present, everything between them (inclusive) is
-    replaced. Otherwise the block is appended at the end.
+    replaced. Otherwise, a legacy unmarked protocol section (if any) is
+    excised first, then the block is appended at the end.
     """
     if BEGIN_MARKER in text and END_MARKER in text:
         start = text.index(BEGIN_MARKER)
@@ -203,6 +235,7 @@ def splice_managed_block(text: str, block: str) -> str:
         return (
             text[:start] + BEGIN_MARKER + "\n" + block + "\n" + END_MARKER + text[end:]
         )
+    text = _excise_legacy_unmarked_section(text)
     return text + "\n\n" + BEGIN_MARKER + "\n" + block + "\n" + END_MARKER + "\n"
 
 

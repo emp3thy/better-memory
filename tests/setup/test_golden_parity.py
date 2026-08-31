@@ -71,3 +71,11 @@ def test_claude_md_canonical_matches_reference_section():
     normalized_ref = " ".join(ref_md.split())
     normalized_block = " ".join(CLAUDE_MD_BLOCK.split())
     assert normalized_block in normalized_ref
+
+
+def test_first_migration_does_not_duplicate_protocol_text():
+    ref_md = (FIXTURES / "reference_claude_md.md").read_text("utf-8")
+    spliced = splice_managed_block(ref_md, CLAUDE_MD_BLOCK)
+    assert spliced.count("# better-memory (MANDATORY)") == 1
+    assert "# Global Preferences" in spliced
+    assert "# Process Discipline" in spliced
