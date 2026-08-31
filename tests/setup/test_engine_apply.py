@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,8 +20,16 @@ from better_memory.setup.manifest import (
     BEGIN_MARKER,
     CLAUDE_MD_BLOCK,
     END_MARKER,
-    MANAGED_SKILLS,
     MachineParams,
+)
+
+# Skill names seeded into the fake repo checkout by _fake_repo_params().
+# With managed_skills() enumerating the repo, the fake tree defines the
+# managed set for these tests.
+SEEDED_SKILLS = (
+    "better-memory-synthesize",
+    "rate-session-memories",
+    "start-better-memory-ui",
 )
 
 PARAMS = MachineParams(
@@ -182,10 +191,10 @@ LADDER_SKILL = "better-memory-synthesize"
 
 
 def _fake_repo_params(tmp_path: Path) -> MachineParams:
-    """A fake repo checkout with every MANAGED_SKILLS entry seeded as a real
+    """A fake repo checkout with every SEEDED_SKILLS entry seeded as a real
     directory, so install_skills() never warns about a missing source."""
     repo = tmp_path / "repo"
-    for name in MANAGED_SKILLS:
+    for name in SEEDED_SKILLS:
         skill_dir = repo / ".claude" / "skills" / name
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(f"{name} sentinel\n", encoding="utf-8")
@@ -291,9 +300,9 @@ def test_install_skills_wraps_oserror_as_warning_and_continues(tmp_path, monkeyp
 
     warnings = install_skills(paths, params)
 
-    assert len(warnings) == len(MANAGED_SKILLS)
+    assert len(warnings) == len(SEEDED_SKILLS)
     assert all("skipped" in w for w in warnings)
-    for name in MANAGED_SKILLS:
+    for name in SEEDED_SKILLS:
         assert not (skills_dir / name).exists()
     assert skills_dir.is_dir()  # dir creation is separate from link creation
 
@@ -328,10 +337,10 @@ def test_install_skills_junction_fallback_heals_when_symlink_denied(tmp_path, mo
     warnings = install_skills(paths, params)
 
     assert warnings == []
-    assert len(calls) == len(MANAGED_SKILLS)
+    assert len(calls) == len(SEEDED_SKILLS)
     for cmd in calls:
         assert cmd[:4] == ["cmd", "/c", "mklink", "/J"]
-    for name in MANAGED_SKILLS:
+    for name in SEEDED_SKILLS:
         assert (skills_dir / name).exists()
 
 
@@ -358,9 +367,9 @@ def test_install_skills_junction_fallback_warns_when_both_fail(tmp_path, monkeyp
 
     warnings = install_skills(paths, params)
 
-    assert len(warnings) == len(MANAGED_SKILLS)
+    assert len(warnings) == len(SEEDED_SKILLS)
     assert all("skipped" in w for w in warnings)
-    for name in MANAGED_SKILLS:
+    for name in SEEDED_SKILLS:
         assert not (skills_dir / name).exists()
 
 
@@ -390,9 +399,9 @@ def test_install_skills_junction_fallback_warns_when_subprocess_raises(tmp_path,
 
     warnings = install_skills(paths, params)
 
-    assert len(warnings) == len(MANAGED_SKILLS)
+    assert len(warnings) == len(SEEDED_SKILLS)
     assert all("skipped" in w for w in warnings)
-    for name in MANAGED_SKILLS:
+    for name in SEEDED_SKILLS:
         assert not (skills_dir / name).exists()
 
 
@@ -427,3 +436,107 @@ def test_junction_skill_link_is_recognised_and_skipped(tmp_path):
     # (see requires_symlinks); only the junction'd skill must be silent.
     assert not any(LADDER_SKILL in w for w in warnings)
     assert os.path.isjunction(junction)  # untouched, not rmtree'd
+
+
+# ------------------------- dynamic enumeration + stale-link prune
+
+
+def _make_link(link: Path, target: Path) -> None:
+    """Create a directory link the way this environment allows: a symlink
+    where privileged, else a junction (mklink /J needs no privilege)."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        proc = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"cannot create links here: {proc.stderr.strip()}")
+
+
+def _link_exists(link: Path) -> bool:
+    return os.path.lexists(link) or os.path.isjunction(link)
+
+
+def test_install_skills_picks_up_newly_added_skill_dir(tmp_path):
+    """A skill directory added to the repo after install is enumerated and
+    linked on the next run — no hardcoded skill list to update."""
+    params = _fake_repo_params(tmp_path)
+    new_skill = Path(params.repo_root) / ".claude" / "skills" / "zz-brand-new"
+    new_skill.mkdir(parents=True)
+    (new_skill / "SKILL.md").write_text("new skill\n", encoding="utf-8")
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json", settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md", skills_dir=tmp_path / "skills",
+    )
+
+    warnings = install_skills(paths, params)
+
+    link = paths.skills_dir / "zz-brand-new"
+    if any("zz-brand-new" in w for w in warnings):
+        pytest.skip("environment can create neither symlinks nor junctions")
+    assert _link_exists(link)
+    assert Path(os.path.realpath(link)) == new_skill.resolve()
+
+
+def test_install_skills_prunes_stale_repo_targeted_link(tmp_path):
+    """A link in skills_dir that targets <repo>/.claude/skills/<name> whose
+    source no longer exists (skill deleted/renamed in repo) is removed."""
+    params = _fake_repo_params(tmp_path)
+    gone = Path(params.repo_root) / ".claude" / "skills" / "old-deleted-skill"
+    gone.mkdir(parents=True)
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json", settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md", skills_dir=tmp_path / "skills",
+    )
+    stale = paths.skills_dir / "old-deleted-skill"
+    _make_link(stale, gone)
+    shutil.rmtree(gone)  # now dangling, repo-targeted
+
+    install_skills(paths, params)
+
+    assert not _link_exists(stale)
+
+
+def test_install_skills_preserves_foreign_entries(tmp_path):
+    """Entries in skills_dir that are not better-memory's — a user's real
+    skill directory, or a link pointing outside the repo skills tree — are
+    never touched by the prune pass."""
+    params = _fake_repo_params(tmp_path)
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json", settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md", skills_dir=tmp_path / "skills",
+    )
+    user_dir = paths.skills_dir / "user-skill"
+    user_dir.mkdir(parents=True)
+    (user_dir / "SKILL.md").write_text("user's own skill\n", encoding="utf-8")
+    elsewhere = tmp_path / "other-tool-skills" / "other-skill"
+    elsewhere.mkdir(parents=True)
+    foreign_link = paths.skills_dir / "other-skill"
+    _make_link(foreign_link, elsewhere)
+
+    install_skills(paths, params)
+
+    assert (user_dir / "SKILL.md").exists()
+    assert _link_exists(foreign_link)
+
+
+def test_diff_reports_stale_repo_targeted_link(tmp_path):
+    """diff() must surface a stale repo-targeted link as drift, or the
+    autocheck's `if drift:` guard would never trigger the pruning apply()."""
+    params = _fake_repo_params(tmp_path)
+    gone = Path(params.repo_root) / ".claude" / "skills" / "old-deleted-skill"
+    gone.mkdir(parents=True)
+    paths = TargetPaths(
+        claude_json=tmp_path / ".claude.json", settings_json=tmp_path / "settings.json",
+        claude_md=tmp_path / "CLAUDE.md", skills_dir=tmp_path / "skills",
+    )
+    stale = paths.skills_dir / "old-deleted-skill"
+    _make_link(stale, gone)
+    shutil.rmtree(gone)
+
+    drift = diff(params, paths)
+
+    assert any("skill" in d and "stale link" in d for d in drift)

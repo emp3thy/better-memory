@@ -1,12 +1,14 @@
 """Manifest completeness and rendering tests."""
+from pathlib import Path
+
 from better_memory.setup.manifest import (
     CLAUDE_MD_BLOCK,
     MANAGED_ENV,
     MANAGED_HOOKS,
-    MANAGED_SKILLS,
     MachineParams,
     detect_machine_params,
     hook_entry,
+    managed_skills,
     mcp_server_entry,
 )
 
@@ -61,13 +63,33 @@ def test_mcp_server_entry_shape():
     }
 
 
-def test_managed_env_and_skills():
+def test_managed_env():
     assert MANAGED_ENV == {"BETTER_MEMORY_INJECT_MODE": "deferred"}
-    assert MANAGED_SKILLS == (
-        "better-memory-synthesize",
-        "rate-session-memories",
-        "start-better-memory-ui",
-    )
+
+
+def test_managed_skills_enumerates_repo_skill_dirs(tmp_path):
+    """Every directory under <repo>/.claude/skills/ with a SKILL.md counts;
+    dirs without SKILL.md and stray files are ignored; result is sorted."""
+    skills_root = tmp_path / ".claude" / "skills"
+    for name in ("zeta-skill", "alpha-skill"):
+        d = skills_root / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(f"{name}\n", encoding="utf-8")
+    (skills_root / "not-a-skill").mkdir()  # no SKILL.md
+    (skills_root / "stray.md").write_text("stray\n", encoding="utf-8")
+
+    assert managed_skills(tmp_path) == ("alpha-skill", "zeta-skill")
+
+
+def test_managed_skills_missing_dir_returns_empty(tmp_path):
+    assert managed_skills(tmp_path) == ()
+
+
+def test_managed_skills_finds_real_repo_skills():
+    repo_root = Path(__file__).resolve().parents[2]
+    found = managed_skills(repo_root)
+    assert {"better-memory-synthesize", "rate-session-memories",
+            "start-better-memory-ui"} <= set(found)
 
 
 def test_claude_md_block_is_nonempty_and_unmarkered():
