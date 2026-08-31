@@ -102,7 +102,8 @@ class SessionToolHandlers:
     async def list_session_exposures(
         self, args: dict[str, Any]
     ) -> list[TextContent]:
-        sid = resolve_session_id(self._home) or ""
+        explicit = str(args.get("session_id") or "").strip()
+        sid = explicit or resolve_session_id(self._home) or ""
         if self._remote is not None:
             payload = self._remote.list_session_exposures(session_id=sid)
             return [TextContent(type="text", text=json.dumps(payload))]
@@ -114,7 +115,8 @@ class SessionToolHandlers:
     async def apply_session_ratings(
         self, args: dict[str, Any]
     ) -> list[TextContent]:
-        sid = resolve_session_id(self._home)
+        explicit = str(args.get("session_id") or "").strip()
+        sid = explicit or resolve_session_id(self._home)
         if not sid:
             raise ValueError(
                 "No active session: CLAUDE_SESSION_ID / "

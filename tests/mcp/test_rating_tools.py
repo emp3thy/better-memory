@@ -185,7 +185,15 @@ class TestListSessionExposuresRegistered:
             if t.name == "memory.list_session_exposures"
         )
         assert tool.inputSchema["additionalProperties"] is False
-        assert tool.inputSchema["properties"] == {}
+        assert tool.inputSchema["properties"] == {
+            "session_id": {
+                "type": "string",
+                "description": (
+                    "Explicit session id from the RATE_MEMORIES "
+                    "directive; overrides env/marker resolution."
+                ),
+            },
+        }
         assert "required" not in tool.inputSchema
 
 
@@ -520,3 +528,137 @@ class TestEvidenceSchema:
         assert tool.description is not None
         assert "evidence" in tool.description
         assert "ignored" in tool.description
+
+
+class TestApplyRatingsSessionIdSchema:
+    """Task 2: memory.apply_session_ratings gains an optional explicit
+    session_id, mirroring memory.list_session_exposures."""
+
+    def test_schema_has_session_id_property(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.apply_session_ratings"
+        )
+        assert tool.inputSchema["properties"]["session_id"] == {
+            "type": "string",
+            "description": (
+                "Explicit session id from the RATE_MEMORIES directive; "
+                "overrides env/marker resolution."
+            ),
+        }
+        # session_id must stay optional — required is unchanged.
+        assert tool.inputSchema["required"] == ["ratings"]
+
+    def test_description_mentions_explicit_session_id(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.apply_session_ratings"
+        )
+        assert "session_id" in tool.description
+
+
+class TestListExposuresSessionIdDescription:
+    def test_description_mentions_explicit_session_id(self):
+        from better_memory.mcp.server import _tool_definitions
+        tool = next(
+            t for t in _tool_definitions()
+            if t.name == "memory.list_session_exposures"
+        )
+        assert "session_id" in tool.description
+
+
+class TestExplicitSessionIdOverridesAmbientResolution:
+    """Task 2: both rating tools accept an explicit session_id argument
+    (from the RATE_MEMORIES directive) that overrides env/marker
+    resolution. Whitespace-only values are treated as absent."""
+
+    def test_list_exposures_explicit_session_id_overrides_env(
+        self, memory_db, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+
+        conn, _ = memory_db
+        _seed_reflection(conn, "r-s1")
+        _seed_exposure(conn, "S1", "reflection", "r-s1")
+        # Ambient env resolution points elsewhere.
+        _seed_reflection(conn, "r-other")
+        _seed_exposure(conn, "OTHER", "reflection", "r-other")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "OTHER")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.list_session_exposures", {"session_id": "S1"},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["session_id"] == "S1"
+        assert len(payload["exposures"]) == 1
+        assert payload["exposures"][0]["id"] == "r-s1"
+
+    def test_list_exposures_whitespace_session_id_falls_back_to_ambient(
+        self, memory_db, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+
+        conn, _ = memory_db
+        _seed_reflection(conn, "r-amb")
+        _seed_exposure(conn, "AMBIENT", "reflection", "r-amb")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "AMBIENT")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.list_session_exposures", {"session_id": "   "},
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["session_id"] == "AMBIENT"
+        assert len(payload["exposures"]) == 1
+        assert payload["exposures"][0]["id"] == "r-amb"
+
+    def test_apply_ratings_explicit_session_id_overrides_env(
+        self, memory_db, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+
+        conn, _ = memory_db
+        _seed_reflection(conn, "r-s1")
+        _seed_exposure(conn, "S1", "reflection", "r-s1")
+        _seed_reflection(conn, "r-other")
+        _seed_exposure(conn, "OTHER", "reflection", "r-other")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "OTHER")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.apply_session_ratings",
+            {
+                "session_id": "S1",
+                "ratings": [
+                    {"kind": "reflection", "id": "r-s1", "class": "cited",
+                     "evidence": "used it to fix the bug"},
+                ],
+            },
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["session_id"] == "S1"
+        assert payload["applied"]["cited"] == 1
+
+    def test_apply_ratings_whitespace_session_id_falls_back_to_ambient(
+        self, memory_db, monkeypatch,
+    ):
+        from better_memory.mcp import server as srv_mod
+
+        conn, _ = memory_db
+        _seed_reflection(conn, "r-amb")
+        _seed_exposure(conn, "AMBIENT", "reflection", "r-amb")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "AMBIENT")
+
+        result = run_async(srv_mod._dispatch_for_tests(
+            "memory.apply_session_ratings",
+            {
+                "session_id": "   ",
+                "ratings": [
+                    {"kind": "reflection", "id": "r-amb", "class": "cited",
+                     "evidence": "used it to fix the bug"},
+                ],
+            },
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["session_id"] == "AMBIENT"
+        assert payload["applied"]["cited"] == 1
