@@ -178,7 +178,7 @@ class TestListSessionExposuresRegistered:
         names = {t.name for t in _tool_definitions()}
         assert "memory.list_session_exposures" in names
 
-    def test_tool_schema_has_no_required_properties(self):
+    def test_tool_schema_shape_and_optional_session_id(self):
         from better_memory.mcp.server import _tool_definitions
         tool = next(
             t for t in _tool_definitions()
@@ -556,6 +556,7 @@ class TestApplyRatingsSessionIdSchema:
             t for t in _tool_definitions()
             if t.name == "memory.apply_session_ratings"
         )
+        assert tool.description is not None
         assert "session_id" in tool.description
 
 
@@ -566,6 +567,7 @@ class TestListExposuresSessionIdDescription:
             t for t in _tool_definitions()
             if t.name == "memory.list_session_exposures"
         )
+        assert tool.description is not None
         assert "session_id" in tool.description
 
 
