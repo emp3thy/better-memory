@@ -14,8 +14,8 @@ Port of ``better_memory/cli/install_hooks.py``'s ``merge_settings_json``
 (lines 228-279). The pure merges are generalized to iterate the full
 ``MANAGED_HOOKS`` table (8 specs, including ``if_filter`` groups) and to
 merge ``MANAGED_ENV`` alongside hooks; ``install_skill_symlinks`` is
-parameterized by target dir + repo root and extended to loop
-``MANAGED_SKILLS``.
+parameterized by target dir + repo root and extended to loop every skill
+``manifest.managed_skills()`` enumerates from the repo checkout.
 
 ``_backup``/``_atomic_write`` are duplicated here rather than imported from
 ``cli/install_hooks`` — that module becomes a thin shim over this engine in
@@ -43,9 +43,9 @@ from better_memory.setup.manifest import (
     LEGACY_HOOK_MODULES,
     MANAGED_ENV,
     MANAGED_HOOKS,
-    MANAGED_SKILLS,
     MachineParams,
     hook_entry,
+    managed_skills,
     mcp_server_entry,
 )
 
@@ -106,7 +106,8 @@ def _canonical_hook_groups(params: MachineParams) -> dict[str, list[dict]]:
 def render(params: MachineParams) -> dict:
     """Build the desired-state dict for every managed surface."""
     skills = tuple(
-        (name, str(_repo_skill_source(params, name))) for name in MANAGED_SKILLS
+        (name, str(_repo_skill_source(params, name)))
+        for name in managed_skills(params.repo_root)
     )
 
     return {
@@ -351,7 +352,7 @@ def diff(params: MachineParams, paths: TargetPaths) -> list[str]:
             f"{paths.claude_md}: legacy unmarked better-memory section outside managed block"
         )
 
-    for skill_name in MANAGED_SKILLS:
+    for skill_name in managed_skills(params.repo_root):
         link = paths.skills_dir / skill_name
         source = _repo_skill_source(params, skill_name)
         if not (link.is_symlink() or os.path.isjunction(link)):
@@ -363,6 +364,9 @@ def diff(params: MachineParams, paths: TargetPaths) -> list[str]:
             resolved_ok = False
         if not resolved_ok:
             drifts.append(f"skill {skill_name!r}: link does not resolve to repo skill dir")
+
+    for stale in _stale_repo_skill_links(paths, params):
+        drifts.append(f"skill {stale.name!r}: stale link (source gone from repo)")
 
     return drifts
 
@@ -512,14 +516,42 @@ def _apply_claude_md(paths: TargetPaths, backup_dir: Path, repaired: list[str]) 
     repaired.append(f"{paths.claude_md}: managed block")
 
 
+def _stale_repo_skill_links(paths: TargetPaths, params: MachineParams) -> list[Path]:
+    """Links in ``paths.skills_dir`` that better-memory owns but no longer
+    manages: the link targets ``<repo>/.claude/skills/`` yet its name is not
+    an enumerated skill (the skill was deleted or renamed in the repo).
+    Foreign entries — real directories, or links targeting anywhere else —
+    are never included.
+    """
+    if not paths.skills_dir.is_dir():
+        return []
+    managed = set(managed_skills(params.repo_root))
+    skills_root = (Path(params.repo_root) / ".claude" / "skills").resolve()
+    stale: list[Path] = []
+    for entry in paths.skills_dir.iterdir():
+        if entry.name in managed:
+            continue
+        if not (entry.is_symlink() or os.path.isjunction(entry)):
+            continue
+        try:
+            # realpath, not resolve(): non-strict for dangling links, and it
+            # follows junctions on Windows without the \\?\ prefix.
+            target = Path(os.path.realpath(entry))
+        except OSError:
+            continue
+        if skills_root in target.parents:
+            stale.append(entry)
+    return stale
+
+
 def install_skills(paths: TargetPaths, params: MachineParams) -> list[str]:
-    """Symlink each ``MANAGED_SKILLS`` entry from the repo into
-    ``paths.skills_dir``.
+    """Symlink each skill ``manifest.managed_skills()`` enumerates from the
+    repo checkout into ``paths.skills_dir``.
 
     Port of ``cli/install_hooks.py``'s ``install_skill_symlinks``,
     parameterized by target dir (``paths.skills_dir``) and repo root
     (``params.repo_root``) instead of hardcoded user-scope paths, and
-    looping the full ``MANAGED_SKILLS`` tuple.
+    looping every enumerated repo skill.
 
     Idempotent: if a link already points to the right target, nothing
     happens. If a different symlink, file, or directory exists at the
@@ -534,7 +566,7 @@ def install_skills(paths: TargetPaths, params: MachineParams) -> list[str]:
     warnings: list[str] = []
     paths.skills_dir.mkdir(parents=True, exist_ok=True)
 
-    for skill_name in MANAGED_SKILLS:
+    for skill_name in managed_skills(params.repo_root):
         source = _repo_skill_source(params, skill_name)
         if not source.is_dir():
             warnings.append(f"skill {skill_name!r}: source not found at {source}")
@@ -577,6 +609,18 @@ def install_skills(paths: TargetPaths, params: MachineParams) -> list[str]:
                 warnings.append(
                     f"skill symlink skipped ({skill_name}): {exc}; enable Windows "
                     "Developer Mode or run as administrator to install skill symlinks."
+                )
+
+    # Prune links whose repo skill is gone (deleted/renamed in the checkout).
+    for stale in _stale_repo_skill_links(paths, params):
+        try:
+            stale.unlink()
+        except OSError as exc:
+            try:
+                os.rmdir(stale)
+            except OSError:
+                warnings.append(
+                    f"stale skill link not removed ({stale.name}): {exc}"
                 )
 
     return warnings

@@ -18,7 +18,11 @@ _STATE_NAME = "wiring_fingerprint.json"
 
 def _mtimes(paths: engine.TargetPaths) -> dict[str, float]:
     result = {}
-    for p in (paths.claude_json, paths.settings_json, paths.claude_md):
+    # skills_dir: a directory's mtime changes when entries are added or
+    # removed, so a manually deleted skill link busts the cache and gets
+    # relinked next session.
+    for p in (paths.claude_json, paths.settings_json, paths.claude_md,
+              paths.skills_dir):
         result[str(p)] = p.stat().st_mtime if p.exists() else 0.0
     return result
 

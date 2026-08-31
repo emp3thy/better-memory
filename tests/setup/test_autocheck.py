@@ -54,6 +54,21 @@ def test_kill_switch(tmp_path, monkeypatch):
     assert autocheck.maybe_repair(tmp_path / "home", tmp_path) is None
 
 
+def test_cache_invalidated_when_skills_dir_touched(tmp_path, monkeypatch):
+    """Adding or removing an entry in the user-level skills dir changes its
+    mtime, which must bust the fingerprint cache — otherwise a manually
+    deleted skill link would never be restored."""
+    paths, params = _wire(tmp_path, monkeypatch)
+    autocheck.maybe_repair(tmp_path / "home", tmp_path)
+    calls = []
+    monkeypatch.setattr(engine, "diff",
+                        lambda *a, **k: calls.append(1) or [])
+    paths.skills_dir.mkdir(parents=True)
+    (paths.skills_dir / "some-skill").mkdir()
+    autocheck.maybe_repair(tmp_path / "home", tmp_path)
+    assert calls == [1]  # skills_dir mtime change re-ran the diff
+
+
 def test_cache_invalidated_when_config_touched(tmp_path, monkeypatch):
     paths, params = _wire(tmp_path, monkeypatch)
     autocheck.maybe_repair(tmp_path / "home", tmp_path)

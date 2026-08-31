@@ -2,10 +2,12 @@
 
 Managed surface (spec table, rows 1-12): eight hook entries and one env key
 in ~/.claude/settings.json, the MCP server entry in ~/.claude.json, the
-CLAUDE.md managed block, and three user-scope skills. Row 13 (per-repo
-post-commit hook) lives in setup/repo_hook.py.
+CLAUDE.md managed block, and the user-scope skills enumerated from the repo
+checkout's .claude/skills/. Row 13 (per-repo post-commit hook) lives in
+setup/repo_hook.py.
 
-Pure data + rendering helpers; no I/O except detect_machine_params().
+Pure data + rendering helpers; no I/O except detect_machine_params() and
+managed_skills() (a read-only directory listing).
 """
 from __future__ import annotations
 
@@ -104,11 +106,22 @@ MANAGED_HOOKS: tuple[HookSpec, ...] = (
 
 MANAGED_ENV: dict[str, str] = {"BETTER_MEMORY_INJECT_MODE": "deferred"}
 
-MANAGED_SKILLS: tuple[str, ...] = (
-    "better-memory-synthesize",
-    "rate-session-memories",
-    "start-better-memory-ui",
-)
+def managed_skills(repo_root: str | Path) -> tuple[str, ...]:
+    """Enumerate the repo's user-scope skills: every directory under
+    ``<repo_root>/.claude/skills/`` that contains a ``SKILL.md``.
+
+    Sorted for deterministic ``engine.fingerprint()`` output — adding or
+    removing a skill directory in the repo changes the fingerprint, which
+    is what lets the per-session autocheck notice and re-apply. A missing
+    skills directory yields an empty tuple.
+    """
+    skills_root = Path(repo_root) / ".claude" / "skills"
+    if not skills_root.is_dir():
+        return ()
+    return tuple(sorted(
+        entry.name for entry in skills_root.iterdir()
+        if entry.is_dir() and (entry / "SKILL.md").is_file()
+    ))
 
 BEGIN_MARKER = "<!-- BEGIN better-memory (managed) -->"
 END_MARKER = "<!-- END better-memory (managed) -->"
