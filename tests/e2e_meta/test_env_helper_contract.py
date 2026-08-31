@@ -13,8 +13,8 @@ Four lenses from the harness-safety scenario
 * **C — single-choke-point enforcement**: every spawn site in ``tests/e2e``
   derives its env from the helper; hand-rolled env dicts and
   ``os.environ``-copy patterns are structurally banned.
-* **D — skip-decoration checks**: setup.sh tests skip (not error) without
-  bash; symlink content assertions are capability-probed.
+* **D — skip-decoration checks**: symlink content assertions are
+  capability-probed.
 
 Plus the ``mcp_session`` boot smoke: proves the shared helper can drive the
 real MCP server hermetically before any journey test builds on it.
@@ -534,16 +534,6 @@ class TestContractCSingleChokePoint:
 
 
 class TestContractDSkipDecorations:
-    def test_setup_sh_module_skips_without_bash(self) -> None:
-        mod = E2E_DIR / "test_setup_sh.py"
-        if not mod.exists():
-            pytest.skip("tests/e2e/test_setup_sh.py not implemented yet (design task 9)")
-        src = mod.read_text(encoding="utf-8")
-        assert "skipif" in src, "setup.sh module must SKIP (not error) when bash is absent"
-        assert re.search(r"which\(\s*['\"]bash['\"]\s*\)", src), (
-            "expected a shutil.which('bash') presence probe driving the skipif"
-        )
-
     def test_symlink_assertions_are_capability_probed(self) -> None:
         """Modules asserting symlink outcomes must gate them behind a probe
         (mirrors tests/setup/test_engine_apply.py's requires_symlinks):

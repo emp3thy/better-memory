@@ -192,11 +192,9 @@ def _scratch_dir() -> Path:
     """A short-lived scratch root for the throwaway worktree.
 
     On Windows this must NOT live under %TEMP%: Git Bash mounts %TEMP% as
-    /tmp, so setup.sh sees the worktree at /tmp/... — a non-drive-letter
-    MSYS path that win_path() cannot rewrite, which breaks the two
-    test_setup_sh interpreter-path assertions in the control run for
-    environment reasons unrelated to HEAD. LOCALAPPDATA itself (the parent
-    of %TEMP%) is not mounted at /tmp and keeps paths short.
+    /tmp, a non-drive-letter MSYS-style path that confuses some
+    Windows-native tooling. LOCALAPPDATA itself (the parent of %TEMP%) is
+    not mounted at /tmp and keeps paths short.
     """
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA")
