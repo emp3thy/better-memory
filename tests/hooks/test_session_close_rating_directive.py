@@ -43,6 +43,34 @@ def _seed_unrated_exposure(db_path: Path, sid: str = "S1", source: str = "bootst
     c.close()
 
 
+def _seed_many_unrated(db_path: Path, sid: str, count: int):
+    """Seed ``count`` distinct reflections + unrated exposures for ``sid``,
+    each with a long title so the rendered directive comfortably exceeds
+    the hook's 8KB truncation cap."""
+    c = connect(db_path)
+    apply_migrations(c)
+    long_title = "T" * 80
+    for i in range(count):
+        rid = f"r{i}"
+        c.execute(
+            """INSERT INTO reflections
+               (id, title, project, phase, polarity, use_cases, hints,
+                confidence, created_at, updated_at)
+               VALUES (?, ?, 'p', 'general', 'do', 'uc', '[]', 0.5,
+                       '2026-01-01', '2026-01-01')""",
+            (rid, long_title),
+        )
+        c.execute(
+            """INSERT INTO session_memory_exposure
+               (session_id, memory_kind, memory_id, exposed_at, source)
+               VALUES (?, 'reflection', ?, '2026-05-11T11:00:00+00:00',
+                       'bootstrap')""",
+            (sid, rid),
+        )
+    c.commit()
+    c.close()
+
+
 def _seed_semantic_exposure(db_path: Path, sid: str = "S1", source: str = "contextual"):
     """Seed a semantic-memory unrated exposure. Assumes migrations already
     applied (call after _seed_unrated_exposure, which applies them)."""
@@ -298,3 +326,45 @@ class TestRatingDirectiveEmission:
         directive = payload["hookSpecificOutput"]["additionalContext"]
         assert "Reflections (" not in directive
         assert "My Semantic Fact" in directive
+
+    def test_directive_names_the_session_id_it_counted(
+        self, tmp_path, tmp_memory_db,
+    ):
+        """The MCP rating tools can't reliably re-derive the session id the
+        Stop hook counted against (env drift after MCP respawn + marker
+        races), so the directive must name it explicitly, as the second
+        line, right after the RATE_MEMORIES header."""
+        _seed_unrated_exposure(tmp_memory_db, "S1")
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        lines = directive.split("\n")
+        assert lines[0].startswith("RATE_MEMORIES:")
+        assert lines[1] == "Session: S1"
+
+    def test_session_line_survives_truncation(self, tmp_path, tmp_memory_db):
+        """Seed enough unrated rows to blow past the 8KB truncation cap and
+        confirm the ``Session:`` line (which precedes the capped slice)
+        survives, and that the truncation message points the LLM at
+        list_session_exposures with the id it should use."""
+        _seed_many_unrated(tmp_memory_db, "S1", 200)
+        env = {
+            "BETTER_MEMORY_HOME": str(tmp_memory_db.parent),
+            "CLAUDE_SESSION_ID": "S1",
+        }
+        result = _run_hook(env)
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        directive = payload["hookSpecificOutput"]["additionalContext"]
+        # Confirm truncation actually happened so this test is meaningful.
+        assert "list truncated" in directive
+        assert "Session: S1" in directive.split("\n")
+        assert (
+            "(list truncated; call memory.list_session_exposures "
+            "with this session id for the full set)"
+        ) in directive

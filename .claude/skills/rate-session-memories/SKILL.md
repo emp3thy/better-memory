@@ -10,9 +10,14 @@ already been credited via `memory.credit` mid-session.
 
 ## STEP 1 — Refresh the list
 
-Call `memory.list_session_exposures` (no arguments — the server resolves the
-current session from env). Read the returned list. This is the ONLY valid set
-of ids to rate. The list in the RATE_MEMORIES directive may have been truncated.
+Read the `Session:` line from the RATE_MEMORIES directive (its second line,
+e.g. `Session: <id>`). If present, call `memory.list_session_exposures` with
+`{"session_id": "<that id>"}`. If the directive has no `Session:` line (older
+hook), call `memory.list_session_exposures` with no arguments — the server
+resolves the current session from env, as before.
+
+Read the returned list. This is the ONLY valid set of ids to rate. The list
+in the RATE_MEMORIES directive may have been truncated.
 
 ## STEP 2 — Evidence first, then classify
 
@@ -42,11 +47,13 @@ Rules:
 
 ## STEP 3 — Submit ALL ratings in ONE call
 
-Call `memory.apply_session_ratings` with this exact shape (no `session_id`
-— the server resolves it):
+Call `memory.apply_session_ratings` with the same `session_id` from STEP 1
+alongside `ratings` (omit `session_id` if the directive had no `Session:`
+line — the server then resolves it as before):
 
 ```json
 {
+  "session_id": "<that id>",
   "ratings": [
     {"kind": "reflection", "id": "r-abc...", "class": "cited",
      "evidence": "Used its junit-xml flag verbatim in the pytest invocation."},

@@ -460,33 +460,50 @@ def tool_definitions(
             description=(
                 "Return the unrated session_memory_exposure rows for the "
                 "current Claude session (resolved server-side from "
-                "CLAUDE_SESSION_ID env). Read-only; no side effects. "
-                "Used by the rate-session-memories skill as the "
-                "authoritative anti-hallucination list."
+                "CLAUDE_SESSION_ID env, or from an explicit session_id "
+                "argument). Read-only; no side effects. Used by the "
+                "rate-session-memories skill as the authoritative "
+                "anti-hallucination list."
             ),
             inputSchema={
                 "type": "object",
                 "additionalProperties": False,
-                "properties": {},
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Explicit session id from the RATE_MEMORIES "
+                            "directive; overrides env/marker resolution."
+                        ),
+                    },
+                },
             },
         ),
         Tool(
             name="memory.apply_session_ratings",
             description=(
                 "Atomic batch rating for the current Claude session "
-                "(resolved server-side from CLAUDE_SESSION_ID). Called "
-                "at session end by the rate-session-memories skill. "
-                "Raises if CLAUDE_SESSION_ID is unset — call only inside "
-                "an active Claude session. Non-ignored classes require "
-                "`evidence` (one line: what the memory changed, or a "
-                "quote); write the evidence line FIRST — no evidence "
-                "means the class is `ignored`."
+                "(resolved server-side from CLAUDE_SESSION_ID, or from an "
+                "explicit session_id argument). Called at session end by "
+                "the rate-session-memories skill. Raises if no session "
+                "can be resolved — call only inside an active Claude "
+                "session. Non-ignored classes require `evidence` (one "
+                "line: what the memory changed, or a quote); write the "
+                "evidence line FIRST — no evidence means the class is "
+                "`ignored`."
             ),
             inputSchema={
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["ratings"],
                 "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Explicit session id from the RATE_MEMORIES "
+                            "directive; overrides env/marker resolution."
+                        ),
+                    },
                     "ratings": {
                         "type": "array",
                         "minItems": 1,

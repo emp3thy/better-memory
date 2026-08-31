@@ -214,14 +214,14 @@ described below:
    hook checks for unrated exposures. If any exist, it emits a `Stop`
    block directive triggering the `rate-session-memories` skill. The
    directive opens with a `RATE_MEMORIES: {n} unrated. Invoke skill
-   rate-session-memories.` header line, followed by an `Evidence line
+   rate-session-memories.` header line, followed by a `Session: {session_id}` line, then an `Evidence line
    first; none possible = ignored.` rule line, then pending exposures
    grouped by kind (`Reflections (N):` / `Semantic (N):`), one line per
    exposure — `- {id} [{source}] {display}`, `display` truncated to 80
    chars and read via `COALESCE(e.display, r.title, s.content)` off the
    `session_memory_exposure` row (falling back to the live title/content
    only when no display snapshot was captured at exposure time). The
-   skill then calls `memory.list_session_exposures` and
+   skill then calls `memory.list_session_exposures` (passing the directive's session id as the explicit `session_id` argument) and
    submits `memory.apply_session_ratings` with one `{class, evidence}` per
    id (`cited` / `shaped` / `ignored` / `misled` / `overlooked`; `ignored`
    is the only class evidence is optional for). `MemoryRatingService`

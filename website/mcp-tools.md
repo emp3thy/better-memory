@@ -222,8 +222,11 @@ history; no scoring reads it) and is unrelated to `evidence_count` on
 reflections/semantic memories, which counts synthesis source
 observations.
 
-Session ids resolve server-side from `CLAUDE_SESSION_ID`; none of these
-tools accept a session id parameter.
+Session ids resolve server-side from `CLAUDE_SESSION_ID` by default;
+`memory.list_session_exposures` and `memory.apply_session_ratings` also
+accept an explicit `session_id` (from the RATE_MEMORIES directive's
+`Session:` line), which overrides env/marker resolution. `memory.credit`
+takes no session id.
 
 ### `memory.credit`
 
@@ -242,17 +245,25 @@ context compaction; the session-end sweep catches anything missed.
 ### `memory.list_session_exposures`
 
 Return the unrated `session_memory_exposure` rows for the current Claude
-session. Read-only; no side effects. Used by the `rate-session-memories`
-skill as the authoritative anti-hallucination list. No parameters.
-
-### `memory.apply_session_ratings`
-
-Atomic batch rating for the current Claude session. Called by the
-`rate-session-memories` skill at session end after `memory.list_session_exposures`.
-Raises if `CLAUDE_SESSION_ID` is unset.
+session (resolved server-side from `CLAUDE_SESSION_ID` env, or from an
+explicit `session_id` argument). Read-only; no side effects. Used by the
+`rate-session-memories` skill as the authoritative anti-hallucination list.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
+| `session_id` | string | no | Explicit session id from the RATE_MEMORIES directive's `Session:` line; overrides env/marker resolution. |
+
+### `memory.apply_session_ratings`
+
+Atomic batch rating for the current Claude session (resolved server-side
+from `CLAUDE_SESSION_ID`, or from an explicit `session_id` argument). Called
+by the `rate-session-memories` skill at session end after
+`memory.list_session_exposures`. Raises if no session can be resolved —
+call only inside an active Claude session.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `session_id` | string | no | Explicit session id from the RATE_MEMORIES directive's `Session:` line; overrides env/marker resolution. |
 | `ratings` | array | yes | One entry per exposure. Each entry: `{kind: "reflection" \| "semantic", id: string, class: "cited" \| "shaped" \| "ignored" \| "misled" \| "overlooked", evidence?: string}`. Minimum one entry. `evidence` (<= 500 chars) is required for every non-`ignored` class and optional for `ignored`; the wire schema marks it optional per-entry, but `MemoryRatingService.apply_session_ratings` enforces the real contract by validating every entry in the batch before writing any row — one non-ignored entry missing `evidence` rejects the whole batch with a `ValueError`, none applied. |
 
 Returns `{applied: {...}, skipped: {...}}`. Ids not in the

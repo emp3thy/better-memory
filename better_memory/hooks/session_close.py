@@ -111,6 +111,7 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
         sections = [
             f"RATE_MEMORIES: {len(rows)} unrated. "
             "Invoke skill `rate-session-memories`.",
+            f"Session: {session_id}",
             "Evidence line first; none possible = `ignored`.",
         ]
         if refl_lines:
@@ -124,7 +125,7 @@ def _emit_rating_directive_if_unrated(session_id: str) -> bool:
         if len(encoded) > CAP_BYTES:
             directive = encoded[: CAP_BYTES - 200].decode("utf-8", errors="ignore") + (
                 "\n\n(list truncated; call memory.list_session_exposures "
-                "for the full set)"
+                "with this session id for the full set)"
             )
 
         payload = {

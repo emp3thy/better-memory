@@ -454,6 +454,44 @@ class TestSessionHandlersRemoteBranch:
         )
         rating.apply_session_ratings.assert_not_called()
 
+    async def test_list_session_exposures_explicit_session_id_wins_over_env(
+        self, tmp_path: Path, remote, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Task 2: an explicit session_id argument overrides ambient env
+        resolution on the remote branch too — same sid variable feeds
+        both self._remote and the local service path."""
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sid-env-1")
+        svc = _bootstrap_service()
+        handlers = SessionToolHandlers(
+            session_bootstrap=svc,
+            memory_rating=MagicMock(),
+            home=tmp_path,
+            remote=remote,
+        )
+        await handlers.list_session_exposures({"session_id": "sid-explicit"})
+        remote.list_session_exposures.assert_called_once_with(
+            session_id="sid-explicit"
+        )
+
+    async def test_apply_session_ratings_explicit_session_id_wins_over_env(
+        self, tmp_path: Path, remote, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sid-env-1")
+        rating = MagicMock(name="MemoryRatingService")
+        handlers = SessionToolHandlers(
+            session_bootstrap=_bootstrap_service(),
+            memory_rating=rating,
+            home=tmp_path,
+            remote=remote,
+        )
+        ratings = [{"kind": "reflection", "id": _RECORD_ID_40, "class": "cited"}]
+        await handlers.apply_session_ratings(
+            {"session_id": "sid-explicit", "ratings": ratings}
+        )
+        remote.apply_session_ratings.assert_called_once_with(
+            session_id="sid-explicit", ratings=ratings
+        )
+
     async def test_apply_session_ratings_keeps_no_session_guard_with_remote(
         self, tmp_path: Path, remote
     ) -> None:

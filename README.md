@@ -203,13 +203,13 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 | `memory.synthesize_next_get_context(project?)` | One pending episode's full context for the IDE-LLM to act on. |
 | `memory.synthesize_next_apply(episode_id, decision, project?)` | Atomically apply Claude's `new` / `augment` / `merge` / `ignore` decision. |
 
-**Rating** — closed-loop reinforcement on top of `memory.record_use`. Session id is resolved server-side from `CLAUDE_SESSION_ID`; none of these tools take a session id.
+**Rating** — closed-loop reinforcement on top of `memory.record_use`. Session id is resolved server-side from `CLAUDE_SESSION_ID` by default; `list_session_exposures` and `apply_session_ratings` also accept an explicit `session_id` (from the RATE_MEMORIES directive's `Session:` line), which overrides env/marker resolution. `memory.credit` takes no session id.
 
 | Tool | Purpose |
 |---|---|
 | `memory.credit(kind, id, class, evidence)` | Opportunistic per-tool-use credit. `class` ∈ `cited` / `shaped` / `misled` / `overlooked` (not `ignored`). `evidence` is required: one line — what the memory changed, or a quote. If you can't write one, the memory was ignored; don't call credit. |
-| `memory.list_session_exposures()` | Unrated exposure rows for the current session. Read-only; used by the `rate-session-memories` skill. |
-| `memory.apply_session_ratings(ratings)` | Atomic end-of-session batch rating. Each entry: `{kind, id, class, evidence?}` — evidence is required for every non-`ignored` class (write the evidence line first; nothing to point at means the class is `ignored`). Violating batches are rejected whole. |
+| `memory.list_session_exposures(session_id?)` | Unrated exposure rows for the current session. Read-only; used by the `rate-session-memories` skill. |
+| `memory.apply_session_ratings(ratings, session_id?)` | Atomic end-of-session batch rating. Each entry: `{kind, id, class, evidence?}` — evidence is required for every non-`ignored` class (write the evidence line first; nothing to point at means the class is `ignored`). Violating batches are rejected whole. |
 
 **Knowledge** — human-authored markdown corpus.
 
