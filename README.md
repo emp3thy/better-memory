@@ -23,11 +23,12 @@ It's a memory layer for Claude Code that (with the default sqlite backend) runs 
 ## Requirements
 
 - **Python 3.12+**
-- **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for environment management
-- **[Ollama](https://ollama.com/)** — a local model runner (installed separately) with the `nomic-embed-text` embedding model pulled. better-memory uses it *only* to turn text into search vectors; lesson-distilling is done by Claude, and your code never leaves your machine. Ollama is only required when `BETTER_MEMORY_EMBEDDINGS_BACKEND=ollama` (the default). Set it to `sqlite` to use a pure-SQL trigram-FTS5 backend with no model downloads.
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for environment management — the bootstrap scripts below install it for you if it's missing.
 - **Claude Code** installed
 
 SQLite ships with Python; `sqlite-vec` is installed as a pip dependency — nothing else to set up.
+
+better-memory's default embeddings backend (`BETTER_MEMORY_EMBEDDINGS_BACKEND=ollama`) needs [Ollama](https://ollama.com/) running locally with the `nomic-embed-text` model pulled (`ollama pull nomic-embed-text`) — the bootstrap scripts no longer install or pull this for you. Set `BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite` instead to skip Ollama entirely (pure-SQL trigram-FTS5 backend, no model downloads).
 
 ## Storage backends
 
@@ -44,119 +45,68 @@ Switching to agentcore is done by `better-memory agentcore init`, which provisio
 
 ## Quick start
 
+**Interactive** — clone the repo and run the bootstrap script for your OS from a terminal:
+
 ```bash
+# macOS / Linux
+git clone https://github.com/emp3thy/better-memory
+cd better-memory
 ./scripts/setup.sh
 ```
 
-The script:
-1. Verifies Python ≥ 3.12 and uv.
-2. Runs `uv sync` to build the venv.
-3. Checks for Ollama; offers to install via `brew` / `apt` / `winget` if missing.
-4. Pulls `nomic-embed-text`.
-5. Creates `~/.better-memory/{spool,knowledge-base/...}`.
-6. Auto-installs the MCP server registration into `~/.claude.json` and the hooks (`session_bootstrap`, `observer`, `session_close`, and `contextual_inject` on `UserPromptSubmit` + `PreToolUse`) into `~/.claude/settings.json` (idempotent; backups go to `~/.better-memory/install-backups/`).
+```powershell
+# Windows (PowerShell)
+git clone https://github.com/emp3thy/better-memory
+cd better-memory
+.\scripts\setup.ps1
+```
 
-If you'd rather inspect or hand-edit the config, see [Manual setup](#manual-setup) below.
+Each script: installs `uv` if it isn't already on PATH (macOS/Linux: the official installer via `curl | sh`; Windows: `winget install --id=astral-sh.uv`, falling back to the `irm https://astral.sh/uv/install.ps1 | iex` installer if winget isn't available), runs `uv sync`, then runs `uv run better-memory setup` — which creates `~/.better-memory/{spool,state,install-backups,knowledge-base/{standards,languages,projects}}`, and installs/repairs the MCP server registration (`~/.claude.json`), all eight managed hooks plus the `BETTER_MEMORY_INJECT_MODE` env var (`~/.claude/settings.json`), the managed CLAUDE.md block, and the three skill symlinks (falling back to Windows directory junctions if symlink privilege is unavailable) — idempotently; anything overwritten is backed up first to `~/.better-memory/install-backups/`.
 
-> **Note:** `./scripts/setup.sh` writes both `~/.claude.json` and `~/.claude/settings.json` for you idempotently. The Manual setup section below is reference material — useful if you need to inspect or hand-edit the config, but not required for a normal install.
-
-## Manual setup
-
-If you'd rather do it by hand:
+**Scripted / CI** — the same steps, called directly (skips the bootstrap script's `uv`-install step, e.g. when `uv` is already provisioned by the image):
 
 ```bash
 uv sync
-mkdir -p ~/.better-memory/{spool,knowledge-base/{standards,languages,projects}}
-ollama pull nomic-embed-text
+uv run better-memory setup
 ```
 
-Then add to `~/.claude.json` (user-scope MCP — create the file if it doesn't exist):
+Both paths are fully idempotent and non-interactive — neither prompts for input, so either is safe to re-run any time, including from automation. Restart Claude Code afterward; MCP servers and hook registrations don't hot-reload.
 
-```json
-{
-  "mcpServers": {
-    "better-memory": {
-      "type": "stdio",
-      "command": "/absolute/path/to/better-memory/.venv/bin/python",
-      "args": ["-m", "better_memory.mcp"],
-      "env": {
-        "BETTER_MEMORY_HOME": "/absolute/path/to/your/home/.better-memory"
-      }
-    }
-  }
-}
+If you'd rather inspect what gets written or hand-edit the config, see [Manual setup](#manual-setup) below; for checking or repairing drift later, see [Doctor](#doctor).
+
+## Manual setup
+
+`better-memory setup` (invoked by both bootstrap scripts above) writes everything below automatically and idempotently — this section is reference material for inspecting or hand-editing the config, not a required step.
+
+```bash
+uv sync
+uv run better-memory setup
 ```
 
-And add hooks to `~/.claude/settings.json`:
+That single command:
+- Creates `~/.better-memory/{spool,state,install-backups,knowledge-base/{standards,languages,projects}}` and a default `settings.json` if none exists.
+- Registers the MCP server in `~/.claude.json` (creating the file if needed).
+- Installs eight managed hooks plus the `BETTER_MEMORY_INJECT_MODE` env var into `~/.claude/settings.json`: `session_bootstrap` (SessionStart) opens/reuses the session's background episode and injects curated context — project-scoped and general-scope semantic memories plus distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext`, with only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5) rendered in full; `observer` (PostToolUse, `Write|Edit|Bash`) captures tool-call snapshots into the spool; `session_close` + `stop_sweep` (Stop) drive the end-of-session rating sweep and a reminder to record non-obvious observations; `contextual_inject` (UserPromptSubmit every prompt, and PreToolUse unscoped but latched to one firing per session) surfaces memories relevant to the current prompt/tool-input — see [Configuration](website/configuration.md) and [Architecture](website/architecture.md#injection-strategies) for how it scores, floors, and dedups candidates; `commit_checkpoint` (PreToolUse, gated to `Bash(git commit*)`) reminds Claude to record an observation before committing; `pre_compact` (PreCompact) reminds Claude to persist state before context compaction.
+- Splices the managed CLAUDE.md block (the retrieve/reinforce/synthesize/record protocol) into `~/.claude/CLAUDE.md` between `<!-- BEGIN better-memory (managed) -->` / `<!-- END -->` markers, leaving the rest of your CLAUDE.md untouched.
+- Symlinks (or, without Windows symlink privilege, directory-junctions) the three Claude Code skills — see [Claude Code skills](#claude-code-skills) below.
 
-Four hooks ship. `session_bootstrap` (SessionStart) opens (or reuses) a background episode for the session and injects the project's curated context — project-scoped and general-scope semantic memories plus distilled reflections (`do` / `dont` / `neutral` buckets) — as `additionalContext` so Claude has prior memory available without needing to call any retrieval tool first. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5) render in full; the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` restores the old full-dump behavior). The hook does its work in-process against `memory.db` (in agentcore mode it also opens the local `memory.db` — for the exposure ledger only, never memory content — while content reads route through the storage backend instead); if it fails for any reason, a fallback directive is injected instructing Claude to call `mcp__better-memory__memory_session_bootstrap` manually. `contextual_inject` (UserPromptSubmit + PreToolUse) additionally surfaces memories relevant to the current prompt/tool-input mid-session — see [Configuration](website/configuration.md) and [Architecture](website/architecture.md#injection-strategies) for how it scores, floors, and dedups candidates.
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_bootstrap"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.observer",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.session_close",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.contextual_inject"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Skill|Task|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/.venv/bin/python -m better_memory.hooks.contextual_inject"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-`contextual_inject` is gated at runtime by `BETTER_MEMORY_CONTEXT_INJECT_MODE` (default `both`) — set it to `userprompt`, `pretool`, or `off` to narrow or disable which event actually injects.
-
-On Windows, point hooks at `.venv\Scripts\pythonw.exe` (no console flash) instead of `python.exe`.
+For the exact JSON shapes it writes — useful if you're hand-editing `~/.claude/settings.json` or `~/.claude.json` — see [docs/hooks-setup.md](docs/hooks-setup.md), which documents each hook's event, matcher, and async/sync-ness as reference material only; `better-memory setup` / `doctor --fix` are the source of truth, not the doc.
 
 Restart Claude Code. MCP servers don't hot-reload.
+
+## Doctor
+
+`better-memory doctor` checks the same managed wiring `setup` installs, without writing anything unless you pass `--fix`:
+
+```bash
+uv run better-memory doctor            # human-readable drift report; exit code 1 if any drift, 0 if clean
+uv run better-memory doctor --fix      # repairs drift in place (same engine as `setup`); always exits 0
+uv run better-memory doctor --json     # machine-readable {"drift": [...]}; ignored if --fix is also passed
+```
+
+- **Session-start autocheck.** Every Claude Code session start, the `session_bootstrap` hook runs a near-zero-cost version of the same check in-process — cached against a fingerprint of the desired state plus the target files' mtimes, so a clean machine costs nothing on the happy path — and self-repairs any drift it finds, appending a one-line summary to the session's startup context. It also installs the per-repo `post-commit` hook (see [docs/hooks-setup.md](docs/hooks-setup.md#post-commit-hook-opt-in-episode-close)) the first time it sees a git repo that doesn't have one yet, honoring a custom `core.hooksPath`, chaining after an existing plain-`sh` script, and warning — never overwriting — anything it doesn't recognize. Set `BETTER_MEMORY_WIRING_AUTOCHECK=off` to disable the autocheck entirely.
+- **Moved or renamed the repo?** The machine-level wiring embeds this checkout's absolute path (interpreters, skill-symlink targets). After moving `better-memory`, run `uv run better-memory doctor --fix` from the new location to repoint everything.
+- **`install_hooks` is deprecated.** `python -m better_memory.cli.install_hooks` still runs, but only prints a deprecation warning and delegates to `better-memory setup`; its old flags (`--venv-py`, `--venv-pyw`, `--home`) are accepted and ignored, since machine params are auto-detected now. Use `better-memory setup` / `doctor` directly.
 
 ## Configuration
 
@@ -165,6 +115,7 @@ One env var roots the runtime filesystem layout:
 | Variable | Default | Purpose |
 |---|---|---|
 | `BETTER_MEMORY_HOME` | `~/.better-memory` | Root dir for `memory.db`, `knowledge.db`, `spool/`, `knowledge-base/` |
+| `BETTER_MEMORY_WIRING_AUTOCHECK` | (unset = on) | Session-start wiring drift autocheck: self-repairs `~/.claude.json`, `~/.claude/settings.json` hooks/env, the CLAUDE.md managed block, skill links, and the per-repo post-commit hook. Set to `off` (case-insensitive) to disable; any other value leaves it enabled. See [Doctor](#doctor). |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model (must produce 768-dim vectors) |
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
@@ -271,7 +222,7 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 
 | Tool | Purpose |
 |---|---|
-| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject startup context as `additionalContext` markdown. In `deferred` mode (recommended): general-scope standing rules in full plus a one-line index — everything else arrives contextually. In `legacy` mode: the original render (up to 20 reflections/bucket, Wilson-ranked, top `BETTER_MEMORY_BOOTSTRAP_TOP_N` in full). Mirrors the SessionStart hook; callable manually for recovery, testing, or post-`/clear` re-injection. The hook also runs a CLAUDE.md drift sentinel: if your CLAUDE.md documents tool parameters that don't exist in the live schemas, one warning line is appended. |
+| `memory.session_bootstrap(source?, session_id?, cwd?)` | Open or reuse a session episode and inject startup context as `additionalContext` markdown. In `deferred` mode (recommended): general-scope standing rules in full plus a one-line index — everything else arrives contextually. In `legacy` mode: the original render (up to 20 reflections/bucket, Wilson-ranked, top `BETTER_MEMORY_BOOTSTRAP_TOP_N` in full). Mirrors the SessionStart hook, except the hook additionally runs the wiring autocheck (`better_memory.setup.autocheck.maybe_repair`) after bootstrap renders, appending at most one summary line — see [Doctor](#doctor); calling this tool directly does not run the autocheck. Callable manually for recovery, testing, or post-`/clear` re-injection. |
 | `memory.run_retention(retention_days?, prune?, prune_age_days?, dry_run?)` | Apply spec §9 retention rules; archive or hard-delete. |
 | `memory.start_ui()` | Spawn or reuse the management UI; returns `{url, reused}`. |
 
@@ -288,23 +239,26 @@ Plus `CLAUDE.snippet.md` — paste into your project's `CLAUDE.md` to teach the 
 
 ### Claude Code skills
 
-Two skills live in `.claude/skills/` and are auto-symlinked into `~/.claude/skills/` by `./scripts/setup.sh` so Claude triggers them in any repo:
+Three skills live in `.claude/skills/` and are auto-symlinked into `~/.claude/skills/` by `better-memory setup` (run directly, or via either bootstrap script) so Claude triggers them in any repo — falling back to a Windows directory junction automatically when symlink privilege isn't available:
 
 - **`better-memory-synthesize`** — walks Claude through the per-episode reflection synthesis loop (`memory.synthesize_next_get_context` → decide → `memory.synthesize_next_apply`). Fires when `memory.start_episode` reports `pending_synthesis.pending > 0` or when the user asks to consolidate.
 - **`rate-session-memories`** — classifies exposed reflections / semantic memories at session end (`cited` / `shaped` / `ignored` / `misled` / `overlooked`) via `memory.list_session_exposures` + `memory.apply_session_ratings`. Triggered by a Stop-block directive from the `session_close` hook when unrated exposures remain.
+- **`start-better-memory-ui`** — launches the management UI directly (the `memory.start_ui` MCP tool is a stub; this skill runs `python -m better_memory.ui` itself). Triggered by phrasing like "start ui" / "launch the better-memory UI".
 
-For the synthesis skill, also add a section to `~/.claude/CLAUDE.md` telling Claude to invoke it when `mcp__better-memory__memory_start_episode` reports `pending_synthesis.pending > 0`. The rating skill fires from the hook directive and doesn't need an instruction line.
+`better-memory setup` also writes the managed CLAUDE.md block that tells Claude when to invoke `better-memory-synthesize` (the `pending_synthesis.pending > 0` trigger) — no manual CLAUDE.md editing needed. The rating skill fires from the hook directive and needs no instruction line either.
 
-If the auto-symlink failed (e.g. Windows without developer mode or admin), symlink manually:
+If the automatic symlink/junction install failed for some reason (e.g. Windows with neither Developer Mode nor an elevated shell), link manually:
 
 ```bash
 # Linux / macOS
 ln -s "$PWD/.claude/skills/better-memory-synthesize" ~/.claude/skills/better-memory-synthesize
 ln -s "$PWD/.claude/skills/rate-session-memories"    ~/.claude/skills/rate-session-memories
+ln -s "$PWD/.claude/skills/start-better-memory-ui"   ~/.claude/skills/start-better-memory-ui
 
 # Windows (PowerShell, run from this repo, as Administrator OR with developer mode)
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\better-memory-synthesize" -Target "$PWD\.claude\skills\better-memory-synthesize"
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\rate-session-memories"    -Target "$PWD\.claude\skills\rate-session-memories"
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\start-better-memory-ui"   -Target "$PWD\.claude\skills\start-better-memory-ui"
 ```
 
 ## Development
@@ -340,6 +294,9 @@ The spool drains on every `memory.retrieve` call. If you haven't retrieved in a 
 
 **Windows console flashes on every tool call.**
 Your hook command is using `python.exe`; switch to `.venv\Scripts\pythonw.exe`. The no-console variant still reads stdin pipes fine and won't flash a window.
+
+**Wiring drifted after a repo move, upgrade, or a hand-edit to `~/.claude/settings.json` / `~/.claude.json` / `~/.claude/CLAUDE.md`.**
+Run `uv run better-memory doctor` to see what's stale, or `uv run better-memory doctor --fix` to repair it in place. See [Doctor](#doctor).
 
 ## Architecture
 
