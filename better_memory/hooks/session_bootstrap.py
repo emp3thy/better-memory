@@ -4,7 +4,9 @@ Reads Claude Code SessionStart payload from stdin (source, session_id, cwd),
 calls SessionBootstrapService in-process (no MCP RPC on the hook critical
 path), prints a hookSpecificOutput JSON envelope to stdout. Never raises;
 on any error logs to hook_errors and injects a fallback directive instructing
-Claude to call the MCP tool manually.
+Claude to call the MCP tool manually. Also wires in the wiring autocheck
+(better_memory.setup.autocheck.maybe_repair), a best-effort per-session
+drift check/repair over the managed Claude Code config surface.
 """
 from __future__ import annotations
 
@@ -123,21 +125,16 @@ def main() -> None:
             rendered = result.additional_context
 
         try:
-            claude_md_path = Path.home() / ".claude" / "CLAUDE.md"
-            if claude_md_path.is_file():
-                from better_memory.hooks._claude_md_sentinel import (
-                    build_schemas,
-                    check_claude_md,
-                )
+            from better_memory.setup.autocheck import maybe_repair
 
-                claude_md_text = claude_md_path.read_text(
-                    encoding="utf-8", errors="ignore",
-                )
-                sentinel_warnings = check_claude_md(claude_md_text, build_schemas())
-                if sentinel_warnings:
-                    rendered = rendered + "\n\n" + sentinel_warnings[0]
-        except BaseException:  # noqa: BLE001 — sentinel is best-effort
-            pass
+            autocheck_line = maybe_repair(cfg.home, Path(cwd_str))
+            if autocheck_line:
+                rendered = rendered + "\n\n" + autocheck_line
+        except BaseException as autocheck_exc:  # noqa: BLE001 — autocheck is best-effort
+            try:
+                record_hook_error(hook_name="wiring_autocheck", exc=autocheck_exc)
+            except BaseException:  # noqa: BLE001
+                pass
     except BaseException as exc:  # noqa: BLE001
         try:
             record_hook_error(hook_name="session_bootstrap", exc=exc)

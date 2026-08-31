@@ -1,13 +1,21 @@
 # better-memory hook registration
 
-better-memory ships these hooks that wire into Claude Code's hook framework:
+better-memory ships eight managed hook entries across seven hook modules
+(`contextual_inject` registers on two events) that wire into Claude Code's
+hook framework. `better-memory setup` (and `doctor --fix`) install and
+repair all eight automatically — see [Registering the hooks](#registering-the-hooks)
+below.
 
-| Hook | Purpose | Module |
-|---|---|---|
-| `SessionStart` | Open/reuse a background episode and inject project + general semantic memories and reflections as `additionalContext` | `better_memory.hooks.session_bootstrap` |
-| `PostToolUse` | Capture every tool invocation as a spool event | `better_memory.hooks.observer` |
-| `Stop` | Mark session end for consolidation boundary detection | `better_memory.hooks.session_close` |
-| `UserPromptSubmit` + `PreToolUse` | Inject curated memories (semantic + reflections) relevant to the current prompt / tool-input as `additionalContext` | `better_memory.hooks.contextual_inject` |
+| Event | Matcher / `if` | Purpose | Module |
+|---|---|---|---|
+| `SessionStart` | — | Open/reuse a background episode; inject project + general semantic memories and reflections as `additionalContext`; run the wiring autocheck | `better_memory.hooks.session_bootstrap` |
+| `PostToolUse` | `Write\|Edit\|Bash`, async | Capture every matched tool invocation as a spool event | `better_memory.hooks.observer` |
+| `Stop` | — | Mark session end for consolidation boundary detection; emit the end-of-session rating-sweep directive when unrated exposures remain | `better_memory.hooks.session_close` |
+| `Stop` | — (second, independent registration) | Remind Claude to record non-obvious observations before stopping | `better_memory.hooks.stop_sweep` |
+| `UserPromptSubmit` | — | Inject curated memories (semantic + reflections) relevant to the current prompt as `additionalContext` | `better_memory.hooks.contextual_inject` |
+| `PreToolUse` | unscoped, latched to one firing/session | Same as above, keyed to the tool name + input | `better_memory.hooks.contextual_inject` |
+| `PreToolUse` | `Bash`, `if: "Bash(git commit*)"` | Remind Claude to record an observation before a `git commit` that fixes a bug, addresses review feedback, or closes a phase | `better_memory.hooks.commit_checkpoint` |
+| `PreCompact` | — | Remind Claude to persist the in-flight task, decisions, and open questions before context compaction | `better_memory.hooks.pre_compact` |
 
 The `contextual_inject` hook is gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE`
 (`userprompt` \| `pretool` \| `both` (default) \| `off`). It runs in-process
@@ -17,15 +25,22 @@ check (BM25 match against `reflection_fts`, or vector cosine similarity
 those legs are structurally unavailable — a keyword-hit fallback), then
 ranks qualifiers by reciprocal rank fusion over a Wilson-score usefulness
 prior; it injects the top matches (capped at `BETTER_MEMORY_CONTEXT_MAX_ITEMS`)
-and never blocks a turn. `PreToolUse` is registered unscoped (matches every
-tool) but latches to one real firing per session — later tool calls
-short-circuit on a state file before touching the DB.
+and never blocks a turn. `PreToolUse` hosts two independent registrations —
+`contextual_inject`, unscoped (matches every tool) but latched to one real
+firing per session (later tool calls short-circuit on a state file before
+touching the DB), and `commit_checkpoint`, scoped to `Bash` and gated to
+fire only immediately before a `git commit`. `stop_sweep` and `pre_compact`
+are simple, ungated reminder-injectors — no evidence gate, no DB access.
 
 ## Registering the hooks
 
-Add the following to your Claude Code `settings.json` (typically
-`~/.claude/settings.json` for global, or `.claude/settings.json` for
-project-scoped):
+**Managed automatically — reference only.** Run `better-memory setup` (or
+either bootstrap script, `scripts/setup.sh` / `scripts/setup.ps1`) — it
+writes and idempotently repairs all eight entries below in your Claude
+Code `settings.json` (`~/.claude/settings.json` for global). `better-memory
+doctor --fix` repairs drift the same way later. You should not need to
+hand-edit this file; the JSON below just documents the exact shape
+`better_memory/setup/manifest.py` renders, for inspection or recovery.
 
 ```json
 {
@@ -35,7 +50,7 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.session_bootstrap"
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.session_bootstrap"
           }
         ]
       }
@@ -46,7 +61,7 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.observer",
+            "command": "\"/absolute/path/to/.venv/bin/pythonw\" -m better_memory.hooks.observer",
             "async": true
           }
         ]
@@ -57,7 +72,15 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.session_close"
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.session_close"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.stop_sweep"
           }
         ]
       }
@@ -67,7 +90,7 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.contextual_inject"
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.contextual_inject"
           }
         ]
       }
@@ -77,7 +100,27 @@ project-scoped):
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python -m better_memory.hooks.contextual_inject"
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.contextual_inject"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.commit_checkpoint",
+            "if": "Bash(git commit*)"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/absolute/path/to/.venv/bin/python\" -m better_memory.hooks.pre_compact"
           }
         ]
       }
@@ -86,12 +129,28 @@ project-scoped):
 }
 ```
 
-Adjust the `command` to match your environment — for example:
+Notes on the shape above (`better_memory/setup/manifest.py::hook_entry`):
 
-- If better-memory is installed as a system-wide package, drop the
-  `uv run` prefix and use `python -m better_memory.hooks.session_bootstrap`.
-- If your environment uses a different Python launcher (e.g. `py` on
-  Windows with multiple Python versions), adjust accordingly.
+- `async: true` appears **only** on `observer` — every other hook needs
+  Claude Code to read its stdout synchronously (`additionalContext` /
+  block directives / `systemMessage`), so it is registered without the
+  `async` key.
+- Windows interpreter selection: `better-memory setup` writes
+  `pythonw.exe` (no console flash) only for `observer`, since it's the
+  one hook that needs no stdout back; every other hook is written with
+  `python.exe` because pythonw.exe silently nulls `sys.stdout` and the
+  hook's output would never reach Claude. If you hand-edit this file on
+  Windows, keep that split — don't blanket-switch every hook to
+  `pythonw.exe`.
+- The `if` filter on `commit_checkpoint`'s `PreToolUse` group scopes it to
+  commands matching `git commit*`; `contextual_inject`'s `PreToolUse`
+  group has no matcher (fires on every tool, latched to one real firing
+  per session — see above) and is a separate group, not merged with
+  `commit_checkpoint`'s.
+- If better-memory is installed as a system-wide package rather than a
+  repo-local `.venv`, the `command` is whatever `python -m
+  better_memory.hooks.<name>` resolves to on your `PATH` — this is exactly
+  what `better-memory setup` computes for you from `sys.platform`.
 
 ## How sessions flow
 
@@ -121,9 +180,16 @@ Adjust the `command` to match your environment — for example:
    - renders a markdown block with a `## better-memory: session
      bootstrap` header summarising project / source / episode action,
      followed by the memories and reflections;
-   - appends a CLAUDE.md drift-sentinel warning (at most one) if the
-     user's `~/.claude/CLAUDE.md` references a schema field/enum that no
-     longer matches the codebase.
+   - runs the wiring autocheck (`better_memory.setup.autocheck.maybe_repair`)
+     after bootstrap renders: a near-zero-cost per-session drift check,
+     cached against a fingerprint of the desired wiring state plus the
+     target files' mtimes, that self-repairs `~/.claude.json`,
+     `~/.claude/settings.json`, the CLAUDE.md managed block, and skill
+     links if anything drifted, and installs the per-repo `post-commit`
+     hook (see [below](#post-commit-hook-opt-in-episode-close)) the first
+     time it sees a git repo without one; at most one summary line is
+     appended to `additionalContext`. Disable with
+     `BETTER_MEMORY_WIRING_AUTOCHECK=off`.
    The hook prints a `hookSpecificOutput` JSON envelope with the rendered
    markdown as `additionalContext`. Claude Code injects this into the
    first turn's context. If anything fails, a fallback directive is
@@ -182,26 +248,65 @@ fixes, WIP pushes. Auto-closing on every commit would churn episodes.
 Instead, the hook only fires when a commit message carries a
 `Closes-Episode: true` trailer. Normal commits are no-ops.
 
-### Installing per repo
+### Installed automatically
 
-Create `.git/hooks/post-commit` in your project with executable
-permissions:
+You don't create `.git/hooks/post-commit` by hand anymore. The
+session-start wiring autocheck (`better_memory.setup.autocheck.maybe_repair`,
+see [How sessions flow](#how-sessions-flow) above) calls
+`better_memory.setup.repo_hook.ensure_post_commit(cwd, params)` on every
+Claude Code session start, installing the hook into whatever repo `cwd`
+resolves to the first time it's missing there — worktree-safe, and
+honoring a custom `core.hooksPath`. `better-memory setup` and
+`doctor --fix` do **not** install it themselves (they only manage the
+machine-level wiring in `~/.claude*`); only the per-session autocheck
+does, so it's the first Claude Code session opened inside a given repo
+(with `BETTER_MEMORY_WIRING_AUTOCHECK` not set to `off`) that installs it
+there.
 
-```bash
+The installed hook looks like:
+
+```sh
 #!/bin/sh
-# Writes a commit_close marker to the better-memory spool iff the
-# just-committed message contains `Closes-Episode: <truthy>`. Never
-# raises; exits 0 regardless.
-exec uv run python -m better_memory.hooks.post_commit
+# better-memory post-commit (managed)
+"/absolute/path/to/.venv/bin/python" -m better_memory.hooks.post_commit || true
 ```
 
-Make it executable:
+### Skip rules (concern 5)
+
+`ensure_post_commit` never overwrites a hook it doesn't recognize:
+
+- No `.git` directory at `cwd` → skip silently (not a git repo).
+- A custom `core.hooksPath` is configured (`git config --get
+  core.hooksPath`) → install there instead of the default
+  `.git/hooks`, resolving a relative path against the repo root.
+- The resolved hooks directory doesn't exist → skip silently.
+- No `post-commit` file exists yet → create one (mode `0755`) with the
+  sentinel comment (`# better-memory post-commit (managed)`) followed by
+  the invocation line above.
+- A `post-commit` file already exists:
+  - It already contains the sentinel or `better_memory.hooks.post_commit`
+    → no-op, already installed.
+  - It isn't readable as UTF-8 text (binary / undecodable) → skip with a
+    warning; never touched.
+  - Its first non-blank line isn't a `#!` shebang containing `sh` → skip
+    with a warning; never touched (won't append to a non-shell script).
+  - Otherwise → **chain**: append the sentinel comment + invocation line
+    after the existing script's content, so the pre-existing hook keeps
+    running first.
+
+Verify it installed by starting a Claude Code session inside a git repo
+that doesn't have `.git/hooks/post-commit` yet (or the `core.hooksPath`
+directory, if set), then:
 
 ```bash
-chmod +x .git/hooks/post-commit
+cat .git/hooks/post-commit
 ```
 
-Verify it runs without side-effects (no trailer → no marker written):
+Expected: a `# better-memory post-commit (managed)` line followed by the
+invocation line — appended after any pre-existing script content if the
+hook already existed.
+
+Then verify the opt-in trailer behaviour itself:
 
 ```bash
 git commit --allow-empty -m "test: no trailer"
@@ -209,8 +314,6 @@ ls ~/.better-memory/spool/
 ```
 
 Expected: no new `*commit_close*.json` file.
-
-Now test the opt-in path:
 
 ```bash
 git commit --allow-empty -m "test: close it
@@ -222,14 +325,6 @@ ls ~/.better-memory/spool/
 Expected: one new `*commit_close*.json` file. The next MCP retrieve
 (or a direct `uv run python -c 'from better_memory.services.spool import SpoolService; ...'`
 drain) will consume it.
-
-### Cross-platform notes
-
-- **Windows + git-bash / git-cmd:** the shebang `#!/bin/sh` is handled
-  by git's bundled bash. The `uv run` command must be on PATH for the
-  hook to find it.
-- **Windows + PowerShell:** no action needed; git always uses its
-  bundled bash for hook execution, not the parent shell.
 
 ### Integrating plan-complete close
 

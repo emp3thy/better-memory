@@ -22,6 +22,26 @@ from better_memory.hooks import session_bootstrap as hook
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "better_memory" / "db" / "migrations"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_real_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin HOME/USERPROFILE away from the developer's real profile.
+
+    session_bootstrap now wires in autocheck.maybe_repair (replacing the old
+    read-only CLAUDE.md sentinel), which resolves ~/.claude paths via
+    engine.default_target_paths() (Path.home()-based) regardless of
+    BETTER_MEMORY_HOME. Without this, every subprocess spawned by this file
+    would diff — and potentially repair-write — the REAL ~/.claude.json,
+    ~/.claude/settings.json, and ~/.claude/CLAUDE.md on the machine running
+    the tests. monkeypatch.setenv touches process os.environ, so subprocess
+    helpers here (which build env from ``{**os.environ, ...}``) inherit it
+    too.
+    """
+    fake_home = tmp_path / "fake-user-home"
+    fake_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+
 def _run_hook(
     home_dir: Path,
     *,
@@ -339,14 +359,15 @@ def test_agentcore_mode_opens_local_conn_for_exposure_ledger(
     proj.mkdir()
     monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
-    # Hermetic against the CLAUDE.md drift sentinel: point Path.home() at an
-    # empty dir so no real ~/.claude/CLAUDE.md is picked up (the sentinel
-    # skips silently when the file is missing) and the exact-equality
-    # assertion below on the remote backend's passthrough context holds
-    # regardless of the machine's real CLAUDE.md contents.
-    no_home = tmp_path / "no-home"
-    monkeypatch.setenv("USERPROFILE", str(no_home))
-    monkeypatch.setenv("HOME", str(no_home))
+    # HOME/USERPROFILE are already isolated by the file-scoped
+    # _isolate_real_home autouse fixture, so no real ~/.claude files are
+    # touched here — but the isolated home is EMPTY, so autocheck would
+    # still find "everything missing" drift and append a repair line,
+    # breaking the exact-equality assertion below on the remote backend's
+    # passthrough context. Kill-switch autocheck for this routing test —
+    # its own behavior is covered by tests/setup/test_autocheck.py and the
+    # dedicated autocheck-wiring tests further down this file.
+    monkeypatch.setenv("BETTER_MEMORY_WIRING_AUTOCHECK", "off")
 
     connect_calls: list = []
     real_connect = hook.connect
@@ -419,6 +440,12 @@ def test_agentcore_mode_bootstrap_exposure_lands_in_local_ledger(
         c.close()
     monkeypatch.setenv("BETTER_MEMORY_HOME", str(home))
     monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+    # Kill-switch autocheck: the isolated fake HOME (from the file-scoped
+    # _isolate_real_home fixture) has no pre-existing ~/.claude wiring, so
+    # autocheck would repair it fresh and append a report line, breaking
+    # the exact-equality assertion below on the remote backend's passthrough
+    # context. Autocheck's own behavior is covered elsewhere.
+    monkeypatch.setenv("BETTER_MEMORY_WIRING_AUTOCHECK", "off")
 
     class _FakeDeferredBackend:
         def __init__(self, conn):
@@ -543,3 +570,98 @@ def test_sqlite_mode_never_consults_build_backend(
     )
     text = res["hookSpecificOutput"]["additionalContext"]
     assert "## better-memory: session bootstrap" in text
+
+
+# ---------------------------------------------------------------------------
+# Wiring autocheck (replaces the retired CLAUDE.md sentinel): the hook's
+# try block does `from better_memory.setup.autocheck import maybe_repair`
+# on every call, so monkeypatching the attribute on the autocheck module
+# itself is picked up (no need to patch `hook`).
+# ---------------------------------------------------------------------------
+
+
+def test_autocheck_line_appended_to_bootstrap_context(
+    home_with_schema, git_cwd, monkeypatch, capsys
+):
+    """When autocheck.maybe_repair returns a report line, session_bootstrap
+    appends it to the rendered additionalContext."""
+    from better_memory.setup import autocheck
+
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home_with_schema))
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+    monkeypatch.setattr(
+        autocheck,
+        "maybe_repair",
+        lambda home, cwd: "better-memory doctor: repaired 1 item(s): "
+        "settings.json (effective next session)",
+    )
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "autocheck-sess-1", "cwd": str(git_cwd)},
+        monkeypatch, capsys,
+    )
+    text = res["hookSpecificOutput"]["additionalContext"]
+    assert "## better-memory: session bootstrap" in text
+    assert "better-memory doctor: repaired 1 item(s)" in text
+
+
+def test_autocheck_raising_still_produces_normal_output(
+    home_with_schema, git_cwd, monkeypatch, capsys
+):
+    """autocheck is best-effort: if maybe_repair raises, the bootstrap still
+    emits its normal additionalContext (the surrounding try/except
+    BaseException swallows the failure and drops the autocheck line)."""
+    from better_memory.setup import autocheck
+
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home_with_schema))
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+
+    def _boom(home, cwd):
+        raise RuntimeError("autocheck exploded")
+
+    monkeypatch.setattr(autocheck, "maybe_repair", _boom)
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "autocheck-sess-2", "cwd": str(git_cwd)},
+        monkeypatch, capsys,
+    )
+    text = res["hookSpecificOutput"]["additionalContext"]
+    assert "## better-memory: session bootstrap" in text
+    assert "doctor" not in text
+
+
+def test_autocheck_failure_is_recorded_via_record_hook_error(
+    home_with_schema, git_cwd, monkeypatch, capsys
+):
+    """Regression: a persistent autocheck failure must not silently vanish
+    forever — record_hook_error(hook_name="wiring_autocheck", ...) is called
+    (best-effort, mirroring the outer handler's pattern), and the bootstrap
+    output is otherwise unaffected."""
+    from better_memory.setup import autocheck
+
+    monkeypatch.setenv("BETTER_MEMORY_HOME", str(home_with_schema))
+    monkeypatch.delenv("BETTER_MEMORY_STORAGE_BACKEND", raising=False)
+
+    def _boom(home, cwd):
+        raise RuntimeError("autocheck exploded")
+
+    monkeypatch.setattr(autocheck, "maybe_repair", _boom)
+
+    calls: list[dict] = []
+
+    def _fake_record_hook_error(*, hook_name, exc):
+        calls.append({"hook_name": hook_name, "exc": exc})
+
+    monkeypatch.setattr(hook, "record_hook_error", _fake_record_hook_error)
+
+    res = _run_inprocess(
+        {"source": "startup", "session_id": "autocheck-sess-3", "cwd": str(git_cwd)},
+        monkeypatch, capsys,
+    )
+    text = res["hookSpecificOutput"]["additionalContext"]
+    assert "## better-memory: session bootstrap" in text
+    assert "doctor" not in text
+
+    assert len(calls) == 1
+    assert calls[0]["hook_name"] == "wiring_autocheck"
+    assert isinstance(calls[0]["exc"], RuntimeError)

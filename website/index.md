@@ -99,13 +99,12 @@ stateDiagram-v2
 <section class="brut-section" id="install">
   <div class="brut-container">
     <div class="brut-num">05 — INSTALL</div>
-    <h2 class="brut-section-h">three commands, one paste</h2>
-    <p class="brut-lede brut-muted">Clone, run setup, paste the printed JSON snippets into your Claude Code config.</p>
+    <h2 class="brut-section-h">one script, zero paste</h2>
+    <p class="brut-lede brut-muted">Clone, run the bootstrap script for your OS. It installs uv if needed, syncs dependencies, and wires the MCP server + hooks into your Claude Code config automatically — nothing to hand-edit.</p>
 
 ```bash
 git clone https://github.com/emp3thy/better-memory
 cd better-memory
-./scripts/setup.sh
 ```
 
     <div class="brut-tabs" data-brut-tabs>
@@ -116,52 +115,29 @@ cd better-memory
 
     <div class="brut-tab-pane brut-tab-pane-active" data-os-pane="macos">
 
-```json
-{
-  "mcpServers": {
-    "better-memory": {
-      "type": "stdio",
-      "command": "/absolute/path/to/.venv/bin/python",
-      "args": ["-m", "better_memory.mcp"]
-    }
-  }
-}
+```bash
+./scripts/setup.sh
 ```
 
     </div>
 
     <div class="brut-tab-pane" data-os-pane="linux">
 
-```json
-{
-  "mcpServers": {
-    "better-memory": {
-      "type": "stdio",
-      "command": "/absolute/path/to/.venv/bin/python",
-      "args": ["-m", "better_memory.mcp"]
-    }
-  }
-}
+```bash
+./scripts/setup.sh
 ```
 
     </div>
 
     <div class="brut-tab-pane" data-os-pane="windows">
 
-```json
-{
-  "mcpServers": {
-    "better-memory": {
-      "type": "stdio",
-      "command": "C:/absolute/path/to/.venv/Scripts/pythonw.exe",
-      "args": ["-m", "better_memory.mcp"]
-    }
-  }
-}
+```powershell
+.\scripts\setup.ps1
 ```
 
     </div>
 
+    <p style="margin-top:18px">Idempotent and non-interactive — safe to re-run any time. Restart Claude Code afterward. Run <code>uv run better-memory doctor</code> later to check for drift.</p>
     <p style="margin-top:18px"><a href="configuration/">full setup guide →</a></p>
   </div>
 </section>

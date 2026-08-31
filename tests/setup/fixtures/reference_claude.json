@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "better-memory": {
+      "type": "stdio",
+      "command": "C:\\Users\\ref\\source\\better-memory\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "better_memory.mcp"
+      ],
+      "env": {
+        "BETTER_MEMORY_HOME": "C:\\Users\\ref\\.better-memory",
+        "BETTER_MEMORY_EMBED_LOG": "1",
+        "BETTER_MEMORY_INJECT_MODE": "deferred"
+      }
+    }
+  }
+}

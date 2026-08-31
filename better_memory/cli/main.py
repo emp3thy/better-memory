@@ -1,7 +1,8 @@
 """Top-level CLI dispatcher: `better-memory <subcommand>`.
 
 Registered via `[project.scripts]` in `pyproject.toml`. Subcommand modules
-live alongside this one in `better_memory/cli/`. Today: `agentcore`.
+live alongside this one in `better_memory/cli/`. Today: `agentcore`, `setup`,
+`doctor`.
 """
 
 from __future__ import annotations
@@ -32,6 +33,11 @@ def _build_parser() -> argparse.ArgumentParser:
     from better_memory.cli import agentcore as agentcore_cli
     agentcore_cli.add_subparsers(ac_parser)
 
+    # ----- setup / doctor subcommands -----
+    from better_memory.cli import setup_cmd
+    setup_cmd.add_setup_parser(subparsers)
+    setup_cmd.add_doctor_parser(subparsers)
+
     return parser
 
 
@@ -42,6 +48,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "agentcore":
         from better_memory.cli import agentcore as agentcore_cli
         return agentcore_cli.handle(args)
+    if args.command == "setup":
+        from better_memory.cli import setup_cmd
+        return setup_cmd.handle_setup(args)
+    if args.command == "doctor":
+        from better_memory.cli import setup_cmd
+        return setup_cmd.handle_doctor(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error raises SystemExit

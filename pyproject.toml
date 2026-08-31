@@ -61,6 +61,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# render is imported to document engine's public API surface; exercised
+# indirectly via fingerprint() rather than called directly in this file.
+"tests/setup/test_engine.py" = ["F401"]
+
 [tool.pyright]
 include = ["better_memory", "tests"]
 exclude = ["**/.worktrees/**", "**/__pycache__"]
