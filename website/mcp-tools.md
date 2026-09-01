@@ -27,7 +27,7 @@ Get reflections bucketed by polarity, plus drained spool observations.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
-| `query` | string | optional (strongly recommended) | Plain-language description of the task at hand. Fuses BM25 + vector search via RRF with the Wilson-score usefulness prior. Omitting it degrades gracefully to the Wilson-prior-only order — the same generic top-ranked lessons every call. |
+| `query` | string | optional (strongly recommended) | Plain-language description of the task at hand. Fuses a BM25 relevance ranking via RRF with the Wilson-score usefulness prior. Omitting it degrades gracefully to the Wilson-prior-only order — the same generic top-ranked lessons every call. |
 | `project` | string | optional | Defaults to current project (cwd-derived). |
 | `tech` | string | optional | Filter by tech tag. |
 | `phase` | `planning` / `implementation` / `general` | optional | Filter by reflection phase. |
@@ -42,7 +42,7 @@ Drill-down: get raw observations matching filters. Use `memory.retrieve` for the
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
-| `query` | string | optional | Hybrid FTS5 + vector search. Without it, ordered by `created_at DESC`. |
+| `query` | string | optional | Hybrid FTS5 search (word + trigram BM25 legs, RRF-fused). Without it, ordered by `created_at DESC`. |
 | `component` | string | optional | |
 | `theme` | string | optional | Ignored in query mode. |
 | `outcome` | `success` / `failure` / `neutral` | optional | |

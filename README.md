@@ -26,9 +26,7 @@ It's a memory layer for Claude Code that (with the default sqlite backend) runs 
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for environment management — the bootstrap scripts below install it for you if it's missing.
 - **Claude Code** installed
 
-SQLite ships with Python; `sqlite-vec` is installed as a pip dependency — nothing else to set up.
-
-better-memory's default embeddings backend (`BETTER_MEMORY_EMBEDDINGS_BACKEND=ollama`) needs [Ollama](https://ollama.com/) running locally with the `nomic-embed-text` model pulled (`ollama pull nomic-embed-text`) — the bootstrap scripts no longer install or pull this for you. Set `BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite` instead to skip Ollama entirely (pure-SQL trigram-FTS5 backend, no model downloads).
+SQLite ships with Python — nothing else to set up. All local retrieval is pure in-SQL FTS5 (word + trigram); there is no embedding model and no external service to install or run.
 
 ## Storage backends
 
@@ -116,18 +114,14 @@ One env var roots the runtime filesystem layout:
 |---|---|---|
 | `BETTER_MEMORY_HOME` | `~/.better-memory` | Root dir for `memory.db`, `knowledge.db`, `spool/`, `knowledge-base/` |
 | `BETTER_MEMORY_WIRING_AUTOCHECK` | (unset = on) | Session-start wiring drift autocheck: self-repairs `~/.claude.json`, `~/.claude/settings.json` hooks/env, the CLAUDE.md managed block, skill links, and the per-repo post-commit hook. Set to `off` (case-insensitive) to disable; any other value leaves it enabled. See [Doctor](#doctor). |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
-| `EMBED_MODEL` | `nomic-embed-text` | Embedding model (must produce 768-dim vectors) |
 | `AUDIT_LOG_RETRIEVED` | `true` | Whether `memory.retrieve` writes per-result audit rows |
-| `BETTER_MEMORY_EMBEDDINGS_BACKEND` | `ollama` | `ollama` (default) — local Ollama at `OLLAMA_HOST`; `sqlite` — pure-SQL trigram-FTS5 fusion, no model downloads and no in-memory state. |
 | `BETTER_MEMORY_STORAGE_BACKEND` | unset | `sqlite` or `agentcore`. Explicit override of the storage backend; when unset, `$BETTER_MEMORY_HOME/settings.json` (written by `better-memory agentcore init`) decides, falling back to `sqlite`. The env var always wins over settings.json. |
 | `BETTER_MEMORY_AUTO_PRUNE` | (unset = `false`) | When set to `1`, the auto-retention runner (which fires on `memory.retrieve`, throttled to once per 24h) ALSO hard-deletes archived observations older than 365 days. **Irreversible.** Default is archive-only (status flip, reversible). Opt in only if you actively want disk space reclaimed. |
 | `BETTER_MEMORY_PROJECT` | unset | Force the project name for all calls in this process. Highest-priority project-resolution signal — overrides both the `.better-memory` file and the git-derived name. Designed for subprocess scoping (e.g. ralph's executor sets it per-iteration so subagent observations land in the PBI's target_repo regardless of the worktree's cwd). Empty/whitespace-only values are treated as unset. |
 | `BETTER_MEMORY_INJECT_MODE` | `legacy` (config default; `deferred` is the recommended and currently-deployed setting) | `deferred`: SessionStart injects only general-scope standing rules + a one-line index; everything else surfaces via the contextual channel as it becomes relevant. `legacy`: the original full bootstrap dump. Unknown values coerce to `legacy`. |
 | `BETTER_MEMORY_CONTEXT_INJECT_MODE` | `both` | Contextual memory-injection hook trigger: `userprompt`, `pretool`, `both` (default), or `off`. PreToolUse fires once per session (any tool), latched. |
-| `BETTER_MEMORY_CONTEXT_VEC_FLOOR` | `0.55` | Cosine floor for the contextual channel's vector-evidence leg. A memory injects only with a text match or a cosine ≥ floor; calibrated precision-first (see the deferred-injection spec). |
 | `BETTER_MEMORY_BOOTSTRAP_TOP_N` | `5` | Legacy-mode only: project-scoped items the SessionStart bootstrap renders in full; the rest collapse into a one-line index. `0` = full dump. |
-| `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | **Deprecated, unused** — superseded by the evidence gate (BM25 / vector floor). Kept for back-compat only. |
+| `BETTER_MEMORY_CONTEXT_MIN_HITS` | `2` | **Deprecated, unused** — superseded by the evidence gate (BM25 match, or a keyword-hit fallback when unavailable). Kept for back-compat only. |
 | `BETTER_MEMORY_CONTEXT_MAX_ITEMS` | `3` | Max memories the contextual-injection hook injects per firing. |
 | `BETTER_MEMORY_CONTEXT_REINJECT_TURNS` | `0` | Turns before a contextually-injected memory can be re-injected. `0` = never re-inject. A turn is one firing of the `contextual_inject` hook (each user prompt, plus each matched tool call in mode `both`), not one user prompt-response cycle. |
 
@@ -174,8 +168,8 @@ The server registers 22 tools, grouped below. Full schemas are in [`website/mcp-
 | Tool | Purpose |
 |---|---|
 | `memory.observe(content, component?, theme?, trigger_type?, outcome?, tech?, scope?)` | Record an observation. Returns `{"id": ...}`. |
-| `memory.retrieve(query?, project?, tech?, phase?, polarity?, limit_per_bucket?)` | Distilled reflections in `do` / `dont` / `neutral` buckets, ranked by a Wilson-score hit-rate prior; pass `query` (a plain-language task description) to fuse in BM25 + vector relevance. One shortlist slot per bucket is reserved for an under-rated memory so new lessons earn a score. Drains spool first. |
-| `memory.retrieve_observations(query?, component?, theme?, outcome?, episode_id?, project?, limit?)` | Raw-observation drill-down with hybrid FTS5 + vector search. |
+| `memory.retrieve(query?, project?, tech?, phase?, polarity?, limit_per_bucket?)` | Distilled reflections in `do` / `dont` / `neutral` buckets, ranked by a Wilson-score hit-rate prior; pass `query` (a plain-language task description) to fuse in BM25 relevance. One shortlist slot per bucket is reserved for an under-rated memory so new lessons earn a score. Drains spool first. |
+| `memory.retrieve_observations(query?, component?, theme?, outcome?, episode_id?, project?, limit?)` | Raw-observation drill-down with hybrid FTS5 search (word + trigram BM25 legs, RRF-fused). |
 | `memory.record_use(id, outcome?)` | Stamp reinforcement outcome on a memory after validation. |
 
 **Semantic memory** — user-stated facts and preferences (current truth, not history).
@@ -265,7 +259,7 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\start-better-
 
 ```bash
 uv sync              # install deps
-uv run pytest         # full suite (requires Ollama running for integration marker)
+uv run pytest         # full suite (integration marker needs real AWS / a browser)
 uv run pytest -m "not integration"   # unit tests only
 uv run ruff check .   # lint
 ```
@@ -279,9 +273,6 @@ uv run python -m better_memory.mcp
 It speaks JSON-RPC over stdio — pipe `initialize` / `tools/list` / `tools/call` payloads in.
 
 ## Troubleshooting
-
-**"Ollama unreachable" on startup.**
-Make sure Ollama is running (`ollama serve` on macOS/Linux; the tray app on Windows) and that `nomic-embed-text` is pulled (`ollama pull nomic-embed-text`). The MCP server continues booting and serves `knowledge.*` tools, but `memory.observe` / `memory.retrieve` will error until Ollama is up.
 
 **MCP server not appearing in Claude Code after editing `~/.claude.json`.**
 MCP servers don't hot-reload. Restart Claude Code.
@@ -307,7 +298,7 @@ See `docs/superpowers/specs/2026-04-06-better-memory-design.md` for the original
 Three shipped upgrades sit on top of that foundation (specs: `2026-07-23-retrieval-quality-design.md`, `2026-07-23-deferred-injection-design.md`):
 
 - **Wilson-score ranking.** Reflections and semantic memories rank by the lower bound of their observed hit rate — `(useful + overlooked) / (useful + overlooked + ignored)` — so a memory that helps 3 times out of 4 serves outranks one that helped 67 times out of 192. No raw-count rich-get-richer. One shortlist slot per bucket is reserved for memories with fewer than 3 ratings (the **exploration slot**), so new lessons get served, rated, and scored instead of starving; those serves are tagged (`via_exploration`) and excluded from headline usefulness metrics.
-- **Deferred, evidence-gated injection.** SessionStart injects only your standing rules; each prompt (and the session's first tool call) is then scored against the store with three legs — BM25 text match, vector cosine (reflections and semantic memories are embedded at write time, self-healed on retrieve, backfillable via `python -m better_memory.cli.backfill_embeddings`), and the Wilson prior for ranking only. A memory injects solely on positive relevance evidence; popularity can never force an irrelevant injection. Ollama outages cost at most one bounded stall per minute (file-persisted circuit breaker shared across hook processes).
+- **Deferred, evidence-gated injection.** SessionStart injects only your standing rules; each prompt (and the session's first tool call) is then scored against the store against an evidence gate — a BM25 text match for reflections, a keyword-hit fallback for semantic memories (which have no FTS substrate of their own) — with the Wilson prior fused in for ranking only. A memory injects solely on positive relevance evidence; popularity can never force an irrelevant injection.
 - **Evidence-anchored ratings.** Non-`ignored` ratings require a one-line receipt, enforced server-side and stored on the exposure row; the management UI shows each memory's rating-evidence history. Ratings are the fuel for everything above, so their variance is the system's noise floor — the receipts anchor them to observable events.
 
 ## Observation lifecycle

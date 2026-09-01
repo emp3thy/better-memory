@@ -1,6 +1,6 @@
 # Architecture
 
-better-memory is a four-layer epistemic hierarchy backed by a pluggable storage backend — a single SQLite database by default — with embeddings supplied by one of two pluggable backends (Ollama, or an in-SQL trigram-FTS5 fusion).
+better-memory is a four-layer epistemic hierarchy backed by a pluggable storage backend — a single SQLite database by default, with all local retrieval running as pure in-SQL FTS5 (word + trigram) — no embedding model, no external service.
 
 ## The four layers
 
@@ -24,11 +24,13 @@ better-memory abstracts persistence behind the `StorageBackend` protocol (`bette
 ```mermaid
 flowchart LR
   RESOLVE["env var, else settings.json,<br/>else sqlite"]
-  RESOLVE -->|sqlite| SQLITE["SqliteBackend<br/>(local memory.db + sqlite-vec)"]
+  RESOLVE -->|sqlite| SQLITE["SqliteBackend<br/>(local memory.db, FTS5)"]
   RESOLVE -->|agentcore| AGENTCORE["AgentCoreBackend<br/>(AWS Bedrock AgentCore Memory)"]
   SQLITE -->|sync I/O| DB[("memory.db")]
   AGENTCORE -->|boto3| AWS[("region from agentcore.json<br/>bedrock-agentcore")]
 ```
+
+The `sqlite-vec` extension is still loaded by every `memory.db` connection (`better_memory/db/connection.py`) — not for search (no code path performs a vector query any more), but because dropping the vec0 virtual tables in migration `0018_drop_vec_tables.sql` requires the module registered first. Removing the dependency outright is an announced follow-up.
 
 | Aspect | `sqlite` | `agentcore` |
 |---|---|---|
@@ -40,12 +42,12 @@ flowchart LR
 | Multi-machine sync | No | Yes — memory content and rating counters are shared; the exposure ledger and its evidence stay local/session-scoped on every machine |
 | Closure events | N/A | `CreateEvent(role=OTHER)` from Stop hook; end-of-session rating sweeps additionally emit one best-effort `CreateEvent` (`extractionMode: SKIP`) as a durable, team-visible receipt of what was rated |
 | Episode tracking | Local `episodes` table | Internal to AgentCore (sessionId) |
-| Self-rating loop (exposure ledger, `memory.credit`, sweep, Wilson ranking, exploration slot) | Local, entirely in `memory.db` | Same loop — backend-agnostic. Exposure ledger writes to the SAME local `session_memory_exposure` table (session-operational state, never memory content); rating counters (`useful_count`, `ignored_count`, etc.) live on the AWS record and are genuinely shared across teammates. `query`-conditioned retrieval and the contextual-injection evidence gate use server-side semantic search (`RetrieveMemoryRecords`) in place of sqlite's BM25/vector legs, degrading to Wilson-only / keyword fallback only on an AWS error. |
+| Self-rating loop (exposure ledger, `memory.credit`, sweep, Wilson ranking, exploration slot) | Local, entirely in `memory.db` | Same loop — backend-agnostic. Exposure ledger writes to the SAME local `session_memory_exposure` table (session-operational state, never memory content); rating counters (`useful_count`, `ignored_count`, etc.) live on the AWS record and are genuinely shared across teammates. `query`-conditioned retrieval and the contextual-injection evidence gate use server-side semantic search (`RetrieveMemoryRecords`) in place of sqlite's BM25 leg, degrading to Wilson-only / keyword fallback only on an AWS error. |
 | Bulk import | N/A (clean start) | `better-memory agentcore migrate` copies existing sqlite reflections + semantic memories into AWS (idempotent, ledgered) |
 
 Migrating with `better-memory agentcore migrate` is distinct from activating: it only writes records to AWS and never flips `storage_backend`. A migrated reflection carries its rating counters, `status`, and `source_row_id` in the record's JSON **content body** — the built-in episodic strategy owns the metadata schema — whereas cloud-extracted records (and migrated semantic records) keep that state in record **metadata**. See [AgentCore setup > Migrate](agentcore-setup.md#migrate-existing-memory-optional).
 
-The management UI's `create_app` (`better_memory/ui/app.py`) builds a `StorageBackend` via `factory.build_backend`, sharing the same sqlite connection and `sync_embedder` the UI already constructs, and stores it at `app.extensions["backend"]`. The Reflections surfaces (list, detail, promote, retire) and the Semantic surfaces (full CRUD — create, list, get, update text, set scope, delete) reach memory CONTENT exclusively through `app.extensions["backend"]`, never raw SQL in `better_memory/ui/queries.py` or a service constructed directly on the raw connection. `app.extensions["db_connection"]` is retained for OPERATIONAL state — hook errors, rating evidence/counters, retention runs, the audit log — on both backends. A `caps` context processor reads six capability flags off `app.extensions["backend"]` (`supports_episodes`, `supports_observations`, `supports_provenance`, `supports_retention_runs`, `supports_reflection_review`, `supports_reflection_text_edit`) and exposes them to every template as `caps`, rebuilt on every render so swapping the extension flips every gate. All six flags are consumed: each pairs a nav-link/template-block gate (`{% if caps.* %}`, wrapping existing markup, no new classes) with a matching `abort(404)` guard on the route(s) it protects, so an agentcore session can neither see nor navigate directly to a hidden surface.
+The management UI's `create_app` (`better_memory/ui/app.py`) builds a `StorageBackend` via `factory.build_backend`, sharing the same sqlite connection the UI already opens, and stores it at `app.extensions["backend"]`. The Reflections surfaces (list, detail, promote, retire) and the Semantic surfaces (full CRUD — create, list, get, update text, set scope, delete) reach memory CONTENT exclusively through `app.extensions["backend"]`, never raw SQL in `better_memory/ui/queries.py` or a service constructed directly on the raw connection. `app.extensions["db_connection"]` is retained for OPERATIONAL state — hook errors, rating evidence/counters, retention runs, the audit log — on both backends. A `caps` context processor reads six capability flags off `app.extensions["backend"]` (`supports_episodes`, `supports_observations`, `supports_provenance`, `supports_retention_runs`, `supports_reflection_review`, `supports_reflection_text_edit`) and exposes them to every template as `caps`, rebuilt on every render so swapping the extension flips every gate. All six flags are consumed: each pairs a nav-link/template-block gate (`{% if caps.* %}`, wrapping existing markup, no new classes) with a matching `abort(404)` guard on the route(s) it protects, so an agentcore session can neither see nor navigate directly to a hidden surface.
 
 - `supports_episodes` — hides the Episodes nav link and 404s every `/episodes*` route (episode grouping is internal to AgentCore's `sessionId`, no local table).
 - `supports_observations` — hides the Observations nav link and 404s every `/observations*` route (no local observation table in agentcore mode).
@@ -77,14 +79,16 @@ Two distinct retrieve tools, two distinct ranking mechanisms:
 - **`memory.retrieve`** returns three reflection buckets — `do`, `dont`,
   `neutral` — ranked by the Wilson-score hit-rate prior on rated
   exposures (see [Self-rating loop](#self-rating-loop) for the formula
-  and the query-driven BM25/vector re-fusion).
+  and the query-driven BM25 re-fusion).
 - **`memory.retrieve_observations`** returns raw observations via a
-  hybrid search: FTS5 lexical match against observation content, plus
-  a sqlite-vec dense vector match against observation embeddings
-  (768-dim from `nomic-embed-text`), combined by Reciprocal Rank Fusion
-  (RRF). Results are filtered by outcome bucket and weighted by
-  `reinforcement_score` (each `memory.record_use` shifts a memory's
-  score up on success or down on failure — see [Reinforcement](#reinforcement)).
+  hybrid search over two BM25 legs -- word-level FTS5 (`observation_fts`)
+  and trigram-level FTS5 (`observation_trigram_fts`, which catches
+  substring matches the word tokenizer misses) -- fused by Reciprocal
+  Rank Fusion (RRF). There is no vector/embedding leg (removed; see
+  `better_memory/search/hybrid.py`). Results are filtered by outcome
+  bucket and weighted by `reinforcement_score` (each `memory.record_use`
+  shifts a memory's score up on success or down on failure — see
+  [Reinforcement](#reinforcement)).
 
 ## Injection strategies
 
@@ -97,79 +101,40 @@ better-memory gets memory in front of Claude two ways: a dump at session start, 
 
 **CLAUDE.md drift sentinel — retired.** SessionStart no longer runs a standalone sentinel that scanned `~/.claude/CLAUDE.md` for stale tool-parameter references (`better_memory/hooks/_claude_md_sentinel.py`, deleted). See [Self-managing wiring](#self-managing-wiring) above: the retrieve/reinforce/synthesize/record protocol text is now a managed block (`manifest.CLAUDE_MD_BLOCK`) that `better-memory setup` / `doctor --fix` / the session-start autocheck (`better_memory.setup.autocheck.maybe_repair`, wired into `hooks/session_bootstrap.py`) keep byte-identical to the canonical text, so drift is repaired outright rather than merely flagged. `better_memory/skills/CLAUDE.snippet.md` (used for non-Claude-Code MCP integrations) remains behavioural instructions only ("pass a task-describing query when you begin a task", "credit with evidence") and never enumerates parameter names or types, so it can't drift the way the retired sentinel used to detect.
 
-**Contextual injection (UserPromptSubmit / PreToolUse).** The `contextual_inject` hook (`better_memory/hooks/contextual_inject.py`) scores the curated memory set (semantic + reflections) against the current prompt (UserPromptSubmit, fires on every prompt) or tool name + input (PreToolUse, matcher now unscoped -- every tool call, not a fixed allowlist) via `retrieve_relevant` (`better_memory/services/relevant.py`), a three-leg evidence-gated scorer:
+**Contextual injection (UserPromptSubmit / PreToolUse).** The `contextual_inject` hook (`better_memory/hooks/contextual_inject.py`) scores the curated memory set (semantic + reflections) against the current prompt (UserPromptSubmit, fires on every prompt) or tool name + input (PreToolUse, matcher now unscoped -- every tool call, not a fixed allowlist) via `retrieve_relevant` (`better_memory/services/relevant.py`), an evidence-gated scorer:
 
-- A memory injects only when it clears an evidence gate: a BM25 match against `reflection_fts` (title / use_cases / hints), or a vector cosine similarity >= `BETTER_MEMORY_CONTEXT_VEC_FLOOR` (default `0.55`) against its embedding. No evidence, no injection -- a memory with neither leg present is silently dropped, however popular it is. In agentcore mode, the BM25/vector legs are replaced by the backend's own `relevance_ranks` (`StorageBackend.relevance_ranks`, backed by server-side `RetrieveMemoryRecords` semantic search): a memory qualifies iff it appears in that search's result set.
-- The Wilson lower-bound prior on rated exposures (see [Self-rating loop](#self-rating-loop)) never qualifies a memory by itself; among qualifiers it only ranks, via reciprocal rank fusion together with whichever of the BM25/vector ranks (or, on agentcore, the `relevance_ranks` rank) are present. Popularity forcing irrelevant injections into context was the old failure mode the gate exists to close.
-- A keyword-hit fallback (>= 2 distinct hits) applies only where the primary evidence leg is structurally unavailable or has failed: for sqlite-backed reflections, when there is no raw sqlite `conn`; for agentcore-backed reflections and semantic memories, only when `relevance_ranks` itself fails (an AWS error on every namespace, signalled by `None` -- a genuinely empty `{}` result is a legitimate negative and is NOT a fallback trigger); for sqlite-backed semantic memories -- which have no FTS substrate at all -- whenever no query vector could be produced (no embedder configured, or the Ollama embed call is in cooldown). `BETTER_MEMORY_CONTEXT_MIN_HITS` is **deprecated**: `contextual_inject` no longer reads it, superseded by the evidence gate above.
-- Because PreToolUse now matches every tool, a per-session latch (`SeenStore.pretool_fired` / `mark_pretool_fired`, `better_memory/services/context_seen.py`) runs the full retrieval path at most once per session for PreToolUse; every later PreToolUse event in the session short-circuits on the latch state before touching the DB or the embedder. UserPromptSubmit is unaffected by the latch and fires on every prompt.
+- A memory injects only when it clears an evidence gate. For reflections: a BM25 match against `reflection_fts` (title / use_cases / hints) -- or, only when that leg is structurally unavailable (no sqlite `conn` passed in), a keyword-hit fallback (>= 2 distinct hits). For semantic memories, which have no FTS substrate of their own: the keyword-hit fallback (>= 2 distinct hits) is the only evidence leg, and it is unconditionally active. No evidence, no injection -- a memory with neither leg present is silently dropped, however popular it is. In agentcore mode, both kinds are instead gated by the backend's own `relevance_ranks` (`StorageBackend.relevance_ranks`, backed by server-side `RetrieveMemoryRecords` semantic search): a memory qualifies iff it appears in that search's result set, falling back to the keyword-hit floor only when the lookup itself fails (an AWS error, signalled by `None` -- a genuinely empty `{}` result is a legitimate negative, not a fallback trigger).
+- The Wilson lower-bound prior on rated exposures (see [Self-rating loop](#self-rating-loop)) never qualifies a memory by itself; among qualifiers it only ranks, via reciprocal rank fusion together with the BM25 rank (or, on agentcore, the `relevance_ranks` rank) when present. Popularity forcing irrelevant injections into context was the old failure mode the gate exists to close.
+- The keyword-hit fallback described above applies only where the primary evidence leg is structurally unavailable or has failed: for sqlite-backed reflections, when there is no raw sqlite `conn`; for agentcore-backed reflections and semantic memories, only when `relevance_ranks` itself fails (an AWS error on every namespace, signalled by `None` -- a genuinely empty `{}` result is a legitimate negative and is NOT a fallback trigger); for sqlite-backed semantic memories it is unconditional, since they have no other evidence leg at all. `BETTER_MEMORY_CONTEXT_MIN_HITS` is **deprecated**: `contextual_inject` no longer reads it, superseded by the evidence gate above.
+- Because PreToolUse now matches every tool, a per-session latch (`SeenStore.pretool_fired` / `mark_pretool_fired`, `better_memory/services/context_seen.py`) runs the full retrieval path at most once per session for PreToolUse; every later PreToolUse event in the session short-circuits on the latch state before touching the DB. UserPromptSubmit is unaffected by the latch and fires on every prompt.
 - Survivors are capped to `BETTER_MEMORY_CONTEXT_MAX_ITEMS`, then filtered through a per-session `SeenStore` (`better_memory/services/context_seen.py`, JSON file at `<home>/state/context_seen_<session_id>.json`) that deduplicates memories already injected this session. `BETTER_MEMORY_CONTEXT_REINJECT_TURNS=0` (default) means a memory is injected at most once per session; a positive value allows re-injection after that many turns have passed since it was last shown. A "turn" here is one firing of the `contextual_inject` hook, not one user prompt-response cycle: each user prompt is a turn, and each PreToolUse latch-firing is a turn too (subsequent latched-out PreToolUse events do not bump the turn counter).
 - Survivors render as a `<project-memory source="better-memory">` XML block in `additionalContext`, one entry per item with its kind, id, confidence, `useful_count`, and age, a `dont`-polarity item prefixed `Known pitfall -- do this instead:`, and a footer inviting `memory_credit(kind, id, class, evidence)` — with a one-line evidence statement — when an entry actually helped or misled.
 - Survivors are logged to `session_memory_exposure` with `source='contextual'` (best-effort; a write failure never blocks injection) and counted in `rating_diagnostics` (`contextual_fired_userprompt`, `contextual_fired_pretool`, `contextual_injected`, `contextual_suppressed_floor`, `contextual_suppressed_dedup`). These counters are per-firing, not per-item: a firing that injects one or several memories still increments `contextual_injected` by exactly 1. `contextual_suppressed_floor` now means "no candidate cleared the evidence gate", not "below the old keyword-hits floor".
 
 Gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE` (`userprompt` / `pretool` / `both` / `off`). The hook never raises and always exits 0 — failures are swallowed and logged to `hook_errors`, with no `additionalContext` emitted on that turn.
 
-## Embeddings backends
+## Local search (sqlite)
 
-better-memory supports two backends behind the
-`BETTER_MEMORY_EMBEDDINGS_BACKEND` env var.
-
-**`ollama` (default).** Observation text is embedded by a local Ollama
-server (model: `nomic-embed-text`, 768-dim). Vectors land in the
-`observation_embeddings` virtual table; retrieval fuses FTS5 BM25 with
-sqlite-vec kNN via Reciprocal Rank Fusion. Same quality as previous
-versions; requires Ollama running on `OLLAMA_HOST`.
-
-**`sqlite`.** A second FTS5 virtual table (`observation_trigram_fts`,
-tokenizer=`trigram`) is populated by triggers alongside the existing
-`observation_fts` (word tokenizer). Retrieval fuses both via RRF — no
-external service, no model downloads, no in-memory state. Lower
-recall on long paraphrased queries than Ollama embeddings, but
-substring and morphology bridging via trigrams works well for
-keyword-dense observations.
-
-Both FTS5 tables are populated by triggers regardless of which backend
-is active, so backend switches require no data migration at runtime —
-the trigram table is always ready to serve `sqlite` queries, and the
-word-tokenized table always feeds the lexical half of the `ollama`
-path. Only the vec0 (sqlite-vec) half degrades for cross-backend rows
-that were written while `sqlite` was active (no embedding was computed
-for them); a future `memory.reindex` MCP tool can backfill if that
-half-state becomes a problem.
-
-### Reflection and semantic-memory embeddings
-
-Reflections and semantic memories get their own vectors, written at
-write time rather than lazily at query time: `ReflectionSynthesisService`
-embeds a reflection when synthesis creates or augments it, `ReflectionService`
-re-embeds on `update_text`, and the semantic-memory service does the
-same on `memory.semantic_observe` and its update path. All of these go
-through `SyncEmbedder` (`better_memory/embeddings/sync_embed.py`), a
-synchronous facade over the Ollama embedder that is best-effort by
-design: any failure opens a 60-second circuit breaker (`_DEFAULT_COOLDOWN`)
-during which every embed call returns `None` immediately instead of
-retrying against a dead Ollama. In `contextual_inject`, that cooldown is
-additionally persisted to a state file (`<home>/state/embed_down_until`)
-so an Ollama outage is paid for once, not once per hook process -- every
-`contextual_inject` invocation started while the file's deadline is still
-in the future skips the embed call outright instead of re-discovering the
-outage itself. A missing vector is never treated as an
-error - callers just drop the vector leg from ranking and fall back to
-the Wilson + BM25 order above.
-
-Two mechanisms cover rows left without a vector - historical rows
-predating this feature, or rows written during a breaker outage:
-
-- **Lazy self-heal on retrieve.** Each `memory.retrieve` call embeds up
-  to 20 reflections missing a vector before ranking (`SELF_HEAL_BATCH_CAP`
-  in `better_memory/services/reflection.py`) - capped so a cold corpus
-  can't turn one retrieve call into an unbounded batch of Ollama calls.
-- **`python -m better_memory.cli.backfill_embeddings`.** A one-shot,
-  idempotent CLI that embeds every reflection and semantic memory still
-  missing a vector, in batches of 50. Intended to run once after
-  deploying the migration that adds the embedding tables, so the
-  historical corpus is searchable immediately instead of waiting for
-  retrieval traffic to heal it row by row.
+All local retrieval is pure in-SQL FTS5 — no embedding model, no
+external service, no in-memory state. Two FTS5 virtual tables are
+populated by triggers on write: `observation_fts` (word tokenizer) and
+`observation_trigram_fts` (tokenizer=`trigram`, which catches substring
+matches the word tokenizer misses). `better_memory/search/hybrid.py`
+fuses both via Reciprocal Rank Fusion into one ranked list for
+`memory.retrieve_observations`. Reflections have their own word-level
+FTS5 table (`reflection_fts`, title / use_cases / hints) used by the
+evidence gate in [Injection strategies](#injection-strategies) and the
+query re-fusion in [Self-rating loop](#self-rating-loop). Semantic
+memories have no FTS substrate of their own and rely on the keyword-hit
+fallback described in those sections. There used to be a second,
+Ollama-backed embeddings path (vector search over `nomic-embed-text`
+embeddings, selected via a now-removed `BETTER_MEMORY_EMBEDDINGS_BACKEND`
+env var); it was deleted, along with the `observation_embeddings` /
+`reflection_embeddings` / `semantic_embeddings` vec0 tables (migration
+`0018_drop_vec_tables.sql`). The `sqlite-vec` extension is still loaded
+by every connection only because dropping those vec0 tables requires
+the module registered — see the note under [Storage
+backends](#storage-backends).
 
 ## Reinforcement
 
@@ -249,11 +214,10 @@ described below:
    from the headline usefulness metric while still being rated normally
    through the same self-rating loop. When `memory.retrieve` is called
    with a `query`, this Wilson-ranked list is re-fused with a BM25
-   relevance ranking (title / use_cases / hints) and a vector-kNN
-   ranking via the same Reciprocal Rank Fusion used for observations --
-   a three-leg RRF of Wilson rank, BM25 rank, and vector rank -- so a
-   query that matches nothing on either extra leg degrades exactly to
-   the Wilson-only order.
+   relevance ranking (title / use_cases / hints) via the same
+   Reciprocal Rank Fusion used for observations -- a two-leg RRF of
+   Wilson rank and BM25 rank -- so a query that matches nothing on the
+   BM25 leg degrades exactly to the Wilson-only order.
 
 Every non-ignored rating's evidence line is stored on the
 `session_memory_exposure` row (`evidence` column, migration

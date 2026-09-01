@@ -25,11 +25,13 @@ In sqlite mode the UI lets the maintainer edit the two **text** fields in place:
 - **Save:** `POST /reflections/<id>/edit` (route `reflection_edit_save`) calls
   `ReflectionService.update_text`, which runs
   `UPDATE reflections SET use_cases=?, hints=?, updated_at=? WHERE id=?`
-  (hints stored as `json.dumps(list[str])` from newline-separated input), then — when a
-  `SyncEmbedder` is present — re-embeds title+use_cases+hints via a `DELETE+INSERT` into the
-  vec0 `reflection_embeddings` table. Single commit. Empty use_cases/hints → 400 at the
-  route; retired/superseded → `ValueError` → 409. On success it re-renders
-  `fragments/reflection_drawer.html` with `HX-Trigger: reflection-changed`.
+  (hints stored as `json.dumps(list[str])` from newline-separated input). Single commit.
+  [Correction: the re-embed step this paragraph originally described (`SyncEmbedder` →
+  vec0 `reflection_embeddings`) was removed repo-wide in remove-ollama-embeddings; the
+  table no longer exists (migration 0018). `update_text` today is just the `UPDATE`
+  above.] Empty use_cases/hints → 400 at the route; retired/superseded → `ValueError` →
+  409. On success it re-renders `fragments/reflection_drawer.html` with
+  `HX-Trigger: reflection-changed`.
 
 The mental model in sqlite mode is simple: the maintainer **owns** the reflection text.
 Synthesis writes it once; nothing else rewrites it; the edit is the last word.

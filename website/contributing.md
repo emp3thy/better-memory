@@ -11,11 +11,11 @@ uv sync --dev
 ## Running tests
 
 ```bash
-uv run pytest                          # full suite (integration tests need Ollama running)
+uv run pytest                          # full suite (integration tests need real AWS / a browser)
 uv run pytest -m "not integration"     # unit tests only — fast, no external deps
 ```
 
-The integration marker gates tests that hit Ollama or spawn the MCP server end-to-end. Unit tests cover the bulk of the codebase and run in seconds.
+The integration marker gates tests that need real AWS Bedrock AgentCore credentials (`BETTER_MEMORY_TEST_AGENTCORE=1`) or a Playwright browser for the management UI's browser suite. Unit tests cover the bulk of the codebase and run in seconds.
 
 ## Linting and type-checking
 
