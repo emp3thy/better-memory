@@ -40,7 +40,9 @@ Synthesis writes it once; nothing else rewrites it; the edit is the last word.
 
 ### The sqlite source
 `reflections.use_cases` and `reflections.hints` are plain columns on the local
-`reflections` table (with a mirrored vec0 `reflection_embeddings` row). `update_text` owns
+`reflections` table. [Correction: this used to also say "with a mirrored vec0
+`reflection_embeddings` row" — that table was dropped in migration 0018
+(remove-ollama-embeddings); see the section-1 correction above.] `update_text` owns
 those columns outright. All of this bypasses `StorageBackend` today — the UI hands
 `ReflectionService` a raw `sqlite3.Connection` (`app.py:93-96`), so even the write never
 touches the backend abstraction (see `docs/agentcore-ui/data-sources.md`, Reflections tab).
@@ -83,9 +85,11 @@ that namespace, distinguished by a body marker:
    write — the crediting path already documents last-writer-wins, agentcore.py:1084-1088 — so
    even detecting the clobber after the fact is not free.)
 3. **The vec0 re-embed leg has no agentcore counterpart** and is a design non-goal —
-   embeddings are AWS-managed; vector search moves to `RetrieveMemoryRecords`. (This is not
-   the blocker, just a note: the sqlite `update_text` also touches `reflection_embeddings`,
-   which simply drops away in agentcore mode.)
+   embeddings are AWS-managed; vector search moves to `RetrieveMemoryRecords`. [Correction:
+   this point originally framed the vec0 leg as something the sqlite `update_text` "also
+   touches" and that "simply drops away in agentcore mode" — in fact `update_text` no longer
+   touches any embedding table in EITHER mode; the vec0 write was removed repo-wide, not
+   agentcore-specifically dropped. See the section-1 correction above.]
 
 So: **migrated** reflection text is cleanly editable (we own the body). **AWS-extracted**
 reflection text is editable *mechanically* but the edit is not durable against the extraction

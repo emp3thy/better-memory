@@ -62,7 +62,9 @@ the UI never writes runs). The UI has **no** button to trigger a run — it only
   safe in agentcore mode (same as `hook_errors`).
 - The **engine that produces the counts**, however, is *content-mutation*: rules A/B/C read the
   `reflection_sources → reflections → episodes` graph and `UPDATE observations SET status='archived'`;
-  `_prune` `DELETE`s from `observations` + `observation_embeddings`. Every one of those tables is
+  `_prune` `DELETE`s from `observations`. [Correction: this used to also say "+
+  `observation_embeddings`" — that table was dropped in migration 0018
+  (remove-ollama-embeddings); see the section-1 correction above.] Every one of those tables is
   AWS-side in agentcore mode.
 
 **Why the engine cannot run against AgentCore (live-API facts):**
