@@ -1,9 +1,9 @@
 """Pins the FTS5/BM25 evidence leg as unconditional.
 
 After the Ollama/vector removal, BM25 is the only local evidence leg for
-sqlite-storage retrieval. This test constructs services with NO embedder
-(the only construction mode after this branch) and proves observe -> FTS
-row -> BM25-evidenced retrieval works end to end.
+sqlite-storage retrieval. ``ObservationService`` no longer accepts an
+embedder parameter at all (remove-ollama-embeddings Task 6), so this test
+proves observe -> FTS row -> BM25-evidenced retrieval works end to end.
 
 EXPECTED GREEN from the moment it is written (verification pin, not
 TDD red) -- see
@@ -23,13 +23,12 @@ The actual end-to-end BM25 retrieval path for observations is
 ``ObservationService.retrieve()``, backed by
 ``better_memory.search.hybrid.hybrid_search`` -- a module whose own
 docstring says it is "deliberately pure SQLite: it never calls the
-embedder", and which falls back to trigram-FTS5 BM25 (``second_source=
-"trigram"``) instead of sqlite-vec kNN as its second RRF leg exactly when
-no embedder is present (see ``ObservationService.create``/``retrieve``:
-``second_source = "vec0" if self._embedder is not None else "trigram"``).
-That is the function this test exercises instead, to keep the assertion
-shape (observe -> FTS row -> BM25-evidenced retrieval hit -> no embedder
-anywhere) truthful to what the code actually does.
+embedder", and which ``ObservationService`` always calls with
+``second_source="trigram"`` -- there is no more ``"vec0"`` mode to
+select, since ``ObservationService`` has no embedder path at all any
+more. That is the function this test exercises instead, to keep the
+assertion shape (observe -> FTS row -> BM25-evidenced retrieval hit -> no
+embedder anywhere) truthful to what the code actually does.
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ async def test_observe_populates_fts_without_embedder(
     DELETE triggers defined in 0001_init.sql / 0002_episodic.sql. FTS
     population is unconditional: it is not gated on any embeddings backend
     (see task-1 Step 1 grep evidence in the task report)."""
-    svc = ObservationService(conn, None, episodes=EpisodeService(conn))
+    svc = ObservationService(conn, episodes=EpisodeService(conn))
     await svc.create(
         content="growatt inverter polling uses Timespan.hour", project="p1"
     )
@@ -83,7 +82,7 @@ async def test_retrieve_returns_bm25_evidence_without_embedder(
     trigram-FTS5 BM25, both embedder-free -- when the service is
     constructed with no embedder (``second_source`` resolves to
     ``"trigram"``, never ``"vec0"``)."""
-    svc = ObservationService(conn, None, episodes=EpisodeService(conn))
+    svc = ObservationService(conn, episodes=EpisodeService(conn))
     await svc.create(
         content="growatt inverter polling uses Timespan.hour", project="p1"
     )

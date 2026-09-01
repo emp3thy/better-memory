@@ -1,10 +1,11 @@
-"""Contextual relevance: BM25 + vec + Wilson prior behind an evidence gate.
+"""Contextual relevance: BM25 + Wilson prior behind an evidence gate.
 
 The gate is the point: a memory injects only with positive relevance
-evidence (BM25 match on the query, or vec cosine >= floor). The Wilson
-prior RANKS qualifiers but can never qualify a memory alone — popularity
-must not force irrelevant injections (that failure mode measured 13% useful
-as bootstrap). Vectors are unit-norm, so cosine >= c is L2 dist^2 <= 2(1-c).
+evidence (BM25 match on the query for reflections; a keyword-hit floor for
+semantics, which have no FTS leg of their own). The Wilson prior RANKS
+qualifiers but can never qualify a memory alone -- popularity must not
+force irrelevant injections (that failure mode measured 13% useful as
+bootstrap).
 """
 from __future__ import annotations
 
@@ -12,14 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import sqlite_vec
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.relevant import RelevantMemory, retrieve_relevant
 from better_memory.storage.sqlite import SqliteBackend
-from tests.services._embedding_fakes import DirectedEmbedder, FakeEmbedder
 
 FIXED_NOW = datetime(2026, 7, 11, 12, 0, 0, tzinfo=UTC)
 
@@ -34,11 +32,8 @@ def conn(tmp_memory_db: Path):
         c.close()
 
 
-def _backend(conn, *, sync_embedder=None, project="p"):
-    return SqliteBackend(
-        memory_conn=conn, sync_embedder=sync_embedder,
-        session_id=None, project=project,
-    )
+def _backend(conn, *, project="p"):
+    return SqliteBackend(memory_conn=conn, session_id=None, project=project)
 
 
 def _seed_reflection(
@@ -74,22 +69,6 @@ def _seed_semantic(
     conn.commit()
 
 
-def _embed_reflection(conn, rid, vector):
-    conn.execute(
-        "INSERT INTO reflection_embeddings (reflection_id, embedding) VALUES (?, ?)",
-        (rid, sqlite_vec.serialize_float32(vector)),
-    )
-    conn.commit()
-
-
-def _embed_semantic(conn, sid, vector):
-    conn.execute(
-        "INSERT INTO semantic_embeddings (memory_id, embedding) VALUES (?, ?)",
-        (sid, sqlite_vec.serialize_float32(vector)),
-    )
-    conn.commit()
-
-
 class TestBM25Gate:
     def test_bm25_match_qualifies(self, conn):
         _seed_reflection(conn, "r1", title="Retention archives by confidence")
@@ -110,68 +89,6 @@ class TestBM25Gate:
         assert out == []
 
 
-class TestVecGate:
-    def test_vec_match_qualifies_without_token_overlap(self, conn):
-        # DirectedEmbedder maps EITHER trigger phrase to the same unit
-        # vector, so the title (matching via "Stdout handling") and the
-        # query (matching via "console output") land at cosine 1 despite
-        # sharing zero tokens -- isolating the vec leg from BM25.
-        title = "Stdout handling on win32 interpreters"
-        emb = DirectedEmbedder("Stdout handling", "console output")
-        _seed_reflection(conn, "r1", title=title)
-        _embed_reflection(conn, "r1", emb._vec(title))
-        sync_embedder = SyncEmbedder(lambda: emb)
-        backend = _backend(conn, sync_embedder=sync_embedder)
-        out = retrieve_relevant(
-            backend, query="console output disappears on windows", project="p",
-            conn=conn, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
-        )
-        assert [m.id for m in out] == ["r1"]
-
-    def test_vec_below_floor_does_not_qualify(self, conn):
-        # Orthogonal unit vectors: the title's trigger is absent from the
-        # query, so DirectedEmbedder's else-branch gives the query the
-        # noise vector [0,1,...] while the stored embedding is [1,0,...].
-        title = "Zebra flamingo unrelated topic"
-        emb = DirectedEmbedder("only-in-the-title-xyz")
-        _seed_reflection(conn, "r1", title=title)
-        _embed_reflection(conn, "r1", emb._vec("only-in-the-title-xyz"))
-        sync_embedder = SyncEmbedder(lambda: emb)
-        backend = _backend(conn, sync_embedder=sync_embedder)
-        out = retrieve_relevant(
-            backend, query="totally different wording", project="p",
-            conn=conn, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
-        )
-        assert out == []
-
-    def test_orphan_vector_row_does_not_leak_via_vec_gate(self, conn):
-        # Issue #104: the vec table is global and its rows persist across
-        # retire (retire only UPDATEs status; the vector stays). An
-        # "orphan" vector -- one whose metadata row was retired or deleted
-        # so backend.retrieve does not surface it as a candidate -- must
-        # not qualify anything through the vec leg. Prior to the fix,
-        # _vec_qualifiers issued an unfiltered kNN, so the orphan showed
-        # up in vec_r but happened to be harmless only because the RRF
-        # loop keys on the caller's candidate list -- this test locks in
-        # that the candidate scoping is now enforced at the vec-query
-        # layer too, so orphan ids never appear in vec_r at all.
-        from better_memory.services.relevant import _vec_qualifiers
-        emb = DirectedEmbedder("orphan trigger")
-        # Insert a vec row for a reflection id that has NO metadata row.
-        _embed_reflection(conn, "r-orphan", emb._vec("orphan trigger"))
-        qvec = emb._vec("orphan trigger")
-        # candidate_ids empty -> short-circuit
-        assert _vec_qualifiers(
-            conn, "reflection_embeddings", "reflection_id",
-            qvec, 0.55, [],
-        ) == {}
-        # candidate_ids restricts what returns from the kNN scan
-        assert _vec_qualifiers(
-            conn, "reflection_embeddings", "reflection_id",
-            qvec, 0.55, ["r-different"],
-        ) == {}
-
-
 class TestWilsonRanking:
     def test_wilson_ranks_among_qualifiers(self, conn):
         _seed_reflection(conn, "r-hi", title="Retention thresholds alpha",
@@ -187,19 +104,6 @@ class TestWilsonRanking:
 
 
 class TestSemantics:
-    def test_semantic_qualifies_via_vec(self, conn):
-        content = "Stdout handling on win32 interpreters"
-        emb = DirectedEmbedder("Stdout handling", "console output")
-        _seed_semantic(conn, "s1", content=content)
-        _embed_semantic(conn, "s1", emb._vec(content))
-        sync_embedder = SyncEmbedder(lambda: emb)
-        backend = _backend(conn, sync_embedder=sync_embedder)
-        out = retrieve_relevant(
-            backend, query="console output disappears on windows", project="p",
-            conn=conn, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
-        )
-        assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
-
     def test_semantic_fallback_keyword_when_no_embedder(self, conn):
         _seed_semantic(conn, "s1", content="repo uses uv run pytest on windows")
         backend = _backend(conn)
@@ -209,18 +113,18 @@ class TestSemantics:
         )
         assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
 
-    def test_semantic_fallback_keyword_when_conn_none_agentcore(self, conn):
-        """agentcore mode: conn=None but the embedder is healthy and qvec is
-        real. The vec candidate set is still structurally empty because vec
-        queries need the sqlite conn -- so the keyword fallback must fire
-        here too, not only when qvec itself is None."""
+    def test_semantic_fallback_keyword_when_conn_none(self, conn):
+        """Semantics have no vec/FTS leg at all, so the keyword-hit floor
+        is their only evidence leg regardless of ``conn`` -- a sqlite
+        backend called with ``conn=None`` keeps the same keyword-fallback
+        behaviour as ``conn=conn`` (see services/relevant.py's module
+        docstring: 'a sqlite backend called with conn=None keeps the
+        pre-existing keyword-fallback behavior unchanged')."""
         _seed_semantic(conn, "s1", content="repo uses uv run pytest on windows")
-        emb = DirectedEmbedder("unrelated trigger phrase")
-        sync_embedder = SyncEmbedder(lambda: emb)
-        backend = _backend(conn, sync_embedder=sync_embedder)
+        backend = _backend(conn)
         out = retrieve_relevant(
             backend, query="uv run pytest windows setup", project="p",
-            conn=None, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
+            conn=None, now=lambda: FIXED_NOW,
         )
         assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
 
@@ -248,34 +152,17 @@ class TestCapsAndDegradation:
         )
         assert [m.id for m in out] == ["r-hi", "r-lo"]
 
-    def test_embedder_failure_degrades_to_bm25(self, conn):
-        _seed_reflection(conn, "r1", title="Retention archives by confidence")
-        sync_embedder = SyncEmbedder(lambda: FakeEmbedder(fail=True))
-        backend = _backend(conn, sync_embedder=sync_embedder)
-        out = retrieve_relevant(
-            backend, query="how does retention archive things", project="p",
-            conn=conn, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
-        )
-        assert [m.id for m in out] == ["r1"]
-
 
 @pytest.mark.parametrize("blank_query", ["", "   ", "\t\n"])
 def test_blank_query_returns_empty(conn, blank_query):
-    # DirectedEmbedder with no trigger args maps EVERY text to the same
-    # unit vector, so it would match anything if the vec leg were reached --
-    # the point is that a contentless query short-circuits before that.
     title = "Retention archives by confidence"
-    emb = DirectedEmbedder()
     _seed_reflection(conn, "r1", title=title)
-    _embed_reflection(conn, "r1", emb._vec(title))
-    sync_embedder = SyncEmbedder(lambda: emb)
-    backend = _backend(conn, sync_embedder=sync_embedder)
+    backend = _backend(conn)
     out = retrieve_relevant(
         backend, query=blank_query, project="p",
-        conn=conn, sync_embedder=sync_embedder, now=lambda: FIXED_NOW,
+        conn=conn, now=lambda: FIXED_NOW,
     )
     assert out == []
-    assert emb.calls == []
 
 
 class _StubAgentCoreBackend:
@@ -330,15 +217,14 @@ def _stub_reflection(rid, *, title, use_cases="", useful=0, overlooked=0, ignore
 
 class TestAgentCoreRelevanceGate:
     """conn=None + supports_synthesis=False routes retrieve_relevant
-    through backend.relevance_ranks instead of the BM25/vec legs (which
-    are structurally unavailable with no sqlite conn -- see
+    through backend.relevance_ranks instead of the BM25 leg (which is
+    structurally unavailable with no sqlite conn -- see
     services/relevant.py's agentcore_mode gate)."""
 
     def test_backend_rank_membership_qualifies_without_token_overlap(self):
         # Zero shared tokens between title and query -- the old
         # keyword-hit fallback would never qualify this; only the backend
-        # rank map's membership does, mirroring the vec-gate's
-        # DirectedEmbedder scenario but with no embedder involved at all.
+        # rank map's membership does.
         reflections = {
             "do": [_stub_reflection("r1", title="Zebra flamingo unrelated topic")],
             "dont": [], "neutral": [],

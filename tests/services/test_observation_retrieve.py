@@ -1,6 +1,7 @@
 """Tests for :meth:`ObservationService.retrieve` — the three-bucket API.
 
-Uses a stub embedder so the test doesn't contact Ollama.
+There is no embedder any more (remove-ollama-embeddings Task 6); this
+exercises the FTS5/trigram BM25-only path.
 """
 
 from __future__ import annotations
@@ -17,22 +18,6 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import BucketedResults, ObservationService
-
-_VEC_DIM = 768
-_VEC_FIXED = [0.01] * _VEC_DIM
-
-
-class _StubEmbedder:
-    """Minimal async embedder that always returns the same vector."""
-
-    def __init__(self, *, vector: list[float] | None = None) -> None:
-        self._vector = vector if vector is not None else list(_VEC_FIXED)
-        self.calls: list[str] = []
-
-    async def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        return list(self._vector)
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -56,17 +41,11 @@ def fixed_clock() -> Any:
 
 
 @pytest.fixture
-def embedder() -> _StubEmbedder:
-    return _StubEmbedder()
-
-
-@pytest.fixture
 def service(
-    conn: sqlite3.Connection, fixed_clock: Any, embedder: _StubEmbedder
+    conn: sqlite3.Connection, fixed_clock: Any
 ) -> ObservationService:
     return ObservationService(
         conn,
-        embedder,
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
@@ -156,15 +135,6 @@ async def test_retrieve_buckets_sorted_by_final_score_descending(
     for bucket in (result.do, result.dont, result.neutral):
         scores = [r.final_score for r in bucket]
         assert scores == sorted(scores, reverse=True)
-
-
-async def test_retrieve_embeds_query_once(
-    service: ObservationService, embedder: _StubEmbedder
-) -> None:
-    await _seed_mix(service)
-    embedder.calls.clear()
-    await service.retrieve(query="marker")
-    assert len(embedder.calls) == 1
 
 
 async def test_retrieve_reinforcement_orders_within_do_bucket(

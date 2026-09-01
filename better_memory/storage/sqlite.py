@@ -6,9 +6,10 @@ protocol delegation surface.
 
 Held state:
 - ``memory_conn`` — open sqlite3 Connection
-- ``embedder`` — forwarded to ObservationService. May be ``None`` for the
-  sqlite (FTS5) embeddings backend, which indexes via DB triggers instead
-  of a Python embedder.
+- ``embedder`` — accepted for constructor-compatibility with callers built
+  before remove-ollama-embeddings Task 6. ``ObservationService`` no longer
+  takes an embedder at all (it indexes via DB triggers / FTS5), so this
+  value is stored but never forwarded or read.
 - ``sync_embedder`` — caller-owned ``SyncEmbedder``, used only by
   ``relevance_ranks`` to embed the query for its vector leg
   (``ReflectionSynthesisService`` no longer takes an embedder — see
@@ -67,7 +68,6 @@ class SqliteBackend:
         self._episodes = EpisodeService(memory_conn)
         self._observations = ObservationService(
             memory_conn,
-            embedder=embedder,
             session_id=session_id,
             project_resolver=self._project_resolver,
             episodes=self._episodes,

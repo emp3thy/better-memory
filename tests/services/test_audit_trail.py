@@ -25,20 +25,6 @@ from better_memory.db.schema import apply_migrations
 from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import ObservationService
 
-_VEC_DIM = 768
-_VEC_FIXED = [0.01] * _VEC_DIM
-
-
-class _StubEmbedder:
-    """Deterministic async embedder — never touches Ollama."""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    async def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        return list(_VEC_FIXED)
-
 
 @pytest.fixture
 def conn(tmp_memory_db: Path) -> Iterator[sqlite3.Connection]:
@@ -64,7 +50,6 @@ def _make_service(
 ) -> ObservationService:
     return ObservationService(
         conn,
-        _StubEmbedder(),
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
@@ -205,7 +190,6 @@ async def test_audit_log_retrieved_flag_defaults_to_config(
     monkeypatch.setenv("AUDIT_LOG_RETRIEVED", "false")
     svc = ObservationService(
         conn,
-        _StubEmbedder(),
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,

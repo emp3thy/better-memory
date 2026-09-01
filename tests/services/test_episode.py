@@ -472,14 +472,9 @@ class TestObservationServiceEpisodeIntegration:
     async def test_observation_write_opens_background_episode_lazily(self, conn, fixed_clock):
         from better_memory.services.observation import ObservationService
 
-        class _StubEmbedder:
-            async def embed(self, text):
-                return [0.0] * 768
-
         epsvc = EpisodeService(conn, clock=fixed_clock)
         obs_svc = ObservationService(
             conn,
-            _StubEmbedder(),
             clock=fixed_clock,
             project_resolver=lambda: "proj-a",
             session_id="sess-1",
@@ -505,14 +500,9 @@ class TestObservationServiceEpisodeIntegration:
     async def test_observation_accepts_tech_parameter(self, conn, fixed_clock):
         from better_memory.services.observation import ObservationService
 
-        class _StubEmbedder:
-            async def embed(self, text):
-                return [0.0] * 768
-
         epsvc = EpisodeService(conn, clock=fixed_clock)
         obs_svc = ObservationService(
             conn,
-            _StubEmbedder(),
             clock=fixed_clock,
             project_resolver=lambda: "proj-a",
             session_id="sess-1",
@@ -530,14 +520,9 @@ class TestObservationServiceEpisodeIntegration:
         """tech='' is coerced to NULL on observation writes (matches EpisodeService)."""
         from better_memory.services.observation import ObservationService
 
-        class _StubEmbedder:
-            async def embed(self, text):
-                return [0.0] * 768
-
         epsvc = EpisodeService(conn, clock=fixed_clock)
         obs_svc = ObservationService(
             conn,
-            _StubEmbedder(),
             clock=fixed_clock,
             project_resolver=lambda: "proj-a",
             session_id="sess-1",

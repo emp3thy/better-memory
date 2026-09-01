@@ -7,7 +7,7 @@ window instead of one per call.
 from __future__ import annotations
 
 from better_memory.embeddings.sync_embed import SyncEmbedder
-from tests.services._embedding_fakes import FakeEmbedder
+from tests.embeddings._embedding_fakes import FakeEmbedder
 
 
 class FakeClock:

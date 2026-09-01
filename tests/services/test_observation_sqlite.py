@@ -36,30 +36,12 @@ def service(conn: sqlite3.Connection, fixed_clock) -> ObservationService:
     episodes = EpisodeService(conn, clock=fixed_clock)
     return ObservationService(
         conn,
-        embedder=None,
         clock=fixed_clock,
         project_resolver=lambda: "p",
         scope_resolver=lambda: None,
         session_id="sess",
         episodes=episodes,
     )
-
-
-async def test_create_skips_vec0_insert_in_sqlite_mode(
-    service: ObservationService, conn: sqlite3.Connection
-) -> None:
-    obs_id = await service.create(content="hello tfidf world", outcome="success")
-
-    row = conn.execute(
-        "SELECT id FROM observations WHERE id = ?", (obs_id,)
-    ).fetchone()
-    assert row is not None
-
-    vec_count = conn.execute(
-        "SELECT COUNT(*) FROM observation_embeddings WHERE observation_id = ?",
-        (obs_id,),
-    ).fetchone()[0]
-    assert vec_count == 0
 
 
 async def test_create_populates_trigram_index(
