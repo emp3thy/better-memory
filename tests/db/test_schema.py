@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import struct
 from pathlib import Path
 
 import pytest
 
 from better_memory.db.connection import connect
-from better_memory.db.schema import apply_migrations
+from better_memory.db.schema import _DEFAULT_MIGRATIONS_DIR, apply_migrations
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,16 +58,15 @@ def test_apply_migrations_creates_core_tables(tmp_memory_db: Path) -> None:
 
 
 def test_apply_migrations_creates_virtual_tables(tmp_memory_db: Path) -> None:
-    """FTS5 and sqlite-vec virtual tables exist after migration."""
+    """FTS5 virtual tables exist after migration; the vec0 embedding
+    tables do not — migration 0018 drops them (local vector search
+    removed)."""
     conn = connect(tmp_memory_db)
     try:
         apply_migrations(conn)
         virtual = _virtual_table_names(conn)
-        expected = {
-            "observation_fts",
-            "observation_embeddings",
-        }
-        assert expected.issubset(virtual), f"Missing virtual tables: {expected - virtual}"
+        assert "observation_fts" in virtual
+        assert "observation_embeddings" not in virtual
     finally:
         conn.close()
 
@@ -1055,14 +1056,16 @@ def test_idx_episodes_pending_synth_partial_index_exists(tmp_memory_db: Path) ->
 
 
 def test_0014_semantic_embeddings_table(tmp_memory_db: Path) -> None:
-    """Migration 0014 creates the semantic_embeddings vec0 virtual table."""
+    """Migration 0014 created the semantic_embeddings vec0 virtual table;
+    migration 0018 drops it again (local vector search removed), so a full
+    ``apply_migrations`` run leaves it absent."""
     conn = connect(tmp_memory_db)
     try:
         apply_migrations(conn)
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE name='semantic_embeddings'"
         ).fetchone()
-        assert row is not None
+        assert row is None
     finally:
         conn.close()
 
@@ -1081,3 +1084,73 @@ def test_0016_rating_evidence_column(tmp_memory_db):
     cols = [r[1] for r in conn.execute("PRAGMA table_info(session_memory_exposure)")]
     assert "evidence" in cols
     conn.close()
+
+
+def _insert_dummy_vec_row(conn: sqlite3.Connection, table: str, id_col: str, row_id: str) -> None:
+    """Insert one row into a vec0 table using a real 768-dim float vector.
+
+    sqlite-vec is loaded by :func:`connect`, so the ``vec0`` module is
+    available on ``conn`` without any extra setup here.
+    """
+    embedding = struct.pack("768f", *(0.0 for _ in range(768)))
+    conn.execute(
+        f"INSERT INTO {table} ({id_col}, embedding) VALUES (?, ?)",
+        (row_id, embedding),
+    )
+
+
+def test_0018_drop_vec_tables(tmp_memory_db: Path, tmp_path: Path) -> None:
+    """Migration 0018 drops the three vec0 embedding tables now that local
+    vector search has been removed.
+
+    Builds the schema through 0017 (vec0 tables still present), inserts a
+    real row into each so the DROP has live data to remove, then applies
+    the full (real) migration set — which is only 0018 left pending — and
+    asserts all three tables are gone. A rerun on a fresh connection must
+    not error (DROP TABLE IF EXISTS keeps 0018 idempotent).
+    """
+    pre_dir = tmp_path / "migs_pre_0018"
+    pre_dir.mkdir()
+    for f in sorted(_DEFAULT_MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+        if f.name.startswith("0018_"):
+            continue
+        shutil.copy(f, pre_dir / f.name)
+
+    conn = connect(tmp_memory_db)
+    try:
+        apply_migrations(conn, migrations_dir=pre_dir)
+
+        _insert_dummy_vec_row(conn, "observation_embeddings", "observation_id", "obs-1")
+        _insert_dummy_vec_row(conn, "reflection_embeddings", "reflection_id", "refl-1")
+        _insert_dummy_vec_row(conn, "semantic_embeddings", "memory_id", "mem-1")
+        conn.commit()
+
+        # Apply against the real, default migrations directory: 0001-0017
+        # are already recorded as applied, so only 0018 actually runs.
+        applied = apply_migrations(conn)
+        assert "0018" in applied
+
+        for table in (
+            "observation_embeddings",
+            "reflection_embeddings",
+            "semantic_embeddings",
+        ):
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE name = ?", (table,)
+            ).fetchone()
+            assert row is None, f"{table} should be dropped by migration 0018"
+    finally:
+        conn.close()
+
+    # Idempotency: a fresh connection against the same DB file re-applies
+    # cleanly even though 0018 is already recorded as applied.
+    conn2 = connect(tmp_memory_db)
+    try:
+        applied_again = apply_migrations(conn2)
+        assert applied_again == []
+        row = conn2.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'observation_embeddings'"
+        ).fetchone()
+        assert row is None
+    finally:
+        conn2.close()

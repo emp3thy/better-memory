@@ -199,9 +199,11 @@ class RetentionService:
         but correct — the spec doesn't require pruning sourced rows.
 
         The FTS5 observation_fts table is kept in sync by an AFTER
-        DELETE trigger on observations. The vec0 observation_embeddings
-        virtual table has no such trigger, so this method deletes
-        embedding rows explicitly before removing the observations.
+        DELETE trigger on observations. (Prior to remove-ollama-embeddings
+        Task 9, this method also explicitly deleted rows from the vec0
+        observation_embeddings table, which had no DELETE trigger of its
+        own; that table was dropped by migration 0018 along with local
+        vector search, so there is nothing left to clean up here.)
         """
         threshold = (
             self._clock() - timedelta(days=prune_age_days)
@@ -225,32 +227,9 @@ class RetentionService:
         if not eligible_ids:
             return 0
 
-        # Both DELETEs run inside a single SAVEPOINT — if the second
-        # raises, the first is rolled back, preventing observations
-        # from outliving their embeddings (which a later
-        # ``conn.commit()`` from another service would otherwise
-        # persist).
-        self._conn.execute("SAVEPOINT retention_prune")
-        try:
-            self._delete_embeddings(eligible_ids)
-            deleted = self._delete_observations(eligible_ids)
-        except Exception:
-            self._conn.execute("ROLLBACK TO SAVEPOINT retention_prune")
-            self._conn.execute("RELEASE SAVEPOINT retention_prune")
-            raise
-        else:
-            self._conn.execute("RELEASE SAVEPOINT retention_prune")
+        deleted = self._delete_observations(eligible_ids)
         self._conn.commit()
         return deleted
-
-    def _delete_embeddings(self, ids: list[str]) -> None:
-        """Delete embedding rows (no AFTER DELETE trigger on vec0)."""
-        placeholders = ", ".join("?" * len(ids))
-        self._conn.execute(
-            f"DELETE FROM observation_embeddings "
-            f"WHERE observation_id IN ({placeholders})",
-            ids,
-        )
 
     def _delete_observations(self, ids: list[str]) -> int:
         """Delete observation rows (FTS5 trigger handles observation_fts)."""
