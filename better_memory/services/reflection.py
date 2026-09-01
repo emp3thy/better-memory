@@ -773,13 +773,23 @@ class ReflectionSynthesisService:
 
     # ---------------------------------------------------------------- _apply_new
     def _apply_new(
-        self, actions: list[NewAction], *, project: str
+        self,
+        actions: list[NewAction],
+        *,
+        project: str,
+        embed_tasks: list[tuple[str, str]] | None = None,
     ) -> int:
         """Insert new reflections + their source links + consume observations.
 
         Idempotency: observation ids in ``source_observation_ids`` that
         don't exist in the DB are dropped. Entries whose entire source
         list turns out to be invalid are skipped silently.
+
+        When ``embed_tasks`` is supplied, the blocking embed call is NOT
+        made here; instead ``(reflection_id, source_text)`` pairs are
+        appended for the caller to embed AFTER the write transaction
+        commits (see :meth:`apply_decision` and #97). When ``None``, the
+        embed still runs inline for direct callers.
 
         Returns the count of reflections actually inserted (may be
         smaller than ``len(actions)`` when entries are dropped for lack
@@ -835,12 +845,16 @@ class ReflectionSynthesisService:
             )
 
             if self._sync_embedder is not None:
-                self._store_embedding(
-                    reflection_id,
-                    self._sync_embedder.embed_text(_embedding_source_text(
-                        action.title, action.use_cases, action.hints,
-                    )),
+                source_text = _embedding_source_text(
+                    action.title, action.use_cases, action.hints,
                 )
+                if embed_tasks is not None:
+                    embed_tasks.append((reflection_id, source_text))
+                else:
+                    self._store_embedding(
+                        reflection_id,
+                        self._sync_embedder.embed_text(source_text),
+                    )
             created += 1
 
         return created
@@ -887,7 +901,11 @@ class ReflectionSynthesisService:
         return [i for i in ids if i in existing]
 
     # ----------------------------------------------------------- _apply_augment
-    def _apply_augment(self, actions: list[AugmentAction]) -> int:
+    def _apply_augment(
+        self,
+        actions: list[AugmentAction],
+        embed_tasks: list[tuple[str, str]] | None = None,
+    ) -> int:
         """Apply augment actions: append hints, rewrite use_cases, bump
         confidence, link new sources, recompute evidence count.
 
@@ -897,6 +915,12 @@ class ReflectionSynthesisService:
           entry skipped (cannot modify a retired lesson).
         - ``add_source_observation_ids`` filtered to existing obs;
           ``INSERT OR IGNORE`` dedupes against existing source rows.
+
+        When ``embed_tasks`` is supplied, the blocking embed call is NOT
+        made here; instead ``(reflection_id, source_text)`` pairs are
+        appended for the caller to embed AFTER the write transaction
+        commits (see :meth:`apply_decision` and #97). When ``None``, the
+        embed still runs inline for direct callers.
 
         Returns the count of reflections actually augmented.
         """
@@ -997,12 +1021,16 @@ class ReflectionSynthesisService:
                 final_use_cases = (action.rewrite_use_cases
                                    if action.rewrite_use_cases is not None
                                    else row["use_cases"])
-                self._store_embedding(
-                    action.reflection_id,
-                    self._sync_embedder.embed_text(_embedding_source_text(
-                        row["title"], final_use_cases, merged_hints,
-                    )),
+                source_text = _embedding_source_text(
+                    row["title"], final_use_cases, merged_hints,
                 )
+                if embed_tasks is not None:
+                    embed_tasks.append((action.reflection_id, source_text))
+                else:
+                    self._store_embedding(
+                        action.reflection_id,
+                        self._sync_embedder.embed_text(source_text),
+                    )
             augmented += 1
 
         return augmented
@@ -1277,6 +1305,12 @@ class ReflectionSynthesisService:
                 f"(synthesized_at={row['synthesized_at']})"
             )
 
+        # Collect embed inputs during the DB writes so the blocking Ollama
+        # call happens AFTER commit, outside the WAL writer lock — see #97.
+        # Missing vectors self-heal on first retrieval via
+        # _heal_missing_embeddings, so a crash between the two commits
+        # only costs one round of embedding on the next lookup.
+        embed_tasks: list[tuple[str, str]] = []
         self._conn.execute("SAVEPOINT episode_synthesize")
         try:
             active_rows = self._conn.execute(
@@ -1286,8 +1320,12 @@ class ReflectionSynthesisService:
             ).fetchall()
             active_ids = [r["id"] for r in active_rows]
 
-            created = self._apply_new(response.new, project=project)
-            augmented = self._apply_augment(response.augment)
+            created = self._apply_new(
+                response.new, project=project, embed_tasks=embed_tasks,
+            )
+            augmented = self._apply_augment(
+                response.augment, embed_tasks=embed_tasks,
+            )
             merged = self._apply_merge(response.merge)
             ignored = self._apply_ignore(response.ignore)
             auto_ignored = self._auto_ignore_unused(active_ids)
@@ -1299,6 +1337,17 @@ class ReflectionSynthesisService:
         else:
             self._conn.execute("RELEASE SAVEPOINT episode_synthesize")
         self._conn.commit()
+
+        # Now that the main write transaction is committed, run the batched
+        # embed call. A slow or dead Ollama can no longer stall other
+        # connections; the vector write is a second, short transaction.
+        if embed_tasks and self._sync_embedder is not None:
+            texts = [t for _, t in embed_tasks]
+            vectors = self._sync_embedder.embed_batch(texts)
+            if vectors is not None:
+                for (rid, _), vec in zip(embed_tasks, vectors):
+                    self._store_embedding(rid, vec)
+                self._conn.commit()
 
         counts = {
             "created": created,
@@ -1771,19 +1820,20 @@ class ReflectionService:
                 f"Cannot edit reflection in status {status!r}"
             )
         now = self._clock().isoformat()
+        # Compute the embedding BEFORE the UPDATE opens sqlite3's implicit
+        # write transaction — see #97. Ollama is blocking and would otherwise
+        # hold the WAL writer lock across a multi-second network call.
+        vector = None
+        if self._sync_embedder is not None:
+            vector = self._sync_embedder.embed_text(_embedding_source_text(
+                row["title"], use_cases, hint_list,
+            ))
         self._conn.execute(
             "UPDATE reflections SET use_cases = ?, hints = ?, updated_at = ? "
             "WHERE id = ?",
             (use_cases, json.dumps(hint_list), now, reflection_id),
         )
-        if self._sync_embedder is not None:
-            _write_reflection_embedding(
-                self._conn,
-                reflection_id,
-                self._sync_embedder.embed_text(_embedding_source_text(
-                    row["title"], use_cases, hint_list,
-                )),
-            )
+        _write_reflection_embedding(self._conn, reflection_id, vector)
         self._conn.commit()
 
     def promote_to_general(self, *, reflection_id: str) -> None:

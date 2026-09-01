@@ -20,6 +20,7 @@ from better_memory.services.reflection import (
     NewAction,
     ReflectionService,
     ReflectionSynthesisService,
+    SynthesisResponse,
     _embedding_source_text,
 )
 from tests.services._embedding_fakes import FakeEmbedder
@@ -319,6 +320,112 @@ class TestReflectionServiceUpdateTextEmbedding:
             "SELECT use_cases FROM reflections WHERE id = 'r1'"
         ).fetchone()
         assert row["use_cases"] == "new uc"
+        assert _vec_count(conn) == 0
+
+
+class TestApplyDecisionDefersEmbeddingOutsideWriteLock:
+    """apply_decision must not hold the writer lock across Ollama calls.
+
+    #97: the blocking embed is now performed AFTER the SAVEPOINT commits.
+    These tests exercise the end-to-end flow (apply_decision → embeds)
+    and prove the deferred path writes vectors correctly.
+    """
+
+    def _make_episode(self, conn, fixed_clock):
+        epsvc = EpisodeService(conn, clock=fixed_clock)
+        ep = epsvc.start_foreground(session_id="s1", project="p", goal="g")
+        epsvc.close_active(
+            session_id="s1", outcome="success", close_reason="goal_complete"
+        )
+        return ep
+
+    def test_apply_decision_writes_embedding_for_new(self, conn, fixed_clock):
+        ep = self._make_episode(conn, fixed_clock)
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        fake = FakeEmbedder()
+        svc = ReflectionSynthesisService(
+            conn, clock=fixed_clock, sync_embedder=SyncEmbedder(lambda: fake),
+        )
+        response = SynthesisResponse(
+            new=[NewAction(
+                title="Always test", phase="general", polarity="do",
+                use_cases="when writing code", hints=["write tests first"],
+                tech="python", confidence=0.6,
+                source_observation_ids=["obs-1"],
+            )],
+            augment=[], merge=[], ignore=[],
+        )
+        svc.apply_decision(episode_id=ep, response=response, project="p")
+
+        assert _vec_count(conn) == 1
+        # FakeEmbedder.embed_batch appends the incoming list to calls; the
+        # per-row embed_text path would append a bare str instead. Assert
+        # the one recorded call is the batched form.
+        assert len(fake.calls) == 1
+        assert isinstance(fake.calls[0], list)
+        assert len(fake.calls[0]) == 1
+        assert "Always test" in fake.calls[0][0]
+
+    def test_apply_decision_writes_embedding_for_augment(
+        self, conn, fixed_clock
+    ):
+        ep = self._make_episode(conn, fixed_clock)
+        _insert_reflection(
+            conn, refl_id="r1", project="p",
+            title="Existing", use_cases="old uc", hints='["old-hint"]',
+        )
+        conn.commit()
+
+        fake = FakeEmbedder()
+        svc = ReflectionSynthesisService(
+            conn, clock=fixed_clock, sync_embedder=SyncEmbedder(lambda: fake),
+        )
+        response = SynthesisResponse(
+            new=[], augment=[AugmentAction(
+                reflection_id="r1",
+                add_hints=["new-hint"],
+                rewrite_use_cases=None,
+                confidence_delta=0.0,
+                add_source_observation_ids=[],
+            )], merge=[], ignore=[],
+        )
+        svc.apply_decision(episode_id=ep, response=response, project="p")
+
+        assert _vec_count(conn) == 1
+        assert len(fake.calls) == 1
+        assert isinstance(fake.calls[0], list)
+        assert "new-hint" in fake.calls[0][0]
+
+    def test_apply_decision_survives_embedder_failure(self, conn, fixed_clock):
+        """Embed failure never rolls back the reflection writes.
+
+        This is the pre-existing best-effort contract; the writer-lock fix
+        must not silently strengthen it into an atomicity guarantee.
+        """
+        ep = self._make_episode(conn, fixed_clock)
+        _insert_obs(conn, obs_id="obs-1", project="p", episode_id=ep)
+        conn.commit()
+
+        svc = ReflectionSynthesisService(
+            conn, clock=fixed_clock,
+            sync_embedder=SyncEmbedder(lambda: FakeEmbedder(fail=True)),
+        )
+        response = SynthesisResponse(
+            new=[NewAction(
+                title="t", phase="general", polarity="do",
+                use_cases="uc", hints=[], tech=None, confidence=0.5,
+                source_observation_ids=["obs-1"],
+            )],
+            augment=[], merge=[], ignore=[],
+        )
+        svc.apply_decision(episode_id=ep, response=response, project="p")
+
+        refl = conn.execute(
+            "SELECT id FROM reflections WHERE title = 't'"
+        ).fetchone()
+        assert refl is not None
         assert _vec_count(conn) == 0
 
 
