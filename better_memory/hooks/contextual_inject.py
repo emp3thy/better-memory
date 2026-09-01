@@ -144,7 +144,6 @@ def main() -> None:
                 items = retrieve_relevant(
                     backend, query=query, project=project,
                     conn=conn if cfg.storage_backend == "sqlite" else None,
-                    vec_floor=cfg.context_vec_floor,
                     max_items=cfg.context_max_items,
                 )
                 had_candidates = bool(items)

@@ -12,9 +12,9 @@ fixture forgetting to pin ``BETTER_MEMORY_PROJECT`` surfaces as
 Mechanism: build a maximally hostile outer env ON TOP of the real
 ``os.environ`` (poison is added, nothing is stripped — that is the point),
 then re-run the sqlite-mode T1 slice whose assertions the poisoned
-``backend=agentcore`` / ``embeddings=ollama`` values would break if any
-fixture inherited them. A decoy ``BETTER_MEMORY_HOME`` dir with a hashed
-sentinel pins location bleed independently of pass/fail outcomes.
+``backend=agentcore`` value would break if any fixture inherited it. A
+decoy ``BETTER_MEMORY_HOME`` dir with a hashed sentinel pins location bleed
+independently of pass/fail outcomes.
 
 Deviation from the author scenario (documented): HOME/USERPROFILE are
 redirected to a neutral tmp home in the hostile env. The scenario's
@@ -41,8 +41,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The T1 sqlite happy-path + hook-contract modules: they assert sqlite-mode
-#: behavior that an inherited backend=agentcore / embeddings=ollama poison
-#: would break, making them the highest-signal bleed detectors.
+#: behavior that an inherited backend=agentcore poison would break, making
+#: them the highest-signal bleed detectors.
 INNER_SLICE: tuple[str, ...] = (
     "tests/e2e/test_sqlite_journey.py",
     "tests/e2e/test_hooks_contracts.py",
@@ -58,7 +58,6 @@ POISON_VARS: dict[str, str] = {
     "BETTER_MEMORY_AGENTCORE_REGION": "us-gov-west-1",
     "BETTER_MEMORY_PROJECT": "poison-project",
     "BETTER_MEMORY_CONTEXT_INJECT_MODE": "aggressive",
-    "BETTER_MEMORY_EMBEDDINGS_BACKEND": "ollama",
     "OLLAMA_HOST": "http://does-not-exist.invalid:1",
     "CLAUDE_SESSION_ID": "poison-session",
     "AWS_PROFILE": "poison",
@@ -159,9 +158,8 @@ def test_inner_slice_not_vacuous(bleed_run: BleedRun) -> None:
 
 def test_inner_slice_green_under_poisoned_shell(bleed_run: BleedRun) -> None:
     """sqlite-mode tests still pass with backend=agentcore + POISON ids +
-    aggressive inject mode + embeddings=ollama in the outer shell — proving
-    every fixture constructs its env from the explicit allowlist rather than
-    inheriting."""
+    aggressive inject mode in the outer shell — proving every fixture
+    constructs its env from the explicit allowlist rather than inheriting."""
     assert bleed_run.rc == 0, (
         f"inner pytest rc={bleed_run.rc}\n"
         f"--- stdout tail ---\n{_tail(bleed_run.stdout)}\n"

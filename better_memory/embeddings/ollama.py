@@ -33,16 +33,24 @@ from uuid import uuid4
 import httpx
 
 from better_memory import _diag
-from better_memory.config import get_config
 
-# Diagnostic logging for embed calls. Off by default; enable with
-# BETTER_MEMORY_EMBED_LOG=1 to localize hang-on-first-call freezes that the
-# MCP server has hit intermittently on Windows. Each ``_post_embed`` call
-# writes a paired ``[bm-embed start ...]`` / ``[bm-embed done ...]`` line via
-# the shared diagnostic logger (stderr + ``{home}/logs/diag.log``) with a
-# short call-id, attempt counter, and elapsed ms. A ``start`` line with no
-# matching ``done`` localises the hang to ``httpx.AsyncClient.post()``.
+# Diagnostic logging for embed calls. Off by default; enable via
+# Config.diag_logging (BETTER_MEMORY_DIAG_LOGGING) to localize
+# hang-on-first-call freezes that the MCP server has hit intermittently on
+# Windows. Each ``_post_embed`` call writes a paired ``[bm-embed start ...]``
+# / ``[bm-embed done ...]`` line via the shared diagnostic logger (stderr +
+# ``{home}/logs/diag.log``) with a short call-id, attempt counter, and
+# elapsed ms. A ``start`` line with no matching ``done`` localises the hang
+# to ``httpx.AsyncClient.post()``.
 from better_memory._diag import log as _embed_log
+
+#: Module-level defaults for ``host``/``model`` when the caller omits them.
+#: No longer sourced from :class:`~better_memory.config.Config` — this
+#: package is scheduled for deletion (remove-ollama-embeddings epic), so the
+#: two config fields backing these were dropped from ``Config`` rather than
+#: threaded through here.
+_DEFAULT_HOST = "http://localhost:11434"
+_DEFAULT_MODEL = "nomic-embed-text"
 
 
 class EmbeddingError(RuntimeError):
@@ -55,9 +63,9 @@ class OllamaEmbedder:
     Parameters
     ----------
     host:
-        Base URL of the Ollama server. Defaults to ``get_config().ollama_host``.
+        Base URL of the Ollama server. Defaults to ``"http://localhost:11434"``.
     model:
-        Name of the embedding model. Defaults to ``get_config().embed_model``.
+        Name of the embedding model. Defaults to ``"nomic-embed-text"``.
     timeout:
         Per-request timeout in seconds.
     max_retries:
@@ -90,9 +98,8 @@ class OllamaEmbedder:
         if max_retries < 1:
             raise ValueError("max_retries must be >= 1")
 
-        cfg = get_config()
-        self._host = host if host is not None else cfg.ollama_host
-        self._model = model if model is not None else cfg.embed_model
+        self._host = host if host is not None else _DEFAULT_HOST
+        self._model = model if model is not None else _DEFAULT_MODEL
         self._timeout = timeout
         self._max_retries = max_retries
         self._backoff_base = backoff_base

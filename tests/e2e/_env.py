@@ -21,8 +21,8 @@ Contract (design section 2, ``2026-07-12-e2e-clean-slate-smoke-design.md``):
   vars are dropped case-insensitively (automatic: allowlist construction
   never copies them in the first place).
 * Pins: ``BETTER_MEMORY_HOME=<tmp>/.better-memory``, ``BETTER_MEMORY_PROJECT``,
-  ``CLAUDE_SESSION_ID``, ``BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite`` and a
-  poisoned ``OLLAMA_HOST`` so nothing can ever reach a real Ollama daemon.
+  ``CLAUDE_SESSION_ID``, and a poisoned ``OLLAMA_HOST`` so nothing can ever
+  reach a real Ollama daemon.
 """
 
 from __future__ import annotations
@@ -116,7 +116,6 @@ def isolated_env(tmp_home: Path, **pins: str | None) -> dict[str, str]:
     _set(env, "BETTER_MEMORY_HOME", str(Path(tmp_home) / ".better-memory"))
     _set(env, "BETTER_MEMORY_PROJECT", DEFAULT_PROJECT)
     _set(env, "CLAUDE_SESSION_ID", DEFAULT_SESSION_ID)
-    _set(env, "BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
     _set(env, "OLLAMA_HOST", POISONED_OLLAMA_HOST)
 
     # 4. Caller pins (override defaults; None removes).

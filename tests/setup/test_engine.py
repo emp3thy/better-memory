@@ -74,11 +74,11 @@ def test_patch_mcp_entry_touches_only_our_key():
 def test_patch_mcp_entry_preserves_user_env_extras():
     existing = {"mcpServers": {"better-memory": {
         "type": "stdio", "command": "old", "args": [],
-        "env": {"BETTER_MEMORY_EMBED_LOG": "1"},
+        "env": {"SOME_USER_SET_VAR": "1"},
     }}}
     patched = patch_mcp_entry(existing, PARAMS)
     env = patched["mcpServers"]["better-memory"]["env"]
-    assert env["BETTER_MEMORY_EMBED_LOG"] == "1"
+    assert env["SOME_USER_SET_VAR"] == "1"
     assert env["BETTER_MEMORY_HOME"] == PARAMS.home
 
 

@@ -34,10 +34,11 @@ def run_best_effort(
     silently dropped the exception, so a broken background path could
     fail invisibly for weeks.
 
-    When ``diag_cid`` is provided and ``BETTER_MEMORY_EMBED_LOG=1`` is on,
-    emits a ``[bm-retrieve step=<operation> cid=... ms=N status=ok|error]``
-    line through the shared diagnostic logger so callers can localize
-    which step is slow.
+    When ``diag_cid`` is provided and diagnostic logging is on
+    (``Config.diag_logging`` / ``BETTER_MEMORY_DIAG_LOGGING``), emits a
+    ``[bm-retrieve step=<operation> cid=... ms=N status=ok|error]`` line
+    through the shared diagnostic logger so callers can localize which
+    step is slow.
     """
     t0 = time.monotonic()
     status = "ok"

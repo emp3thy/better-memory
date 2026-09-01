@@ -10,10 +10,8 @@ filesystem layout. Everything lives under that directory:
         knowledge-base/
         settings.json      (optional; persists storage_backend selection)
 
-Default home is ``~/.better-memory``. External-service knobs
-(``OLLAMA_HOST``, ``EMBED_MODEL``, ``AUDIT_LOG_RETRIEVED``,
-``BETTER_MEMORY_EMBEDDINGS_BACKEND``) are separate env vars because they're
-orthogonal to path layout. Injection-tuning knobs
+Default home is ``~/.better-memory``. ``AUDIT_LOG_RETRIEVED`` is a separate
+env var because it's orthogonal to path layout. Injection-tuning knobs
 (``BETTER_MEMORY_BOOTSTRAP_TOP_N``, ``BETTER_MEMORY_CONTEXT_MIN_HITS``,
 ``BETTER_MEMORY_CONTEXT_MAX_ITEMS``, ``BETTER_MEMORY_CONTEXT_REINJECT_TURNS``)
 control content injection strategies.
@@ -30,10 +28,6 @@ from typing import Literal
 from better_memory import _diag
 from better_memory._common import resolve_home
 
-_DEFAULT_OLLAMA_HOST = "http://localhost:11434"
-_DEFAULT_EMBED_MODEL = "nomic-embed-text"
-_DEFAULT_EMBEDDINGS_BACKEND = "ollama"
-_VALID_EMBEDDINGS_BACKENDS = ("ollama", "sqlite")
 _DEFAULT_STORAGE_BACKEND = "sqlite"
 _VALID_STORAGE_BACKENDS = ("sqlite", "agentcore")
 _SETTINGS_FILE = "settings.json"
@@ -220,12 +214,9 @@ class Config:
     knowledge_db: Path
     knowledge_base: Path
     spool_dir: Path
-    ollama_host: str
-    embed_model: str
     audit_log_retrieved: bool
     auto_prune: bool
     diag_logging: bool
-    embeddings_backend: Literal["ollama", "sqlite"]
     storage_backend: Literal["sqlite", "agentcore"]
     context_inject_mode: Literal["userprompt", "pretool", "both", "off"]
     bootstrap_top_n: int
@@ -233,7 +224,6 @@ class Config:
     context_max_items: int
     context_reinject_turns: int
     inject_mode: Literal["deferred", "legacy"]
-    context_vec_floor: float
     # NOTE: context_min_hits is DEPRECATED. The three-leg evidence-gated
     # scorer in services/relevant.py (BM25 / vector cosine / keyword-hit
     # fallback) replaced the old pure keyword-hits floor; contextual_inject.py
@@ -257,30 +247,10 @@ def _resolve_context_inject_mode() -> Literal["userprompt", "pretool", "both", "
     return raw  # type: ignore[return-value]
 
 
-def _resolve_embeddings_backend() -> Literal["ollama", "sqlite"]:
-    raw = os.environ.get("BETTER_MEMORY_EMBEDDINGS_BACKEND", _DEFAULT_EMBEDDINGS_BACKEND)
-    if raw not in _VALID_EMBEDDINGS_BACKENDS:
-        raise ValueError(
-            f"BETTER_MEMORY_EMBEDDINGS_BACKEND must be one of "
-            f"{_VALID_EMBEDDINGS_BACKENDS}, got {raw!r}"
-        )
-    return raw  # type: ignore[return-value]
-
-
 def _resolve_inject_mode() -> Literal["deferred", "legacy"]:
     raw = (os.environ.get("BETTER_MEMORY_INJECT_MODE") or "legacy").strip().lower()
     # Fail-safe: anything unrecognised means today's behaviour.
     return "deferred" if raw == "deferred" else "legacy"
-
-
-def _resolve_vec_floor() -> float:
-    raw = os.environ.get("BETTER_MEMORY_CONTEXT_VEC_FLOOR")
-    if raw is None:
-        return 0.55
-    try:
-        return min(1.0, max(0.0, float(raw)))
-    except ValueError:
-        return 0.55
 
 
 def _read_settings_storage_backend(home: Path) -> str | None:
@@ -366,12 +336,9 @@ def get_config() -> Config:
         knowledge_db=home / "knowledge.db",
         knowledge_base=home / "knowledge-base",
         spool_dir=home / "spool",
-        ollama_host=_resolve_str("OLLAMA_HOST", _DEFAULT_OLLAMA_HOST),
-        embed_model=_resolve_str("EMBED_MODEL", _DEFAULT_EMBED_MODEL),
         audit_log_retrieved=_resolve_bool("AUDIT_LOG_RETRIEVED", default=True),
         auto_prune=_resolve_bool("BETTER_MEMORY_AUTO_PRUNE", default=False),
         diag_logging=_resolve_bool("BETTER_MEMORY_DIAG_LOGGING", default=False),
-        embeddings_backend=_resolve_embeddings_backend(),
         storage_backend=storage_backend,
         context_inject_mode=_resolve_context_inject_mode(),
         bootstrap_top_n=_resolve_nonneg_int("BETTER_MEMORY_BOOTSTRAP_TOP_N", 5),
@@ -379,5 +346,4 @@ def get_config() -> Config:
         context_max_items=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_MAX_ITEMS", 3),
         context_reinject_turns=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_REINJECT_TURNS", 0),
         inject_mode=_resolve_inject_mode(),
-        context_vec_floor=_resolve_vec_floor(),
     )

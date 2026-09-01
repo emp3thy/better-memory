@@ -1,10 +1,13 @@
 """Integration tests for :mod:`better_memory.embeddings.ollama`.
 
-These tests hit a real Ollama server at ``$OLLAMA_HOST`` (default
-``http://localhost:11434``) and require the ``nomic-embed-text`` model to be
-pulled. The whole module is skipped automatically when Ollama is not
-reachable, so the default ``pytest`` run (even without ``-m`` filtering) stays
-green on machines that don't have Ollama running.
+These tests hit a real Ollama server at the module's hardcoded default host
+(``http://localhost:11434``; no longer configurable via ``$OLLAMA_HOST`` --
+remove-ollama-embeddings Task 3 dropped ``Config.ollama_host`` and hardcoded
+the default inside :mod:`better_memory.embeddings.ollama`) and require the
+``nomic-embed-text`` model to be pulled. The whole module is skipped
+automatically when Ollama is not reachable, so the default ``pytest`` run
+(even without ``-m`` filtering) stays green on machines that don't have
+Ollama running.
 
 Run explicitly with::
 
@@ -18,16 +21,14 @@ import math
 import httpx
 import pytest
 
-from better_memory.config import get_config
-from better_memory.embeddings.ollama import OllamaEmbedder
+from better_memory.embeddings.ollama import _DEFAULT_HOST, OllamaEmbedder
 
 pytestmark = pytest.mark.integration
 
 
 def _ollama_reachable() -> bool:
-    host = get_config().ollama_host
     try:
-        resp = httpx.get(f"{host}/api/tags", timeout=1.0)
+        resp = httpx.get(f"{_DEFAULT_HOST}/api/tags", timeout=1.0)
     except httpx.HTTPError:
         return False
     return resp.status_code == 200
@@ -37,7 +38,7 @@ def _ollama_reachable() -> bool:
 # is passed. This keeps CI runs sane and lets developers without Ollama use the
 # marker without hitting confusing connection errors.
 if not _ollama_reachable():
-    pytest.skip("Ollama not reachable on configured OLLAMA_HOST", allow_module_level=True)
+    pytest.skip("Ollama not reachable at the default host", allow_module_level=True)
 
 
 async def test_embed_returns_768_floats() -> None:

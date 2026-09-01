@@ -49,7 +49,6 @@ E2E_DIR = Path(__file__).resolve().parents[1] / "e2e"
 DELIBERATE_PINS = {
     "BETTER_MEMORY_HOME",
     "BETTER_MEMORY_PROJECT",
-    "BETTER_MEMORY_EMBEDDINGS_BACKEND",
     "CLAUDE_SESSION_ID",
     "OLLAMA_HOST",
 }
@@ -157,7 +156,6 @@ class TestContractADictLevel:
     def test_default_pin_values(self, tmp_path: Path) -> None:
         env = isolated_env(tmp_path)
         assert env["BETTER_MEMORY_HOME"] == str(tmp_path / ".better-memory")
-        assert env["BETTER_MEMORY_EMBEDDINGS_BACKEND"] == "sqlite"
         assert env["OLLAMA_HOST"] == POISONED_OLLAMA_HOST
         assert env["CLAUDE_SESSION_ID"] == "e2e-session-1"
         assert env["BETTER_MEMORY_PROJECT"] == "e2e-project"

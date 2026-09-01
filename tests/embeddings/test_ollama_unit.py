@@ -454,7 +454,13 @@ async def test_max_retries_below_one_raises_value_error() -> None:
         OllamaEmbedder(max_retries=0)
 
 
-async def test_defaults_come_from_get_config(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_defaults_ignore_env_and_use_hardcoded_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OLLAMA_HOST/EMBED_MODEL are no longer read (remove-ollama-embeddings
+    Task 3 dropped ``Config.ollama_host``/``Config.embed_model``): host/model
+    always fall back to the hardcoded module defaults when omitted, even
+    with both env vars set to something else."""
     monkeypatch.setenv("OLLAMA_HOST", "http://example.invalid:9999")
     monkeypatch.setenv("EMBED_MODEL", "custom-model")
 
@@ -465,14 +471,14 @@ async def test_defaults_come_from_get_config(monkeypatch: pytest.MonkeyPatch) ->
         captured["body"] = json.loads(request.content.decode("utf-8"))
         return httpx.Response(200, json={"embeddings": [_VEC_768]})
 
-    # We still inject the transport (so no real network), but omit host/model
-    # to verify they're read from config.
-    client = _make_client(handler, base_url="http://example.invalid:9999")
+    # Injected transport (so no real network) matches the hardcoded default
+    # host, proving the env var above was NOT consulted.
+    client = _make_client(handler, base_url="http://localhost:11434")
     embedder = OllamaEmbedder(client=client)
     try:
         await embedder.embed("hi")
     finally:
         await client.aclose()
 
-    assert captured["url"] == "http://example.invalid:9999/api/embed"
-    assert captured["body"]["model"] == "custom-model"
+    assert captured["url"] == "http://localhost:11434/api/embed"
+    assert captured["body"]["model"] == "nomic-embed-text"

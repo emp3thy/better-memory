@@ -7,17 +7,13 @@ messages into ``mcp-logs-<server>/*.jsonl`` but does NOT capture the
 spawned server's stderr, so without the file mirror these lines are
 discarded when running under Claude Code.
 
-The gate resolves from the ``diag_logging`` config field, with the
-``BETTER_MEMORY_EMBED_LOG`` environment variable kept as an emergency
-override (env wins) so diagnostics can still be flipped without editing
-config. The env var is named ``BETTER_MEMORY_EMBED_LOG`` for historical
-reasons (originally added to localize Ollama embed hangs).
+The gate resolves solely from the ``diag_logging`` config field (backed by
+``BETTER_MEMORY_DIAG_LOGGING``).
 """
 
 from __future__ import annotations
 
 import contextlib
-import os
 import sys
 import threading
 import time
@@ -33,26 +29,14 @@ from pathlib import Path
 # call fires, ``config`` has finished importing and ``get_config()`` is safe.
 _ENABLED: bool | None = None
 
-# Values of ``BETTER_MEMORY_EMBED_LOG`` that mean "off"; any other non-empty
-# value means "on", preserving the historic env-var semantics.
-_ENV_OFF_VALUES = frozenset({"0", "false", "no", "off"})
-
 _LOCK = threading.Lock()
 _FILE_HANDLE: object | None = None  # actually a text file, typed loosely to avoid import
 _FILE_INIT_ATTEMPTED = False
 
 
 def _resolve_enabled() -> bool:
-    """Resolve whether diagnostics are on.
-
-    ``BETTER_MEMORY_EMBED_LOG`` is an emergency override: when set to a
-    non-empty value it wins outright (env wins), keeping the run-time-flip
-    workflow intact. Otherwise the gate falls back to the ``diag_logging``
-    field on :class:`~better_memory.config.Config`.
-    """
-    raw = os.environ.get("BETTER_MEMORY_EMBED_LOG", "").strip()
-    if raw:
-        return raw.lower() not in _ENV_OFF_VALUES
+    """Resolve whether diagnostics are on from the ``diag_logging`` field on
+    :class:`~better_memory.config.Config`."""
     try:
         from better_memory.config import get_config
 
