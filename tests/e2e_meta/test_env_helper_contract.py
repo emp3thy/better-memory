@@ -578,9 +578,10 @@ class TestHelperSmoke:
 
     async def test_mcp_session_boots_real_server_hermetically(self, tmp_path: Path) -> None:
         """The proven-helper smoke for every T1/T2 builder: the real MCP
-        server boots offline on a virgin fake home (sqlite embeddings,
-        poisoned OLLAMA_HOST), answers list_tools + memory.retrieve, and all
-        disk writes land under the fake home."""
+        server boots offline on a virgin fake home (isolated_env pins
+        BETTER_MEMORY_HOME and poisons OLLAMA_HOST, though the server never
+        talks to Ollama any more), answers list_tools + memory.retrieve,
+        and all disk writes land under the fake home."""
         home = tmp_path / "home"
         home.mkdir()
         env = isolated_env(home)

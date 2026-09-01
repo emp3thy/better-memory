@@ -110,8 +110,8 @@ def step(fn: str, msg: str, **fields: object) -> None:
     """Emit an intermediate ``[bm-trace step ...]`` line.
 
     Use inside a method already wrapped in :func:`trace` to mark a
-    sub-step (e.g. "about to call self._embedder.embed", "SAVEPOINT
-    open", "commit"). Cheap when diagnostics are off.
+    sub-step (e.g. "obs_id_minted", "SAVEPOINT open", "commit"). Cheap
+    when diagnostics are off.
     """
     if not enabled():
         return

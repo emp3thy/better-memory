@@ -564,7 +564,7 @@ class TestListObservations:
             episodes=epsvc,
         )
 
-        # Insert two distinct observations via service so embeddings exist.
+        # Insert two distinct observations via service so FTS rows exist.
         await svc.create("flamingo migration failed", project="p")
         await svc.create("pelican lazy-init succeeded", project="p")
         conn.commit()

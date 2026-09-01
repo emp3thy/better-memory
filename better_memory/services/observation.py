@@ -135,7 +135,7 @@ class ObservationService:
         tech: str | None = None,
         scope: str = "project",
     ) -> str:
-        """Insert a new observation, embedding and audit row; return its id."""
+        """Insert a new observation and audit row; return its id."""
         fn = "ObservationService.create"
         with _diag.trace(fn, scope=scope, content_len=len(content)):
             if scope not in ("project", "general"):

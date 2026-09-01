@@ -1,4 +1,4 @@
-"""Migration 0011 — trigram FTS5 table for the sqlite embeddings backend."""
+"""Migration 0011 — trigram FTS5 table for sqlite-backed observation search."""
 from __future__ import annotations
 
 import sqlite3

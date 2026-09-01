@@ -18,7 +18,7 @@ PreToolUse is latched to one real firing per session
 sentinel file, race-safe across parallel hook processes): the installed
 matcher is unscoped (all tools), so without the latch every tool call
 would re-run the full retrieval path. Later PreToolUse events in the same
-session short-circuit on the sentinel before any DB/embedder work.
+session short-circuit on the sentinel before any DB work.
 UserPromptSubmit is unaffected by the latch.
 """
 from __future__ import annotations
@@ -112,7 +112,7 @@ def main() -> None:
             if event == "PreToolUse":
                 # Atomic O_CREAT|O_EXCL claim: if another parallel hook
                 # process already fired for this session, we return False
-                # and short-circuit before opening any DB / embedder.
+                # and short-circuit before opening any DB connection.
                 if not seen.try_claim_pretool_fired():
                     raise _SkipInjection()  # module-local sentinel; caught below
             seen.bump_turn()
