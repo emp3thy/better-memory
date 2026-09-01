@@ -119,9 +119,8 @@ def _vec_qualifiers(
     plain (unsquared) distance only; the squared-distance branch that a
     defensive dual-check would need is dead code and has been omitted.
 
-    ``candidate_ids`` scopes the result to the caller's candidate set,
-    matching ``ReflectionService._vec_ranks`` (reflection.py) -- sqlite-vec
-    kNN accepts only ``embedding MATCH ? AND k = ?`` (no extra predicates),
+    ``candidate_ids`` scopes the result to the caller's candidate set --
+    sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` (no extra predicates),
     so we fetch top-k and filter in Python. ``k`` scales with
     ``max(len(candidate_ids), 50)`` so the window is dense over what the
     caller actually ranks, instead of being drowned by neighbours from

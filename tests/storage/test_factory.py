@@ -90,9 +90,12 @@ def test_build_backend_forwards_sync_embedder_to_sqlite_backend(memory_conn) -> 
     """Regression for PR #83: build_backend must pass the caller's
     process-wide SyncEmbedder through to SqliteBackend rather than letting
     SqliteBackend construct its own — otherwise the circuit breaker splits
-    into an independent instance per backend build. Only _synthesis takes
-    a sync_embedder now — Task 4 (remove-ollama-embeddings) removed the
-    parameter from SemanticMemoryService entirely."""
+    into an independent instance per backend build. Neither _synthesis nor
+    _semantic take a sync_embedder any more — Task 4 (remove-ollama-embeddings)
+    removed the parameter from SemanticMemoryService, and Task 5 removed it
+    from ReflectionSynthesisService. SqliteBackend keeps its own
+    ``_sync_embedder`` attribute solely to embed the query for
+    ``relevance_ranks``' vector leg."""
     cfg = _config()
     sentinel_sync_embedder = MagicMock(name="sentinel-sync-embedder")
     backend = build_backend(
@@ -104,7 +107,7 @@ def test_build_backend_forwards_sync_embedder_to_sqlite_backend(memory_conn) -> 
         project="p",
     )
     assert isinstance(backend, SqliteBackend)
-    assert backend._synthesis._sync_embedder is sentinel_sync_embedder
+    assert backend._sync_embedder is sentinel_sync_embedder
 
 
 def test_build_backend_raises_for_unknown(memory_conn) -> None:

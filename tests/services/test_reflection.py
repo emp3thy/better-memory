@@ -2072,7 +2072,7 @@ class TestApplyDecision:
         )
         conn.commit()
 
-        def boom(self, actions, *, project, embed_tasks=None):
+        def boom(self, actions, *, project):
             raise sqlite3.IntegrityError("simulated FK violation")
 
         monkeypatch.setattr(

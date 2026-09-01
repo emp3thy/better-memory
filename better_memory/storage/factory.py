@@ -42,11 +42,11 @@ def build_backend(
 
     ``sync_embedder``, when provided, must be the caller's already-built
     process-wide ``SyncEmbedder`` (see ``mcp/server.py``). It is forwarded
-    as-is to ``SqliteBackend`` so its internal ``_semantic`` / ``_synthesis``
-    services share the same circuit breaker as the caller's write-path
-    tools instead of each backend build spinning up an independent one.
-    Unused by the agentcore path, which has no local semantic/synthesis
-    services of its own.
+    as-is to ``SqliteBackend``, which uses it only to embed the query for
+    ``relevance_ranks``' vector leg, so that leg shares the same circuit
+    breaker as the caller's write-path tools instead of each backend build
+    spinning up an independent one. Unused by the agentcore path, which has
+    no local relevance-ranking of its own.
     """
     if config.storage_backend == "sqlite":
         if memory_conn is None:

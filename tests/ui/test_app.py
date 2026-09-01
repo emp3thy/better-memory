@@ -29,21 +29,15 @@ class TestSyncEmbedderWiring:
 
     Task 2 (remove-ollama-embeddings) deleted create_app's auto-detecting
     ``_build_sync_embedder()`` and its ``sync_embedder=`` override
-    parameter: every write-path service (``ReflectionService``,
-    ``SemanticMemoryService`` via ``observation_promote_to_semantic``,
-    ``build_backend``) now receives ``sync_embedder=None`` unconditionally,
-    same as ``better_memory/mcp/server.py`` and the contextual_inject hook.
+    parameter: ``build_backend`` now receives ``sync_embedder=None``
+    unconditionally, same as ``better_memory/mcp/server.py`` and the
+    contextual_inject hook. ``ReflectionService`` no longer accepts a
+    sync_embedder parameter at all (Task 5).
     """
 
     def test_sync_embedder_always_none(self, tmp_db: Path) -> None:
         app = create_app(start_watchdog=False, db_path=tmp_db)
         assert app.extensions["sync_embedder"] is None
-
-    def test_reflection_service_receives_no_sync_embedder(
-        self, tmp_db: Path,
-    ) -> None:
-        app = create_app(start_watchdog=False, db_path=tmp_db)
-        assert app.extensions["reflection_service"]._sync_embedder is None
 
 
 class TestHealthz:

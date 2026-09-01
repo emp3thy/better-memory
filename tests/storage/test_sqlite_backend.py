@@ -56,10 +56,14 @@ def test_sqlite_backend_satisfies_protocol(backend) -> None:
 
 def test_sqlite_backend_shares_caller_sync_embedder(memory_conn) -> None:
     """Regression for PR #83: SqliteBackend must NOT build its own
-    SyncEmbedder for _synthesis — it must reuse the caller's instance so
-    the circuit breaker is process-wide, not split in two. _semantic no
-    longer takes a sync_embedder at all — Task 4 (remove-ollama-embeddings)
-    removed the parameter from SemanticMemoryService entirely."""
+    SyncEmbedder — it must reuse the caller's instance so the circuit
+    breaker is process-wide, not split in two. Neither _synthesis nor
+    _semantic take a sync_embedder at all any more — Task 4
+    (remove-ollama-embeddings) removed the parameter from
+    SemanticMemoryService, and Task 5 removed it from
+    ReflectionSynthesisService. SqliteBackend keeps its own
+    ``_sync_embedder`` attribute solely to embed the query for
+    ``relevance_ranks``' vector leg."""
     embedder = MagicMock()
     embedder.embed = AsyncMock(return_value=[0.0] * 768)
     sentinel_sync_embedder = MagicMock(name="sentinel-sync-embedder")
@@ -72,13 +76,13 @@ def test_sqlite_backend_shares_caller_sync_embedder(memory_conn) -> None:
         project="testproj",
     )
 
-    assert backend._synthesis._sync_embedder is sentinel_sync_embedder
+    assert backend._sync_embedder is sentinel_sync_embedder
 
 
 def test_sqlite_backend_sync_embedder_defaults_to_none(backend) -> None:
     """When the caller passes no sync_embedder (default), the backend must
-    not silently construct its own — _synthesis stays None."""
-    assert backend._synthesis._sync_embedder is None
+    not silently construct its own."""
+    assert backend._sync_embedder is None
 
 
 def test_sqlite_backend_implements_hot_path_methods(backend) -> None:
