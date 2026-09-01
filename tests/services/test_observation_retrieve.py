@@ -164,7 +164,7 @@ async def test_retrieve_reinforcement_orders_within_do_bucket(
 async def test_retrieve_with_no_query_still_returns_bucketed(
     service: ObservationService,
 ) -> None:
-    # query=None and no vector → hybrid_search returns [] for each bucket.
+    # query=None → hybrid_search returns [] for each bucket.
     await _seed_mix(service)
     result = await service.retrieve(query=None)
     assert result.do == []
@@ -178,10 +178,10 @@ async def test_retrieve_with_hyphenated_query_ranks_fts_match_first(
     """Regression: ``better-memory`` once crashed FTS5 as ``-memory`` column.
 
     The safety net in hybrid search would swallow the error and return ``[]``
-    for the FTS path, so users got vector-only hits (or nothing) for any
-    hyphenated query. After sanitising, the FTS path delivers the matching
-    row, which then ranks first in RRF fusion because only it contributes
-    an FTS rank on top of the vector rank.
+    for the word-FTS path, so users got trigram-only hits (or nothing) for
+    any hyphenated query. After sanitising, the word-FTS path delivers the
+    matching row, which then ranks first in RRF fusion because it now
+    contributes an FTS rank on top of the trigram rank.
     """
     matched_id = await service.create(
         "better memory retrieval conventions", outcome="success"

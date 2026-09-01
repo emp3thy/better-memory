@@ -23,12 +23,13 @@ The actual end-to-end BM25 retrieval path for observations is
 ``ObservationService.retrieve()``, backed by
 ``better_memory.search.hybrid.hybrid_search`` -- a module whose own
 docstring says it is "deliberately pure SQLite: it never calls the
-embedder", and which ``ObservationService`` always calls with
-``second_source="trigram"`` -- there is no more ``"vec0"`` mode to
-select, since ``ObservationService`` has no embedder path at all any
-more. That is the function this test exercises instead, to keep the
-assertion shape (observe -> FTS row -> BM25-evidenced retrieval hit -> no
-embedder anywhere) truthful to what the code actually does.
+embedder", and which unconditionally fuses word-FTS5 and trigram-FTS5
+BM25 via RRF -- there is no ``second_source`` parameter to pick a mode
+with any more (removed in Task 7 along with the vector leg), since
+``ObservationService`` has no embedder path at all any more. That is
+the function this test exercises instead, to keep the assertion shape
+(observe -> FTS row -> BM25-evidenced retrieval hit -> no embedder
+anywhere) truthful to what the code actually does.
 """
 
 from __future__ import annotations
@@ -80,8 +81,9 @@ async def test_retrieve_returns_bm25_evidence_without_embedder(
     """Same substrate as above; ``ObservationService.retrieve()`` must
     surface the observation on BM25 evidence alone -- word-FTS5 BM25 plus
     trigram-FTS5 BM25, both embedder-free -- when the service is
-    constructed with no embedder (``second_source`` resolves to
-    ``"trigram"``, never ``"vec0"``)."""
+    constructed with no embedder (both legs always run unconditionally;
+    there is no ``second_source`` parameter to select between them any
+    more)."""
     svc = ObservationService(conn, episodes=EpisodeService(conn))
     await svc.create(
         content="growatt inverter polling uses Timespan.hour", project="p1"

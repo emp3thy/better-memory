@@ -200,8 +200,8 @@ def tool_definitions(
             description=(
                 "Retrieve raw observations matching given filters. Drill-down "
                 "tool — use memory.retrieve for the distilled-reflections "
-                "default. With ``query``, results are ranked by hybrid "
-                "FTS5 + sqlite-vec relevance; without, ordered created_at "
+                "default. With ``query``, results are ranked by BM25/FTS5 "
+                "relevance; without, ordered created_at "
                 "DESC. ``episode_id`` and ``theme`` filters are ignored "
                 "in query mode."
             ),

@@ -171,7 +171,7 @@ def retrieve_relevant(
     fts_unavailable = conn is None
 
     # Agentcore evidence gate (design spec 2026-07-24-agentcore-parity-
-    # design.md §3): when the caller has no sqlite FTS/vec substrate
+    # design.md §3): when the caller has no sqlite FTS substrate
     # (conn=None) AND the backend is agentcore-flavored --
     # supports_synthesis=False, the existing Protocol capability flag that
     # already distinguishes AgentCoreBackend from SqliteBackend everywhere

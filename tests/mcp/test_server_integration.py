@@ -31,7 +31,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from better_memory.mcp.server import _tool_definitions
 
-# Allow plenty of room for Ollama's first-call warm-up on a cold model.
+# Generous timeout to absorb slow CI subprocess startup and migrations.
 _CLIENT_TIMEOUT = timedelta(seconds=60)
 
 # A structurally valid synthesize_next_apply decision that takes no action.

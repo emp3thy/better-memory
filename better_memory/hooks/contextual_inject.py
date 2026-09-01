@@ -2,11 +2,13 @@
 current prompt or tool-input. Gated by BETTER_MEMORY_CONTEXT_INJECT_MODE
 (userprompt | pretool | both | off). Never raises; always exits 0.
 
-Candidates are scored via retrieve_relevant's three-leg evidence gate (BM25 /
-vector cosine / keyword-hit fallback — see services/relevant.py) and capped
-at cfg.context_max_items. A per-session SeenStore dedups injected memories
-across turns within a run (cfg.context_reinject_turns controls re-injection
-after N turns). Survivors are recorded as 'contextual' exposures (best-effort;
+Candidates are scored via retrieve_relevant's evidence gate (BM25
+qualifiers, a keyword-hit fallback when no FTS substrate is available, or
+the backend's relevance_ranks in agentcore mode — see
+services/relevant.py) and capped at cfg.context_max_items. A per-session
+SeenStore dedups injected memories across turns within a run
+(cfg.context_reinject_turns controls re-injection after N turns).
+Survivors are recorded as 'contextual' exposures (best-effort;
 a write failure never blocks injection) and counted in rating_diagnostics for
 observability (contextual_fired_userprompt/pretool, contextual_injected,
 contextual_suppressed_floor, contextual_suppressed_dedup).
@@ -119,15 +121,15 @@ def main() -> None:
             # operational state (the exposure ledger) lives in the local
             # memory.db regardless of backend — build_backend threads this
             # conn through as the backend's exposure-ledger connection. The
-            # BM25/vec legs below still require the SQLITE-CONTENT
-            # substrate (reflection_fts / *_embeddings), which agentcore has
-            # none of, so retrieve_relevant still gets conn=None for
-            # agentcore — that parameter means "FTS/vec index available",
-            # not "any local connection at all". retrieve_relevant itself
-            # detects agentcore (conn=None + supports_synthesis=False) and
+            # BM25 legs below still require the SQLITE-CONTENT
+            # substrate (reflection_fts), which agentcore has none of, so
+            # retrieve_relevant still gets conn=None for agentcore -- that
+            # parameter means "FTS index available", not "any local
+            # connection at all". retrieve_relevant itself detects
+            # agentcore (conn=None + supports_synthesis=False) and
             # substitutes backend.relevance_ranks — a server-side semantic
-            # search — for the BM25/vec legs, so agentcore's evidence gate
-            # is no longer purely keyword-based despite conn=None here.
+            # search — for the BM25 legs, so agentcore's evidence gate is
+            # no longer purely keyword-based despite conn=None here.
             with closing(connect(cfg.memory_db)) as conn:
                 _bump_diagnostic(
                     conn, cfg,
