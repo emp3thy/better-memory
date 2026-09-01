@@ -1107,7 +1107,11 @@ def test_0018_drop_vec_tables(tmp_memory_db: Path, tmp_path: Path) -> None:
     real row into each so the DROP has live data to remove, then applies
     the full (real) migration set — which is only 0018 left pending — and
     asserts all three tables are gone. A rerun on a fresh connection must
-    not error (DROP TABLE IF EXISTS keeps 0018 idempotent).
+    not error (DROP TABLE IF EXISTS keeps 0018 idempotent). It also
+    executes the raw 0018 SQL file directly, twice in a row, against the
+    already-migrated DB — independent of the migration ledger's
+    already-applied bookkeeping — to pin the ``IF EXISTS`` contract on
+    the SQL text itself.
     """
     pre_dir = tmp_path / "migs_pre_0018"
     pre_dir.mkdir()
@@ -1152,5 +1156,16 @@ def test_0018_drop_vec_tables(tmp_memory_db: Path, tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE name = 'observation_embeddings'"
         ).fetchone()
         assert row is None
+
+        # Direct rerun-idempotency: executescript the raw 0018 SQL file
+        # content twice against the migrated DB, bypassing the migration
+        # ledger entirely, and assert neither run errors. This pins the
+        # ``DROP TABLE IF EXISTS`` contract in the SQL text itself, not
+        # just the ledger's "already applied, skip it" bookkeeping.
+        sql_0018 = (_DEFAULT_MIGRATIONS_DIR / "0018_drop_vec_tables.sql").read_text(
+            encoding="utf-8"
+        )
+        conn2.executescript(sql_0018)
+        conn2.executescript(sql_0018)
     finally:
         conn2.close()

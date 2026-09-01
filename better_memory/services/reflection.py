@@ -1,25 +1,30 @@
 """Reflection synthesis service.
 
 Orchestrates per-episode synthesis: for each closed-but-unsynthesized
-episode, loads its observations and tech-filtered reflections, calls the
-LLM once, and applies new/augment/merge/ignore actions atomically inside
-a per-episode SAVEPOINT.
+episode, loads its observations and tech-filtered reflections, hands
+them to the driving agent's LLM call out of process, and applies the
+returned new/augment/merge/ignore actions atomically inside a
+per-episode SAVEPOINT.
 
 This module provides:
 - Typed read models for LLM consumption (:class:`ReflectionForPrompt`,
   :class:`ObservationForPrompt`).
 - Per-episode types: :class:`EpisodeForPrompt`, :class:`EpisodeContext`,
   :class:`EpisodeQueueCounts`, :class:`SynthesisStep`.
-- :class:`ReflectionSynthesisService` with ``synthesize_next`` as the
-  primary entry point.
+- :class:`ReflectionSynthesisService` with ``get_next_pending_context`` /
+  ``apply_decision`` as the primary entry points.
 
 Design notes:
 - The service owns writes within its own transaction envelope
   (SAVEPOINT + commit), matching the convention used by
   ObservationService and EpisodeService.
-- The LLM client is injected via a ``ChatCompleter`` Protocol so
-  tests can swap :class:`better_memory.llm.fake.FakeChat` in
-  without touching Ollama.
+- The service holds no chat client and never calls an LLM itself.
+  ``get_next_pending_context`` returns the episode's prompt context for
+  the driving agent (Claude, via the ``better-memory-synthesize`` skill)
+  to complete out of process; the agent's parsed decision is submitted
+  back via ``apply_decision``. This two-call split replaces the old
+  single ``synthesize_next`` call, which embedded an Ollama chat-client
+  call between load and apply.
 """
 
 from __future__ import annotations

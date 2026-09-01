@@ -49,10 +49,12 @@ async def test_ollama_absent_default_backend_succeeds_without_embedder(
     """
     env = isolated_env(
         clean_slate_home,
-        # Remove the harness default 'sqlite' pin: the whole point is the
-        # real out-of-the-box default ('ollama' per config.py), which must
-        # now behave identically because nothing reads it for embedder
-        # construction any more.
+        # BETTER_MEMORY_EMBEDDINGS_BACKEND no longer exists as a config key
+        # (removed from config.py this branch), and isolated_env carries no
+        # pin for it either -- this explicit None is a no-op, kept only to
+        # document that the test deliberately exercises the real
+        # out-of-the-box default, which now behaves identically because
+        # nothing reads this variable for embedder construction any more.
         BETTER_MEMORY_EMBEDDINGS_BACKEND=None,
     )
     errlog_path = tmp_path / "server.stderr"  # outside the fake home

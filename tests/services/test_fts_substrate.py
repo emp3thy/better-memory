@@ -59,8 +59,8 @@ def conn(tmp_memory_db: Path) -> Iterator[sqlite3.Connection]:
 async def test_observe_populates_fts_without_embedder(
     conn: sqlite3.Connection,
 ) -> None:
-    """``ObservationService(conn, None, ...)`` -- no embedder constructed at
-    all -- still populates ``observation_fts`` via the AFTER INSERT/UPDATE/
+    """``ObservationService(conn, episodes=...)`` -- no embedder constructed
+    at all -- still populates ``observation_fts`` via the AFTER INSERT/UPDATE/
     DELETE triggers defined in 0001_init.sql / 0002_episodic.sql. FTS
     population is unconditional: it is not gated on any embeddings backend
     (see task-1 Step 1 grep evidence in the task report)."""

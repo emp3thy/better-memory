@@ -67,8 +67,9 @@ async def test_ollama_zero_traffic_across_journey_and_sync_hooks(
     Task 2 (remove-ollama-embeddings) deleted OllamaEmbedder construction
     and the /api/tags startup probe from mcp/server.py entirely — there is
     no longer an ``embeddings_backend == 'ollama'`` branch to skip, so this
-    holds regardless of BETTER_MEMORY_EMBEDDINGS_BACKEND (isolated_env still
-    pins it to "sqlite" as belt-and-braces). Regressions this flips red on:
+    holds regardless of BETTER_MEMORY_EMBEDDINGS_BACKEND (the key no longer
+    exists in config.py, and isolated_env carries no pin for it either --
+    the pin was removed this branch). Regressions this flips red on:
     reintroducing embedder construction or a startup probe into
     mcp/server.py, or contextual_inject growing an embedding-based scorer —
     either records a request here.

@@ -10,14 +10,17 @@ When to use: before starting any meaningful coding task, or when entering a new 
   (`do` / `dont` / `neutral`). ALWAYS pass `query` — a plain-language
   description of the task at hand — or you get the same generic
   top-ranked lessons every session regardless of what you're working on.
-  `query` fuses BM25 + vector search via reciprocal rank fusion against
-  a Wilson-score usefulness prior. Also filter by `project`, `tech`,
-  `phase`, `polarity`, `limit_per_bucket` (default 5 per bucket). Use
-  this as the default at the start of work to find generalised lessons.
+  `query` fuses a BM25 match against `reflection_fts` with the
+  Wilson-score usefulness prior via reciprocal rank fusion — a query
+  that matches nothing on the BM25 leg degrades to the Wilson-only
+  order. Also filter by `project`, `tech`, `phase`, `polarity`,
+  `limit_per_bucket` (default 5 per bucket). Use this as the default at
+  the start of work to find generalised lessons.
 - `memory.retrieve_observations` — raw observations. Supports a free-text
-  `query` (hybrid FTS5 + sqlite-vec) plus filters like `component`. Use
-  this to drill into a specific incident or hunt for an exact prior
-  decision.
+  `query` (word-level + trigram-level FTS5 BM25, fused by reciprocal
+  rank fusion — no embedding model involved) plus filters like
+  `component`. Use this to drill into a specific incident or hunt for an
+  exact prior decision.
 
 ## Steps
 
@@ -66,13 +69,14 @@ raw observations with `memory.retrieve_observations`:
 
 ```python
 result = memory.retrieve_observations(
-    query="async bridge ollama transport error",
+    query="episodes tab hidden when agentcore flag is false",
     component="ui",
     limit=10,
 )
 ```
 
-With `query`, results are ranked by hybrid FTS5 + sqlite-vec relevance;
+With `query`, results are ranked by word+trigram FTS5 BM25 relevance
+(fused via reciprocal rank fusion — no embedding model involved);
 without, they are ordered newest-first. `episode_id` and `theme`
 filters are ignored in query mode.
 
@@ -80,8 +84,9 @@ filters are ignored in query mode.
 
 `memory.retrieve(query?, project?, tech?, phase?, polarity?,
 limit_per_bucket?)` — reflections, bucketed by polarity. `query` ranks
-by BM25 + vector RRF fused with the Wilson-score usefulness prior;
-omitting it returns the same generic top-ranked lessons every time.
+by BM25 (against `reflection_fts`) reciprocal-rank-fused with the
+Wilson-score usefulness prior; omitting it returns the same generic
+top-ranked lessons every time.
 `limit_per_bucket` defaults to 5. No component/scope/window filters;
 use `retrieve_observations` for those.
 

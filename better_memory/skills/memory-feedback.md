@@ -43,8 +43,8 @@ If the work was opened with `memory.start_episode(...)` and the goal is now reso
 ```python
 # At decision time — no evidence yet
 obs_id = memory.observe(
-    content="Switched to async embedder to allow batch requests.",
-    component="embeddings/ollama",
+    content="Switched observation retrieval to word+trigram FTS5 BM25 RRF fusion.",
+    component="search/hybrid",
     trigger_type="decision",
     outcome="neutral",
 )
