@@ -668,9 +668,7 @@ def create_app(
         from markupsafe import escape
         conn = app.extensions["db_connection"]
         scope = request.form.get("scope") or "project"
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
+        svc = SemanticMemoryService(conn)
         try:
             svc.create_from_observation(observation_id=id, scope=scope)
         except ValueError as exc:

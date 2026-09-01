@@ -15,10 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-import sqlite_vec
-
 from better_memory._common import default_clock, env_session_id
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.scoring import wilson_lower_bound
 
 
@@ -57,25 +54,9 @@ class SemanticMemoryService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
-        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
-        self._sync_embedder = sync_embedder
-
-    def _store_embedding(self, memory_id: str, vector: list[float] | None) -> None:
-        if vector is None:
-            return
-        # DELETE+INSERT: vec0 tables historically mishandle UPSERT.
-        self._conn.execute(
-            "DELETE FROM semantic_embeddings WHERE memory_id = ?",
-            (memory_id,),
-        )
-        self._conn.execute(
-            "INSERT INTO semantic_embeddings (memory_id, embedding) "
-            "VALUES (?, ?)",
-            (memory_id, sqlite_vec.serialize_float32(vector)),
-        )
 
     def create(
         self, *, content: str, project: str, scope: str = "project"
@@ -88,11 +69,6 @@ class SemanticMemoryService:
             raise ValueError("content must not be empty")
         memory_id = uuid4().hex
         now = self._clock().isoformat()
-        # Compute the embedding BEFORE the INSERT opens sqlite3's implicit
-        # write transaction — see #97. A blocking Ollama call inside the
-        # WAL writer lock starves every other connection until commit.
-        vector = (self._sync_embedder.embed_text(content)
-                  if self._sync_embedder is not None else None)
         self._conn.execute(
             """
             INSERT INTO semantic_memories
@@ -101,38 +77,24 @@ class SemanticMemoryService:
             """,
             (memory_id, content, project, scope, now, now),
         )
-        self._store_embedding(memory_id, vector)
         self._conn.commit()
         return memory_id
 
     def update_text(self, *, id: str, content: str) -> None:
         if not content.strip():
             raise ValueError("content must not be empty")
-        # Validate existence BEFORE spending the (blocking) embed. Without
-        # this check a stale id from MCP / UI would pay the full ~15s
-        # Ollama worker timeout before failing — see #125 review.
-        if self._conn.execute(
-            "SELECT 1 FROM semantic_memories WHERE id = ?", (id,),
-        ).fetchone() is None:
-            raise ValueError(f"semantic memory not found: {id}")
         now = self._clock().isoformat()
-        # Compute the embedding BEFORE the UPDATE opens sqlite3's implicit
-        # write transaction — see #97.
-        vector = (self._sync_embedder.embed_text(content)
-                  if self._sync_embedder is not None else None)
         cur = self._conn.execute(
             "UPDATE semantic_memories SET content = ?, updated_at = ? "
             "WHERE id = ?",
             (content, now, id),
         )
         if cur.rowcount == 0:
-            # Race: row was deleted between our SELECT and UPDATE. Rare,
-            # but roll back the implicit BEGIN so we don't strand the WAL
+            # Roll back the implicit BEGIN so we don't strand the WAL
             # write lock for callers sharing this connection. Mirrors
             # ObservationService.set_outcome (better_memory/services/observation.py:435).
             self._conn.rollback()
             raise ValueError(f"semantic memory not found: {id}")
-        self._store_embedding(id, vector)
         self._conn.commit()
 
     def set_scope(self, *, id: str, scope: str) -> None:
@@ -194,10 +156,6 @@ class SemanticMemoryService:
 
         memory_id = uuid4().hex
         now = self._clock().isoformat()
-        # Compute the embedding BEFORE opening the SAVEPOINT — see #97.
-        # The blocking Ollama call must not run under the WAL writer lock.
-        vector = (self._sync_embedder.embed_text(row["content"])
-                  if self._sync_embedder is not None else None)
         self._conn.execute("SAVEPOINT promote_observation")
         try:
             self._conn.execute(
@@ -214,7 +172,6 @@ class SemanticMemoryService:
                 "WHERE id = ?",
                 (now, observation_id),
             )
-            self._store_embedding(memory_id, vector)
         except BaseException:
             self._conn.execute("ROLLBACK TO SAVEPOINT promote_observation")
             self._conn.execute("RELEASE SAVEPOINT promote_observation")
