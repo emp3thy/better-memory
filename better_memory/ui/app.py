@@ -64,22 +64,13 @@ def create_app(
     resolved_db = db_path if db_path is not None else resolve_home() / "memory.db"
     db_conn = connect(resolved_db)
 
-    # No code path builds a SyncEmbedder any more (Task 2:
-    # remove-ollama-embeddings) — ``build_backend`` below always receives
-    # sync_embedder=None, same as better_memory/mcp/server.py and the
-    # contextual_inject hook. ``ReflectionService`` no longer accepts a
-    # sync_embedder at all (Task 5).
-    resolved_sync_embedder = None
-
     app.extensions["db_connection"] = db_conn
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
     app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
-    app.extensions["sync_embedder"] = resolved_sync_embedder
     app.extensions["db_path"] = resolved_db
     app.extensions["backend"] = build_backend(
         config=get_config(),
         memory_conn=db_conn,
-        sync_embedder=resolved_sync_embedder,
         session_id=None,
         project=project_name(),
     )

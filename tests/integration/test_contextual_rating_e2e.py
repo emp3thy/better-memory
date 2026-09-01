@@ -64,7 +64,7 @@ def test_contextual_injection_full_rating_loop(conn, monkeypatch, tmp_path):
 
     # 2. Build the sqlite backend.
     backend = SqliteBackend(
-        memory_conn=conn, embedder=None, session_id="e2e-sess", project="proj",
+        memory_conn=conn, session_id="e2e-sess", project="proj",
     )
 
     # 3. Retrieve relevant memories for the query; the seeded reflection

@@ -30,14 +30,11 @@ unchanged, regardless of whether it also implements ``relevance_ranks``
 """
 from __future__ import annotations
 
-import math
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-
-import sqlite_vec
 
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.keywords import count_keyword_hits, extract_keywords
@@ -94,68 +91,6 @@ def _bm25_qualifiers(conn: sqlite3.Connection | None, query: str) -> dict[str, i
     except sqlite3.OperationalError:
         return {}
     return {row[0]: i for i, row in enumerate(rows)}
-
-
-def _vec_qualifiers(
-    conn: sqlite3.Connection | None,
-    table: str,
-    id_col: str,
-    query_vector: list[float] | None,
-    vec_floor: float,
-    candidate_ids: list[str] | None = None,
-) -> dict[str, int]:
-    """id -> vec rank for rows within the cosine floor.
-
-    Not used by ``retrieve_relevant`` any more (remove-ollama-embeddings
-    Task 6 removed its vec leg) -- kept only because
-    ``SqliteBackend.relevance_ranks`` (``storage/sqlite.py``) still imports
-    and calls it for its own vec leg. That call site is explicitly
-    out-of-scope for Task 6 (see the task ledger); removing this helper
-    is Task 7's job, alongside ``relevance_ranks``'s vec leg and
-    ``SqliteBackend``'s ``sync_embedder`` plumbing.
-
-    Vectors are unit-norm, so cosine >= c  <=>  L2 distance <= sqrt(2*(1-c)).
-
-    Step 3a probe (2026-07-23, sqlite-vec as vendored in this repo's
-    .venv): a vec0 kNN query for [1,0,0,0] against a stored [0,1,0,0] row
-    returned ``distance=1.4142135381698608`` -- sqrt(2) at float32
-    precision, not 2.0. Confirms sqlite-vec's ``distance`` column is plain
-    L2 distance, NOT squared L2. The floor comparison below is against the
-    plain (unsquared) distance only; the squared-distance branch that a
-    defensive dual-check would need is dead code and has been omitted.
-
-    ``candidate_ids`` scopes the result to the caller's candidate set --
-    sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` (no extra predicates),
-    so we fetch top-k and filter in Python. ``k`` scales with
-    ``max(len(candidate_ids), 50)`` so the window is dense over what the
-    caller actually ranks, instead of being drowned by neighbours from
-    other projects or retired records (whose vectors persist -- retire
-    only UPDATEs status). ``None`` preserves the global-scope behaviour
-    for callers (e.g. ``SqliteBackend.relevance_ranks``) that intentionally
-    want the unfiltered rank map; ``[]`` short-circuits to ``{}``.
-    """
-    if conn is None or query_vector is None:
-        return {}
-    if candidate_ids is not None and not candidate_ids:
-        return {}
-    max_dist = math.sqrt(2.0 * (1.0 - vec_floor))
-    k = max(len(candidate_ids), 50) if candidate_ids is not None else 50
-    try:
-        rows = conn.execute(
-            f"SELECT {id_col}, distance FROM {table} "
-            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (sqlite_vec.serialize_float32(query_vector), k),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    wanted: set[str] | None = set(candidate_ids) if candidate_ids is not None else None
-    out: dict[str, int] = {}
-    for row in rows:
-        if wanted is not None and row[0] not in wanted:
-            continue
-        if float(row[1]) <= max_dist:
-            out[row[0]] = len(out)
-    return out
 
 
 def _wilson_for(useful: int, overlooked: int, ignored: int) -> float:

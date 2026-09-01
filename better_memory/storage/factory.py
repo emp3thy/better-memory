@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from better_memory.storage.protocol import StorageBackend
 from better_memory.storage.sqlite import SqliteBackend
@@ -33,28 +33,15 @@ def build_backend(
     *,
     config: _ConfigLike,
     memory_conn: sqlite3.Connection | None,
-    embedder: Any = None,
-    sync_embedder: Any = None,
     session_id: str | None,
     project: str,
 ) -> StorageBackend:
-    """Construct the StorageBackend implementation appropriate for the config.
-
-    ``sync_embedder``, when provided, must be the caller's already-built
-    process-wide ``SyncEmbedder`` (see ``mcp/server.py``). It is forwarded
-    as-is to ``SqliteBackend``, which uses it only to embed the query for
-    ``relevance_ranks``' vector leg, so that leg shares the same circuit
-    breaker as the caller's write-path tools instead of each backend build
-    spinning up an independent one. Unused by the agentcore path, which has
-    no local relevance-ranking of its own.
-    """
+    """Construct the StorageBackend implementation appropriate for the config."""
     if config.storage_backend == "sqlite":
         if memory_conn is None:
             raise ValueError("sqlite backend requires memory_conn")
         return SqliteBackend(
             memory_conn=memory_conn,
-            embedder=embedder,
-            sync_embedder=sync_embedder,
             session_id=session_id,
             project=project,
         )

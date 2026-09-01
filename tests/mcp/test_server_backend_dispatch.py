@@ -50,13 +50,10 @@ async def test_create_server_wires_no_sync_embedder_into_backend(
     """Task 2 (remove-ollama-embeddings): create_server no longer builds any
     SyncEmbedder at all — mcp/server.py no longer even imports SyncEmbedder,
     let alone constructs one — regardless of
-    BETTER_MEMORY_EMBEDDINGS_BACKEND. The backend's own ``_sync_embedder``
-    attribute (used only to embed the query for ``relevance_ranks``' vector
-    leg) is ``None``, same as every other caller. Neither _synthesis nor
-    _semantic take a sync_embedder at all any more (formerly PR #83 pinned
-    that they shared ONE process-wide instance; that instance no longer
-    exists — Task 4 removed the parameter from SemanticMemoryService, and
-    Task 5 removed it from ReflectionSynthesisService)."""
+    BETTER_MEMORY_EMBEDDINGS_BACKEND. Task 7 went further and removed the
+    backend's ``embedder``/``sync_embedder`` ctor params entirely (they were
+    dead pass-throughs once ``relevance_ranks``' vector leg was deleted), so
+    there is no ``_sync_embedder`` attribute left to wire at all."""
     home = tmp_path / "bm"
     home.mkdir()
     (home / "knowledge-base").mkdir()
@@ -69,7 +66,7 @@ async def test_create_server_wires_no_sync_embedder_into_backend(
     server, cleanup, ctx = server_mod.create_server()
     try:
         assert isinstance(ctx.backend, SqliteBackend)
-        assert ctx.backend._sync_embedder is None
+        assert not hasattr(ctx.backend, "_sync_embedder")
     finally:
         await cleanup()
 

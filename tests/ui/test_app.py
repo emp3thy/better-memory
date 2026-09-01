@@ -24,22 +24,6 @@ class TestServiceWiring:
         assert row[0] == 0
 
 
-class TestSyncEmbedderWiring:
-    """UI-driven writes never construct a SyncEmbedder.
-
-    Task 2 (remove-ollama-embeddings) deleted create_app's auto-detecting
-    ``_build_sync_embedder()`` and its ``sync_embedder=`` override
-    parameter: ``build_backend`` now receives ``sync_embedder=None``
-    unconditionally, same as ``better_memory/mcp/server.py`` and the
-    contextual_inject hook. ``ReflectionService`` no longer accepts a
-    sync_embedder parameter at all (Task 5).
-    """
-
-    def test_sync_embedder_always_none(self, tmp_db: Path) -> None:
-        app = create_app(start_watchdog=False, db_path=tmp_db)
-        assert app.extensions["sync_embedder"] is None
-
-
 class TestHealthz:
     def test_returns_200_with_ok_body(self, client: FlaskClient) -> None:
         response = client.get("/healthz")
@@ -294,7 +278,6 @@ class TestBackendWiring:
         spy.assert_called_once()
         _, kwargs = spy.call_args
         assert kwargs["memory_conn"] is app.extensions["db_connection"]
-        assert kwargs["sync_embedder"] is app.extensions["sync_embedder"]
         assert kwargs["session_id"] is None
         assert kwargs["project"] == project_name()
         assert "config" in kwargs  # get_config() forwarded to the factory

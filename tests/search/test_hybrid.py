@@ -1,7 +1,7 @@
 """Tests for :mod:`better_memory.search.hybrid`.
 
 The hybrid search layer is pure-SQLite (no embedder). We manually insert
-observations + their vectors so we can control every input deterministically.
+observations so we can control every input deterministically.
 """
 
 from __future__ import annotations
@@ -17,13 +17,9 @@ _LEGACY_SKIP = pytest.mark.skip(
     reason="Awaiting Phase 2 episodic service layer — see docs/superpowers/specs/2026-04-20-episodic-memory-design.md"
 )
 
-import sqlite_vec
-
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.search.hybrid import SearchFilters, hybrid_search
-
-_VEC_DIM = 768
 
 
 # ---------------------------------------------------------------------------
@@ -51,13 +47,6 @@ def clock(fixed_now: datetime):
     return lambda: fixed_now
 
 
-def _unit_vector(axis: int, dim: int = _VEC_DIM) -> list[float]:
-    """Return a unit-length 768-vector with 1.0 on one axis."""
-    v = [0.0] * dim
-    v[axis % dim] = 1.0
-    return v
-
-
 def _seed(
     conn: sqlite3.Connection,
     *,
@@ -70,11 +59,9 @@ def _seed(
     reinforcement_score: float = 0.0,
     scope_path: str | None = None,
     status: str = "active",
-    vector: list[float] | None = None,
     created_at: datetime | None = None,
 ) -> None:
-    """Insert a fully-specified observation row and its embedding."""
-    vec = vector if vector is not None else _unit_vector(0)
+    """Insert a fully-specified observation row."""
     created = (
         (created_at or datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC))
         .isoformat()
@@ -101,10 +88,6 @@ def _seed(
             created,
         ),
     )
-    conn.execute(
-        "INSERT INTO observation_embeddings (observation_id, embedding) VALUES (?, ?)",
-        (obs_id, sqlite_vec.serialize_float32(vec)),
-    )
     conn.commit()
 
 
@@ -130,39 +113,6 @@ def test_text_only_hybrid_ranks_matching_first(conn: sqlite3.Connection, clock) 
 
     assert len(results) == 2
     assert results[0].id == "a"
-
-
-@_LEGACY_SKIP
-def test_vector_only_hybrid_ranks_closer_first(conn: sqlite3.Connection, clock) -> None:
-    _seed(conn, obs_id="a", content="alpha", vector=_unit_vector(0))
-    _seed(conn, obs_id="b", content="beta", vector=_unit_vector(1))
-
-    # Query vector very close to axis 0 → id "a" should rank first.
-    q = _unit_vector(0)
-    results = hybrid_search(conn, query_vector=q, clock=clock)
-
-    assert len(results) == 2
-    assert results[0].id == "a"
-
-
-@_LEGACY_SKIP
-def test_both_sources_merge_via_rrf(conn: sqlite3.Connection, clock) -> None:
-    # 'a' matches both FTS and vector; 'b' matches FTS only; 'c' matches
-    # vector only. 'a' should therefore rank above 'b' and 'c'.
-    _seed(conn, obs_id="a", content="marker python", vector=_unit_vector(0))
-    _seed(conn, obs_id="b", content="marker rust", vector=_unit_vector(5))
-    _seed(conn, obs_id="c", content="unrelated word", vector=_unit_vector(1))
-
-    q_vec = _unit_vector(0)
-    results = hybrid_search(
-        conn,
-        query_text="marker python",
-        query_vector=q_vec,
-        clock=clock,
-    )
-
-    ids = [r.id for r in results]
-    assert ids[0] == "a"
 
 
 @_LEGACY_SKIP
@@ -281,27 +231,24 @@ def test_outcome_filter(conn: sqlite3.Connection, clock) -> None:
 def test_reinforcement_boosts_same_similarity_item(
     conn: sqlite3.Connection, clock
 ) -> None:
-    # Identical content + identical vector → equal raw similarity. A's
-    # reinforcement_score is high so it must rank first.
+    # Identical content -> equal raw BM25 similarity. A's reinforcement_score
+    # is high so it must rank first.
     _seed(
         conn,
         obs_id="high",
         content="marker alpha",
         reinforcement_score=5.0,
-        vector=_unit_vector(0),
     )
     _seed(
         conn,
         obs_id="low",
         content="marker alpha",
         reinforcement_score=0.0,
-        vector=_unit_vector(0),
     )
 
     results = hybrid_search(
         conn,
         query_text="marker alpha",
-        query_vector=_unit_vector(0),
         clock=clock,
     )
     ids = [r.id for r in results]
@@ -317,20 +264,17 @@ def test_recency_decay_boosts_new(
         obs_id="new",
         content="marker alpha",
         created_at=fixed_now,
-        vector=_unit_vector(0),
     )
     _seed(
         conn,
         obs_id="old",
         content="marker alpha",
         created_at=fixed_now - timedelta(days=90),
-        vector=_unit_vector(0),
     )
 
     results = hybrid_search(
         conn,
         query_text="marker alpha",
-        query_vector=_unit_vector(0),
         filters=SearchFilters(window_days=None),
         clock=clock,
     )
@@ -382,7 +326,9 @@ def test_search_result_carries_fields(conn: sqlite3.Connection, clock) -> None:
 
 
 # ---------------------------------------------------------------------------
-# second_source parameter (vec0 | trigram | none)
+# Trigram leg — always-on BM25 companion to word-FTS5 (no toggle any more:
+# remove-ollama-embeddings Task 7 deleted the second_source parameter along
+# with the vec0 leg it used to select between).
 # ---------------------------------------------------------------------------
 #
 # These tests use a self-contained ``_seed_obs`` helper rather than the legacy
@@ -399,7 +345,6 @@ def _seed_obs(
     project: str = "alpha",
     outcome: str = "neutral",
     created_at: datetime | None = None,
-    vector: list[float] | None = None,
 ) -> None:
     """Insert an observation (and its parent episode) compatible with current schema."""
     episode_id = f"ep-{obs_id}"
@@ -423,23 +368,18 @@ def _seed_obs(
         """,
         (obs_id, content, project, outcome, created, created, episode_id),
     )
-    vec = vector if vector is not None else _unit_vector(0)
-    conn.execute(
-        "INSERT INTO observation_embeddings (observation_id, embedding) VALUES (?, ?)",
-        (obs_id, sqlite_vec.serialize_float32(vec)),
-    )
     conn.commit()
 
 
-def test_hybrid_search_second_source_trigram(conn: sqlite3.Connection, clock) -> None:
-    """When second_source='trigram', the second source is FTS5 trigram BM25 over observation_trigram_fts."""
+def test_trigram_leg_finds_word_match(conn: sqlite3.Connection, clock) -> None:
+    """The trigram BM25 leg (always fused in via RRF) surfaces a word match
+    same as the word-FTS5 leg would."""
     _seed_obs(conn, obs_id="hit", content="pytest junit-xml on windows")
     _seed_obs(conn, obs_id="miss", content="completely unrelated topic")
 
     results = hybrid_search(
         conn,
         query_text="pytest windows",
-        second_source="trigram",
         filters=SearchFilters(window_days=None),
         limit=2,
         clock=clock,
@@ -449,23 +389,7 @@ def test_hybrid_search_second_source_trigram(conn: sqlite3.Connection, clock) ->
     assert results[0].id == "hit"
 
 
-def test_hybrid_search_second_source_none(conn: sqlite3.Connection, clock) -> None:
-    """When second_source='none', only word-FTS5 BM25 runs (no second source)."""
-    _seed_obs(conn, obs_id="o1", content="alpha bravo charlie")
-
-    results = hybrid_search(
-        conn,
-        query_text="alpha",
-        second_source="none",
-        filters=SearchFilters(window_days=None),
-        limit=5,
-        clock=clock,
-    )
-
-    assert any(r.id == "o1" for r in results)
-
-
-def test_hybrid_search_second_source_trigram_substring_match(
+def test_trigram_leg_matches_substring_beyond_word_tokenizer(
     conn: sqlite3.Connection, clock
 ) -> None:
     """Trigram source matches substrings the word tokenizer misses."""
@@ -474,7 +398,6 @@ def test_hybrid_search_second_source_trigram_substring_match(
     results = hybrid_search(
         conn,
         query_text="estin",
-        second_source="trigram",
         filters=SearchFilters(window_days=None),
         limit=5,
         clock=clock,

@@ -252,9 +252,6 @@ class ObservationService:
         """
         resolved_project = project if project is not None else self._project_resolver()
 
-        # No embedder — the vector leg of hybrid_search is never used here.
-        query_vector: list[float] | None = None
-
         # Sanitise before FTS5 MATCH: user queries like ``better-memory retrieval``
         # would otherwise be parsed by FTS5 as ``-memory`` column-exclusion and
         # resolve to [] (via the safety net in hybrid._fts_candidates), yielding
@@ -276,8 +273,6 @@ class ObservationService:
             return hybrid_search(
                 self._conn,
                 query_text=fts_query_text,
-                query_vector=query_vector,
-                second_source="trigram",
                 filters=filters,
                 limit=limit,
                 candidate_k=candidate_k,
@@ -433,8 +428,9 @@ class ObservationService:
         - Order: ``created_at DESC, rowid DESC``. Cap at ``limit``.
 
         Query mode (``query`` is given):
-        - Embed the query and route through :func:`hybrid_search`. FTS5 +
-          sqlite-vec results, RRF-fused, ranked by relevance.
+        - Route through :func:`hybrid_search`: word-FTS5 + trigram-FTS5
+          BM25, RRF-fused, ranked by relevance. There is no embedder, so
+          no vector leg.
         - The simple filters that ``SearchFilters`` natively supports
           (``project``, ``component``, ``outcome``) are honoured; ``status``
           and ``window_days`` are disabled (drill-down should see all
@@ -528,12 +524,9 @@ class ObservationService:
             status=None,
             window_days=None,
         )
-        vector: list[float] | None = None
         results = hybrid_search(
             self._conn,
             query_text=fts_query_text,
-            query_vector=vector,
-            second_source="trigram",
             filters=filters,
             limit=limit,
             clock=self._clock,
