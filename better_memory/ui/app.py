@@ -15,38 +15,10 @@ from werkzeug.wrappers import Response
 
 from better_memory.config import get_config, project_name, resolve_home
 from better_memory.db.connection import connect
-from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.services.episode import EpisodeService
 from better_memory.services.reflection import ReflectionService
 from better_memory.storage.factory import build_backend
 from better_memory.ui import queries
-
-
-class _Unset:
-    """Sentinel type distinguishing "caller did not pass sync_embedder"
-    (auto-detect from config) from an explicit ``sync_embedder=None``
-    (force-disable, e.g. in tests that don't want any embedding side
-    effects). A dedicated class (rather than a bare ``object()``) lets
-    pyright narrow the parameter type via ``isinstance`` in create_app.
-    """
-
-    __slots__ = ()
-
-
-_UNSET = _Unset()
-
-
-def _build_sync_embedder() -> SyncEmbedder | None:
-    """Build the shared SyncEmbedder used by every write-path service.
-
-    Only wired for the ollama embeddings backend — sqlite (FTS5) indexes
-    via DB triggers instead of a Python embedder (mirrors the same gate
-    in better_memory/mcp/server.py and better_memory/storage/sqlite.py).
-    """
-    if get_config().embeddings_backend != "ollama":
-        return None
-    return SyncEmbedder(lambda: OllamaEmbedder(timeout=5.0, max_retries=1))
 
 
 def _reflection_drawer_detail(app: Flask, id: str) -> SimpleNamespace | None:
@@ -71,7 +43,6 @@ def create_app(
     inactivity_poll_interval: float = 30.0,
     start_watchdog: bool = True,
     db_path: Path | None = None,
-    sync_embedder: SyncEmbedder | None | _Unset = _UNSET,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -86,14 +57,6 @@ def create_app(
         If ``False``, skip starting the background watchdog thread.
         ``_check_idle`` is still registered so tests can drive it
         synchronously without spawning threads.
-    sync_embedder:
-        Shared :class:`SyncEmbedder` passed to every UI write-path
-        service (``ReflectionService``, ``SemanticMemoryService``) so
-        UI-driven writes embed exactly like MCP-driven writes. Defaults
-        to auto-detecting from ``get_config().embeddings_backend`` via
-        :func:`_build_sync_embedder`. Pass explicitly (including
-        ``None``) to override — tests use this to inject a fake
-        embedder or to force-disable embedding.
     """
     app = Flask(__name__)
 
@@ -101,23 +64,13 @@ def create_app(
     resolved_db = db_path if db_path is not None else resolve_home() / "memory.db"
     db_conn = connect(resolved_db)
 
-    resolved_sync_embedder: SyncEmbedder | None = (
-        _build_sync_embedder()
-        if isinstance(sync_embedder, _Unset)
-        else sync_embedder
-    )
-
     app.extensions["db_connection"] = db_conn
     app.extensions["episode_service"] = EpisodeService(conn=db_conn)
-    app.extensions["reflection_service"] = ReflectionService(
-        conn=db_conn, sync_embedder=resolved_sync_embedder,
-    )
-    app.extensions["sync_embedder"] = resolved_sync_embedder
+    app.extensions["reflection_service"] = ReflectionService(conn=db_conn)
     app.extensions["db_path"] = resolved_db
     app.extensions["backend"] = build_backend(
         config=get_config(),
         memory_conn=db_conn,
-        sync_embedder=resolved_sync_embedder,
         session_id=None,
         project=project_name(),
     )
@@ -705,9 +658,7 @@ def create_app(
         from markupsafe import escape
         conn = app.extensions["db_connection"]
         scope = request.form.get("scope") or "project"
-        svc = SemanticMemoryService(
-            conn, sync_embedder=app.extensions["sync_embedder"],
-        )
+        svc = SemanticMemoryService(conn)
         try:
             svc.create_from_observation(observation_id=id, scope=scope)
         except ValueError as exc:

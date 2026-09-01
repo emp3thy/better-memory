@@ -28,8 +28,10 @@ archive rules atomically inside `SAVEPOINT retention_archive`, then an optional 
 - **Rule C — `_archive_rule_c_no_outcome_episode`**: observation's episode has
   `outcome='no_outcome'` and `ended_at` ≥ `retention_days` old.
 - **Prune — `_prune`**: hard-`DELETE` archived observations older than `prune_age_days` (default
-  365) that have **no** `reflection_sources` rows (sourced rows are kept for the audit trail);
-  also explicitly `DELETE`s the matching `observation_embeddings`.
+  365) that have **no** `reflection_sources` rows (sourced rows are kept for the audit trail).
+  [Correction: this bullet originally also said prune explicitly deletes the matching
+  `observation_embeddings` row; that table was dropped in migration 0018 (remove-ollama-embeddings)
+  and `_prune` no longer touches it.]
 
 Each run records one row in the local `retention_runs` ledger via
 `RetentionScheduler._record_run` (`services/retention_scheduler.py`), guarded by a 24h
@@ -60,7 +62,9 @@ the UI never writes runs). The UI has **no** button to trigger a run — it only
   safe in agentcore mode (same as `hook_errors`).
 - The **engine that produces the counts**, however, is *content-mutation*: rules A/B/C read the
   `reflection_sources → reflections → episodes` graph and `UPDATE observations SET status='archived'`;
-  `_prune` `DELETE`s from `observations` + `observation_embeddings`. Every one of those tables is
+  `_prune` `DELETE`s from `observations`. [Correction: this used to also say "+
+  `observation_embeddings`" — that table was dropped in migration 0018
+  (remove-ollama-embeddings); see the section-1 correction above.] Every one of those tables is
   AWS-side in agentcore mode.
 
 **Why the engine cannot run against AgentCore (live-API facts):**

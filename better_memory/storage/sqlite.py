@@ -6,15 +6,6 @@ protocol delegation surface.
 
 Held state:
 - ``memory_conn`` — open sqlite3 Connection
-- ``embedder`` — forwarded to ObservationService. May be ``None`` for the
-  sqlite (FTS5) embeddings backend, which indexes via DB triggers instead
-  of a Python embedder.
-- ``sync_embedder`` — caller-owned ``SyncEmbedder`` forwarded to
-  ``SemanticMemoryService`` / ``ReflectionSynthesisService`` as-is. The
-  backend does NOT construct its own — it must be the same process-wide
-  instance the caller (e.g. ``mcp/server.py``) built, so its circuit
-  breaker state is shared across the write-path tools and this backend's
-  ``retrieve``/``semantic`` methods rather than split into two breakers.
 - ``session_id`` — used for episode lookups, ratings, exposures. ``None``
   means "defer resolution to env-var fallback at first write"
   (ObservationService re-resolves from ``CLAUDE_SESSION_ID`` /
@@ -51,21 +42,16 @@ class SqliteBackend:
         self,
         *,
         memory_conn: sqlite3.Connection,
-        embedder: Any = None,
-        sync_embedder: Any = None,
         session_id: str | None,
         project: str,
     ) -> None:
         self._conn = memory_conn
-        self._embedder = embedder
-        self._sync_embedder = sync_embedder
         self._session_id: str | None = session_id
         self._project = project
         self._project_resolver = lambda: self._project
         self._episodes = EpisodeService(memory_conn)
         self._observations = ObservationService(
             memory_conn,
-            embedder=embedder,
             session_id=session_id,
             project_resolver=self._project_resolver,
             episodes=self._episodes,
@@ -73,10 +59,8 @@ class SqliteBackend:
         self._reflection = ReflectionService(memory_conn)
         self._memory_rating = MemoryRatingService(memory_conn)
         self._session_bootstrap = SessionBootstrapService(memory_conn)
-        self._semantic = SemanticMemoryService(memory_conn, sync_embedder=sync_embedder)
-        self._synthesis = ReflectionSynthesisService(
-            memory_conn, sync_embedder=sync_embedder
-        )
+        self._semantic = SemanticMemoryService(memory_conn)
+        self._synthesis = ReflectionSynthesisService(memory_conn)
 
     # ----- Capability flags -----
 
@@ -304,18 +288,26 @@ class SqliteBackend:
         top_k: int = 50,
     ) -> dict[tuple[str, str], int]:
         """Thin protocol-completeness wrapper over the existing BM25
-        (``reflection_fts``) + vector legs (``services/relevant.py``'s
-        ``_bm25_qualifiers`` / ``_vec_qualifiers``), RRF-merged per kind.
-        Always returns a dict, never ``None`` -- its underlying legs
-        already degrade internally (a missing conn, no query vector, or a
-        malformed FTS query all resolve to empty results, not an error) so
-        there is no failure mode to signal here (see the Protocol
+        (``reflection_fts``) leg in ``services/relevant.py``'s
+        ``_bm25_qualifiers``. Always returns a dict, never ``None`` -- the
+        underlying leg already degrades internally (a missing conn or a
+        malformed FTS query both resolve to empty results, not an error)
+        so there is no failure mode to signal here (see the Protocol
         docstring's ``None`` vs ``{}`` contract, which only agentcore's
         AWS-error path actually exercises).
 
+        Semantic memories have no FTS/BM25 substrate of their own, and the
+        vector leg that used to cover them (``_vec_qualifiers`` over
+        ``semantic_embeddings`` / ``reflection_embeddings``) was removed in
+        remove-ollama-embeddings Task 7 along with this backend's
+        ``sync_embedder`` plumbing -- so ``"semantic"`` in ``kinds`` never
+        contributes any ranks here. That matches ``retrieve_relevant``'s
+        own sqlite path, which always falls back to its keyword-hit floor
+        for semantics regardless of this method (see module docstring).
+
         NOT consumed by ``retrieve_relevant``'s own sqlite path -- that
-        function keeps calling those helpers directly against its own
-        ``conn`` parameter (see its ``agentcore_mode`` gate, which is
+        function keeps calling ``_bm25_qualifiers`` directly against its
+        own ``conn`` parameter (see its ``agentcore_mode`` gate, which is
         False for any backend reporting ``supports_synthesis=True``), so
         this method's existence changes zero sqlite contextual-gate
         behavior. It exists purely so SqliteBackend satisfies the full
@@ -324,21 +316,13 @@ class SqliteBackend:
         if not (query or "").strip():
             return {}
         # Local import: services/relevant.py is the contextual-gate module;
-        # importing its private ranking helpers here (rather than
-        # duplicating the BM25/vec SQL) keeps the two legs byte-identical
+        # importing its private BM25 helper here (rather than duplicating
+        # the SQL) keeps this leg byte-identical to _bm25_qualifiers
         # without creating a module-load-time cycle (relevant.py itself
         # never imports storage).
-        from better_memory.services.relevant import (
-            _RRF_K,
-            _bm25_qualifiers,
-            _vec_qualifiers,
-        )
+        from better_memory.services.relevant import _RRF_K, _bm25_qualifiers
 
         q = query.strip()
-        qvec = (
-            self._sync_embedder.embed_text(q)
-            if self._sync_embedder is not None else None
-        )
 
         def _rrf_merge(rank_maps: list[dict[str, int]]) -> dict[str, int]:
             scores: dict[str, float] = {}
@@ -351,17 +335,8 @@ class SqliteBackend:
         out: dict[tuple[str, str], int] = {}
         if "reflection" in kinds:
             bm = _bm25_qualifiers(self._conn, q)
-            vec_r = _vec_qualifiers(
-                self._conn, "reflection_embeddings", "reflection_id", qvec, 0.55,
-            )
-            for rid, rank in _rrf_merge([bm, vec_r]).items():
+            for rid, rank in _rrf_merge([bm]).items():
                 out[("reflection", rid)] = rank
-        if "semantic" in kinds:
-            vec_s = _vec_qualifiers(
-                self._conn, "semantic_embeddings", "memory_id", qvec, 0.55,
-            )
-            for rid, rank in _rrf_merge([vec_s]).items():
-                out[("semantic", rid)] = rank
         return out
 
     # ----- Reflection lifecycle -----

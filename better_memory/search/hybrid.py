@@ -1,17 +1,18 @@
-"""Hybrid search over observations (FTS5 BM25 + sqlite-vec kNN + RRF fusion).
+"""Hybrid search over observations (word-FTS5 BM25 + trigram-FTS5 BM25 + RRF fusion).
 
-This module is deliberately **pure SQLite**: it never calls the embedder.
-Callers that want semantic search must supply a ``query_vector`` themselves.
-This keeps the layer unit-testable without mocking Ollama and lets the caller
-reuse one embedding across multiple search calls (e.g. three bucket searches
-per retrieve).
+This module is deliberately **pure SQLite**: it never calls an embedder --
+there is no vector/embedding leg (removed in remove-ollama-embeddings Task 7,
+which deleted the sqlite-vec kNN leg and its ``query_vector`` parameter).
+Both BM25 legs run over the same ``query_text``.
 
 Algorithm
 ---------
 1. Build a base ``WHERE`` clause from :class:`SearchFilters`.
-2. Run FTS5 BM25 top-K (if ``query_text`` supplied) and sqlite-vec kNN top-K
-   (if ``query_vector`` supplied). Both are cheap serial queries — the "parallel"
-   in the plan means "independently scored", not concurrent execution.
+2. Run word-FTS5 BM25 top-K (``observation_fts``) and trigram-FTS5 BM25 top-K
+   (``observation_trigram_fts``, which catches substring matches the word
+   tokenizer misses) -- both keyed off ``query_text``. Cheap serial queries
+   -- the "parallel" in the plan means "independently scored", not concurrent
+   execution.
 3. Fuse candidate lists with Reciprocal Rank Fusion:
    ``score(d) = Σ 1 / (rrf_k + rank_source(d))`` across sources.
 4. Multiply by the reinforcement multiplier
@@ -27,8 +28,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
-
-import sqlite_vec
 
 from better_memory._common import default_clock
 
@@ -84,8 +83,6 @@ def hybrid_search(
     conn: sqlite3.Connection,
     *,
     query_text: str | None = None,
-    query_vector: list[float] | None = None,
-    second_source: Literal["vec0", "trigram", "none"] = "vec0",
     filters: SearchFilters = _DEFAULT_FILTERS,
     limit: int = 10,
     candidate_k: int = 50,
@@ -96,62 +93,40 @@ def hybrid_search(
 ) -> list[SearchResult]:
     """Run hybrid search and return the top ``limit`` results.
 
-    ``second_source`` selects the companion ranker that fuses with word-FTS5
-    BM25 via RRF:
-      * ``"vec0"`` (default) — sqlite-vec kNN over ``query_vector``.
-      * ``"trigram"`` — FTS5 BM25 over ``observation_trigram_fts`` using
-        ``query_text``. Used by the ``sqlite`` embeddings backend.
-      * ``"none"`` — skip the second source; only word-FTS5 runs.
-    The RRF source tag stays ``"vec"`` for both vec0 and trigram so downstream
-    code that treats it as "the second source" is unaffected.
+    Always fuses two BM25 legs over the same ``query_text`` via RRF:
+    word-level FTS5 (``observation_fts``) and trigram-level FTS5
+    (``observation_trigram_fts``, which catches substring matches the word
+    tokenizer misses). There is no vector/embedding leg (removed in
+    remove-ollama-embeddings Task 7, along with the ``query_vector`` /
+    ``second_source`` parameters this function used to accept).
     """
-    if query_text is None and query_vector is None and second_source != "trigram":
-        return []
-    if second_source == "trigram" and (query_text is None or not query_text.strip()):
+    if query_text is None or not query_text.strip():
         return []
 
     now = (clock or default_clock)()
     where_sql, where_params = _build_where(filters, now=now)
 
-    # Gather candidate rowids from each active source.
-    fts_ids: list[str] = []
-    second_ids: list[str] = []
+    fts_ids = _fts_candidates(
+        conn,
+        query_text=query_text,
+        where_sql=where_sql,
+        where_params=where_params,
+        candidate_k=candidate_k,
+    )
+    trigram_ids = _trigram_candidates(
+        conn,
+        query_text=query_text,
+        where_sql=where_sql,
+        where_params=where_params,
+        candidate_k=candidate_k,
+    )
 
-    if query_text is not None and query_text.strip():
-        fts_ids = _fts_candidates(
-            conn,
-            query_text=query_text,
-            where_sql=where_sql,
-            where_params=where_params,
-            candidate_k=candidate_k,
-        )
-    if second_source == "vec0" and query_vector is not None:
-        second_ids = _vec_candidates(
-            conn,
-            query_vector=query_vector,
-            where_sql=where_sql,
-            where_params=where_params,
-            candidate_k=candidate_k,
-        )
-    elif second_source == "trigram" and query_text is not None and query_text.strip():
-        second_ids = _trigram_candidates(
-            conn,
-            query_text=query_text,
-            where_sql=where_sql,
-            where_params=where_params,
-            candidate_k=candidate_k,
-        )
-    # second_source == "none" → second_ids stays []
-
-    if not fts_ids and not second_ids:
+    if not fts_ids and not trigram_ids:
         return []
 
-    # Fuse with Reciprocal Rank Fusion. The second-source tag stays "vec" so
-    # downstream rank-bookkeeping (which treats it as "the companion source")
-    # is unchanged whether vec0 or trigram populated it.
     candidates: dict[str, _Candidate] = {}
     _add_rrf_ranks(candidates, fts_ids, source="fts", rrf_k=rrf_k)
-    _add_rrf_ranks(candidates, second_ids, source="vec", rrf_k=rrf_k)
+    _add_rrf_ranks(candidates, trigram_ids, source="trigram", rrf_k=rrf_k)
 
     if not candidates:
         return []
@@ -257,43 +232,6 @@ def _fts_candidates(
         # treat as no matches rather than propagating.
         return []
     return [r["id"] for r in rows]
-
-
-def _vec_candidates(
-    conn: sqlite3.Connection,
-    *,
-    query_vector: list[float],
-    where_sql: str,
-    where_params: list[Any],
-    candidate_k: int,
-) -> list[str]:
-    """Return observation ids ordered by vec distance (closest first)."""
-    # sqlite-vec's kNN operator only accepts ``embedding MATCH ? AND k = ?``
-    # without extra predicates, so we fetch the top candidates first and then
-    # filter/order by joining to observations afterwards.
-    blob = sqlite_vec.serialize_float32(query_vector)
-    knn_rows = conn.execute(
-        "SELECT observation_id, distance "
-        "FROM observation_embeddings "
-        "WHERE embedding MATCH ? AND k = ? "
-        "ORDER BY distance",
-        (blob, candidate_k),
-    ).fetchall()
-    if not knn_rows:
-        return []
-
-    # Build the filtered set by joining to observations.
-    ids_in_order = [r["observation_id"] for r in knn_rows]
-    placeholders = ",".join("?" for _ in ids_in_order)
-    sql = f"SELECT o.id AS id FROM observations o WHERE o.id IN ({placeholders})"
-    params: list[Any] = list(ids_in_order)
-    if where_sql:
-        sql += " AND " + where_sql
-        params.extend(where_params)
-
-    allowed = {r["id"] for r in conn.execute(sql, params).fetchall()}
-    # Preserve kNN order while filtering.
-    return [i for i in ids_in_order if i in allowed]
 
 
 def _trigram_candidates(

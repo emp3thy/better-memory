@@ -39,8 +39,6 @@ def test_defaults_resolve_under_home(
     fake_home = _fake_user_home(monkeypatch, tmp_path)
     for var in (
         "BETTER_MEMORY_HOME",
-        "OLLAMA_HOST",
-        "EMBED_MODEL",
         "AUDIT_LOG_RETRIEVED",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -56,8 +54,6 @@ def test_defaults_resolve_under_home(
     assert cfg.knowledge_db == home / "knowledge.db"
     assert cfg.knowledge_base == home / "knowledge-base"
     assert cfg.spool_dir == home / "spool"
-    assert cfg.ollama_host == "http://localhost:11434"
-    assert cfg.embed_model == "nomic-embed-text"
     assert cfg.audit_log_retrieved is True
 
 
@@ -92,15 +88,36 @@ def test_home_expands_tilde(
 
 def test_external_service_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """External-service env vars override independently of path layout."""
-    monkeypatch.setenv("OLLAMA_HOST", "http://example:9999")
-    monkeypatch.setenv("EMBED_MODEL", "some-other-model")
     monkeypatch.setenv("AUDIT_LOG_RETRIEVED", "false")
 
     cfg = get_config()
 
-    assert cfg.ollama_host == "http://example:9999"
-    assert cfg.embed_model == "some-other-model"
     assert cfg.audit_log_retrieved is False
+
+
+def test_removed_embedding_fields_raise_attribute_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ollama_host/embed_model/embeddings_backend/context_vec_floor were
+    deleted from Config outright -- accessing them raises, rather than
+    silently resolving a stale default. Their backing env vars (OLLAMA_HOST,
+    EMBED_MODEL, BETTER_MEMORY_EMBEDDINGS_BACKEND,
+    BETTER_MEMORY_CONTEXT_VEC_FLOOR) are set here to prove they're now
+    silently unread, not just unset."""
+    monkeypatch.setenv("OLLAMA_HOST", "http://example:9999")
+    monkeypatch.setenv("EMBED_MODEL", "some-other-model")
+    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", "0.9")
+
+    cfg = get_config()
+    for attr in (
+        "ollama_host",
+        "embed_model",
+        "embeddings_backend",
+        "context_vec_floor",
+    ):
+        with pytest.raises(AttributeError):
+            getattr(cfg, attr)
 
 
 def test_paths_are_path_objects(
@@ -318,25 +335,6 @@ def test_project_name_env_var_stripped(
     """Surrounding whitespace in BETTER_MEMORY_PROJECT is stripped."""
     monkeypatch.setenv("BETTER_MEMORY_PROJECT", "  scoped-name  \n")
     assert project_name(tmp_path) == "scoped-name"
-
-
-def test_embeddings_backend_defaults_to_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", raising=False)
-    cfg = get_config()
-    assert cfg.embeddings_backend == "ollama"
-
-
-def test_embeddings_backend_sqlite_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
-    cfg = get_config()
-    assert cfg.embeddings_backend == "sqlite"
-
-
-def test_embeddings_backend_unknown_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    # `tfidf` was valid in PR #65, no longer accepted after the rename.
-    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "tfidf")
-    with pytest.raises(ValueError, match="BETTER_MEMORY_EMBEDDINGS_BACKEND"):
-        get_config()
 
 
 def test_storage_backend_defaults_to_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -617,19 +615,3 @@ class TestInjectModeConfig:
     def test_unknown_coerces_to_legacy(self, monkeypatch):
         monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "yolo")
         assert get_config().inject_mode == "legacy"
-
-
-class TestVecFloorConfig:
-    def test_default(self, monkeypatch):
-        monkeypatch.delenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", raising=False)
-        assert get_config().context_vec_floor == 0.55
-
-    def test_override_and_clamp(self, monkeypatch):
-        monkeypatch.setenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", "0.7")
-        assert get_config().context_vec_floor == 0.7
-        monkeypatch.setenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", "1.7")
-        assert get_config().context_vec_floor == 1.0
-
-    def test_malformed_falls_back(self, monkeypatch):
-        monkeypatch.setenv("BETTER_MEMORY_CONTEXT_VEC_FLOOR", "high")
-        assert get_config().context_vec_floor == 0.55

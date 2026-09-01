@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "better-memory"
 version = "0.1.0"
-description = "Local-first AI memory system (MCP server + SQLite + sqlite-vec + Ollama embeddings)"
+description = "Local-first AI memory system (MCP server + SQLite FTS5)"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }

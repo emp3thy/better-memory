@@ -1,9 +1,8 @@
 """Observation write-path service.
 
 Handles creation of episodic ``observations`` rows plus the supporting
-``observation_embeddings`` vector row and ``audit_log`` entry, and records
-re-use / outcome signals that move ``reinforcement_score`` up (success) or
-down (failure).
+``audit_log`` entry, and records re-use / outcome signals that move
+``reinforcement_score`` up (success) or down (failure).
 
 Retrieval lives in later phases.
 
@@ -14,26 +13,11 @@ to :meth:`ObservationService.create`:
 
     1. Resolves the active episode via the injected :class:`EpisodeService`,
        opening a background episode if none is active. This call commits on
-       success (background episode creation is its own transaction). See the
-       caveat below.
-    2. Calls the embedder. A slow / broken Ollama server causes this step to
-       fail; steps 3+ do not run.
-    3. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
-       FTS content-linked virtual table), inserts the embedding into the
-       ``vec0`` table, and writes an audit row. All four statements succeed
-       together or the SAVEPOINT rolls them all back.
-    4. Commits the transaction.
-
-Fail-fast caveat
-----------------
-If the embedder fails in step 2, a background episode may have been
-committed in step 1 and left with zero observations attached. Subsequent
-successful ``create`` calls on the same session will reuse that background
-episode (via ``active_episode``), so the stranding is bounded to "one
-orphan background episode per session that hit embed failure before any
-successful write". Phase 2 accepts this trade-off; a future refactor of
-``EpisodeService.open_background`` to support an "in-savepoint" mode
-could restore the stricter guarantee.
+       success (background episode creation is its own transaction).
+    2. Opens a SAVEPOINT, inserts the observation (AI trigger populates the
+       FTS content-linked virtual table) and writes an audit row. Both
+       statements succeed together or the SAVEPOINT rolls them all back.
+    3. Commits the transaction.
 
 If the SAVEPOINT is rolled back on error, the FTS trigger's side-effects are
 undone along with the base-table row because SQLite FTS5 triggers participate
@@ -46,8 +30,7 @@ The task brief originally said ``create`` should insert into
 ``content='observations'`` FTS5 external-content table with AFTER INSERT /
 UPDATE / DELETE triggers that mirror writes automatically. Therefore
 *no* direct insert into ``observation_fts`` is required — the trigger
-handles it. The ``vec0`` ``observation_embeddings`` table, on the other
-hand, is NOT trigger-populated and must be written manually.
+handles it.
 """
 
 from __future__ import annotations
@@ -58,8 +41,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
-
-import sqlite_vec
 
 from better_memory import _diag
 from better_memory._common import default_clock, get_session_id
@@ -110,7 +91,6 @@ class ObservationService:
     def __init__(
         self,
         conn: sqlite3.Connection,
-        embedder: Any = None,
         *,
         clock: Callable[[], datetime] | None = None,
         project_resolver: Callable[[], str] | None = None,
@@ -120,7 +100,6 @@ class ObservationService:
         episodes: EpisodeService | None = None,
     ) -> None:
         self._conn = conn
-        self._embedder = embedder
         self._clock: Callable[[], datetime] = clock or default_clock
         self._project_resolver: Callable[[], str] = (
             project_resolver if project_resolver is not None else project_name
@@ -156,7 +135,7 @@ class ObservationService:
         tech: str | None = None,
         scope: str = "project",
     ) -> str:
-        """Insert a new observation, embedding and audit row; return its id."""
+        """Insert a new observation and audit row; return its id."""
         fn = "ObservationService.create"
         with _diag.trace(fn, scope=scope, content_len=len(content)):
             if scope not in ("project", "general"):
@@ -192,20 +171,6 @@ class ObservationService:
                 episode_id = active.id
                 _diag.step(fn, "reusing_active_episode", episode_id=episode_id)
 
-            # Compute the embedding BEFORE opening the observation SAVEPOINT so a
-            # slow / broken Ollama server does not hold an open SAVEPOINT. Note
-            # that the episode lookup / background-open above has already
-            # committed if a new background was created — see module docstring.
-            # When embedder is None (sqlite backend) skip the vec0 path entirely;
-            # FTS5 triggers populate both the word and trigram indexes for us.
-            vec_blob: bytes | None = None
-            if self._embedder is not None:
-                _diag.step(fn, "about_to_embed", model=getattr(self._embedder, "_model", "?"))
-                vector = await self._embedder.embed(content)
-                _diag.step(fn, "embed_returned", dim=len(vector))
-                vec_blob = sqlite_vec.serialize_float32(vector)
-                _diag.step(fn, "vec_serialized", bytes=len(vec_blob))
-
             now = self._clock().isoformat()
 
             conn = self._conn
@@ -238,14 +203,6 @@ class ObservationService:
                         scope,
                     ),
                 )
-
-                if vec_blob is not None:
-                    _diag.step(fn, "insert_embedding_row")
-                    conn.execute(
-                        "INSERT INTO observation_embeddings (observation_id, embedding) "
-                        "VALUES (?, ?)",
-                        (obs_id, vec_blob),
-                    )
 
                 _diag.step(fn, "write_audit_row")
                 self._write_audit(
@@ -291,23 +248,14 @@ class ObservationService:
     ) -> BucketedResults:
         """Run three outcome-filtered hybrid searches and return them bucketed.
 
-        The query is embedded *once* and the vector is reused for all three
-        sub-searches (success / failure / neutral), saving two embedder
-        round-trips per retrieve.
+        FTS5/trigram BM25 only — there is no embedder, so no vector leg.
         """
         resolved_project = project if project is not None else self._project_resolver()
-
-        # Embed the query once, if any, so vector search is available to every
-        # bucket without paying three embed calls.
-        query_vector: list[float] | None = None
-        if query is not None and query.strip() and self._embedder is not None:
-            query_vector = await self._embedder.embed(query)
 
         # Sanitise before FTS5 MATCH: user queries like ``better-memory retrieval``
         # would otherwise be parsed by FTS5 as ``-memory`` column-exclusion and
         # resolve to [] (via the safety net in hybrid._fts_candidates), yielding
-        # zero hits for any hyphenated term. The embedder still receives the
-        # raw query — operator chars don't affect semantic similarity.
+        # zero hits for any hyphenated term.
         fts_query_text = (
             sanitize_fts5_query(query) if query is not None else None
         ) or None
@@ -322,12 +270,9 @@ class ObservationService:
 
         def _run(outcome: Outcome, limit: int) -> list[SearchResult]:
             filters = SearchFilters(outcome=outcome, **base_kwargs)
-            second_source = "vec0" if self._embedder is not None else "trigram"
             return hybrid_search(
                 self._conn,
                 query_text=fts_query_text,
-                query_vector=query_vector,
-                second_source=second_source,
                 filters=filters,
                 limit=limit,
                 candidate_k=candidate_k,
@@ -483,8 +428,9 @@ class ObservationService:
         - Order: ``created_at DESC, rowid DESC``. Cap at ``limit``.
 
         Query mode (``query`` is given):
-        - Embed the query and route through :func:`hybrid_search`. FTS5 +
-          sqlite-vec results, RRF-fused, ranked by relevance.
+        - Route through :func:`hybrid_search`: word-FTS5 + trigram-FTS5
+          BM25, RRF-fused, ranked by relevance. There is no embedder, so
+          no vector leg.
         - The simple filters that ``SearchFilters`` natively supports
           (``project``, ``component``, ``outcome``) are honoured; ``status``
           and ``window_days`` are disabled (drill-down should see all
@@ -578,15 +524,9 @@ class ObservationService:
             status=None,
             window_days=None,
         )
-        second_source = "vec0" if self._embedder is not None else "trigram"
-        vector: list[float] | None = None
-        if self._embedder is not None:
-            vector = await self._embedder.embed(query)
         results = hybrid_search(
             self._conn,
             query_text=fts_query_text,
-            query_vector=vector,
-            second_source=second_source,
             filters=filters,
             limit=limit,
             clock=self._clock,

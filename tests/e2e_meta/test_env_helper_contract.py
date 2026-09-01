@@ -49,7 +49,6 @@ E2E_DIR = Path(__file__).resolve().parents[1] / "e2e"
 DELIBERATE_PINS = {
     "BETTER_MEMORY_HOME",
     "BETTER_MEMORY_PROJECT",
-    "BETTER_MEMORY_EMBEDDINGS_BACKEND",
     "CLAUDE_SESSION_ID",
     "OLLAMA_HOST",
 }
@@ -157,7 +156,6 @@ class TestContractADictLevel:
     def test_default_pin_values(self, tmp_path: Path) -> None:
         env = isolated_env(tmp_path)
         assert env["BETTER_MEMORY_HOME"] == str(tmp_path / ".better-memory")
-        assert env["BETTER_MEMORY_EMBEDDINGS_BACKEND"] == "sqlite"
         assert env["OLLAMA_HOST"] == POISONED_OLLAMA_HOST
         assert env["CLAUDE_SESSION_ID"] == "e2e-session-1"
         assert env["BETTER_MEMORY_PROJECT"] == "e2e-project"
@@ -580,9 +578,10 @@ class TestHelperSmoke:
 
     async def test_mcp_session_boots_real_server_hermetically(self, tmp_path: Path) -> None:
         """The proven-helper smoke for every T1/T2 builder: the real MCP
-        server boots offline on a virgin fake home (sqlite embeddings,
-        poisoned OLLAMA_HOST), answers list_tools + memory.retrieve, and all
-        disk writes land under the fake home."""
+        server boots offline on a virgin fake home (isolated_env pins
+        BETTER_MEMORY_HOME and poisons OLLAMA_HOST, though the server never
+        talks to Ollama any more), answers list_tools + memory.retrieve,
+        and all disk writes land under the fake home."""
         home = tmp_path / "home"
         home.mkdir()
         env = isolated_env(home)

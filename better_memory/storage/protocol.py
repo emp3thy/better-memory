@@ -447,10 +447,12 @@ class StorageBackend(Protocol):
         2026-07-24-agentcore-parity-design.md §3).
 
         SqliteBackend: a thin wrapper over its existing BM25
-        (``reflection_fts``) + vector legs, RRF-merged per kind. Its own
-        legs never raise (they degrade internally), so it always returns a
-        dict, never ``None``. Provided for protocol completeness only --
-        ``retrieve_relevant``'s sqlite path keeps calling those legs
+        (``reflection_fts``) leg only -- the vector leg that used to also
+        cover semantics was removed in remove-ollama-embeddings Task 7, so
+        ``"semantic"`` in ``kinds`` never contributes any ranks here. Its
+        own leg never raises (it degrades internally), so it always
+        returns a dict, never ``None``. Provided for protocol completeness
+        only -- ``retrieve_relevant``'s sqlite path keeps calling that leg
         directly against its own ``conn`` parameter and never calls this
         method, so sqlite's contextual-gate behavior is unaffected by this
         method's existence.

@@ -19,13 +19,16 @@ below.
 
 The `contextual_inject` hook is gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE`
 (`userprompt` \| `pretool` \| `both` (default) \| `off`). It runs in-process
-against `memory.db` and gates each candidate through a three-leg evidence
-check (BM25 match against `reflection_fts`, or vector cosine similarity
->= `BETTER_MEMORY_CONTEXT_VEC_FLOOR` (default 0.55), or — only when both
-those legs are structurally unavailable — a keyword-hit fallback), then
-ranks qualifiers by reciprocal rank fusion over a Wilson-score usefulness
-prior; it injects the top matches (capped at `BETTER_MEMORY_CONTEXT_MAX_ITEMS`)
-and never blocks a turn. `PreToolUse` hosts two independent registrations —
+against `memory.db` and gates each candidate through a two-leg evidence
+check (a BM25 match against `reflection_fts`, or — only when that leg is
+structurally unavailable, or for semantic memories, which have no FTS
+substrate of their own — a keyword-hit fallback), then ranks qualifiers
+by reciprocal rank fusion over a Wilson-score usefulness prior; it
+injects the top matches (capped at `BETTER_MEMORY_CONTEXT_MAX_ITEMS`) and
+never blocks a turn. On agentcore, both kinds are instead gated by the
+backend's own server-side `relevance_ranks`, falling back to the
+keyword-hit floor only when that lookup itself fails. `PreToolUse` hosts
+two independent registrations —
 `contextual_inject`, unscoped (matches every tool) but latched to one real
 firing per session (later tool calls short-circuit on a state file before
 touching the DB), and `commit_checkpoint`, scoped to `Bash` and gated to

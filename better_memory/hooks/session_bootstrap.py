@@ -108,7 +108,6 @@ def main() -> None:
                 backend = build_backend(
                     config=cfg,
                     memory_conn=conn,
-                    embedder=None,
                     session_id=session_id or None,
                     project=project_name(Path(cwd_str)),
                 )

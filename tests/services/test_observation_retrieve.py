@@ -1,6 +1,7 @@
 """Tests for :meth:`ObservationService.retrieve` — the three-bucket API.
 
-Uses a stub embedder so the test doesn't contact Ollama.
+There is no embedder any more (remove-ollama-embeddings Task 6); this
+exercises the FTS5/trigram BM25-only path.
 """
 
 from __future__ import annotations
@@ -17,22 +18,6 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import BucketedResults, ObservationService
-
-_VEC_DIM = 768
-_VEC_FIXED = [0.01] * _VEC_DIM
-
-
-class _StubEmbedder:
-    """Minimal async embedder that always returns the same vector."""
-
-    def __init__(self, *, vector: list[float] | None = None) -> None:
-        self._vector = vector if vector is not None else list(_VEC_FIXED)
-        self.calls: list[str] = []
-
-    async def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        return list(self._vector)
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -56,17 +41,11 @@ def fixed_clock() -> Any:
 
 
 @pytest.fixture
-def embedder() -> _StubEmbedder:
-    return _StubEmbedder()
-
-
-@pytest.fixture
 def service(
-    conn: sqlite3.Connection, fixed_clock: Any, embedder: _StubEmbedder
+    conn: sqlite3.Connection, fixed_clock: Any
 ) -> ObservationService:
     return ObservationService(
         conn,
-        embedder,
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
@@ -158,15 +137,6 @@ async def test_retrieve_buckets_sorted_by_final_score_descending(
         assert scores == sorted(scores, reverse=True)
 
 
-async def test_retrieve_embeds_query_once(
-    service: ObservationService, embedder: _StubEmbedder
-) -> None:
-    await _seed_mix(service)
-    embedder.calls.clear()
-    await service.retrieve(query="marker")
-    assert len(embedder.calls) == 1
-
-
 async def test_retrieve_reinforcement_orders_within_do_bucket(
     service: ObservationService,
     conn: sqlite3.Connection,
@@ -194,7 +164,7 @@ async def test_retrieve_reinforcement_orders_within_do_bucket(
 async def test_retrieve_with_no_query_still_returns_bucketed(
     service: ObservationService,
 ) -> None:
-    # query=None and no vector → hybrid_search returns [] for each bucket.
+    # query=None → hybrid_search returns [] for each bucket.
     await _seed_mix(service)
     result = await service.retrieve(query=None)
     assert result.do == []
@@ -208,10 +178,10 @@ async def test_retrieve_with_hyphenated_query_ranks_fts_match_first(
     """Regression: ``better-memory`` once crashed FTS5 as ``-memory`` column.
 
     The safety net in hybrid search would swallow the error and return ``[]``
-    for the FTS path, so users got vector-only hits (or nothing) for any
-    hyphenated query. After sanitising, the FTS path delivers the matching
-    row, which then ranks first in RRF fusion because only it contributes
-    an FTS rank on top of the vector rank.
+    for the word-FTS path, so users got trigram-only hits (or nothing) for
+    any hyphenated query. After sanitising, the word-FTS path delivers the
+    matching row, which then ranks first in RRF fusion because it now
+    contributes an FTS rank on top of the trigram rank.
     """
     matched_id = await service.create(
         "better memory retrieval conventions", outcome="success"

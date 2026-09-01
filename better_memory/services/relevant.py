@@ -1,25 +1,23 @@
 """Relevance filter over the curated memory set (semantic + reflections).
 
-Three-leg evidence-gated scorer, replacing the old pure-keyword
-hits-x-activation model: a memory injects only when it has positive
-relevance EVIDENCE --
+Evidence-gated scorer, replacing the old pure-keyword hits-x-activation
+model: a memory injects only when it has positive relevance EVIDENCE --
 
 - BM25 match against ``reflection_fts`` (title / use_cases / hints), or
-- vector cosine similarity >= ``vec_floor`` against its embedding, or
-- (only when the vec/FTS legs are structurally unavailable -- no sqlite
-  ``conn``, or no embedder for semantics) a keyword-hit floor as a
-  degraded fallback.
+- (only when that leg is structurally unavailable -- no sqlite ``conn``
+  for reflections; always, for semantics, which have no FTS substrate at
+  all) a keyword-hit floor as a degraded fallback.
 
 The Wilson lower-bound prior (see ``services.scoring``) never qualifies a
 memory by itself -- it only RANKS among qualifiers via reciprocal rank
-fusion (RRF), alongside the BM25 and vector ranks. Popularity forcing
-irrelevant injections was the old failure mode (13% useful as bootstrap);
-the gate exists specifically to close it.
+fusion (RRF), alongside the BM25 rank. Popularity forcing irrelevant
+injections was the old failure mode (13% useful as bootstrap); the gate
+exists specifically to close it.
 
 Fetches the small, already-ranked sets through the StorageBackend
-abstraction (works on sqlite AND agentcore); the BM25/vec legs additionally
-require a raw sqlite ``conn``. Agentcore (``conn=None`` AND
-``supports_synthesis=False``) replaces the BM25/vec legs wholesale with
+abstraction (works on sqlite AND agentcore); the BM25 leg additionally
+requires a raw sqlite ``conn``. Agentcore (``conn=None`` AND
+``supports_synthesis=False``) replaces the BM25 leg wholesale with
 ``backend.relevance_ranks`` -- a server-side semantic-search rank map --
 and falls back to the keyword-hit floor ONLY when that lookup itself
 FAILS (``relevance_ranks`` returns ``None`` -- an AWS error). A
@@ -32,23 +30,19 @@ unchanged, regardless of whether it also implements ``relevance_ranks``
 """
 from __future__ import annotations
 
-import math
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-import sqlite_vec
-
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.keywords import count_keyword_hits, extract_keywords
 from better_memory.services.scoring import wilson_lower_bound
 
-#: Keyword-hit floor used only when the FTS/vec legs are structurally
-#: unavailable (no sqlite conn for reflections; no query vector, or no
-#: sqlite conn, for semantics -- which have no FTS substrate at all and
-#: whose vec leg needs a conn even when the embedder itself is healthy).
+#: Keyword-hit floor used only when the FTS leg is structurally
+#: unavailable (no sqlite conn, for reflections; always, for semantics,
+#: which have no FTS substrate at all).
 _FALLBACK_MIN_HITS = 2
 
 #: Reciprocal rank fusion constant, matching search/hybrid.py and
@@ -99,61 +93,6 @@ def _bm25_qualifiers(conn: sqlite3.Connection | None, query: str) -> dict[str, i
     return {row[0]: i for i, row in enumerate(rows)}
 
 
-def _vec_qualifiers(
-    conn: sqlite3.Connection | None,
-    table: str,
-    id_col: str,
-    query_vector: list[float] | None,
-    vec_floor: float,
-    candidate_ids: list[str] | None = None,
-) -> dict[str, int]:
-    """id -> vec rank for rows within the cosine floor.
-
-    Vectors are unit-norm, so cosine >= c  <=>  L2 distance <= sqrt(2*(1-c)).
-
-    Step 3a probe (2026-07-23, sqlite-vec as vendored in this repo's
-    .venv): a vec0 kNN query for [1,0,0,0] against a stored [0,1,0,0] row
-    returned ``distance=1.4142135381698608`` -- sqrt(2) at float32
-    precision, not 2.0. Confirms sqlite-vec's ``distance`` column is plain
-    L2 distance, NOT squared L2. The floor comparison below is against the
-    plain (unsquared) distance only; the squared-distance branch that a
-    defensive dual-check would need is dead code and has been omitted.
-
-    ``candidate_ids`` scopes the result to the caller's candidate set,
-    matching ``ReflectionService._vec_ranks`` (reflection.py) -- sqlite-vec
-    kNN accepts only ``embedding MATCH ? AND k = ?`` (no extra predicates),
-    so we fetch top-k and filter in Python. ``k`` scales with
-    ``max(len(candidate_ids), 50)`` so the window is dense over what the
-    caller actually ranks, instead of being drowned by neighbours from
-    other projects or retired records (whose vectors persist -- retire
-    only UPDATEs status). ``None`` preserves the global-scope behaviour
-    for callers (e.g. ``SqliteBackend.relevance_ranks``) that intentionally
-    want the unfiltered rank map; ``[]`` short-circuits to ``{}``.
-    """
-    if conn is None or query_vector is None:
-        return {}
-    if candidate_ids is not None and not candidate_ids:
-        return {}
-    max_dist = math.sqrt(2.0 * (1.0 - vec_floor))
-    k = max(len(candidate_ids), 50) if candidate_ids is not None else 50
-    try:
-        rows = conn.execute(
-            f"SELECT {id_col}, distance FROM {table} "
-            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (sqlite_vec.serialize_float32(query_vector), k),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    wanted: set[str] | None = set(candidate_ids) if candidate_ids is not None else None
-    out: dict[str, int] = {}
-    for row in rows:
-        if wanted is not None and row[0] not in wanted:
-            continue
-        if float(row[1]) <= max_dist:
-            out[row[0]] = len(out)
-    return out
-
-
 def _wilson_for(useful: int, overlooked: int, ignored: int) -> float:
     positive = useful + overlooked
     n = useful + overlooked + ignored
@@ -161,8 +100,8 @@ def _wilson_for(useful: int, overlooked: int, ignored: int) -> float:
 
 
 def _rrf_score(candidates: list[dict]) -> list[tuple[float, dict]]:
-    """RRF-fuse the Wilson prior with the BM25/vec ranks already stashed
-    on each candidate dict (``bm_rank`` / ``vec_rank``, ``None`` if absent).
+    """RRF-fuse the Wilson prior with the BM25 rank already stashed
+    on each candidate dict (``bm_rank``, ``None`` if absent).
 
     The prior rank is computed fresh here (desc by Wilson score) rather
     than carried in, since it only makes sense relative to the other
@@ -176,8 +115,6 @@ def _rrf_score(candidates: list[dict]) -> list[tuple[float, dict]]:
         present_ranks = [prior_rank[c["id"]]]
         if c["bm_rank"] is not None:
             present_ranks.append(c["bm_rank"])
-        if c["vec_rank"] is not None:
-            present_ranks.append(c["vec_rank"])
         score = sum(1.0 / (_RRF_K + rank) for rank in present_ranks)
         scored.append((score, c))
     return scored
@@ -189,22 +126,20 @@ def retrieve_relevant(
     query: str,
     project: str,
     conn: sqlite3.Connection | None = None,
-    sync_embedder: Any = None,
-    vec_floor: float = 0.55,
     max_items: int = 3,
     include_neutral: bool = False,
     now: Callable[[], datetime] | None = None,
 ) -> list[RelevantMemory]:
     """Gate + rank curated memories (semantic + reflections) for ``query``.
 
-    A memory is returned only if it clears the evidence gate: a BM25 match,
-    a vector cosine >= ``vec_floor``, or (only when that leg is structurally
-    unavailable, e.g. no query vector) a keyword-hit fallback. Among
-    qualifiers, ranking is RRF over the Wilson prior plus whichever of
-    BM25/vec ranks are present.
+    A memory is returned only if it clears the evidence gate: a BM25 match
+    (reflections), or (only when that leg is structurally unavailable --
+    no sqlite ``conn`` for reflections; always, for semantics, which have
+    no FTS leg at all) a keyword-hit fallback. Among qualifiers, ranking
+    is RRF over the Wilson prior plus the BM25 rank when present.
 
     Agentcore backends (``conn=None`` AND ``supports_synthesis=False``)
-    replace the BM25/vec legs with ``backend.relevance_ranks`` -- a
+    replace the BM25 leg with ``backend.relevance_ranks`` -- a
     server-side semantic-search rank map fused into the same RRF -- and
     fall back to the keyword-hit floor only when that lookup FAILS
     (returns ``None`` -- an AWS error), never merely because it found
@@ -230,33 +165,13 @@ def retrieve_relevant(
         semantic = []
 
     bm = _bm25_qualifiers(conn, query)
-    qvec = sync_embedder.embed_text(query) if sync_embedder is not None else None
-    # Collect the actual candidate id set before the vec query so kNN is
-    # restricted to it (issue #104): the vec tables are global across
-    # projects and retained/retired rows, so an unbounded k=50 kNN can be
-    # entirely filled by neighbours the caller will never rank -- starving
-    # the evidence gate for the caller's own reflections/semantics.
     refl_bucket_order = ["do", "dont"] + (["neutral"] if include_neutral else [])
-    refl_candidate_ids = [
-        str(r.get("id"))
-        for bucket in refl_bucket_order
-        for r in (buckets.get(bucket) or [])
-    ]
-    sem_candidate_ids = [str(getattr(s, "id", "")) for s in (semantic or [])]
-    vec_r = _vec_qualifiers(
-        conn, "reflection_embeddings", "reflection_id", qvec, vec_floor,
-        refl_candidate_ids,
-    )
-    vec_s = _vec_qualifiers(
-        conn, "semantic_embeddings", "memory_id", qvec, vec_floor,
-        sem_candidate_ids,
-    )
     keywords = extract_keywords(query)     # fallback evidence only
 
     fts_unavailable = conn is None
 
     # Agentcore evidence gate (design spec 2026-07-24-agentcore-parity-
-    # design.md §3): when the caller has no sqlite FTS/vec substrate
+    # design.md §3): when the caller has no sqlite FTS substrate
     # (conn=None) AND the backend is agentcore-flavored --
     # supports_synthesis=False, the existing Protocol capability flag that
     # already distinguishes AgentCoreBackend from SqliteBackend everywhere
@@ -303,13 +218,12 @@ def retrieve_relevant(
             kw_hits = count_keyword_hits(text, keywords)
 
             in_bm = r_id in bm
-            in_vec = r_id in vec_r
             in_backend_rank = agentcore_mode and ("reflection", r_id) in rank_map
             fallback_ok = (
                 (agentcore_kw_fallback if agentcore_mode else fts_unavailable)
                 and kw_hits >= _FALLBACK_MIN_HITS
             )
-            if not (in_bm or in_vec or in_backend_rank or fallback_ok):
+            if not (in_bm or in_backend_rank or fallback_ok):
                 continue
 
             refl_candidates.append({
@@ -324,7 +238,6 @@ def retrieve_relevant(
                     rank_map.get(("reflection", r_id))
                     if agentcore_mode else bm.get(r_id)
                 ),
-                "vec_rank": vec_r.get(r_id),
                 # storage.protocol.retrieve guarantees times_overlooked/
                 # times_ignored on both backends (sqlite columns; agentcore
                 # copies its internal overlooked counter and hardcodes
@@ -343,21 +256,19 @@ def retrieve_relevant(
         content = getattr(s, "content", "") or ""
         kw_hits = count_keyword_hits(content, keywords)
 
-        in_vec = s_id in vec_s
         in_backend_rank = agentcore_mode and ("semantic", s_id) in rank_map
-        # Semantics have no FTS/BM25 leg at all, so the keyword fallback
-        # applies whenever the vec leg is structurally unavailable: no
-        # query vector (no embedder / embed failure) OR no sqlite conn
-        # to query against. In agentcore mode the vec leg is replaced
-        # wholesale by the backend rank map, so the fallback there fires
-        # only per the same agentcore_kw_fallback signal as reflections
-        # (relevance_ranks returned None == AWS error; a genuinely empty
-        # {} does NOT trigger it), not merely "conn is None".
+        # Semantics have no FTS/BM25 leg and no vec leg either, so the
+        # keyword-hit floor is their only evidence leg outside agentcore
+        # mode -- it is always "on" here (there is no other leg to gate
+        # it behind). In agentcore mode the backend rank map replaces it,
+        # so the fallback there fires only per the same
+        # agentcore_kw_fallback signal as reflections (relevance_ranks
+        # returned None == AWS error; a genuinely empty {} does NOT
+        # trigger it).
         fallback_ok = (
-            agentcore_kw_fallback if agentcore_mode
-            else (qvec is None or conn is None)
+            agentcore_kw_fallback if agentcore_mode else True
         ) and kw_hits >= _FALLBACK_MIN_HITS
-        if not (in_vec or in_backend_rank or fallback_ok):
+        if not (in_backend_rank or fallback_ok):
             continue
 
         sem_candidates.append({
@@ -367,10 +278,9 @@ def retrieve_relevant(
             "useful_count": int(getattr(s, "useful_count", 0) or 0),
             "age_days": _age_days(getattr(s, "updated_at", None), _now),
             "hits": kw_hits if (in_backend_rank or fallback_ok) else 0,
-            "bm_rank": None,
-            "vec_rank": (
+            "bm_rank": (
                 rank_map.get(("semantic", s_id))
-                if agentcore_mode else vec_s.get(s_id)
+                if agentcore_mode else None
             ),
             "wilson": _wilson_for(
                 int(getattr(s, "useful_count", 0) or 0),

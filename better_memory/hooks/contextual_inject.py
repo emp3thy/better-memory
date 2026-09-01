@@ -2,11 +2,13 @@
 current prompt or tool-input. Gated by BETTER_MEMORY_CONTEXT_INJECT_MODE
 (userprompt | pretool | both | off). Never raises; always exits 0.
 
-Candidates are scored via retrieve_relevant's three-leg evidence gate (BM25 /
-vector cosine / keyword-hit fallback — see services/relevant.py) and capped
-at cfg.context_max_items. A per-session SeenStore dedups injected memories
-across turns within a run (cfg.context_reinject_turns controls re-injection
-after N turns). Survivors are recorded as 'contextual' exposures (best-effort;
+Candidates are scored via retrieve_relevant's evidence gate (BM25
+qualifiers, a keyword-hit fallback when no FTS substrate is available, or
+the backend's relevance_ranks in agentcore mode — see
+services/relevant.py) and capped at cfg.context_max_items. A per-session
+SeenStore dedups injected memories across turns within a run
+(cfg.context_reinject_turns controls re-injection after N turns).
+Survivors are recorded as 'contextual' exposures (best-effort;
 a write failure never blocks injection) and counted in rating_diagnostics for
 observability (contextual_fired_userprompt/pretool, contextual_injected,
 contextual_suppressed_floor, contextual_suppressed_dedup).
@@ -16,7 +18,7 @@ PreToolUse is latched to one real firing per session
 sentinel file, race-safe across parallel hook processes): the installed
 matcher is unscoped (all tools), so without the latch every tool call
 would re-run the full retrieval path. Later PreToolUse events in the same
-session short-circuit on the sentinel before any DB/embedder work.
+session short-circuit on the sentinel before any DB work.
 UserPromptSubmit is unaffected by the latch.
 """
 from __future__ import annotations
@@ -30,8 +32,6 @@ from pathlib import Path
 
 from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
-from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.hooks._error_log import record_hook_error
 from better_memory.services.context_seen import SeenStore, prune_stale
 from better_memory.services.relevant import format_relevant, retrieve_relevant
@@ -112,7 +112,7 @@ def main() -> None:
             if event == "PreToolUse":
                 # Atomic O_CREAT|O_EXCL claim: if another parallel hook
                 # process already fired for this session, we return False
-                # and short-circuit before opening any DB / embedder.
+                # and short-circuit before opening any DB connection.
                 if not seen.try_claim_pretool_fired():
                     raise _SkipInjection()  # module-local sentinel; caught below
             seen.bump_turn()
@@ -121,15 +121,15 @@ def main() -> None:
             # operational state (the exposure ledger) lives in the local
             # memory.db regardless of backend — build_backend threads this
             # conn through as the backend's exposure-ledger connection. The
-            # BM25/vec legs below still require the SQLITE-CONTENT
-            # substrate (reflection_fts / *_embeddings), which agentcore has
-            # none of, so retrieve_relevant still gets conn=None for
-            # agentcore — that parameter means "FTS/vec index available",
-            # not "any local connection at all". retrieve_relevant itself
-            # detects agentcore (conn=None + supports_synthesis=False) and
+            # BM25 legs below still require the SQLITE-CONTENT
+            # substrate (reflection_fts), which agentcore has none of, so
+            # retrieve_relevant still gets conn=None for agentcore -- that
+            # parameter means "FTS index available", not "any local
+            # connection at all". retrieve_relevant itself detects
+            # agentcore (conn=None + supports_synthesis=False) and
             # substitutes backend.relevance_ranks — a server-side semantic
-            # search — for the BM25/vec legs, so agentcore's evidence gate
-            # is no longer purely keyword-based despite conn=None here.
+            # search — for the BM25 legs, so agentcore's evidence gate is
+            # no longer purely keyword-based despite conn=None here.
             with closing(connect(cfg.memory_db)) as conn:
                 _bump_diagnostic(
                     conn, cfg,
@@ -139,21 +139,12 @@ def main() -> None:
                 backend = build_backend(
                     config=cfg,
                     memory_conn=conn,
-                    embedder=None,
                     session_id=session_id or None,
                     project=project,
                 )
-                sync_embedder = None
-                if cfg.embeddings_backend == "ollama":
-                    sync_embedder = SyncEmbedder(
-                        lambda: OllamaEmbedder(timeout=5.0, max_retries=1),
-                        down_state_file=cfg.home / "state" / "embed_down_until",
-                    )
                 items = retrieve_relevant(
                     backend, query=query, project=project,
                     conn=conn if cfg.storage_backend == "sqlite" else None,
-                    sync_embedder=sync_embedder,
-                    vec_floor=cfg.context_vec_floor,
                     max_items=cfg.context_max_items,
                 )
                 had_candidates = bool(items)

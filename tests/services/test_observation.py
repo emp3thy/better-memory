@@ -1,8 +1,9 @@
 """Tests for :class:`better_memory.services.observation.ObservationService`.
 
-These tests use an in-memory (temp-file) migrated SQLite database and a mock
-embedder — they do NOT contact Ollama. Async tests rely on
-``asyncio_mode = "auto"`` from pyproject.
+These tests use an in-memory (temp-file) migrated SQLite database. There is
+no embedder any more (remove-ollama-embeddings Task 6) -- FTS5/trigram BM25
+is the only evidence leg. Async tests rely on ``asyncio_mode = "auto"``
+from pyproject.
 """
 
 from __future__ import annotations
@@ -18,33 +19,8 @@ import pytest
 
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.embeddings.ollama import EmbeddingError
 from better_memory.services.episode import EpisodeService
 from better_memory.services.observation import ObservationService
-
-# Deterministic 768-length vector used by the mock embedder.
-_VEC_768 = [0.01] * 768
-
-
-class _StubEmbedder:
-    """Minimal mock of :class:`OllamaEmbedder` for unit tests."""
-
-    def __init__(
-        self,
-        *,
-        vector: list[float] | None = None,
-        raise_on_embed: Exception | None = None,
-    ) -> None:
-        self._vector = vector if vector is not None else list(_VEC_768)
-        self._raise = raise_on_embed
-        self.calls: list[str] = []
-
-    async def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        if self._raise is not None:
-            raise self._raise
-        return list(self._vector)
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -70,10 +46,8 @@ def fixed_clock() -> Any:
 
 @pytest.fixture
 def service(conn: sqlite3.Connection, fixed_clock: Any) -> ObservationService:
-    embedder = _StubEmbedder()
     return ObservationService(
         conn,
-        embedder,
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: None,
@@ -142,10 +116,8 @@ async def test_create_stores_scope_path_argument(
 async def test_create_uses_scope_resolver_when_arg_not_given(
     conn: sqlite3.Connection, fixed_clock: Any
 ) -> None:
-    embedder = _StubEmbedder()
     svc = ObservationService(
         conn,
-        embedder,
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         scope_resolver=lambda: "auto/scope",
@@ -176,8 +148,7 @@ async def test_create_defaults_project_to_project_name_when_no_resolver(
     module-level :func:`better_memory.config.project_name` for the current cwd."""
     from better_memory.config import project_name
 
-    embedder = _StubEmbedder()
-    svc = ObservationService(conn, embedder, clock=fixed_clock, session_id="s", episodes=EpisodeService(conn))
+    svc = ObservationService(conn, clock=fixed_clock, session_id="s", episodes=EpisodeService(conn))
     obs_id = await svc.create("no resolver")
     row = conn.execute(
         "SELECT project FROM observations WHERE id = ?", (obs_id,)
@@ -202,17 +173,6 @@ async def test_create_populates_fts_via_trigger(
     assert any(r["rowid"] == obs_rowid for r in matches)
 
 
-async def test_create_stores_embedding(
-    conn: sqlite3.Connection, service: ObservationService
-) -> None:
-    obs_id = await service.create("embedded text")
-    count = conn.execute(
-        "SELECT COUNT(*) AS c FROM observation_embeddings WHERE observation_id = ?",
-        (obs_id,),
-    ).fetchone()["c"]
-    assert count == 1
-
-
 async def test_create_writes_audit_row(
     conn: sqlite3.Connection, service: ObservationService
 ) -> None:
@@ -234,53 +194,6 @@ async def test_create_writes_audit_row(
     assert detail["outcome"] == "success"
     assert detail["component"] == "auth"
     assert detail["scope_path"] is None
-
-
-async def test_create_rolls_back_on_embedder_failure(
-    conn: sqlite3.Connection, fixed_clock: Any
-) -> None:
-    bad_embedder = _StubEmbedder(raise_on_embed=EmbeddingError("boom"))
-    svc = ObservationService(
-        conn,
-        bad_embedder,
-        clock=fixed_clock,
-        project_resolver=lambda: "test-project",
-        scope_resolver=lambda: None,
-        session_id="sess-abc",
-        episodes=EpisodeService(conn),
-    )
-
-    with pytest.raises(EmbeddingError):
-        await svc.create("doomed")
-
-    # Nothing persisted.
-    obs_count = conn.execute("SELECT COUNT(*) AS c FROM observations").fetchone()["c"]
-    emb_count = conn.execute(
-        "SELECT COUNT(*) AS c FROM observation_embeddings"
-    ).fetchone()["c"]
-    audit_count = conn.execute("SELECT COUNT(*) AS c FROM audit_log").fetchone()["c"]
-    assert obs_count == 0
-    assert emb_count == 0
-    assert audit_count == 0
-
-    # Fail-fast contract (Phase 2 caveat): episode lazy-open commits before
-    # the embed call, so a background episode and its episode_sessions row
-    # may be present after an embed-failure. Lock the shape so a future
-    # refactor that tightens the contract (no DB artifacts at all) surfaces
-    # this test failing loudly.
-    episodes_rows = conn.execute("SELECT goal, ended_at FROM episodes").fetchall()
-    # Exactly one background episode (goal NULL, ended_at NULL) may exist.
-    assert len(episodes_rows) <= 1
-    if episodes_rows:
-        assert episodes_rows[0]["goal"] is None
-        assert episodes_rows[0]["ended_at"] is None
-
-    session_rows = conn.execute(
-        "SELECT left_at FROM episode_sessions"
-    ).fetchall()
-    assert len(session_rows) <= 1
-    if session_rows:
-        assert session_rows[0]["left_at"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -405,10 +318,8 @@ def test_session_id_resolves_from_env_var(
     """When CLAUDE_SESSION_ID is set and no session_id kwarg, use the env var."""
     from better_memory.services.episode import EpisodeService
     monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-sess-abc")
-    embedder = _StubEmbedder()
     svc = ObservationService(
         conn,
-        embedder,
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         episodes=EpisodeService(conn),
@@ -422,10 +333,8 @@ def test_session_id_kwarg_overrides_env_var(
     """Explicit session_id kwarg beats the env var."""
     from better_memory.services.episode import EpisodeService
     monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-sess-abc")
-    embedder = _StubEmbedder()
     svc = ObservationService(
         conn,
-        embedder,
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         session_id="explicit-sess",
@@ -440,10 +349,8 @@ def test_session_id_falls_back_to_uuid_when_no_env(
     """Without CLAUDE_SESSION_ID or explicit kwarg, generate a uuid4."""
     from better_memory.services.episode import EpisodeService
     monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
-    embedder = _StubEmbedder()
     svc = ObservationService(
         conn,
-        embedder,
         clock=fixed_clock,
         project_resolver=lambda: "test-project",
         episodes=EpisodeService(conn),
@@ -483,9 +390,8 @@ class TestListObservations:
             session_id="s2", outcome="success", close_reason="goal_complete"
         )
 
-        embedder = _StubEmbedder()
         svc = ObservationService(
-            conn, embedder, clock=fixed_clock,
+            conn, clock=fixed_clock,
             project_resolver=lambda: "p",
             episodes=epsvc,
         )
@@ -535,9 +441,8 @@ class TestListObservations:
             )
         conn.commit()
 
-        embedder = _StubEmbedder()
         svc = ObservationService(
-            conn, embedder, clock=fixed_clock,
+            conn, clock=fixed_clock,
             project_resolver=lambda: "p",
             episodes=epsvc,
         )
@@ -572,9 +477,8 @@ class TestListObservations:
             )
         conn.commit()
 
-        embedder = _StubEmbedder()
         svc = ObservationService(
-            conn, embedder, clock=fixed_clock,
+            conn, clock=fixed_clock,
             project_resolver=lambda: "p",
             episodes=epsvc,
         )
@@ -626,9 +530,8 @@ class TestListObservations:
             )
         conn.commit()
 
-        embedder = _StubEmbedder()
         svc = ObservationService(
-            conn, embedder, clock=fixed_clock,
+            conn, clock=fixed_clock,
             project_resolver=lambda: "p",
             episodes=epsvc,
         )
@@ -655,14 +558,13 @@ class TestListObservations:
             session_id="s1", outcome="success", close_reason="goal_complete"
         )
 
-        embedder = _StubEmbedder()
         svc = ObservationService(
-            conn, embedder, clock=fixed_clock,
+            conn, clock=fixed_clock,
             project_resolver=lambda: "p",
             episodes=epsvc,
         )
 
-        # Insert two distinct observations via service so embeddings exist.
+        # Insert two distinct observations via service so FTS rows exist.
         await svc.create("flamingo migration failed", project="p")
         await svc.create("pelican lazy-init succeeded", project="p")
         conn.commit()

@@ -1,25 +1,30 @@
 """Reflection synthesis service.
 
 Orchestrates per-episode synthesis: for each closed-but-unsynthesized
-episode, loads its observations and tech-filtered reflections, calls the
-LLM once, and applies new/augment/merge/ignore actions atomically inside
-a per-episode SAVEPOINT.
+episode, loads its observations and tech-filtered reflections, hands
+them to the driving agent's LLM call out of process, and applies the
+returned new/augment/merge/ignore actions atomically inside a
+per-episode SAVEPOINT.
 
 This module provides:
 - Typed read models for LLM consumption (:class:`ReflectionForPrompt`,
   :class:`ObservationForPrompt`).
 - Per-episode types: :class:`EpisodeForPrompt`, :class:`EpisodeContext`,
   :class:`EpisodeQueueCounts`, :class:`SynthesisStep`.
-- :class:`ReflectionSynthesisService` with ``synthesize_next`` as the
-  primary entry point.
+- :class:`ReflectionSynthesisService` with ``get_next_pending_context`` /
+  ``apply_decision`` as the primary entry points.
 
 Design notes:
 - The service owns writes within its own transaction envelope
   (SAVEPOINT + commit), matching the convention used by
   ObservationService and EpisodeService.
-- The LLM client is injected via a ``ChatCompleter`` Protocol so
-  tests can swap :class:`better_memory.llm.fake.FakeChat` in
-  without touching Ollama.
+- The service holds no chat client and never calls an LLM itself.
+  ``get_next_pending_context`` returns the episode's prompt context for
+  the driving agent (Claude, via the ``better-memory-synthesize`` skill)
+  to complete out of process; the agent's parsed decision is submitted
+  back via ``apply_decision``. This two-call split replaces the old
+  single ``synthesize_next`` call, which embedded an Ollama chat-client
+  call between load and apply.
 """
 
 from __future__ import annotations
@@ -31,11 +36,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-import sqlite_vec
-
 from better_memory import _diag
 from better_memory._common import default_clock, env_session_id
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.scoring import wilson_lower_bound
 
@@ -51,37 +53,6 @@ _QUERY_STOPWORDS: frozenset[str] = frozenset({
     "make", "made", "want", "need", "like", "just", "some", "which", "who",
     "where", "here", "over", "under", "each", "other", "same", "such",
 })
-
-
-def _embedding_source_text(title: str, use_cases: str, hints: list[str]) -> str:
-    """What gets embedded for a reflection: the discriminating text."""
-    return "\n".join([title, use_cases, *hints])
-
-
-def _write_reflection_embedding(
-    conn: sqlite3.Connection,
-    reflection_id: str,
-    vector: list[float] | None,
-) -> None:
-    """DELETE+INSERT the vec0 row for one reflection's embedding.
-
-    Shared by :class:`ReflectionSynthesisService` (synthesis writes) and
-    :class:`ReflectionService` (UI-driven ``update_text`` writes) so both
-    write paths keep ``reflection_embeddings`` in sync with the
-    reflection's current title/use_cases/hints. DELETE+INSERT rather than
-    UPSERT because vec0 tables historically mishandle UPSERT.
-    """
-    if vector is None:
-        return
-    conn.execute(
-        "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
-        (reflection_id,),
-    )
-    conn.execute(
-        "INSERT INTO reflection_embeddings (reflection_id, embedding) "
-        "VALUES (?, ?)",
-        (reflection_id, sqlite_vec.serialize_float32(vector)),
-    )
 
 
 def _later_ts(a: str | None, b: str | None) -> str | None:
@@ -330,10 +301,6 @@ def _parse_merge(item: object) -> MergeAction:
     )
 
 
-#: Max embeddings written per retrieve call by the lazy self-heal. Keeps
-#: worst-case added latency bounded; cli.backfill_embeddings is the bulk path.
-SELF_HEAL_BATCH_CAP = 20
-
 #: A memory with fewer than this many rated exposures is "untested": its
 #: Wilson score is statistically meaningless, so it competes for the
 #: reserved exploration slot instead of the proven slots.
@@ -370,14 +337,9 @@ class ReflectionSynthesisService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
-        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
-        self._sync_embedder = sync_embedder
-
-    def _store_embedding(self, reflection_id: str, vector: list[float] | None) -> None:
-        _write_reflection_embedding(self._conn, reflection_id, vector)
 
     @staticmethod
     def _normalize_tech(tech: str | None) -> str | None:
@@ -777,19 +739,12 @@ class ReflectionSynthesisService:
         actions: list[NewAction],
         *,
         project: str,
-        embed_tasks: list[tuple[str, str]] | None = None,
     ) -> int:
         """Insert new reflections + their source links + consume observations.
 
         Idempotency: observation ids in ``source_observation_ids`` that
         don't exist in the DB are dropped. Entries whose entire source
         list turns out to be invalid are skipped silently.
-
-        When ``embed_tasks`` is supplied, the blocking embed call is NOT
-        made here; instead ``(reflection_id, source_text)`` pairs are
-        appended for the caller to embed AFTER the write transaction
-        commits (see :meth:`apply_decision` and #97). When ``None``, the
-        embed still runs inline for direct callers.
 
         Returns the count of reflections actually inserted (may be
         smaller than ``len(actions)`` when entries are dropped for lack
@@ -844,17 +799,6 @@ class ReflectionSynthesisService:
                 [now, *valid_sources],
             )
 
-            if self._sync_embedder is not None:
-                source_text = _embedding_source_text(
-                    action.title, action.use_cases, action.hints,
-                )
-                if embed_tasks is not None:
-                    embed_tasks.append((reflection_id, source_text))
-                else:
-                    self._store_embedding(
-                        reflection_id,
-                        self._sync_embedder.embed_text(source_text),
-                    )
             created += 1
 
         return created
@@ -904,7 +848,6 @@ class ReflectionSynthesisService:
     def _apply_augment(
         self,
         actions: list[AugmentAction],
-        embed_tasks: list[tuple[str, str]] | None = None,
     ) -> int:
         """Apply augment actions: append hints, rewrite use_cases, bump
         confidence, link new sources, recompute evidence count.
@@ -915,12 +858,6 @@ class ReflectionSynthesisService:
           entry skipped (cannot modify a retired lesson).
         - ``add_source_observation_ids`` filtered to existing obs;
           ``INSERT OR IGNORE`` dedupes against existing source rows.
-
-        When ``embed_tasks`` is supplied, the blocking embed call is NOT
-        made here; instead ``(reflection_id, source_text)`` pairs are
-        appended for the caller to embed AFTER the write transaction
-        commits (see :meth:`apply_decision` and #97). When ``None``, the
-        embed still runs inline for direct callers.
 
         Returns the count of reflections actually augmented.
         """
@@ -1017,20 +954,6 @@ class ReflectionSynthesisService:
                     ),
                 )
 
-            if self._sync_embedder is not None:
-                final_use_cases = (action.rewrite_use_cases
-                                   if action.rewrite_use_cases is not None
-                                   else row["use_cases"])
-                source_text = _embedding_source_text(
-                    row["title"], final_use_cases, merged_hints,
-                )
-                if embed_tasks is not None:
-                    embed_tasks.append((action.reflection_id, source_text))
-                else:
-                    self._store_embedding(
-                        action.reflection_id,
-                        self._sync_embedder.embed_text(source_text),
-                    )
             augmented += 1
 
         return augmented
@@ -1182,13 +1105,7 @@ class ReflectionSynthesisService:
                 ),
             )
 
-            # Target text is untouched by merge (counters/evidence only), so
-            # no re-embed; drop the superseded source's vector so it stops
-            # competing for kNN slots.
-            self._conn.execute(
-                "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
-                (action.source_id,),
-            )
+            # Target text is untouched by merge (counters/evidence only).
             merged += 1
 
         return merged
@@ -1305,12 +1222,6 @@ class ReflectionSynthesisService:
                 f"(synthesized_at={row['synthesized_at']})"
             )
 
-        # Collect embed inputs during the DB writes so the blocking Ollama
-        # call happens AFTER commit, outside the WAL writer lock — see #97.
-        # Missing vectors self-heal on first retrieval via
-        # _heal_missing_embeddings, so a crash between the two commits
-        # only costs one round of embedding on the next lookup.
-        embed_tasks: list[tuple[str, str]] = []
         self._conn.execute("SAVEPOINT episode_synthesize")
         try:
             active_rows = self._conn.execute(
@@ -1320,12 +1231,8 @@ class ReflectionSynthesisService:
             ).fetchall()
             active_ids = [r["id"] for r in active_rows]
 
-            created = self._apply_new(
-                response.new, project=project, embed_tasks=embed_tasks,
-            )
-            augmented = self._apply_augment(
-                response.augment, embed_tasks=embed_tasks,
-            )
+            created = self._apply_new(response.new, project=project)
+            augmented = self._apply_augment(response.augment)
             merged = self._apply_merge(response.merge)
             ignored = self._apply_ignore(response.ignore)
             auto_ignored = self._auto_ignore_unused(active_ids)
@@ -1337,17 +1244,6 @@ class ReflectionSynthesisService:
         else:
             self._conn.execute("RELEASE SAVEPOINT episode_synthesize")
         self._conn.commit()
-
-        # Now that the main write transaction is committed, run the batched
-        # embed call. A slow or dead Ollama can no longer stall other
-        # connections; the vector write is a second, short transaction.
-        if embed_tasks and self._sync_embedder is not None:
-            texts = [t for _, t in embed_tasks]
-            vectors = self._sync_embedder.embed_batch(texts)
-            if vectors is not None:
-                for (rid, _), vec in zip(embed_tasks, vectors):
-                    self._store_embedding(rid, vec)
-                self._conn.commit()
 
         counts = {
             "created": created,
@@ -1364,81 +1260,22 @@ class ReflectionSynthesisService:
         )
 
     # --------------------------------------------------------- retrieve_reflections
-    def _heal_missing_embeddings(self, rows) -> None:
-        """Embed up to SELF_HEAL_BATCH_CAP candidates that lack vectors.
-
-        Historical rows and write-time failures repair themselves on their
-        first relevant retrieval. Entirely best-effort; one embed_batch call.
-        """
-        if self._sync_embedder is None or not rows:
-            return
-        ids = [r["id"] for r in rows]
-        placeholders = ",".join("?" for _ in ids)
-        have = {
-            row[0] for row in self._conn.execute(
-                f"SELECT reflection_id FROM reflection_embeddings "
-                f"WHERE reflection_id IN ({placeholders})", ids,
-            )
-        }
-        todo = [r for r in rows if r["id"] not in have][:SELF_HEAL_BATCH_CAP]
-        if not todo:
-            return
-        texts = [
-            _embedding_source_text(r["title"], r["use_cases"],
-                                   json.loads(r["hints"]))
-            for r in todo
-        ]
-        vectors = self._sync_embedder.embed_batch(texts)
-        if vectors is None:
-            return
-        for r, vec in zip(todo, vectors):
-            self._store_embedding(r["id"], vec)
-        self._conn.commit()
-
-    def _vec_ranks(self, query_vector, candidate_ids) -> dict[str, int]:
-        """reflection_id -> vec rank (0 = closest) among the candidates.
-
-        sqlite-vec kNN accepts only ``embedding MATCH ? AND k = ?`` — no
-        extra predicates — so fetch top-k then filter, exactly as
-        search/hybrid.py:_vec_candidates does.
-        """
-        if query_vector is None or not candidate_ids:
-            return {}
-        try:
-            knn = self._conn.execute(
-                "SELECT reflection_id FROM reflection_embeddings "
-                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (sqlite_vec.serialize_float32(query_vector),
-                 max(len(candidate_ids), 50)),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return {}
-        wanted = set(candidate_ids)
-        out: dict[str, int] = {}
-        for row in knn:
-            if row[0] in wanted:
-                out[row[0]] = len(out)
-        return out
-
     def _fuse_by_relevance(
-        self, rows: list, *, query: str, query_vector=None, rrf_k: int = 60,
+        self, rows: list, *, query: str, rrf_k: int = 60,
     ) -> list:
-        """Re-order ``rows`` by RRF fusion of popularity rank, BM25 rank, and
-        vector rank.
+        """Re-order ``rows`` by RRF fusion of popularity rank and BM25 rank.
 
         ``rows`` arrives in Wilson-prior order (hit-rate lower bound,
         then confidence, then recency). We compute a second ranking over the same
         ids by BM25 relevance against ``reflection_fts`` (title / use_cases /
-        hints), and (when ``query_vector`` is available) a third ranking by
-        vector distance against ``reflection_embeddings``, then fuse all
-        available legs with reciprocal rank fusion:
+        hints), then fuse both legs with reciprocal rank fusion:
 
-            score(d) = 1/(k + pop_rank(d)) + 1/(k + rel_rank(d)) + 1/(k + vec_rank(d))
+            score(d) = 1/(k + pop_rank(d)) + 1/(k + rel_rank(d))
 
-        matching :mod:`better_memory.search.hybrid`. Rows a given leg does not
-        match keep only the other terms, so relevance *promotes* without ever
-        discarding — a query that matches nothing on any leg degrades exactly
-        to the previous behaviour.
+        matching :mod:`better_memory.search.hybrid`. Rows the BM25 leg does
+        not match keep only the popularity term, so relevance *promotes*
+        without ever discarding — a query that matches nothing degrades
+        exactly to the previous behaviour.
 
         Tokens are OR-ed rather than AND-ed: ``sanitize_fts5_query`` joins bare
         terms, which FTS5 reads as implicit AND, and a natural-language task
@@ -1475,9 +1312,8 @@ class ReflectionSynthesisService:
                 rel_rows = []
 
         rel_rank = {r["id"]: i for i, r in enumerate(rel_rows)}
-        vec_rank = self._vec_ranks(query_vector, ids)
 
-        if not rel_rank and not vec_rank:
+        if not rel_rank:
             return rows
 
         scored = []
@@ -1486,20 +1322,9 @@ class ReflectionSynthesisService:
             rr = rel_rank.get(row["id"])
             if rr is not None:
                 score += 1.0 / (rrf_k + rr)
-            vr = vec_rank.get(row["id"])
-            if vr is not None:
-                score += 1.0 / (rrf_k + vr)
-            # RRF sums are symmetric: a row with (pop_rank=a, vec_rank=b) ties
-            # exactly with one at (pop_rank=b, vec_rank=a). Break such ties
-            # toward the closer semantic match (lower vec_rank) before
-            # falling back to pop_rank — otherwise a strong vec-only match
-            # (this method's whole point) can lose a coin-flip tie to a
-            # popularity-only row. vec_rank absent (no embedder/no vec leg)
-            # collapses to sys.maxsize for every row, so the tiebreak is a
-            # no-op and behaviour matches the shipped two-leg fusion exactly.
-            scored.append((score, vr if vr is not None else sys.maxsize, pop_rank, row))
-        scored.sort(key=lambda t: (-t[0], t[1], t[2]))
-        return [row for _, _, _, row in scored]
+            scored.append((score, pop_rank, row))
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return [row for _, _, row in scored]
 
     def _bucket_item(self, r) -> dict:
         """Convert one reflections row into the dict shape returned to callers."""
@@ -1600,14 +1425,7 @@ class ReflectionSynthesisService:
             rows.sort(key=_wilson_score, reverse=True)
 
             if query:
-                self._heal_missing_embeddings(rows)
-                query_vector = (
-                    self._sync_embedder.embed_text(query)
-                    if self._sync_embedder is not None else None
-                )
-                rows = self._fuse_by_relevance(
-                    rows, query=query, query_vector=query_vector,
-                )
+                rows = self._fuse_by_relevance(rows, query=query)
                 _diag.step(fn, "relevance_fused", n_rows=len(rows))
 
             # Convert None (unlimited) to sys.maxsize so the loop body has a definite int.
@@ -1724,11 +1542,9 @@ class ReflectionService:
         conn: sqlite3.Connection,
         *,
         clock: Callable[[], datetime] | None = None,
-        sync_embedder: SyncEmbedder | None = None,
     ) -> None:
         self._conn = conn
         self._clock: Callable[[], datetime] = clock or default_clock
-        self._sync_embedder = sync_embedder
 
     def confirm(self, *, reflection_id: str) -> None:
         """pending_review → confirmed; no-op on confirmed; raise on retired/superseded."""
@@ -1791,12 +1607,6 @@ class ReflectionService:
         Blocked on retired/superseded — once a reflection has left the
         active set, mutating its text would silently change the audit
         trail.
-
-        Re-embeds when constructed with a ``sync_embedder``: the vector
-        indexes ``title + use_cases + hints`` (see
-        ``_embedding_source_text``), so editing use_cases/hints without
-        refreshing the vector would leave a stale embedding pointing at
-        superseded text. No-op when ``sync_embedder`` is ``None``.
         """
         if not use_cases or not use_cases.strip():
             raise ValueError("use_cases must not be empty")
@@ -1809,7 +1619,7 @@ class ReflectionService:
         if not hint_list:
             raise ValueError("hints must not be empty")
         row = self._conn.execute(
-            "SELECT title, status FROM reflections WHERE id = ?",
+            "SELECT status FROM reflections WHERE id = ?",
             (reflection_id,),
         ).fetchone()
         if row is None:
@@ -1820,20 +1630,11 @@ class ReflectionService:
                 f"Cannot edit reflection in status {status!r}"
             )
         now = self._clock().isoformat()
-        # Compute the embedding BEFORE the UPDATE opens sqlite3's implicit
-        # write transaction — see #97. Ollama is blocking and would otherwise
-        # hold the WAL writer lock across a multi-second network call.
-        vector = None
-        if self._sync_embedder is not None:
-            vector = self._sync_embedder.embed_text(_embedding_source_text(
-                row["title"], use_cases, hint_list,
-            ))
         self._conn.execute(
             "UPDATE reflections SET use_cases = ?, hints = ?, updated_at = ? "
             "WHERE id = ?",
             (use_cases, json.dumps(hint_list), now, reflection_id),
         )
-        _write_reflection_embedding(self._conn, reflection_id, vector)
         self._conn.commit()
 
     def promote_to_general(self, *, reflection_id: str) -> None:

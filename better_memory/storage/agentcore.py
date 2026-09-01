@@ -516,10 +516,9 @@ class AgentCoreBackend:
                 buckets[bucket].append(parsed)
 
         # Local import: EXPLORATION_RATED_FLOOR lives in the reflection
-        # synthesis service (services/reflection.py), which pulls in
-        # sqlite_vec and friends — keep that off agentcore's module-level
-        # import path (mirrors the local exposure_log imports elsewhere in
-        # this class).
+        # synthesis service (services/reflection.py); importing at module
+        # scope would invert the storage→services layering (mirrors the
+        # local exposure_log imports elsewhere in this class).
         from better_memory.services.reflection import EXPLORATION_RATED_FLOOR
 
         # Only worth reserving an exploration slot when there's room for at
