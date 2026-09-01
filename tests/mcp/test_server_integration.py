@@ -2,14 +2,11 @@
 
 These drive the real MCP stdio server as a subprocess via the ``mcp``
 client SDK. They use per-test tmpfs for all paths (memory DB, knowledge
-DB, spool, knowledge base) and talk to the local Ollama instance on
-``http://localhost:11434`` for embeddings (the default
-``BETTER_MEMORY_EMBEDDINGS_BACKEND=ollama``).
-
-``tests/mcp/conftest.py`` auto-skips this module when Ollama is not
-reachable, so contributors without a running Ollama can still run the
-default suite. If you run on a machine where Ollama listens elsewhere,
-point ``OLLAMA_HOST`` at it before invoking pytest.
+DB, spool, knowledge base). Task 2 (remove-ollama-embeddings) deleted
+create_server's embedder construction and Ollama probe entirely, so this
+module no longer talks to Ollama at all and no longer needs a live
+Ollama daemon to run — it works identically regardless of
+``BETTER_MEMORY_EMBEDDINGS_BACKEND``.
 
 Beyond the happy-path round-trips, this module covers the tool-handler
 error paths that are only reachable through the real dispatch layer:

@@ -36,17 +36,13 @@ def bm_home(tmp_path: Path, monkeypatch) -> Path:
     hook.main() falls back to the developer's real ~/.better-memory and writes
     memory.db, diagnostics, and state/ files there.
 
-    Pins ``BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite`` (mirrors
-    tests/ui/conftest.py's pin) so the hook never builds a real SyncEmbedder
-    / OllamaEmbedder and never issues an HTTP call to localhost:11434 --
-    config.py's actual default is "ollama", not sqlite. Without this pin
-    every non-blank-query test here would silently depend on there being no
-    live Ollama daemon to answer (works today only because no test seeds
-    embeddings, so the qvec=None fallback path never observably differs).
+    Task 2 (remove-ollama-embeddings) deleted contextual_inject's SyncEmbedder
+    / OllamaEmbedder construction entirely, so the hook never issues an HTTP
+    call to localhost:11434 regardless of BETTER_MEMORY_EMBEDDINGS_BACKEND --
+    no env pin is needed to guarantee that any more.
     """
     monkeypatch.setenv("BETTER_MEMORY_HOME", str(tmp_path))
     monkeypatch.setenv("BETTER_MEMORY_PROJECT", _PROJECT)
-    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
     conn = connect(tmp_path / "memory.db")
     try:
         apply_migrations(conn)
@@ -170,7 +166,7 @@ def test_second_run_suppressed_by_seen_store(bm_home, monkeypatch, capsys):
 
 def test_below_floor_injects_nothing(bm_home, monkeypatch, capsys):
     # No BM25 overlap (zero shared tokens with the prompt), no vec leg
-    # (the bm_home fixture pins embeddings_backend=sqlite -> sync_embedder is
+    # (the hook never builds a sync_embedder any more -- qvec is always
     # None), and conn is present so the keyword fallback never kicks in
     # either: no evidence on any leg -> no injection.
     _seed_reflection(bm_home, "refl-zebra-flamingo-4", title="zebra flamingo unrelated topic")

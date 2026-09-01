@@ -384,8 +384,9 @@ async def test_observe_retrieve_record_use_offline(
     the ratings at process exit).
 
     The <30s wall-clock budget around the observe call is the tripwire for
-    a regression reintroducing the Ollama embed path (3 retries against the
-    poisoned host blow past it or raise EmbeddingError).
+    a regression reintroducing embedder construction into mcp/server.py
+    (3 retries against the poisoned host blow past it or raise
+    EmbeddingError).
     """
     env = isolated_env(clean_slate_home)
     bm_home = clean_slate_home / ".better-memory"
@@ -409,8 +410,8 @@ async def test_observe_retrieve_record_use_offline(
             )["id"]
             observe_elapsed = time.monotonic() - t0
             assert observe_elapsed < 30, (
-                f"observe took {observe_elapsed:.1f}s — sqlite embeddings "
-                "bypass lost? (Ollama retry path reintroduced)"
+                f"observe took {observe_elapsed:.1f}s — no-embedder wiring "
+                "lost? (embedder construction reintroduced into mcp/server.py)"
             )
             assert isinstance(obs_a, str) and obs_a
 

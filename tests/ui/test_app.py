@@ -25,60 +25,25 @@ class TestServiceWiring:
 
 
 class TestSyncEmbedderWiring:
-    """UI-driven writes must embed like MCP-driven writes.
+    """UI-driven writes never construct a SyncEmbedder.
 
-    Before this wiring, better_memory.ui.app constructed ReflectionService
-    and SemanticMemoryService with no sync_embedder at all, so UI edits/
-    creates never populated reflection_embeddings / semantic_embeddings —
-    only a manual CLI backfill run would fix those rows up. create_app now
-    auto-builds a shared SyncEmbedder from get_config().embeddings_backend
-    (mirroring better_memory/mcp/server.py and better_memory/storage/
-    sqlite.py), and accepts an explicit sync_embedder= override for tests.
+    Task 2 (remove-ollama-embeddings) deleted create_app's auto-detecting
+    ``_build_sync_embedder()`` and its ``sync_embedder=`` override
+    parameter: every write-path service (``ReflectionService``,
+    ``SemanticMemoryService`` via ``observation_promote_to_semantic``,
+    ``build_backend``) now receives ``sync_embedder=None`` unconditionally,
+    same as ``better_memory/mcp/server.py`` and the contextual_inject hook.
     """
 
-    def test_sync_embedder_none_when_backend_sqlite(
-        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
+    def test_sync_embedder_always_none(self, tmp_db: Path) -> None:
         app = create_app(start_watchdog=False, db_path=tmp_db)
         assert app.extensions["sync_embedder"] is None
 
-    def test_sync_embedder_built_when_backend_ollama(
-        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    def test_reflection_service_receives_no_sync_embedder(
+        self, tmp_db: Path,
     ) -> None:
-        from better_memory.embeddings.sync_embed import SyncEmbedder
-
-        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "ollama")
         app = create_app(start_watchdog=False, db_path=tmp_db)
-        assert isinstance(app.extensions["sync_embedder"], SyncEmbedder)
-
-    def test_explicit_sync_embedder_overrides_config_auto_detect(
-        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from better_memory.embeddings.sync_embed import SyncEmbedder
-
-        monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
-        fake_sync_embedder = SyncEmbedder(lambda: None)
-        app = create_app(
-            start_watchdog=False, db_path=tmp_db,
-            sync_embedder=fake_sync_embedder,
-        )
-        assert app.extensions["sync_embedder"] is fake_sync_embedder
-
-    def test_reflection_service_receives_the_shared_sync_embedder(
-        self, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from better_memory.embeddings.sync_embed import SyncEmbedder
-
-        fake_sync_embedder = SyncEmbedder(lambda: None)
-        app = create_app(
-            start_watchdog=False, db_path=tmp_db,
-            sync_embedder=fake_sync_embedder,
-        )
-        assert (
-            app.extensions["reflection_service"]._sync_embedder
-            is fake_sync_embedder
-        )
+        assert app.extensions["reflection_service"]._sync_embedder is None
 
 
 class TestHealthz:

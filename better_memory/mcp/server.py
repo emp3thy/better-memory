@@ -46,9 +46,6 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-import sys
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,8 +58,6 @@ from mcp.types import TextContent, Tool
 from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
-from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.mcp._util import resolve_session_id as _resolve_session_id
 from better_memory.mcp.handlers import (
     EpisodeToolHandlers,
@@ -90,41 +85,6 @@ from better_memory.storage import StorageBackend, build_backend
 _MEMORY_MIGRATIONS = Path(__file__).parent.parent / "db" / "migrations"
 _KNOWLEDGE_MIGRATIONS = Path(__file__).parent.parent / "db" / "knowledge_migrations"
 
-_OLLAMA_PROBE_TIMEOUT_SEC = 2.0
-
-
-def _probe_ollama(host: str) -> None:
-    """Log a clear stderr warning if Ollama isn't reachable. Never raise.
-
-    Called once at startup; purely informational. The server continues in
-    either case — knowledge-only tools (``knowledge.search``, ``knowledge.list``)
-    don't need Ollama, and embedding-dependent tools raise a clean
-    ``EmbeddingError`` the first time they're invoked against a down host.
-    """
-    url = host.rstrip("/") + "/api/tags"
-    try:
-        with urllib.request.urlopen(  # noqa: S310 — local-only URL
-            url, timeout=_OLLAMA_PROBE_TIMEOUT_SEC
-        ) as response:
-            if response.status == 200:
-                return
-            print(
-                f"[better-memory] WARNING: Ollama probe at {url} returned "
-                f"HTTP {response.status}; memory.observe / memory.retrieve "
-                "may fail until this is resolved.",
-                file=sys.stderr,
-                flush=True,
-            )
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        print(
-            f"[better-memory] WARNING: Ollama unreachable at {host} "
-            f"({type(exc).__name__}: {exc}). memory.observe and memory.retrieve "
-            "will fail until Ollama is running; knowledge.* tools still work.",
-            file=sys.stderr,
-            flush=True,
-        )
-
-
 # --------------------------------------------------------------------------- factory
 
 
@@ -136,14 +96,12 @@ class ServerContext:
     (tests, future hooks) can introspect or reuse the wired-up backend
     without rebuilding it. ``backend`` is the live ``StorageBackend``;
     ``memory_conn`` is the underlying sqlite connection (None for non-sqlite
-    backends in future plans); ``embedder`` is whatever was passed to the
-    backend (None for the sqlite/FTS5 embeddings backend, which indexes via
-    DB triggers and needs no Python embedder).
+    backends in future plans). No embedder is ever constructed — sqlite
+    (FTS5) indexes via DB triggers and needs no Python embedder.
     """
 
     backend: StorageBackend
     memory_conn: sqlite3.Connection | None = None
-    embedder: Any = None
 
 
 def create_server() -> tuple[
@@ -154,11 +112,11 @@ def create_server() -> tuple[
     """Wire services and register tools.
 
     Returns a ``(server, cleanup, ctx)`` triple where ``cleanup`` is an
-    idempotent async function that closes the two SQLite connections and
-    the embedder's HTTP client, and ``ctx`` is a :class:`ServerContext`
-    bundling the live :class:`StorageBackend`, its underlying memory
-    connection, and the embedder (if any). Callers must await ``cleanup``
-    on shutdown (typically in a ``finally`` around ``server.run``).
+    idempotent async function that closes the two SQLite connections, and
+    ``ctx`` is a :class:`ServerContext` bundling the live
+    :class:`StorageBackend` and its underlying memory connection. Callers
+    must await ``cleanup`` on shutdown (typically in a ``finally`` around
+    ``server.run``).
     """
     config = get_config()
 
@@ -166,28 +124,6 @@ def create_server() -> tuple[
     apply_migrations(memory_conn, migrations_dir=_MEMORY_MIGRATIONS)
     knowledge_conn = connect(config.knowledge_db)
     apply_migrations(knowledge_conn, migrations_dir=_KNOWLEDGE_MIGRATIONS)
-
-    # Embedder is only built for the ollama backend. For sqlite, FTS5
-    # triggers handle indexing automatically (see migration 0011) and no
-    # embedder is needed.
-    embedder: OllamaEmbedder | None = None
-    if config.embeddings_backend == "ollama":
-        # One embedder per server. Construction is cheap and does NOT contact
-        # Ollama (see OllamaEmbedder.__init__); the first embed() call does.
-        embedder = OllamaEmbedder()
-        # Cheap reachability probe against Ollama. Warn (to stderr) if it's
-        # down but do not block startup — knowledge.* tools still work
-        # without Ollama, and if Ollama comes up later, memory.observe /
-        # memory.retrieve will succeed on their next call without a restart.
-        _probe_ollama(config.ollama_host)
-
-    # Fresh short-timeout embedder per bridge call (loop-bound client);
-    # shared instance so the breaker state is process-wide.
-    sync_embedder: SyncEmbedder | None = None
-    if embedder is not None:
-        sync_embedder = SyncEmbedder(
-            lambda: OllamaEmbedder(timeout=5.0, max_retries=1)
-        )
 
     # Concurrency invariant: the memory-side services below
     # (EpisodeService, ObservationService, ReflectionSynthesisService,
@@ -203,7 +139,7 @@ def create_server() -> tuple[
     # assumption breaks and the services must be reworked to use per-task
     # connections (or a connection pool with explicit checkout).
     episodes = EpisodeService(memory_conn)
-    observations = ObservationService(memory_conn, embedder=embedder, episodes=episodes)
+    observations = ObservationService(memory_conn, episodes=episodes)
 
     # Resolve project + session id ONCE at startup. Per-handler code can
     # still override per-call (handlers continue to read args.get("project")
@@ -220,8 +156,6 @@ def create_server() -> tuple[
     backend: StorageBackend = build_backend(
         config=config,
         memory_conn=memory_conn,
-        embedder=embedder,
-        sync_embedder=sync_embedder,
         session_id=startup_session_id,
         project=startup_project,
     )
@@ -229,10 +163,10 @@ def create_server() -> tuple[
     # Reflection synthesis is driven by the IDE-LLM via two MCP tools
     # (memory.synthesize_next_get_context / _apply). The service no
     # longer holds a chat client.
-    reflections = ReflectionSynthesisService(memory_conn, sync_embedder=sync_embedder)
+    reflections = ReflectionSynthesisService(memory_conn)
     retention = RetentionService(conn=memory_conn)
     memory_rating = MemoryRatingService(memory_conn)
-    semantic = SemanticMemoryService(memory_conn, sync_embedder=sync_embedder)
+    semantic = SemanticMemoryService(memory_conn)
     session_bootstrap = SessionBootstrapService(memory_conn)
 
     knowledge = KnowledgeService(
@@ -318,11 +252,11 @@ def create_server() -> tuple[
     cleaned = False
 
     async def cleanup() -> None:
-        """Close SQLite connections and the embedder HTTP client.
+        """Close the two SQLite connections.
 
         Idempotent: safe to call multiple times. SQLite ``Connection.close``
-        is a no-op after the first call, and we guard the embedder close with
-        a local flag so we don't double-close its httpx client either.
+        is a no-op after the first call, and the ``cleaned`` flag guards
+        against re-entry.
         """
         nonlocal cleaned
         if cleaned:
@@ -336,19 +270,10 @@ def create_server() -> tuple[
             knowledge_conn.close()
         except Exception:  # noqa: BLE001 — best-effort shutdown
             pass
-        # In the sqlite backend no embedder is built (FTS5 triggers handle
-        # indexing). Guard against the None case so this cleanup stays
-        # idempotent across both backends.
-        if embedder is not None:
-            try:
-                await embedder.aclose()
-            except Exception:  # noqa: BLE001 — best-effort shutdown
-                pass
 
     return server, cleanup, ServerContext(
         backend=backend,
         memory_conn=memory_conn,
-        embedder=embedder,
     )
 
 

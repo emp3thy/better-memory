@@ -37,16 +37,11 @@ def client(
     ``TestOriginCheck`` POST-to-/shutdown tests don't fire the real
     100 ms timer that calls ``os._exit`` and kills the pytest process.
 
-    Pins ``BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite`` so ``create_app``'s
-    auto-detected ``sync_embedder`` (see ``_build_sync_embedder`` in
-    ``better_memory/ui/app.py``) resolves to ``None`` — the default
-    config backend is ``ollama``, and without this pin every route test
-    that writes a reflection/semantic memory would silently depend on a
-    live Ollama instance. Tests exercising the embedding wiring build
-    their own app via ``create_app(sync_embedder=...)`` instead of this
-    fixture.
+    Task 2 (remove-ollama-embeddings) deleted create_app's sync_embedder
+    auto-detection entirely — every write-path service now receives
+    ``sync_embedder=None`` unconditionally, so no env pin is needed to
+    keep route tests from depending on a live Ollama instance.
     """
-    monkeypatch.setenv("BETTER_MEMORY_EMBEDDINGS_BACKEND", "sqlite")
     app = create_app(start_watchdog=False, db_path=tmp_db)
     app.config["TESTING"] = True
     with patch("better_memory.ui.app.threading.Timer"):

@@ -64,13 +64,14 @@ async def test_ollama_zero_traffic_across_journey_and_sync_hooks(
 ) -> None:
     """e2e-ollama-zero-traffic-tripwire: the T1 journey never contacts Ollama.
 
-    With BETTER_MEMORY_EMBEDDINGS_BACKEND=sqlite (the isolated_env default),
-    create_server must skip OllamaEmbedder construction AND the /api/tags
-    startup probe entirely (both live inside the ``embeddings_backend ==
-    'ollama'`` branch of mcp/server.py). Regressions this flips red on:
-    hoisting the probe out of that branch "for better diagnostics", or
-    contextual_inject growing an embedding-based scorer that ignores the
-    embeddings backend — either records a request here.
+    Task 2 (remove-ollama-embeddings) deleted OllamaEmbedder construction
+    and the /api/tags startup probe from mcp/server.py entirely — there is
+    no longer an ``embeddings_backend == 'ollama'`` branch to skip, so this
+    holds regardless of BETTER_MEMORY_EMBEDDINGS_BACKEND (isolated_env still
+    pins it to "sqlite" as belt-and-braces). Regressions this flips red on:
+    reintroducing embedder construction or a startup probe into
+    mcp/server.py, or contextual_inject growing an embedding-based scorer —
+    either records a request here.
 
     Anti-vacuity (a dead server also makes zero requests): the recorder is
     first proven to record via a direct self-check request, and the journey
@@ -110,8 +111,8 @@ async def test_ollama_zero_traffic_across_journey_and_sync_hooks(
                 obs_id = json.loads(text_of(r_obs.content[0]))["id"]
                 assert obs_id
 
-                # Trigram drill-down (embedder is None in sqlite embeddings
-                # mode; migration 0011's insert triggers make this
+                # Trigram drill-down (no embedder is ever constructed any
+                # more; migration 0011's insert triggers make this
                 # synchronous with the observe above).
                 r_drill = await session.call_tool(
                     "memory.retrieve_observations", {"query": "tripwire"}

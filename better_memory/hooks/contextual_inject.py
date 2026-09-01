@@ -30,8 +30,6 @@ from pathlib import Path
 
 from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
-from better_memory.embeddings.ollama import OllamaEmbedder
-from better_memory.embeddings.sync_embed import SyncEmbedder
 from better_memory.hooks._error_log import record_hook_error
 from better_memory.services.context_seen import SeenStore, prune_stale
 from better_memory.services.relevant import format_relevant, retrieve_relevant
@@ -143,16 +141,9 @@ def main() -> None:
                     session_id=session_id or None,
                     project=project,
                 )
-                sync_embedder = None
-                if cfg.embeddings_backend == "ollama":
-                    sync_embedder = SyncEmbedder(
-                        lambda: OllamaEmbedder(timeout=5.0, max_retries=1),
-                        down_state_file=cfg.home / "state" / "embed_down_until",
-                    )
                 items = retrieve_relevant(
                     backend, query=query, project=project,
                     conn=conn if cfg.storage_backend == "sqlite" else None,
-                    sync_embedder=sync_embedder,
                     vec_floor=cfg.context_vec_floor,
                     max_items=cfg.context_max_items,
                 )

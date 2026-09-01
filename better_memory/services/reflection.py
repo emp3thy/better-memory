@@ -331,7 +331,7 @@ def _parse_merge(item: object) -> MergeAction:
 
 
 #: Max embeddings written per retrieve call by the lazy self-heal. Keeps
-#: worst-case added latency bounded; cli.backfill_embeddings is the bulk path.
+#: worst-case added latency bounded.
 SELF_HEAL_BATCH_CAP = 20
 
 #: A memory with fewer than this many rated exposures is "untested": its
