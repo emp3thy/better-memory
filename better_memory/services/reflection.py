@@ -1100,13 +1100,7 @@ class ReflectionSynthesisService:
                 ),
             )
 
-            # Target text is untouched by merge (counters/evidence only), so
-            # no re-embed; drop the superseded source's vector so it stops
-            # competing for kNN slots.
-            self._conn.execute(
-                "DELETE FROM reflection_embeddings WHERE reflection_id = ?",
-                (action.source_id,),
-            )
+            # Target text is untouched by merge (counters/evidence only).
             merged += 1
 
         return merged
