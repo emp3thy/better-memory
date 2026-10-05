@@ -406,3 +406,44 @@ def test_userprompt_unaffected_by_pretool_latch(bm_home, monkeypatch, capsys):
     }
     res = _run(prompt_payload, monkeypatch, capsys)
     assert res["hookSpecificOutput"]["additionalContext"] != ""
+
+
+@pytest.mark.parametrize("text,human", [
+    ("fix the bug", True),
+    ("  <task-notification>x", False),
+    ("Another Claude session sent a message: hi", False),
+    ("   ", False),
+    ("", False),
+    ("<bash-input> ls", False),
+    ("deploy <the> widget", True),
+])
+def test_nonhuman_prefix_detection(text, human):
+    assert hook.is_human_prompt(text) is human
+
+
+def test_peer_message_is_suppressed(bm_home, monkeypatch, capsys):
+    _seed_reflection(bm_home, "refl-widget-deploy-peer", title="widget deploy playbook")
+    res = _run(
+        {"hook_event_name": "UserPromptSubmit",
+         "prompt": "Another Claude session sent a message: deploy the widget now",
+         "cwd": ".", "session_id": "sess-peer"},
+        monkeypatch, capsys,
+    )
+    assert res["hookSpecificOutput"]["additionalContext"] == ""
+    conn = connect(bm_home / "memory.db")
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM session_memory_exposure WHERE session_id = ?",
+            ("sess-peer",),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+    assert _diag_value(bm_home, "contextual_suppressed_nonhuman") == 1
+    # A later human prompt in the same session is still served.
+    res = _run(
+        {"hook_event_name": "UserPromptSubmit", "prompt": "deploy the widget service now",
+         "cwd": ".", "session_id": "sess-peer"},
+        monkeypatch, capsys,
+    )
+    assert "refl-widget-deploy-peer" in res["hookSpecificOutput"]["additionalContext"]

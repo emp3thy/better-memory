@@ -63,6 +63,22 @@ def _bump_diagnostic(conn, cfg, metric: str) -> None:
         pass
 
 
+#: Prompt prefixes that mark a UserPromptSubmit payload as NOT typed by a
+#: human: command output and system tags (``<...>``) and peer-agent
+#: messages. The hook payload carries no origin field, so the text is the
+#: only signal. Measured: the hook fired 571 times across sessions holding
+#: 261 typed prompts and 296 peer messages (spec Assumption A5).
+NON_HUMAN_PREFIXES: tuple[str, ...] = ("<", "Another Claude session sent a message")
+
+
+def is_human_prompt(text: str) -> bool:
+    """True for a non-empty prompt that does not start with a non-human prefix."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    return not stripped.startswith(NON_HUMAN_PREFIXES)
+
+
 def _enabled(event: str, mode: str) -> bool:
     if mode == "off":
         return False
@@ -115,6 +131,12 @@ def main() -> None:
                 # and short-circuit before opening any DB connection.
                 if not seen.try_claim_pretool_fired():
                     raise _SkipInjection()  # module-local sentinel; caught below
+            if event == "UserPromptSubmit" and not is_human_prompt(query):
+                # Peer-agent messages, command output and system tags are
+                # not prompts: no injection, no exposure, no turn bump.
+                with closing(connect(cfg.memory_db)) as conn:
+                    _bump_diagnostic(conn, cfg, "contextual_suppressed_nonhuman")
+                raise _SkipInjection()
             seen.bump_turn()
             # A real local connection is opened in BOTH modes now. Agentcore
             # mode never stores memory CONTENT locally, but session-
