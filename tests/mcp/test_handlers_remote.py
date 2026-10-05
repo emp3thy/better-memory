@@ -313,7 +313,9 @@ class TestSemanticHandlersRemoteBranch:
         for row in rows:
             assert set(row) == {
                 "id", "content", "project", "scope", "created_at", "updated_at",
+                "triggers",
             }
+            assert row["triggers"] == []
             assert row["project"] is None
             assert row["created_at"] is None
             assert row["updated_at"] is None

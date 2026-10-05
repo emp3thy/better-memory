@@ -138,3 +138,79 @@ class TestSemanticDeleteHandler:
         from better_memory.services.semantic import SemanticMemoryService
         svc = SemanticMemoryService(conn)
         svc.delete(id="ghost")
+
+
+class TestSemanticTriggers:
+    """Handler-level: ``triggers`` on observe and update, echoed by retrieve."""
+
+    def _handlers(self, conn):
+        from better_memory.mcp.handlers.semantics import SemanticToolHandlers
+        from better_memory.services.semantic import SemanticMemoryService
+        return SemanticToolHandlers(semantic=SemanticMemoryService(conn))
+
+    async def test_observe_with_triggers_persists(self, conn, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_PROJECT", "proj-a")
+        h = self._handlers(conn)
+        out = await h.semantic_observe(
+            {"content": "rule", "triggers": ["tool:WebFetch", "bash:<<"]}
+        )
+        memory_id = _json.loads(out[0].text)["id"]
+        row = conn.execute(
+            "SELECT triggers FROM semantic_memories WHERE id = ?", (memory_id,),
+        ).fetchone()
+        assert _json.loads(row["triggers"]) == ["tool:WebFetch", "bash:<<"]
+
+    async def test_observe_rejects_bad_trigger(self, conn, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_PROJECT", "proj-a")
+        h = self._handlers(conn)
+        with pytest.raises(ValueError, match="invalid trigger"):
+            await h.semantic_observe({"content": "rule", "triggers": ["nope"]})
+        assert conn.execute("SELECT COUNT(*) FROM semantic_memories").fetchone()[0] == 0
+
+    async def test_update_triggers_only_keeps_content(self, conn, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_PROJECT", "proj-a")
+        h = self._handlers(conn)
+        memory_id = _json.loads(
+            (await h.semantic_observe({"content": "rule"}))[0].text
+        )["id"]
+        out = await h.semantic_update({"id": memory_id, "triggers": ["skill:superpowers:*"]})
+        assert _json.loads(out[0].text) == {"ok": True}
+        row = conn.execute(
+            "SELECT content, triggers FROM semantic_memories WHERE id = ?", (memory_id,),
+        ).fetchone()
+        assert row["content"] == "rule"
+        assert _json.loads(row["triggers"]) == ["skill:superpowers:*"]
+
+    async def test_update_content_and_triggers_together(self, conn, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_PROJECT", "proj-a")
+        h = self._handlers(conn)
+        memory_id = _json.loads(
+            (await h.semantic_observe({"content": "rule"}))[0].text
+        )["id"]
+        await h.semantic_update({"id": memory_id, "content": "rule v2", "triggers": []})
+        row = conn.execute(
+            "SELECT content, triggers FROM semantic_memories WHERE id = ?", (memory_id,),
+        ).fetchone()
+        assert (row["content"], row["triggers"]) == ("rule v2", None)
+
+    async def test_update_requires_content_or_triggers(self, conn):
+        h = self._handlers(conn)
+        with pytest.raises(ValueError, match="provide content and/or triggers"):
+            await h.semantic_update({"id": "x"})
+
+    async def test_retrieve_includes_triggers(self, conn, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_PROJECT", "proj-a")
+        h = self._handlers(conn)
+        await h.semantic_observe({"content": "rule", "triggers": ["tool:Agent"]})
+        rows = _json.loads((await h.semantic_retrieve({"project": "proj-a"}))[0].text)
+        assert rows[0]["triggers"] == ["tool:Agent"]
+
+    def test_schema_declares_triggers(self):
+        from better_memory.mcp.server import _tool_definitions
+        tools = {t.name: t for t in _tool_definitions()}
+        for name in ("memory.semantic_observe", "memory.semantic_update"):
+            props = tools[name].inputSchema["properties"]
+            assert props["triggers"]["type"] == "array"
+            assert props["triggers"]["items"] == {"type": "string"}
+            assert "tool:" in props["triggers"]["description"]
+        assert tools["memory.semantic_update"].inputSchema["required"] == ["id"]

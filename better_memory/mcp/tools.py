@@ -97,6 +97,15 @@ def tool_definitions(
                             "'general' for cross-project workflow rules."
                         ),
                     },
+                    "triggers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tool-call triggers that serve this memory just in "
+                            "time: tool:<Name>, skill:<name|prefix*>, "
+                            "bash:<text>, path:<text>, write:large."
+                        ),
+                    },
                 },
             },
         ),
@@ -124,15 +133,26 @@ def tool_definitions(
         Tool(
             name="memory.semantic_update",
             description=(
-                "Edit a semantic memory's content in place. Bumps updated_at."
+                "Edit a semantic memory's content and/or its tool-call "
+                "triggers in place. Give content, triggers, or both. "
+                "Bumps updated_at."
             ),
             inputSchema={
                 "type": "object",
-                "required": ["id", "content"],
+                "required": ["id"],
                 "additionalProperties": False,
                 "properties": {
                     "id": {"type": "string"},
                     "content": {"type": "string"},
+                    "triggers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tool-call triggers that serve this memory just in "
+                            "time: tool:<Name>, skill:<name|prefix*>, "
+                            "bash:<text>, path:<text>, write:large."
+                        ),
+                    },
                 },
             },
         ),
