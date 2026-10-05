@@ -14,6 +14,14 @@ from better_memory.db.connection import connect
 from better_memory.db.schema import apply_migrations
 from better_memory.services.session_bootstrap import SessionBootstrapService
 
+
+@pytest.fixture(autouse=True)
+def _legacy_inject_mode(monkeypatch):
+    """The rendering tests in this module describe the legacy full dump.
+    Deferred is the code default since the just-in-time serving change, so
+    pin legacy here; tests about deferred set the env themselves."""
+    monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "legacy")
+
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "better_memory" / "db" / "migrations"
 
 
@@ -610,7 +618,7 @@ class TestDeferredBootstrap:
         assert exposed == {("semantic", gid) for gid in gen_ids}
         assert all(r["source"] == "bootstrap" for r in rows)
 
-    def test_legacy_mode_byte_identical(
+    def test_unset_mode_is_deferred_byte_identical(
         self, tmp_path: Path, git_repo: Path, monkeypatch
     ) -> None:
         from uuid import UUID
@@ -665,16 +673,6 @@ class TestDeferredBootstrap:
             source="startup", session_id="sess-same", cwd=git_repo,
         ).additional_context
 
-        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "legacy")
-        conn_legacy = make_conn("legacy.db")
-        seed(conn_legacy)
-        svc_legacy = SessionBootstrapService(conn_legacy, clock=lambda: fixed_now)
-        text_legacy = svc_legacy.bootstrap(
-            source="startup", session_id="sess-same", cwd=git_repo,
-        ).additional_context
-
-        assert text_unset == text_legacy
-
         monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
         conn_deferred = make_conn("deferred.db")
         seed(conn_deferred)
@@ -683,4 +681,14 @@ class TestDeferredBootstrap:
             source="startup", session_id="sess-same", cwd=git_repo,
         ).additional_context
 
-        assert text_deferred != text_unset
+        assert text_unset == text_deferred
+
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "legacy")
+        conn_legacy = make_conn("legacy.db")
+        seed(conn_legacy)
+        svc_legacy = SessionBootstrapService(conn_legacy, clock=lambda: fixed_now)
+        text_legacy = svc_legacy.bootstrap(
+            source="startup", session_id="sess-same", cwd=git_repo,
+        ).additional_context
+
+        assert text_legacy != text_unset

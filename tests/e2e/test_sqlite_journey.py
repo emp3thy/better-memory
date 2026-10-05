@@ -512,6 +512,10 @@ async def test_session_close_rate_then_marker(
     Fire 2 emits EMPTY stdout and exactly one session_end marker.
     """
     env = isolated_env(clean_slate_home)
+    # This journey needs a bootstrap exposure to rate; only the legacy
+    # session-start dump writes one (deferred, the default, renders the
+    # index line only). The Stop sequence under test is mode-independent.
+    env["BETTER_MEMORY_INJECT_MODE"] = "legacy"
     proj_dir = tmp_path / "proj"
     proj_dir.mkdir()
     bm_home = clean_slate_home / ".better-memory"
