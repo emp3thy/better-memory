@@ -146,6 +146,7 @@ def main() -> None:
                     backend, query=query, project=project,
                     conn=conn if cfg.storage_backend == "sqlite" else None,
                     max_items=cfg.context_max_items,
+                    min_hits=cfg.context_min_hits,
                 )
                 had_candidates = bool(items)
                 pairs = [(m.kind, m.id) for m in items]
