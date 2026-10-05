@@ -260,8 +260,12 @@ class SessionBootstrapService:
         }
 
         if get_config().inject_mode == "deferred":
-            general_only = [m for m in semantic if m.scope == "general"]
-            deferred_now = self._clock()
+            # Deferred renders NO memories at session start -- not even
+            # general-scope rules. Dumped at bootstrap they were rated
+            # ignored in 29 of 34 rated serves; they now arrive through the
+            # prompt gate and the tool-call trigger channel (spec
+            # 2026-10-05-just-in-time-serving-design.md §1). With nothing
+            # shown there is nothing to expose, so no ledger rows either.
             n_refl = sum(reflections_counts.values())
             n_sem = semantic_count
             index_line = (
@@ -276,23 +280,10 @@ class SessionBootstrapService:
                     action=action,
                     episode_id=episode_id,
                 ),
+                index_line,
+                "---",
+                _FOOTER,
             ]
-            deferred_sem_section, deferred_semantic_ids = _render_semantic_full(
-                general_only, deferred_now,
-            )
-            if deferred_sem_section:
-                deferred_sections.append(deferred_sem_section)
-            deferred_sections.append(index_line)
-            deferred_sections.append("---")
-            deferred_sections.append(_FOOTER)
-
-            self._record_exposure(
-                session_id=session_id,
-                reflection_ids=[],
-                semantic_ids=deferred_semantic_ids,
-                reflection_display={},
-                semantic_display={m.id: m.content for m in general_only},
-            )
 
             return BootstrapResult(
                 additional_context="\n\n".join(deferred_sections),

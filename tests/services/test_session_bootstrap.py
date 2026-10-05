@@ -563,9 +563,12 @@ def test_list_session_exposures_empty_session_id_returns_none_envelope(conn) -> 
 
 
 class TestDeferredBootstrap:
-    def test_deferred_renders_general_semantics_and_index_only(
+    def test_deferred_renders_index_only(
         self, conn, git_repo: Path, monkeypatch
     ) -> None:
+        """Deferred mode dumps nothing at session start -- not even
+        general-scope rules (they were 29 of 51 ignored ratings when
+        dumped); memories arrive via the prompt and trigger channels."""
         monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
         proj = git_repo.name
 
@@ -580,43 +583,57 @@ class TestDeferredBootstrap:
             )
 
         svc = SessionBootstrapService(conn)
-        text = svc.bootstrap(
+        result = svc.bootstrap(
             source="startup", session_id="sess-deferred-1", cwd=git_repo,
-        ).additional_context
+        )
+        text = result.additional_context
 
-        assert "general-fact-one" in text
-        assert "general-fact-two" in text
+        assert "### Semantic memories" not in text
+        assert "general-fact-one" not in text
         assert "project-fact-one" not in text
-        assert "project-fact-two" not in text
-        assert "project-fact-three" not in text
         assert "refl-title-0" not in text
         assert "knows 4 reflections + 5 semantic memories" in text
+        assert "## better-memory: session bootstrap" in text
+        assert "memory_credit" in text
+        # Pool sizes are still reported on the result.
+        assert result.semantic_count == 5
+        assert sum(result.reflections_counts.values()) == 4
 
-    def test_deferred_exposes_only_general_semantics(
+    def test_deferred_writes_no_exposures(
         self, conn, git_repo: Path, monkeypatch
     ) -> None:
         monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
         proj = git_repo.name
 
-        gen_ids = [
-            _seed_semantic(conn, content="general-a", project="anyproj", scope="general"),
-            _seed_semantic(conn, content="general-b", project="otherproj", scope="general"),
-        ]
+        _seed_semantic(conn, content="general-a", project="anyproj", scope="general")
+        _seed_semantic(conn, content="general-b", project="otherproj", scope="general")
         _seed_semantic(conn, content="proj-a", project=proj, scope="project")
-        _seed_semantic(conn, content="proj-b", project=proj, scope="project")
         _seed_reflection(conn, project=proj, polarity="do", scope="project")
 
         svc = SessionBootstrapService(conn)
         svc.bootstrap(source="startup", session_id="sess-deferred-2", cwd=git_repo)
 
-        rows = conn.execute(
-            "SELECT memory_kind, memory_id, source FROM session_memory_exposure "
-            "WHERE session_id = ?",
+        n = conn.execute(
+            "SELECT COUNT(*) FROM session_memory_exposure WHERE session_id = ?",
             ("sess-deferred-2",),
-        ).fetchall()
-        exposed = {(r["memory_kind"], r["memory_id"]) for r in rows}
-        assert exposed == {("semantic", gid) for gid in gen_ids}
-        assert all(r["source"] == "bootstrap" for r in rows)
+        ).fetchone()[0]
+        assert n == 0
+
+    def test_legacy_still_dumps_general_semantics(
+        self, conn, git_repo: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "legacy")
+        _seed_semantic(conn, content="general-fact-one", project="anyproj", scope="general")
+        svc = SessionBootstrapService(conn)
+        text = svc.bootstrap(
+            source="startup", session_id="sess-legacy-1", cwd=git_repo,
+        ).additional_context
+        assert "general-fact-one" in text
+        n = conn.execute(
+            "SELECT COUNT(*) FROM session_memory_exposure WHERE session_id = ?",
+            ("sess-legacy-1",),
+        ).fetchone()[0]
+        assert n == 1
 
     def test_unset_mode_is_deferred_byte_identical(
         self, tmp_path: Path, git_repo: Path, monkeypatch
