@@ -19,6 +19,11 @@ def test_protocol_declares_capability_flag() -> None:
     assert hasattr(StorageBackend, "supports_synthesis")
 
 
+def test_protocol_declares_supports_triggers_flag() -> None:
+    """supports_triggers gates the UI trigger editors and the PreToolUse trigger channel."""
+    assert hasattr(StorageBackend, "supports_triggers")
+
+
 def test_protocol_declares_supports_episodes_flag() -> None:
     """supports_episodes is the capability used by management UI to hide the Episodes tab in agentcore mode."""
     assert hasattr(StorageBackend, "supports_episodes")
@@ -72,6 +77,8 @@ def test_protocol_declares_all_required_methods() -> None:
         # Semantic memories
         "semantic_observe", "semantic_list", "semantic_update_text",
         "semantic_set_scope", "semantic_delete",
+        # Triggers
+        "set_triggers", "triggered_candidates",
         # Episodes
         "open_background_episode", "start_foreground_episode",
         "close_active_episode", "close_episode_by_id", "list_episodes",

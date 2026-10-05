@@ -415,3 +415,57 @@ def test_semantic_get_returns_model(backend, memory_conn):
     assert backend.semantic_get(id="nope") is None
 
 
+
+
+class TestTriggers:
+    def _seed(self, memory_conn, backend):
+        sid = backend.semantic_observe(content="rule", project="testproj", scope="project")
+        memory_conn.execute(
+            "INSERT INTO reflections (id, title, project, phase, polarity, use_cases, hints, "
+            "confidence, status, scope, created_at, updated_at) VALUES "
+            "('r-gen', 'Gen title', 'other', 'general', 'dont', 'uc', '[\"h1\", \"h2\"]', 0.7, "
+            "'confirmed', 'general', '2026-01-01', '2026-01-01'), "
+            "('r-ret', 'Retired', 'testproj', 'general', 'do', 'uc', '[]', 0.7, "
+            "'retired', 'project', '2026-01-01', '2026-01-01')"
+        )
+        memory_conn.commit()
+        return sid
+
+    def test_supports_triggers(self, backend):
+        assert backend.supports_triggers is True
+
+    def test_triggered_candidates_returns_only_rows_with_triggers(self, backend, memory_conn):
+        sid = self._seed(memory_conn, backend)
+        assert backend.triggered_candidates(project="testproj") == []
+        backend.set_triggers(kind="semantic", id=sid, triggers=["tool:WebFetch"])
+        cands = backend.triggered_candidates(project="testproj")
+        assert [c["id"] for c in cands] == [sid]
+        c = cands[0]
+        assert c["kind"] == "semantic" and c["text"] == "rule"
+        assert c["triggers"] == ["tool:WebFetch"]
+        assert c["polarity"] is None and c["confidence"] is None
+        assert set(c) >= {"kind", "id", "text", "triggers", "polarity", "confidence",
+                          "useful_count", "updated_at"}
+
+    def test_triggered_candidates_includes_general_scope_reflection_excludes_retired(
+        self, backend, memory_conn,
+    ):
+        self._seed(memory_conn, backend)
+        backend.set_triggers(kind="reflection", id="r-gen", triggers=["bash:<<"])
+        backend.set_triggers(kind="reflection", id="r-ret", triggers=["bash:<<"])
+        cands = backend.triggered_candidates(project="testproj")
+        assert [c["id"] for c in cands] == ["r-gen"]
+        assert cands[0]["text"] == "Gen title: uc h1 h2"
+        assert cands[0]["polarity"] == "dont" and cands[0]["confidence"] == 0.7
+
+    def test_triggered_candidates_skips_malformed_json(self, backend, memory_conn):
+        sid = self._seed(memory_conn, backend)
+        memory_conn.execute(
+            "UPDATE semantic_memories SET triggers='{not json' WHERE id=?", (sid,)
+        )
+        memory_conn.commit()
+        assert backend.triggered_candidates(project="testproj") == []
+
+    def test_set_triggers_rejects_unknown_kind(self, backend):
+        with pytest.raises(ValueError):
+            backend.set_triggers(kind="episode", id="x", triggers=["tool:X"])

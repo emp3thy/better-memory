@@ -286,3 +286,35 @@ class TestPromoteToGeneral:
         svc = ReflectionService(conn, clock=fixed_clock)
         with pytest.raises(ValueError, match="Cannot promote reflection in status 'superseded'"):
             svc.promote_to_general(reflection_id="r1")
+
+
+class TestSetTriggers:
+    def test_set_triggers_roundtrip_and_bucket_item(self, conn, fixed_clock):
+        from better_memory.services.reflection import (
+            ReflectionService,
+            ReflectionSynthesisService,
+        )
+        rid = "trig-1"
+        conn.execute(
+            "INSERT INTO reflections (id, title, project, phase, polarity, use_cases, "
+            "hints, confidence, status, created_at, updated_at) VALUES "
+            "(?, 't', 'proj-a', 'general', 'do', 'uc', '[\"h\"]', 0.7, 'confirmed', "
+            "'2026-04-25T00:00:00+00:00', '2026-04-25T00:00:00+00:00')",
+            (rid,),
+        )
+        conn.commit()
+        ReflectionService(conn, clock=fixed_clock).set_triggers(
+            reflection_id=rid, triggers=["bash:<<", "write:large"],
+        )
+        buckets = ReflectionSynthesisService(conn).retrieve_reflections(
+            project="proj-a", track_exposure=False,
+        )
+        item = next(r for b in buckets.values() for r in b if r["id"] == rid)
+        assert item["triggers"] == ["bash:<<", "write:large"]
+
+    def test_set_triggers_missing_reflection(self, conn, fixed_clock):
+        from better_memory.services.reflection import ReflectionService
+        with pytest.raises(ValueError, match="Reflection not found"):
+            ReflectionService(conn, clock=fixed_clock).set_triggers(
+                reflection_id="nope", triggers=["tool:X"],
+            )
