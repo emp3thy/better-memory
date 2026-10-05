@@ -876,3 +876,77 @@ def retention_runs_list_for_ui(
         )
         for r in rows
     ]
+
+
+def useful_rate_by_channel(
+    conn: sqlite3.Connection, *, last_n_sessions: int | None
+) -> dict:
+    """Useful rate per exposure source over rated exposures.
+
+    ``useful = cited + shaped``; ``rate = useful / rated`` (0.0 when rated is
+    0). ``last_n_sessions=None`` is all time; otherwise only the N most
+    recently rated sessions (by ``MAX(rated_at)`` per session) count.
+    ``useful_per_session`` (useful ratings / rated sessions) is the guard
+    against reaching a ratio by starving the channels (design spec
+    2026-10-05-just-in-time-serving-design.md §3).
+
+    Returns ``{"rows": [...], "total": {...}, "rated_sessions": int,
+    "useful_per_session": float}``; each row has ``source``, ``rated``,
+    ``useful``, ``ignored``, ``misled``, ``rate``.
+    """
+    session_filter = ""
+    params: list[object] = []
+    if last_n_sessions is not None:
+        session_filter = (
+            "AND session_id IN ("
+            "  SELECT session_id FROM session_memory_exposure "
+            "  WHERE rated_at IS NOT NULL "
+            "  GROUP BY session_id ORDER BY MAX(rated_at) DESC LIMIT ?)"
+        )
+        params.append(int(last_n_sessions))
+    rows = conn.execute(
+        f"""
+        SELECT source,
+               COUNT(*) AS rated,
+               SUM(classification IN ('cited', 'shaped')) AS useful,
+               SUM(classification = 'ignored') AS ignored,
+               SUM(classification = 'misled') AS misled
+          FROM session_memory_exposure
+         WHERE rated_at IS NOT NULL {session_filter}
+         GROUP BY source
+         ORDER BY source
+        """,
+        params,
+    ).fetchall()
+    sessions = conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT session_id) FROM session_memory_exposure
+         WHERE rated_at IS NOT NULL {session_filter}
+        """,
+        params,
+    ).fetchone()[0]
+
+    def _row(source: str, rated: int, useful: int, ignored: int, misled: int) -> dict:
+        return {
+            "source": source, "rated": rated, "useful": useful,
+            "ignored": ignored, "misled": misled,
+            "rate": (useful / rated) if rated else 0.0,
+        }
+
+    out_rows = [
+        _row(r["source"], r["rated"], r["useful"] or 0, r["ignored"] or 0, r["misled"] or 0)
+        for r in rows
+    ]
+    total = _row(
+        "all",
+        sum(r["rated"] for r in out_rows),
+        sum(r["useful"] for r in out_rows),
+        sum(r["ignored"] for r in out_rows),
+        sum(r["misled"] for r in out_rows),
+    )
+    return {
+        "rows": out_rows,
+        "total": total,
+        "rated_sessions": int(sessions or 0),
+        "useful_per_session": (total["useful"] / sessions) if sessions else 0.0,
+    }

@@ -37,6 +37,11 @@ def _reflection_drawer_detail(app: Flask, id: str) -> SimpleNamespace | None:
     return SimpleNamespace(reflection=SimpleNamespace(**row), sources=sources)
 
 
+#: Sessions in the "recent" window of the useful-rate panel: the design's
+#: measurement window for the 33% target (spec §3).
+_RECENT_SESSIONS_WINDOW = 15
+
+
 def create_app(
     *,
     inactivity_timeout: float = 1800.0,
@@ -738,6 +743,11 @@ def create_app(
             recent_ratings=recent_ratings,
             rating_diagnostics=rating_diagnostics,
             overlooked_total=overlooked_total,
+            useful_all=queries.useful_rate_by_channel(conn, last_n_sessions=None),
+            useful_recent=queries.useful_rate_by_channel(
+                conn, last_n_sessions=_RECENT_SESSIONS_WINDOW,
+            ),
+            recent_window=_RECENT_SESSIONS_WINDOW,
         )
 
     @app.get("/diagnostics/panel/hook-errors")
