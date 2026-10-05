@@ -55,21 +55,51 @@ def _seed_reflection(
     home: Path, rid: str, *, title: str, use_cases: str = "context",
     hints: list[str] | None = None, useful_count: int = 0,
     confidence: float = 0.8, polarity: str = "do",
+    triggers: list[str] | None = None,
 ) -> None:
     conn = connect(home / "memory.db")
     try:
         conn.execute(
             """INSERT INTO reflections
                (id, title, project, phase, polarity, use_cases, hints,
-                confidence, created_at, updated_at, useful_count)
+                confidence, created_at, updated_at, useful_count, triggers)
                VALUES (?, ?, ?, 'general', ?, ?, ?, ?, '2026-01-01',
-                       '2026-01-01', ?)""",
+                       '2026-01-01', ?, ?)""",
             (rid, title, _PROJECT, polarity, use_cases,
-             json.dumps(hints or []), confidence, useful_count),
+             json.dumps(hints or []), confidence, useful_count,
+             json.dumps(triggers) if triggers else None),
         )
         conn.commit()
     finally:
         conn.close()
+
+
+def _seed_semantic(
+    home: Path, sid: str, *, content: str, triggers: list[str] | None = None,
+) -> None:
+    conn = connect(home / "memory.db")
+    try:
+        conn.execute(
+            """INSERT INTO semantic_memories
+               (id, content, project, scope, created_at, updated_at, triggers)
+               VALUES (?, ?, ?, 'project', '2026-01-01', '2026-01-01', ?)""",
+            (sid, content, _PROJECT, json.dumps(triggers) if triggers else None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _exposure_sources(home: Path, session_id: str) -> dict[str, str]:
+    conn = connect(home / "memory.db")
+    try:
+        rows = conn.execute(
+            "SELECT memory_id, source FROM session_memory_exposure WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r["memory_id"]: r["source"] for r in rows}
 
 
 def _diag_value(home: Path, metric: str) -> int | None:
@@ -362,52 +392,6 @@ def test_exposure_write_failure_does_not_block_injection(bm_home, monkeypatch, c
     assert "refl-widget-deploy-6" in ctx
 
 
-def test_pretool_fires_once_per_session(bm_home, monkeypatch, capsys):
-    """Second PreToolUse in the same session hits the latch: empty
-    additionalContext, and contextual_fired_pretool is bumped only once."""
-    _seed_reflection(bm_home, "refl-widget-deploy-7", title="widget deploy playbook")
-    payload = {
-        "hook_event_name": "PreToolUse", "tool_name": "Skill",
-        "tool_input": {"skill": "deploy the widget service now"},
-        "cwd": ".", "session_id": "sess-7",
-    }
-    first = _run(payload, monkeypatch, capsys)
-    assert first["hookSpecificOutput"]["additionalContext"] != ""
-    assert _diag_value(bm_home, "contextual_fired_pretool") == 1
-
-    second = _run(payload, monkeypatch, capsys)
-    assert second["hookSpecificOutput"]["additionalContext"] == ""
-    assert _diag_value(bm_home, "contextual_fired_pretool") == 1
-
-
-def test_userprompt_unaffected_by_pretool_latch(bm_home, monkeypatch, capsys):
-    """The PreToolUse latch must not suppress UserPromptSubmit injections,
-    even after a PreToolUse event has already fired in the same session.
-
-    The PreToolUse payload deliberately shares no evidence with the seeded
-    reflection (no BM25/vec/keyword match) so it latches without injecting or
-    marking anything seen -- isolating the latch from the unrelated
-    SeenStore dedup mechanism, which would otherwise also explain a second
-    empty result.
-    """
-    _seed_reflection(bm_home, "refl-widget-deploy-8", title="widget deploy playbook")
-    session_id = "sess-8"
-    pretool_payload = {
-        "hook_event_name": "PreToolUse", "tool_name": "Bash",
-        "tool_input": {"command": "zebra flamingo unrelated topic"},
-        "cwd": ".", "session_id": session_id,
-    }
-    first = _run(pretool_payload, monkeypatch, capsys)  # fires and latches PreToolUse
-    assert first["hookSpecificOutput"]["additionalContext"] == ""
-
-    prompt_payload = {
-        "hook_event_name": "UserPromptSubmit", "prompt": "deploy the widget service now",
-        "cwd": ".", "session_id": session_id,
-    }
-    res = _run(prompt_payload, monkeypatch, capsys)
-    assert res["hookSpecificOutput"]["additionalContext"] != ""
-
-
 @pytest.mark.parametrize("text,human", [
     ("fix the bug", True),
     ("  <task-notification>x", False),
@@ -447,3 +431,97 @@ def test_peer_message_is_suppressed(bm_home, monkeypatch, capsys):
         monkeypatch, capsys,
     )
     assert "refl-widget-deploy-peer" in res["hookSpecificOutput"]["additionalContext"]
+
+
+_HEREDOC = {"command": "cat > notes.md <<'EOF'\nhello\nEOF"}
+
+
+def test_pretool_trigger_hit_injects_with_reason(bm_home, monkeypatch, capsys):
+    _seed_semantic(bm_home, "sem-heredoc", content="Use the Write tool for large files",
+                   triggers=["bash:<<"])
+    res = _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+         "cwd": ".", "session_id": "sess-t1"},
+        monkeypatch, capsys,
+    )
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "sem-heredoc" in ctx
+    assert "Triggered by: bash:<<" in ctx
+    assert _exposure_sources(bm_home, "sess-t1") == {"sem-heredoc": "trigger"}
+    assert _diag_value(bm_home, "trigger_fired") == 1
+    assert _diag_value(bm_home, "trigger_injected") == 1
+    assert _diag_value(bm_home, "contextual_fired_pretool") == 1
+
+
+def test_pretool_no_trigger_no_exposure(bm_home, monkeypatch, capsys):
+    _seed_semantic(bm_home, "sem-heredoc", content="Use the Write tool for large files",
+                   triggers=["bash:<<"])
+    # Keyword overlap with the tool input must NOT serve a memory: the
+    # PreToolUse channel is trigger-only.
+    _seed_reflection(bm_home, "refl-read-files", title="read files playbook")
+    res = _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "Read",
+         "tool_input": {"file_path": "read files playbook.md"},
+         "cwd": ".", "session_id": "sess-t2"},
+        monkeypatch, capsys,
+    )
+    assert res["hookSpecificOutput"]["additionalContext"] == ""
+    assert _exposure_sources(bm_home, "sess-t2") == {}
+    assert _diag_value(bm_home, "trigger_fired") == 1
+    assert _diag_value(bm_home, "trigger_injected") == 0
+
+
+def test_pretool_fires_on_every_call(bm_home, monkeypatch, capsys):
+    _seed_semantic(bm_home, "sem-heredoc", content="heredoc pitfall", triggers=["bash:<<"])
+    _seed_reflection(bm_home, "refl-webfetch", title="WebFetch refusals",
+                     triggers=["tool:WebFetch"])
+    first = _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+         "cwd": ".", "session_id": "sess-t3"},
+        monkeypatch, capsys,
+    )
+    assert "sem-heredoc" in first["hookSpecificOutput"]["additionalContext"]
+    second = _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "WebFetch",
+         "tool_input": {"url": "https://example.com"}, "cwd": ".", "session_id": "sess-t3"},
+        monkeypatch, capsys,
+    )
+    assert "refl-webfetch" in second["hookSpecificOutput"]["additionalContext"]
+    assert _exposure_sources(bm_home, "sess-t3") == {
+        "sem-heredoc": "trigger", "refl-webfetch": "trigger",
+    }
+    assert _diag_value(bm_home, "contextual_fired_pretool") == 2
+
+
+def test_pretool_seen_store_dedups_trigger(bm_home, monkeypatch, capsys):
+    _seed_semantic(bm_home, "sem-heredoc", content="heredoc pitfall", triggers=["bash:<<"])
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+               "cwd": ".", "session_id": "sess-t4"}
+    first = _run(payload, monkeypatch, capsys)["hookSpecificOutput"]["additionalContext"]
+    assert "sem-heredoc" in first
+    assert _run(payload, monkeypatch, capsys)["hookSpecificOutput"]["additionalContext"] == ""
+    assert _diag_value(bm_home, "contextual_suppressed_dedup") == 1
+
+
+def test_prompt_then_trigger_same_memory_once(bm_home, monkeypatch, capsys):
+    _seed_semantic(bm_home, "sem-heredoc", content="Bash heredoc pitfall on windows",
+                   triggers=["bash:<<"])
+    prompt = {"hook_event_name": "UserPromptSubmit", "prompt": "the bash heredoc pitfall again",
+              "cwd": ".", "session_id": "sess-t5"}
+    first = _run(prompt, monkeypatch, capsys)["hookSpecificOutput"]["additionalContext"]
+    assert "sem-heredoc" in first
+    tool = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+            "cwd": ".", "session_id": "sess-t5"}
+    assert _run(tool, monkeypatch, capsys)["hookSpecificOutput"]["additionalContext"] == ""
+    assert _exposure_sources(bm_home, "sess-t5") == {"sem-heredoc": "contextual"}
+
+
+def test_pretool_mode_userprompt_only_disables_triggers(bm_home, monkeypatch, capsys):
+    _seed_semantic(bm_home, "sem-heredoc", content="heredoc pitfall", triggers=["bash:<<"])
+    res = _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+         "cwd": ".", "session_id": "sess-t6"},
+        monkeypatch, capsys, mode="userprompt",
+    )
+    assert res["hookSpecificOutput"]["additionalContext"] == ""
+    assert _exposure_sources(bm_home, "sess-t6") == {}

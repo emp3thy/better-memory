@@ -66,38 +66,21 @@ def test_missing_state_dir_never_raises(tmp_path):
     s.mark_seen([("reflection", "r1")])
 
 
-class TestPretoolLatch:
-    def test_defaults_false_then_persists(self, tmp_path):
-        s = SeenStore(tmp_path, "sess")
-        assert s.pretool_fired() is False
-        s.mark_pretool_fired()
-        assert SeenStore(tmp_path, "sess").pretool_fired() is True
+def test_prune_stale_removes_legacy_pretool_sentinel(tmp_path):
+    """Older versions left a ``.pretool`` latch file per session; prune
+    still sweeps them so upgraded installs do not accumulate stale files."""
+    import os
+    sentinel = tmp_path / "context_seen_sess.pretool"
+    sentinel.write_text("", encoding="utf-8")
+    ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+    os.utime(sentinel, (ten_days_ago, ten_days_ago))
+    prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
+    assert not sentinel.exists()
 
-    def test_corrupt_state_means_not_fired(self, tmp_path):
-        (tmp_path / "context_seen_sess.json").write_text("{", encoding="utf-8")
-        assert SeenStore(tmp_path, "sess").pretool_fired() is False
 
-    def test_try_claim_pretool_fired_only_first_caller_wins(self, tmp_path):
-        # #107: PreToolUse "one real firing per session" was a check-then-set
-        # across two file operations, so N parallel hook processes could all
-        # observe pretool_fired == False and all proceed. The sentinel-based
-        # atomic claim guarantees exactly one True return.
-        stores = [SeenStore(tmp_path, "sess") for _ in range(4)]
-        wins = [s.try_claim_pretool_fired() for s in stores]
-        assert wins.count(True) == 1
-        assert wins.count(False) == 3
-        # And every subsequent instance sees the latch as fired.
-        assert SeenStore(tmp_path, "sess").pretool_fired() is True
-
-    def test_prune_stale_removes_pretool_sentinel(self, tmp_path):
-        import os
-        SeenStore(tmp_path, "sess").mark_pretool_fired()
-        sentinel = tmp_path / "context_seen_sess.pretool"
-        assert sentinel.exists()
-        ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
-        os.utime(sentinel, (ten_days_ago, ten_days_ago))
-        prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
-        assert not sentinel.exists()
+def test_seen_store_has_no_pretool_latch():
+    assert not hasattr(SeenStore, "try_claim_pretool_fired")
+    assert not hasattr(SeenStore, "pretool_fired")
 
 
 class TestConcurrentMutators:

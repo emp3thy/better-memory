@@ -81,10 +81,9 @@ MANAGED_HOOKS: tuple[HookSpec, ...] = (
         "better_memory.hooks.contextual_inject", "UserPromptSubmit", None, False, True
     ),
     # Matcher is None (unscoped = all tools) rather than a tool-name
-    # alternation: the hook's per-session PreToolUse latch (SeenStore
-    # .pretool_fired/.mark_pretool_fired) makes an unscoped matcher cheap —
-    # only the first PreToolUse event per session does real work; every
-    # later one short-circuits on the state file before touching the DB.
+    # alternation: PreToolUse is the trigger channel and must see every
+    # tool call (memories declare which tools/skills/paths they fire on).
+    # Measured cost per call is interpreter start, not the trigger match.
     HookSpec(
         "better_memory.hooks.contextual_inject", "PreToolUse", None, False, True
     ),

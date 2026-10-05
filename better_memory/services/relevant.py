@@ -39,6 +39,7 @@ from typing import Any
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.keywords import count_keyword_hits, extract_keywords
 from better_memory.services.scoring import wilson_lower_bound
+from better_memory.services.triggers import match as match_trigger
 
 #: Keyword-hit floor for the agentcore fallback (relevance_ranks failed).
 _FALLBACK_MIN_HITS = 2
@@ -293,6 +294,49 @@ def retrieve_relevant(
     ]
 
 
+def triggered_memories(
+    backend: Any,
+    *,
+    project: str,
+    tool_name: str,
+    tool_input: dict | None,
+    large_write_chars: int,
+    now: Callable[[], datetime] | None = None,
+) -> list[RelevantMemory]:
+    """Trigger channel (PreToolUse): every memory whose triggers fire for
+    this tool call, best Wilson prior first. ``reason`` carries the trigger
+    string that fired. No keyword matching happens here -- a memory without
+    triggers is never tool-triggered. Never raises: a backend failure
+    yields []."""
+    _now = (now or (lambda: datetime.now(UTC)))()
+    try:
+        candidates = backend.triggered_candidates(project=project)
+    except Exception:  # noqa: BLE001 - degrade to no trigger candidates
+        return []
+    out: list[RelevantMemory] = []
+    for c in candidates or []:
+        reason = match_trigger(
+            list(c.get("triggers") or []), tool_name, tool_input,
+            large_write_chars=large_write_chars,
+        )
+        if reason is None:
+            continue
+        wilson = _wilson_for(
+            int(c.get("useful_count") or 0),
+            int(c.get("times_overlooked") or 0),
+            int(c.get("times_ignored") or 0),
+        )
+        out.append(RelevantMemory(
+            kind=str(c.get("kind")), id=str(c.get("id")), text=str(c.get("text") or ""),
+            polarity=c.get("polarity"), confidence=c.get("confidence"),
+            useful_count=int(c.get("useful_count") or 0),
+            age_days=_age_days(c.get("updated_at"), _now),
+            hits=0, score=wilson, reason=reason,
+        ))
+    out.sort(key=lambda m: (-m.score, m.id))
+    return out
+
+
 _TEXT_MAX_CHARS = 400
 
 _BLOCK_HEADER = (
@@ -330,5 +374,7 @@ def format_relevant(items: list[RelevantMemory]) -> str:
             text = f"Known pitfall -- do this instead: {text}"
         lines.append(f"{i}. {_meta_tag(m)}")
         lines.append(f"   {text}")
+        if m.reason:
+            lines.append(f"   Triggered by: {m.reason}")
     lines.append(_BLOCK_FOOTER)
     return "\n".join(lines)
