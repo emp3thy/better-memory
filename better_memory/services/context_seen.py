@@ -27,10 +27,11 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-# Matches the state JSON, legacy pretool sentinels, and stray `.tmp`
-# siblings left behind by a process hard-killed between mkstemp and
-# os.replace.
-_FILE_RE = re.compile(r"^context_seen_.+\.(json|pretool|json\..+\.tmp)$")
+# Matches the state JSON, per-memory claim sentinels, legacy pretool
+# sentinels, and stray `.tmp` siblings left behind by a process hard-killed
+# between mkstemp and os.replace.
+_FILE_RE = re.compile(r"^context_seen_.+\.(json|claim|pretool|json\..+\.tmp)$")
+_SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.-]")
 _SAFE_SESSION_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
@@ -42,8 +43,39 @@ class SeenStore:
     def __init__(self, state_dir: Path, session_id: str) -> None:
         self._dir = state_dir
         safe = _SAFE_SESSION_RE.sub("_", session_id or "unknown")
+        self._safe = safe
         self._path = state_dir / f"context_seen_{safe}.json"
         self._data = self._load()
+
+    def claim(self, ids: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Atomically claim each (kind, id) for this session; return the ones
+        THIS caller won, in input order.
+
+        Hook processes run in parallel (Claude issues parallel tool calls),
+        and :meth:`filter_unseen` reads a snapshot taken at process start, so
+        two processes can both see a memory as unseen. The claim is an
+        ``O_CREAT|O_EXCL`` sentinel per (session, kind, id):
+        ``context_seen_<session>.<kind>-<id>.claim``. Exactly one process
+        creates it. Never raises: an unwritable state dir claims nothing,
+        so a failure degrades to "do not serve" rather than "serve twice".
+        """
+        won: list[tuple[str, str]] = []
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+        except BaseException:  # noqa: BLE001 - cannot claim -> serve nothing
+            return won
+        for kind, id_ in ids:
+            name = _SAFE_KEY_RE.sub("_", f"{kind}-{id_}")
+            sentinel = self._dir / f"context_seen_{self._safe}.{name}.claim"
+            try:
+                fd = os.open(str(sentinel), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                os.close(fd)
+                won.append((kind, id_))
+            except FileExistsError:
+                continue
+            except BaseException:  # noqa: BLE001 - best-effort; behave as "lost"
+                continue
+        return won
 
     def _load(self) -> dict:
         try:
@@ -125,7 +157,8 @@ class SeenStore:
 
 
 def prune_stale(state_dir: Path, *, now: datetime, max_age_days: int = 7) -> None:
-    """Delete context_seen state / pretool sentinels older than max_age_days.
+    """Delete context_seen state, claim sentinels and legacy pretool
+    sentinels older than max_age_days.
 
     Never raises.
     """

@@ -242,6 +242,8 @@ def _seed_ledger(conn):
     _seed_rated(conn, "s2", "m5", "retrieve", "misled", "2026-10-02T10:00:00+00:00")
     _seed_rated(conn, "s3", "m6", "bootstrap", "ignored", "2026-10-03T10:00:00+00:00")
     _seed_rated(conn, "s3", "m7", "trigger", "shaped", "2026-10-03T10:00:00+00:00")
+    # An overlooked rating: shown, but outside the spec's rate denominator.
+    _seed_rated(conn, "s3", "m9", "trigger", "overlooked", "2026-10-03T10:00:00+00:00")
     conn.execute(
         "INSERT INTO session_memory_exposure (session_id, memory_kind, memory_id, "
         "exposed_at, source) VALUES ('s4', 'semantic', 'm8', '2026-10-04', 'trigger')"
@@ -257,16 +259,16 @@ class TestUsefulRateByChannel:
         rows = {r["source"]: r for r in out["rows"]}
         assert rows["bootstrap"] == {
             "source": "bootstrap", "rated": 2, "useful": 0, "ignored": 2, "misled": 0,
-            "rate": 0.0,
+            "overlooked": 0, "rate": 0.0,
         }
         assert rows["trigger"] == {
             "source": "trigger", "rated": 3, "useful": 2, "ignored": 1, "misled": 0,
-            "rate": pytest.approx(2 / 3),
+            "overlooked": 1, "rate": pytest.approx(2 / 3),
         }
         assert rows["retrieve"]["misled"] == 1 and rows["retrieve"]["rate"] == 0.0
         assert out["total"] == {
             "source": "all", "rated": 7, "useful": 3, "ignored": 3, "misled": 1,
-            "rate": pytest.approx(3 / 7),
+            "overlooked": 1, "rate": pytest.approx(3 / 7),
         }
         assert out["rated_sessions"] == 3
         assert out["useful_per_session"] == pytest.approx(1.0)
@@ -278,6 +280,7 @@ class TestUsefulRateByChannel:
         sources = {r["source"] for r in out["rows"]}
         assert "contextual" not in sources          # only in s1
         assert out["total"]["rated"] == 5
+        assert out["total"]["overlooked"] == 1
         assert out["rated_sessions"] == 2
 
     def test_empty_ledger(self, conn):

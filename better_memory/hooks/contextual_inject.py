@@ -136,6 +136,13 @@ def main() -> None:
                 with closing(connect(cfg.memory_db)) as conn:
                     _bump_diagnostic(conn, cfg, "contextual_suppressed_nonhuman")
                 raise _SkipInjection()
+            if event == "PreToolUse" and cfg.storage_backend != "sqlite":
+                # The trigger channel needs trigger storage, which only the
+                # sqlite backend has. Return before any connection or
+                # backend build: on agentcore that would mean a boto3 import
+                # and two client builds on EVERY tool call for a channel
+                # that cannot fire.
+                raise _SkipInjection()
             seen.bump_turn()
             # A real local connection is opened in BOTH backend modes: the
             # exposure ledger is session-operational state in the local
@@ -180,6 +187,11 @@ def main() -> None:
                 ))
                 items = [m for m in items if (m.kind, m.id) in unseen]
                 items = items[: cfg.context_max_items]
+                # Atomic per-memory claim: parallel hook processes (parallel
+                # tool calls) each read their own SeenStore snapshot, so
+                # without this both would serve the same memory.
+                won = set(seen.claim([(m.kind, m.id) for m in items]))
+                items = [m for m in items if (m.kind, m.id) in won]
                 if items:
                     rendered = format_relevant(items)
                     survivors = [(m.kind, m.id) for m in items]
@@ -199,7 +211,11 @@ def main() -> None:
                     _bump_diagnostic(conn, cfg, injected_metric)
                 elif had_candidates:
                     _bump_diagnostic(conn, cfg, "contextual_suppressed_dedup")
-                else:
+                elif event == "UserPromptSubmit":
+                    # The floor counter is the PROMPT gate's figure (it
+                    # drives retuning of the distinct-hit floor); tool calls
+                    # that match no trigger are measured by
+                    # trigger_fired - trigger_injected instead.
                     _bump_diagnostic(conn, cfg, "contextual_suppressed_floor")
     except _SkipInjection:
         rendered = ""

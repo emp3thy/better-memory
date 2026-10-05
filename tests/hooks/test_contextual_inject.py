@@ -525,3 +525,56 @@ def test_pretool_mode_userprompt_only_disables_triggers(bm_home, monkeypatch, ca
     )
     assert res["hookSpecificOutput"]["additionalContext"] == ""
     assert _exposure_sources(bm_home, "sess-t6") == {}
+
+
+def test_preclaimed_memory_is_not_served_again(bm_home, monkeypatch, capsys):
+    """A parallel hook process that already claimed the memory wins; this
+    process injects nothing and writes no exposure."""
+    from better_memory.services.context_seen import SeenStore
+    _seed_semantic(bm_home, "sem-heredoc", content="heredoc pitfall", triggers=["bash:<<"])
+    SeenStore(bm_home / "state", "sess-claim").claim([("semantic", "sem-heredoc")])
+    res = _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+         "cwd": ".", "session_id": "sess-claim"},
+        monkeypatch, capsys,
+    )
+    assert res["hookSpecificOutput"]["additionalContext"] == ""
+    assert _exposure_sources(bm_home, "sess-claim") == {}
+
+
+def test_pretool_on_agentcore_returns_before_backend_work(bm_home, monkeypatch, capsys):
+    """The trigger channel cannot fire on agentcore (no trigger storage), so
+    PreToolUse must not pay for a backend build on every tool call."""
+    monkeypatch.setenv("BETTER_MEMORY_STORAGE_BACKEND", "agentcore")
+
+    def _boom(**kwargs):
+        raise AssertionError("build_backend must not be called")
+
+    monkeypatch.setattr(hook, "build_backend", _boom)
+    res = _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+         "cwd": ".", "session_id": "sess-ac"},
+        monkeypatch, capsys,
+    )
+    assert res["hookSpecificOutput"]["additionalContext"] == ""
+    conn = connect(bm_home / "memory.db")
+    try:
+        errors = conn.execute("SELECT COUNT(*) FROM hook_errors").fetchone()[0]
+    finally:
+        conn.close()
+    assert errors == 0
+    assert _diag_value(bm_home, "contextual_fired_pretool") in (0, None)
+
+
+def test_pretool_no_match_does_not_bump_prompt_floor_counter(bm_home, monkeypatch, capsys):
+    """contextual_suppressed_floor is the prompt gate's counter; tool calls
+    that match no trigger must not swamp it (trigger_fired - trigger_injected
+    is the trigger channel's own suppression figure)."""
+    _run(
+        {"hook_event_name": "PreToolUse", "tool_name": "Read",
+         "tool_input": {"file_path": "x.md"}, "cwd": ".", "session_id": "sess-floor"},
+        monkeypatch, capsys,
+    )
+    assert _diag_value(bm_home, "contextual_suppressed_floor") == 0
+    assert _diag_value(bm_home, "trigger_fired") == 1
+    assert _diag_value(bm_home, "trigger_injected") == 0

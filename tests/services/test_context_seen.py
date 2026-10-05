@@ -162,3 +162,39 @@ class TestConcurrentMutators:
         assert fresh.filter_unseen(
             [("reflection", "r1"), ("semantic", "m1")], reinject_turns=0,
         ) == []
+
+
+class TestClaim:
+    def test_claim_first_caller_wins_per_memory(self, tmp_path):
+        """Parallel hook processes must not both serve the same memory: the
+        claim is an O_CREAT|O_EXCL sentinel per (session, kind, id)."""
+        stores = [SeenStore(tmp_path, "sess") for _ in range(4)]
+        wins = [s.claim([("reflection", "r1")]) for s in stores]
+        assert [w == [("reflection", "r1")] for w in wins].count(True) == 1
+        # Other memories and other sessions are independent.
+        assert stores[0].claim([("semantic", "s1")]) == [("semantic", "s1")]
+        assert SeenStore(tmp_path, "other").claim([("reflection", "r1")]) == [("reflection", "r1")]
+
+    def test_claim_returns_only_unclaimed_in_order(self, tmp_path):
+        s = SeenStore(tmp_path, "sess")
+        assert s.claim([("reflection", "a")]) == [("reflection", "a")]
+        assert s.claim([("reflection", "a"), ("semantic", "b"), ("reflection", "c")]) == [
+            ("semantic", "b"), ("reflection", "c"),
+        ]
+
+    def test_claim_never_raises_on_unwritable_dir(self, tmp_path):
+        bad = tmp_path / "file-not-dir"
+        bad.write_text("x", encoding="utf-8")
+        # state_dir is a file: mkdir fails; claim degrades to "nothing claimed".
+        assert SeenStore(bad, "sess").claim([("reflection", "a")]) == []
+
+    def test_prune_stale_removes_claim_files(self, tmp_path):
+        import os
+        s = SeenStore(tmp_path, "sess")
+        s.claim([("reflection", "a")])
+        files = list(tmp_path.glob("context_seen_sess*.claim"))
+        assert len(files) == 1
+        ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+        os.utime(files[0], (ten_days_ago, ten_days_ago))
+        prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
+        assert not files[0].exists()

@@ -883,8 +883,10 @@ def useful_rate_by_channel(
 ) -> dict:
     """Useful rate per exposure source over rated exposures.
 
-    ``useful = cited + shaped``; ``rate = useful / rated`` (0.0 when rated is
-    0). ``last_n_sessions=None`` is all time; otherwise only the N most
+    ``useful = cited + shaped``; ``rated = useful + ignored + misled`` (the
+    spec's denominator -- ``overlooked`` ratings are reported in their own
+    column but excluded from the rate); ``rate = useful / rated`` (0.0 when
+    rated is 0). ``last_n_sessions=None`` is all time; otherwise only the N most
     recently rated sessions (by ``MAX(rated_at)`` per session) count.
     ``useful_per_session`` (useful ratings / rated sessions) is the guard
     against reaching a ratio by starving the channels (design spec
@@ -892,7 +894,7 @@ def useful_rate_by_channel(
 
     Returns ``{"rows": [...], "total": {...}, "rated_sessions": int,
     "useful_per_session": float}``; each row has ``source``, ``rated``,
-    ``useful``, ``ignored``, ``misled``, ``rate``.
+    ``useful``, ``ignored``, ``misled``, ``overlooked``, ``rate``.
     """
     session_filter = ""
     params: list[object] = []
@@ -907,10 +909,10 @@ def useful_rate_by_channel(
     rows = conn.execute(
         f"""
         SELECT source,
-               COUNT(*) AS rated,
                SUM(classification IN ('cited', 'shaped')) AS useful,
                SUM(classification = 'ignored') AS ignored,
-               SUM(classification = 'misled') AS misled
+               SUM(classification = 'misled') AS misled,
+               SUM(classification = 'overlooked') AS overlooked
           FROM session_memory_exposure
          WHERE rated_at IS NOT NULL {session_filter}
          GROUP BY source
@@ -926,23 +928,25 @@ def useful_rate_by_channel(
         params,
     ).fetchone()[0]
 
-    def _row(source: str, rated: int, useful: int, ignored: int, misled: int) -> dict:
+    def _row(source: str, useful: int, ignored: int, misled: int, overlooked: int) -> dict:
+        rated = useful + ignored + misled
         return {
             "source": source, "rated": rated, "useful": useful,
-            "ignored": ignored, "misled": misled,
+            "ignored": ignored, "misled": misled, "overlooked": overlooked,
             "rate": (useful / rated) if rated else 0.0,
         }
 
     out_rows = [
-        _row(r["source"], r["rated"], r["useful"] or 0, r["ignored"] or 0, r["misled"] or 0)
+        _row(r["source"], r["useful"] or 0, r["ignored"] or 0, r["misled"] or 0,
+             r["overlooked"] or 0)
         for r in rows
     ]
     total = _row(
         "all",
-        sum(r["rated"] for r in out_rows),
         sum(r["useful"] for r in out_rows),
         sum(r["ignored"] for r in out_rows),
         sum(r["misled"] for r in out_rows),
+        sum(r["overlooked"] for r in out_rows),
     )
     return {
         "rows": out_rows,
