@@ -34,6 +34,19 @@
     <p>{{ detail.reflection.use_cases }}</p>
   </section>
 
+  {% if caps.supports_triggers %}
+  <section class="drawer-section">
+    <h4>Triggers</h4>
+    {% if detail.reflection.triggers %}
+      <div class="trigger-chips">
+        {% for t in detail.reflection.triggers %}<span class="chip">{{ t }}</span>{% endfor %}
+      </div>
+    {% else %}
+      <p class="empty-inline">No triggers: served by the prompt gate only.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
   <section class="drawer-section">
     <h4>Hints</h4>
     {% set hint_list = detail.reflection.hints | decode_hints %}

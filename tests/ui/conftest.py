@@ -62,6 +62,7 @@ class _FakeAgentCoreBackend:
     supports_retention_runs = False
     supports_reflection_review = False
     supports_reflection_text_edit = False
+    supports_triggers = False
 
     def reflection_list(self, **_kwargs: Any) -> list[Any]:
         return []

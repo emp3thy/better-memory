@@ -936,3 +936,71 @@ def test_reflections_panel_caps_limit_at_100(
     resp = client.get("/reflections/panel")
     assert resp.status_code == 200
     assert captured["limit"] == 100
+
+
+class TestReflectionTriggersUI:
+    def test_edit_saves_triggers(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import json
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1")
+        response = client.post(
+            "/reflections/r-1/edit",
+            data={"use_cases": "new uc", "hints": "new h",
+                  "triggers": "skill:superpowers:*\npath:docs/superpowers/specs"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        conn = connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT triggers FROM reflections WHERE id = ?", ("r-1",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert json.loads(row["triggers"]) == [
+            "skill:superpowers:*", "path:docs/superpowers/specs",
+        ]
+        # The returned drawer shows them.
+        body = response.get_data(as_text=True)
+        assert "skill:superpowers:*" in body
+
+    def test_edit_bad_trigger_returns_400(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1")
+        response = client.post(
+            "/reflections/r-1/edit",
+            data={"use_cases": "new uc", "hints": "new h", "triggers": "bogus"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+        assert "invalid trigger" in response.get_data(as_text=True)
+
+    def test_edit_form_prefills_triggers(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from better_memory.ui import app as app_module
+
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        _seed_reflection(tmp_db, rid="r-1")
+        conn = connect(tmp_db)
+        try:
+            conn.execute(
+                "UPDATE reflections SET triggers = ? WHERE id = ?",
+                ('["tool:WebFetch"]', "r-1"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        body = client.get("/reflections/r-1/edit").get_data(as_text=True)
+        assert 'name="triggers"' in body
+        assert "tool:WebFetch" in body
+        drawer = client.get("/reflections/r-1/drawer").get_data(as_text=True)
+        assert "tool:WebFetch" in drawer

@@ -7,9 +7,10 @@ through the service layer.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from better_memory.services.episode import Episode, row_to_episode
+from better_memory.services.triggers import parse_triggers
 
 
 @dataclass(frozen=True)
@@ -331,6 +332,7 @@ class ReflectionFull:
     last_misled_at: str | None = None
     times_overlooked: int = 0
     last_overlooked_at: str | None = None
+    triggers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -392,7 +394,7 @@ def reflection_row(
         "confidence, status, use_cases, hints, evidence_count, scope, "
         "created_at, updated_at, "
         "useful_count, last_useful_at, times_misled, last_misled_at, "
-        "times_overlooked, last_overlooked_at "
+        "times_overlooked, last_overlooked_at, triggers "
         "FROM reflections WHERE id = ?",
         (reflection_id,),
     ).fetchone()
@@ -419,6 +421,7 @@ def reflection_row(
         last_misled_at=r_row["last_misled_at"],
         times_overlooked=r_row["times_overlooked"] or 0,
         last_overlooked_at=r_row["last_overlooked_at"],
+        triggers=parse_triggers(r_row["triggers"]),
     )
 
 

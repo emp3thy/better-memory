@@ -13,6 +13,12 @@
       Hints (one per line)
       <textarea name="hints" rows="6">{{ (detail.reflection.hints | decode_hints) | join('\n') }}</textarea>
     </label>
+    {% if caps.supports_triggers %}
+    <label>
+      Triggers (one per line: tool:Name, skill:name or prefix*, bash:text, path:text, write:large)
+      <textarea name="triggers" rows="3">{{ detail.reflection.triggers | join('\n') }}</textarea>
+    </label>
+    {% endif %}
     <div class="form-actions">
       <button type="submit" class="action-save">Save</button>
       <button type="button"
