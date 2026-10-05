@@ -144,10 +144,11 @@ Record a user-stated fact or preference. Distinct from `memory.observe` — sema
 |---|---|---|---|
 | `content` | string | yes | The factual statement. |
 | `scope` | `project` / `general` | optional | `project` (default) for project-scoped rules; `general` for cross-project workflow rules. |
+| `triggers` | array of string | optional | Tool-call triggers that serve this memory just in time via the PreToolUse trigger channel: `tool:<Name>`, `skill:<name>` (trailing `*` for a prefix), `bash:<text>`, `path:<text>`, `write:large`. Rejected with an error naming the offending string if the grammar is wrong; rejected outright on the agentcore backend. |
 
 ### `memory.semantic_retrieve`
 
-Return user-stated facts and preferences for the current project, merged with all general-scope semantic memories. Flat list ordered newest-first.
+Return user-stated facts and preferences for the current project, merged with all general-scope semantic memories. Flat list ordered newest-first; each row carries its `triggers` list.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
@@ -155,12 +156,13 @@ Return user-stated facts and preferences for the current project, merged with al
 
 ### `memory.semantic_update`
 
-Edit a semantic memory's content in place. Bumps `updated_at`.
+Edit a semantic memory's content and/or its tool-call triggers in place. Give `content`, `triggers`, or both. Bumps `updated_at`.
 
-| Parameter | Type | Required |
-|---|---|---|
-| `id` | string | yes |
-| `content` | string | yes |
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | yes | |
+| `content` | string | optional | New text. |
+| `triggers` | array of string | optional | Replaces the trigger list (same grammar as `memory.semantic_observe`); an empty list clears it. |
 
 ### `memory.semantic_delete`
 
