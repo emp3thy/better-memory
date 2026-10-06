@@ -16,6 +16,17 @@ from better_memory.services.semantic import SemanticMemoryService
 from better_memory.storage import StorageBackend
 
 
+def _triggers_arg(args: dict[str, Any]) -> list[str] | None:
+    """``triggers`` from the tool args: None when absent/null, else a list of
+    str (validated downstream by services.triggers.validate_triggers)."""
+    raw = args.get("triggers")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not all(isinstance(t, str) for t in raw):
+        raise ValueError("triggers must be a list of strings")
+    return raw
+
+
 class SemanticToolHandlers:
     """User-stated facts/preferences CRUD.
 
@@ -47,11 +58,13 @@ class SemanticToolHandlers:
         # against MCP clients sending {"scope": null} — dict.get returns the
         # default only when the key is absent, not when its value is None.
         # Same fix as PR #25's BugBot finding on memory.observe.
+        triggers = _triggers_arg(args)
         if self._remote is not None:
             memory_id = self._remote.semantic_observe(
                 content=args["content"],
                 project=project,
                 scope=args.get("scope") or "project",
+                triggers=triggers,
             )
             return [
                 TextContent(type="text", text=json.dumps({"id": memory_id}))
@@ -60,6 +73,7 @@ class SemanticToolHandlers:
             content=args["content"],
             project=project,
             scope=args.get("scope") or "project",
+            triggers=triggers,
         )
         return [TextContent(type="text", text=json.dumps({"id": memory_id}))]
 
@@ -90,6 +104,7 @@ class SemanticToolHandlers:
                     "scope": record.scope,
                     "created_at": None,
                     "updated_at": None,
+                    "triggers": list(getattr(record, "triggers", []) or []),
                 }
                 for record in self._remote.semantic_list(
                     project=project, scope_filter=None
@@ -105,18 +120,28 @@ class SemanticToolHandlers:
                 "scope": m.scope,
                 "created_at": m.created_at,
                 "updated_at": m.updated_at,
+                "triggers": list(getattr(m, "triggers", []) or []),
             }
             for m in memories
         ]
         return [TextContent(type="text", text=json.dumps(payload))]
 
     async def semantic_update(self, args: dict[str, Any]) -> list[TextContent]:
+        """Edit content and/or triggers. At least one must be given."""
+        content = args.get("content")
+        triggers = _triggers_arg(args)
+        if content is None and triggers is None:
+            raise ValueError("provide content and/or triggers")
         if self._remote is not None:
-            self._remote.semantic_update_text(
-                id=args["id"], content=args["content"]
-            )
+            if content is not None:
+                self._remote.semantic_update_text(id=args["id"], content=content)
+            if triggers is not None:
+                self._remote.set_triggers(kind="semantic", id=args["id"], triggers=triggers)
             return [TextContent(type="text", text=json.dumps({"ok": True}))]
-        self._semantic.update_text(id=args["id"], content=args["content"])
+        if content is not None:
+            self._semantic.update_text(id=args["id"], content=content)
+        if triggers is not None:
+            self._semantic.set_triggers(id=args["id"], triggers=triggers)
         return [TextContent(type="text", text=json.dumps({"ok": True}))]
 
     async def semantic_delete(self, args: dict[str, Any]) -> list[TextContent]:

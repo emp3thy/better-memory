@@ -19,6 +19,7 @@ N×-multiplied allocations on hot paths.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from typing import Any
@@ -32,6 +33,7 @@ from better_memory.services.reflection import (
 )
 from better_memory.services.semantic import SemanticMemoryService
 from better_memory.services.session_bootstrap import SessionBootstrapService
+from better_memory.services.triggers import parse_triggers
 from better_memory.storage.protocol import Outcome, UseOutcome
 
 
@@ -86,6 +88,10 @@ class SqliteBackend:
 
     @property
     def supports_reflection_review(self) -> bool:
+        return True
+
+    @property
+    def supports_triggers(self) -> bool:
         return True
 
     @property
@@ -177,11 +183,13 @@ class SqliteBackend:
         content: str,
         project: str | None = None,
         scope: str = "project",
+        triggers: list[str] | None = None,
     ) -> str:
         return self._semantic.create(
             content=content,
             project=project or self._project,
             scope=scope,
+            triggers=triggers,
         )
 
     def semantic_list(
@@ -210,6 +218,68 @@ class SqliteBackend:
 
     def semantic_get(self, *, id: str) -> Any | None:
         return self._semantic.get(id=id)
+
+    # ----- Triggers -----
+
+    def set_triggers(self, *, kind: str, id: str, triggers: list[str]) -> None:
+        if kind == "semantic":
+            self._semantic.set_triggers(id=id, triggers=triggers)
+        elif kind == "reflection":
+            self._reflection.set_triggers(reflection_id=id, triggers=triggers)
+        else:
+            raise ValueError(
+                f"unknown memory kind {kind!r}; expected 'reflection' or 'semantic'"
+            )
+
+    def triggered_candidates(self, *, project: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        refl_rows = self._conn.execute(
+            "SELECT id, title, use_cases, hints, polarity, confidence, useful_count, "
+            "times_overlooked, times_ignored, updated_at, triggers "
+            "FROM reflections "
+            "WHERE (project = ? OR scope = 'general') "
+            "  AND status IN ('pending_review', 'confirmed') "
+            "  AND triggers IS NOT NULL",
+            (project,),
+        ).fetchall()
+        for r in refl_rows:
+            triggers = parse_triggers(r["triggers"])
+            if not triggers:
+                continue
+            try:
+                hints = json.loads(r["hints"] or "[]")
+            except (TypeError, ValueError):
+                hints = []
+            body = " ".join([str(r["use_cases"] or "")] + [str(h) for h in hints])
+            out.append({
+                "kind": "reflection", "id": r["id"],
+                "text": f"{r['title']}: {body}".strip(": "),
+                "triggers": triggers, "polarity": r["polarity"],
+                "confidence": r["confidence"],
+                "useful_count": int(r["useful_count"] or 0),
+                "times_overlooked": int(r["times_overlooked"] or 0),
+                "times_ignored": int(r["times_ignored"] or 0),
+                "updated_at": r["updated_at"],
+            })
+        sem_rows = self._conn.execute(
+            "SELECT id, content, useful_count, times_overlooked, times_ignored, "
+            "updated_at, triggers FROM semantic_memories "
+            "WHERE (project = ? OR scope = 'general') AND triggers IS NOT NULL",
+            (project,),
+        ).fetchall()
+        for r in sem_rows:
+            triggers = parse_triggers(r["triggers"])
+            if not triggers:
+                continue
+            out.append({
+                "kind": "semantic", "id": r["id"], "text": r["content"],
+                "triggers": triggers, "polarity": None, "confidence": None,
+                "useful_count": int(r["useful_count"] or 0),
+                "times_overlooked": int(r["times_overlooked"] or 0),
+                "times_ignored": int(r["times_ignored"] or 0),
+                "updated_at": r["updated_at"],
+            })
+        return out
 
     # ----- Episodes -----
 

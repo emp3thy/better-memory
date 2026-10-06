@@ -3239,3 +3239,10 @@ def test_distinct_projects_empty_when_both_fail(backend, mock_data_client) -> No
     fixture has no local_conn) degrades all the way to an empty list."""
     mock_data_client.list_actors.side_effect = RuntimeError("throttled")
     assert backend.distinct_projects() == []
+
+
+def test_agentcore_triggers_unsupported(backend) -> None:
+    assert backend.supports_triggers is False
+    assert backend.triggered_candidates(project="p") == []
+    with pytest.raises(NotImplementedError):
+        backend.set_triggers(kind="semantic", id="x", triggers=["tool:X"])

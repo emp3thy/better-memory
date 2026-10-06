@@ -107,3 +107,14 @@ def test_agentcore_observations_drawer_and_promote_route_404(
         headers={"Origin": "http://localhost"},
     )
     assert resp.status_code == 404
+
+
+def test_caps_supports_triggers_follows_backend(
+    client: FlaskClient, agentcore_client: FlaskClient,
+) -> None:
+    with client.application.test_request_context():
+        from flask import render_template_string
+        assert render_template_string("{{ caps.supports_triggers }}") == "True"
+    with agentcore_client.application.test_request_context():
+        from flask import render_template_string
+        assert render_template_string("{{ caps.supports_triggers }}") == "False"

@@ -605,3 +605,44 @@ def test_semantic_service_get_returns_model_or_none(conn):
     assert isinstance(got, SemanticMemory)
     assert got.id == mid and got.content == "a rule" and got.scope == "general"
     assert svc.get(id="missing") is None
+
+
+class TestTriggers:
+    def test_set_triggers_roundtrip(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn)
+        sid = svc.create(content="rule", project="p", scope="general")
+        svc.set_triggers(id=sid, triggers=["tool:WebFetch", " bash:<< "])
+        got = svc.get(id=sid)
+        assert got is not None and got.triggers == ["tool:WebFetch", "bash:<<"]
+        assert svc.list_for_project(project="p", track_exposure=False)[0].triggers == [
+            "tool:WebFetch", "bash:<<",
+        ]
+        svc.set_triggers(id=sid, triggers=[])
+        cleared = svc.get(id=sid)
+        assert cleared is not None and cleared.triggers == []
+        assert conn.execute(
+            "select triggers from semantic_memories where id=?", (sid,)
+        ).fetchone()[0] is None
+
+    def test_set_triggers_rejects_bad_grammar(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn)
+        sid = svc.create(content="rule", project="p")
+        with pytest.raises(ValueError, match="invalid trigger"):
+            svc.set_triggers(id=sid, triggers=["nope"])
+
+    def test_set_triggers_missing_id(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        with pytest.raises(ValueError, match="semantic memory not found"):
+            SemanticMemoryService(conn).set_triggers(id="missing", triggers=["tool:X"])
+
+    def test_create_with_triggers(self, conn):
+        from better_memory.services.semantic import SemanticMemoryService
+        svc = SemanticMemoryService(conn)
+        sid = svc.create(content="rule", project="p", triggers=["skill:superpowers:*"])
+        with_triggers = svc.get(id=sid)
+        assert with_triggers is not None and with_triggers.triggers == ["skill:superpowers:*"]
+        sid2 = svc.create(content="rule2", project="p")
+        without = svc.get(id=sid2)
+        assert without is not None and without.triggers == []

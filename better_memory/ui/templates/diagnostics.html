@@ -41,6 +41,35 @@
   </section>
 
   <section class="diagnostics-panel">
+    <h2>Useful rate by channel</h2>
+    <p class="small">useful = cited + shaped; rated = useful + ignored + misled; rate = useful / rated.
+      Overlooked ratings are shown but outside the rate. Target: 33% overall without the
+      useful-per-session figure falling.</p>
+    {% for label, stats in (("All time", useful_all), ("Last " ~ recent_window ~ " rated sessions", useful_recent)) %}
+    <h3>{{ label }}</h3>
+    <table class="table">
+      <thead><tr><th>source</th><th>rated</th><th>useful</th><th>ignored</th><th>misled</th><th>overlooked</th><th>rate</th></tr></thead>
+      <tbody>
+      {% for r in stats.rows %}
+        <tr>
+          <td>{{ r.source }}</td><td>{{ r.rated }}</td><td>{{ r.useful }}</td>
+          <td>{{ r.ignored }}</td><td>{{ r.misled }}</td><td>{{ r.overlooked }}</td>
+          <td>{{ '%.0f%%' | format(r.rate * 100) }}</td>
+        </tr>
+      {% endfor %}
+        <tr class="total-row">
+          <td><strong>all</strong></td><td>{{ stats.total.rated }}</td><td>{{ stats.total.useful }}</td>
+          <td>{{ stats.total.ignored }}</td><td>{{ stats.total.misled }}</td><td>{{ stats.total.overlooked }}</td>
+          <td><strong>{{ '%.0f%%' | format(stats.total.rate * 100) }}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="small">Useful per rated session: {{ '%.2f' | format(stats.useful_per_session) }}
+      over {{ stats.rated_sessions }} session{{ 's' if stats.rated_sessions != 1 else '' }}.</p>
+    {% endfor %}
+  </section>
+
+  <section class="diagnostics-panel">
     <h3>Rating diagnostics</h3>
     <dl>
       <dt>session_id_missing</dt>

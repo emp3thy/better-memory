@@ -1,32 +1,32 @@
 """Relevance filter over the curated memory set (semantic + reflections).
 
-Evidence-gated scorer, replacing the old pure-keyword hits-x-activation
-model: a memory injects only when it has positive relevance EVIDENCE --
+Evidence-gated scorer. On the sqlite backend ONE gate applies to both
+memory kinds (design spec 2026-10-05-just-in-time-serving-design.md §1):
 
-- BM25 match against ``reflection_fts`` (title / use_cases / hints), or
-- (only when that leg is structurally unavailable -- no sqlite ``conn``
-  for reflections; always, for semantics, which have no FTS substrate at
-  all) a keyword-hit floor as a degraded fallback.
+- tokenise the prompt with ``extract_keywords``;
+- drop any token that is *ubiquitous* in the candidate pool -- present in
+  more than ``DF_CAP`` of the pool's memories, counted only when the pool
+  has at least ``DF_MIN_POOL`` memories (a smaller pool keeps every token,
+  otherwise nothing could ever qualify);
+- count distinct whole-word hits per memory; a memory qualifies when
+  ``hits >= min_hits`` (``cfg.context_min_hits``, default 2).
 
-The Wilson lower-bound prior (see ``services.scoring``) never qualifies a
-memory by itself -- it only RANKS among qualifiers via reciprocal rank
-fusion (RRF), alongside the BM25 rank. Popularity forcing irrelevant
-injections was the old failure mode (13% useful as bootstrap); the gate
-exists specifically to close it.
+The replay that motivated this (11 rated sessions) showed the old "any one
+BM25 token" qualifier serving web-research pitfalls to a repo-exploration
+prompt because both mentioned "Claude Code": a single shared token is not
+evidence. Two distinct non-ubiquitous tokens measured 43% useful against
+19% for the old gate.
 
-Fetches the small, already-ranked sets through the StorageBackend
-abstraction (works on sqlite AND agentcore); the BM25 leg additionally
-requires a raw sqlite ``conn``. Agentcore (``conn=None`` AND
-``supports_synthesis=False``) replaces the BM25 leg wholesale with
-``backend.relevance_ranks`` -- a server-side semantic-search rank map --
-and falls back to the keyword-hit floor ONLY when that lookup itself
-FAILS (``relevance_ranks`` returns ``None`` -- an AWS error). A
-successful lookup that genuinely finds nothing (``{}``) does NOT trigger
-the fallback -- a legitimate negative result from the server-side gate
-must not be overridden by keyword overlap. A sqlite backend called with
-``conn=None`` keeps the pre-existing keyword-fallback behavior
-unchanged, regardless of whether it also implements ``relevance_ranks``
-(it does, for protocol completeness only).
+Ranking among qualifiers is reciprocal rank fusion of the Wilson prior
+(``services.scoring``) with a relevance rank: distinct hits descending,
+ties broken by BM25 rank over ``reflection_fts`` where that table exists.
+The prior never qualifies a memory by itself.
+
+Agentcore (``conn=None`` AND ``supports_synthesis=False``) is unchanged:
+the gate is membership in ``backend.relevance_ranks`` (server-side
+semantic search), falling back to a keyword-hit floor ONLY when that
+lookup itself FAILS (``None`` -- an AWS error); a genuinely empty ``{}`` is
+a legitimate negative.
 """
 from __future__ import annotations
 
@@ -39,11 +39,20 @@ from typing import Any
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.keywords import count_keyword_hits, extract_keywords
 from better_memory.services.scoring import wilson_lower_bound
+from better_memory.services.triggers import match as match_trigger
 
-#: Keyword-hit floor used only when the FTS leg is structurally
-#: unavailable (no sqlite conn, for reflections; always, for semantics,
-#: which have no FTS substrate at all).
+#: Keyword-hit floor for the agentcore fallback (relevance_ranks failed).
 _FALLBACK_MIN_HITS = 2
+
+#: A token present in more than this fraction of the candidate pool is
+#: ubiquitous and carries no evidence. Measured band: 50% on a pool of 10
+#: dropped "claude", "code", "user" and the like; see spec Assumptions A4.
+DF_CAP = 0.5
+
+#: The ubiquity filter only runs when the pool has at least this many
+#: memories; below it every token in a 1- or 2-memory pool would exceed
+#: DF_CAP and nothing could qualify.
+DF_MIN_POOL = 4
 
 #: Reciprocal rank fusion constant, matching search/hybrid.py and
 #: ReflectionSynthesisService._fuse_by_relevance.
@@ -61,6 +70,7 @@ class RelevantMemory:
     age_days: int | None
     hits: int
     score: float
+    reason: str | None = None   # trigger string that fired (trigger channel only)
 
 
 def _age_days(iso_ts: str | None, now: datetime) -> int | None:
@@ -93,6 +103,18 @@ def _bm25_qualifiers(conn: sqlite3.Connection | None, query: str) -> dict[str, i
     return {row[0]: i for i, row in enumerate(rows)}
 
 
+def _ubiquitous(token_sets: list[set[str]]) -> set[str]:
+    """Tokens present in more than DF_CAP of the pool (pool >= DF_MIN_POOL)."""
+    n = len(token_sets)
+    if n < DF_MIN_POOL:
+        return set()
+    counts: dict[str, int] = {}
+    for toks in token_sets:
+        for t in toks:
+            counts[t] = counts.get(t, 0) + 1
+    return {t for t, c in counts.items() if c > DF_CAP * n}
+
+
 def _wilson_for(useful: int, overlooked: int, ignored: int) -> float:
     positive = useful + overlooked
     n = useful + overlooked + ignored
@@ -100,12 +122,12 @@ def _wilson_for(useful: int, overlooked: int, ignored: int) -> float:
 
 
 def _rrf_score(candidates: list[dict]) -> list[tuple[float, dict]]:
-    """RRF-fuse the Wilson prior with the BM25 rank already stashed
-    on each candidate dict (``bm_rank``, ``None`` if absent).
+    """RRF-fuse the Wilson prior with the relevance rank stashed on each
+    candidate dict (``rel_rank``, ``None`` if absent).
 
-    The prior rank is computed fresh here (desc by Wilson score) rather
-    than carried in, since it only makes sense relative to the other
-    qualifiers in this same candidate set.
+    Both ranks are computed relative to this candidate set: the prior rank
+    by Wilson score descending; the relevance rank by distinct hits
+    descending, then ``bm_rank`` ascending (None last), then id.
     """
     order_by_wilson = sorted(range(len(candidates)), key=lambda i: -candidates[i]["wilson"])
     prior_rank = {candidates[i]["id"]: rank for rank, i in enumerate(order_by_wilson)}
@@ -113,11 +135,20 @@ def _rrf_score(candidates: list[dict]) -> list[tuple[float, dict]]:
     scored: list[tuple[float, dict]] = []
     for c in candidates:
         present_ranks = [prior_rank[c["id"]]]
-        if c["bm_rank"] is not None:
-            present_ranks.append(c["bm_rank"])
+        if c.get("rel_rank") is not None:
+            present_ranks.append(c["rel_rank"])
         score = sum(1.0 / (_RRF_K + rank) for rank in present_ranks)
         scored.append((score, c))
     return scored
+
+
+def _assign_rel_ranks(candidates: list[dict]) -> None:
+    """Set ``rel_rank`` on each candidate: hits desc, bm_rank asc (None last), id."""
+    def key(c: dict):
+        bm = c.get("bm_rank")
+        return (-c["hits"], bm if bm is not None else 10**9, c["id"])
+    for rank, c in enumerate(sorted(candidates, key=key)):
+        c["rel_rank"] = rank
 
 
 def retrieve_relevant(
@@ -129,26 +160,17 @@ def retrieve_relevant(
     max_items: int = 3,
     include_neutral: bool = False,
     now: Callable[[], datetime] | None = None,
+    min_hits: int = 2,
 ) -> list[RelevantMemory]:
     """Gate + rank curated memories (semantic + reflections) for ``query``.
 
-    A memory is returned only if it clears the evidence gate: a BM25 match
-    (reflections), or (only when that leg is structurally unavailable --
-    no sqlite ``conn`` for reflections; always, for semantics, which have
-    no FTS leg at all) a keyword-hit fallback. Among qualifiers, ranking
-    is RRF over the Wilson prior plus the BM25 rank when present.
-
-    Agentcore backends (``conn=None`` AND ``supports_synthesis=False``)
-    replace the BM25 leg with ``backend.relevance_ranks`` -- a
-    server-side semantic-search rank map fused into the same RRF -- and
-    fall back to the keyword-hit floor only when that lookup FAILS
-    (returns ``None`` -- an AWS error), never merely because it found
-    nothing (``{}`` is a legitimate negative result the gate must
-    respect). Sqlite backends are unaffected by this branch even when
-    called with ``conn=None``.
-
-    Never raises -- any backend/leg failure degrades that leg to "absent"
-    rather than propagating.
+    Sqlite: a memory is returned only when at least ``min_hits`` distinct
+    non-ubiquitous query tokens appear in it (see module docstring).
+    Agentcore (``conn=None`` AND ``supports_synthesis=False``): membership
+    in ``backend.relevance_ranks``, with the keyword-hit floor only when
+    that lookup FAILS (``None``). Ranking is RRF of the Wilson prior and
+    the relevance rank. Never raises -- any backend/leg failure degrades
+    that leg to "absent".
     """
     if not (query or "").strip():
         return []
@@ -164,36 +186,17 @@ def retrieve_relevant(
     except Exception:  # noqa: BLE001 - degrade to no semantic
         semantic = []
 
-    bm = _bm25_qualifiers(conn, query)
     refl_bucket_order = ["do", "dont"] + (["neutral"] if include_neutral else [])
-    keywords = extract_keywords(query)     # fallback evidence only
 
-    fts_unavailable = conn is None
-
-    # Agentcore evidence gate (design spec 2026-07-24-agentcore-parity-
-    # design.md §3): when the caller has no sqlite FTS substrate
-    # (conn=None) AND the backend is agentcore-flavored --
-    # supports_synthesis=False, the existing Protocol capability flag that
-    # already distinguishes AgentCoreBackend from SqliteBackend everywhere
-    # else in this codebase -- the evidence gate becomes membership in a
-    # backend-computed relevance rank map (server-side RetrieveMemoryRecords
-    # semantic search) instead of the keyword-hit fallback. A conn=None
-    # SqliteBackend caller (supports_synthesis=True) is explicitly excluded
-    # here, so sqlite's own fallback semantics stay byte-for-byte unchanged
-    # regardless of whether SqliteBackend also implements relevance_ranks
-    # (it does, for protocol completeness -- see storage/sqlite.py -- but
-    # this function never calls it in that case).
     agentcore_mode = (
         conn is None
         and hasattr(backend, "relevance_ranks")
         and getattr(backend, "supports_synthesis", True) is False
     )
-    # None vs {} from relevance_ranks is load-bearing (see
-    # StorageBackend.relevance_ranks's docstring): None means the
-    # backend-side lookup itself failed (AWS error on every namespace) --
-    # THAT is the keyword-fallback trigger. {} means the lookup ran fine
-    # and genuinely found nothing, which must NOT re-qualify memories via
-    # keyword overlap -- the server-side gate's negative result stands.
+    # None vs {} from relevance_ranks is load-bearing: None means the lookup
+    # itself failed (AWS error) -- THAT is the keyword-fallback trigger. {}
+    # means it ran fine and found nothing, which must NOT re-qualify
+    # memories via keyword overlap.
     raw_rank_map: dict[tuple[str, str], int] | None = None
     if agentcore_mode:
         try:
@@ -205,94 +208,83 @@ def retrieve_relevant(
     agentcore_kw_fallback = agentcore_mode and raw_rank_map is None
     rank_map: dict[tuple[str, str], int] = raw_rank_map or {}
 
-    refl_candidates: list[dict] = []
+    # Flatten the pool once: (kind, id, display text, polarity, row/obj).
+    pool: list[dict] = []
     for bucket in refl_bucket_order:
         for r in buckets.get(bucket, []) or []:
-            r_id = str(r.get("id"))
             title = str(r.get("title") or "")
             body = " ".join(
                 [str(r.get("use_cases") or "")]
                 + [str(h) for h in (r.get("hints") or [])]
             )
-            text = f"{title} {body}"
-            kw_hits = count_keyword_hits(text, keywords)
-
-            in_bm = r_id in bm
-            in_backend_rank = agentcore_mode and ("reflection", r_id) in rank_map
-            fallback_ok = (
-                (agentcore_kw_fallback if agentcore_mode else fts_unavailable)
-                and kw_hits >= _FALLBACK_MIN_HITS
-            )
-            if not (in_bm or in_backend_rank or fallback_ok):
-                continue
-
-            refl_candidates.append({
-                "id": r_id, "kind": "reflection",
-                "polarity": bucket if bucket in ("do", "dont") else None,
+            pool.append({
+                "kind": "reflection", "id": str(r.get("id")),
+                "match_text": f"{title} {body}",
                 "text": f"{title}: {body}".strip(": "),
+                "polarity": bucket if bucket in ("do", "dont") else None,
                 "confidence": r.get("confidence"),
                 "useful_count": int(r.get("useful_count") or 0),
                 "age_days": _age_days(r.get("updated_at"), _now),
-                "hits": kw_hits if (in_bm or in_backend_rank or fallback_ok) else 0,
-                "bm_rank": (
-                    rank_map.get(("reflection", r_id))
-                    if agentcore_mode else bm.get(r_id)
-                ),
-                # storage.protocol.retrieve guarantees times_overlooked/
-                # times_ignored on both backends (sqlite columns; agentcore
-                # copies its internal overlooked counter and hardcodes
-                # ignored=0 — see storage/agentcore.py::_parse_reflection_record).
-                # The .get(...) defaults below are defensive, not load-bearing.
                 "wilson": _wilson_for(
                     int(r.get("useful_count") or 0),
                     int(r.get("times_overlooked") or 0),
                     int(r.get("times_ignored") or 0),
                 ),
             })
-
-    sem_candidates: list[dict] = []
-    for s in semantic or []:
-        s_id = str(getattr(s, "id", ""))
-        content = getattr(s, "content", "") or ""
-        kw_hits = count_keyword_hits(content, keywords)
-
-        in_backend_rank = agentcore_mode and ("semantic", s_id) in rank_map
-        # Semantics have no FTS/BM25 leg and no vec leg either, so the
-        # keyword-hit floor is their only evidence leg outside agentcore
-        # mode -- it is always "on" here (there is no other leg to gate
-        # it behind). In agentcore mode the backend rank map replaces it,
-        # so the fallback there fires only per the same
-        # agentcore_kw_fallback signal as reflections (relevance_ranks
-        # returned None == AWS error; a genuinely empty {} does NOT
-        # trigger it).
-        fallback_ok = (
-            agentcore_kw_fallback if agentcore_mode else True
-        ) and kw_hits >= _FALLBACK_MIN_HITS
-        if not (in_backend_rank or fallback_ok):
-            continue
-
-        sem_candidates.append({
-            "id": s_id, "kind": "semantic", "polarity": None,
-            "text": content,
+    for s_ in semantic or []:
+        content = getattr(s_, "content", "") or ""
+        pool.append({
+            "kind": "semantic", "id": str(getattr(s_, "id", "")),
+            "match_text": content, "text": content, "polarity": None,
             "confidence": None,
-            "useful_count": int(getattr(s, "useful_count", 0) or 0),
-            "age_days": _age_days(getattr(s, "updated_at", None), _now),
-            "hits": kw_hits if (in_backend_rank or fallback_ok) else 0,
-            "bm_rank": (
-                rank_map.get(("semantic", s_id))
-                if agentcore_mode else None
-            ),
+            "useful_count": int(getattr(s_, "useful_count", 0) or 0),
+            "age_days": _age_days(getattr(s_, "updated_at", None), _now),
             "wilson": _wilson_for(
-                int(getattr(s, "useful_count", 0) or 0),
-                int(getattr(s, "times_overlooked", 0) or 0),
-                int(getattr(s, "times_ignored", 0) or 0),
+                int(getattr(s_, "useful_count", 0) or 0),
+                int(getattr(s_, "times_overlooked", 0) or 0),
+                int(getattr(s_, "times_ignored", 0) or 0),
             ),
         })
+
+    raw_keywords = extract_keywords(query)
+    if agentcore_mode:
+        keywords = raw_keywords                      # fallback evidence only
+    else:
+        ubiquitous = _ubiquitous([extract_keywords(c["match_text"]) for c in pool])
+        keywords = raw_keywords - ubiquitous
+    bm = _bm25_qualifiers(conn, query) if not agentcore_mode else {}
+
+    qualifiers: list[dict] = []
+    for c in pool:
+        kw_hits = count_keyword_hits(c["match_text"], keywords)
+        key = (c["kind"], c["id"])
+        if agentcore_mode:
+            in_backend_rank = key in rank_map
+            fallback_ok = agentcore_kw_fallback and kw_hits >= _FALLBACK_MIN_HITS
+            if not (in_backend_rank or fallback_ok):
+                continue
+            c["bm_rank"] = rank_map.get(key)
+        else:
+            if kw_hits < min_hits:
+                continue
+            c["bm_rank"] = bm.get(c["id"]) if c["kind"] == "reflection" else None
+        c["hits"] = kw_hits
+        qualifiers.append(c)
+
+    refl_candidates = [c for c in qualifiers if c["kind"] == "reflection"]
+    sem_candidates = [c for c in qualifiers if c["kind"] == "semantic"]
+    if agentcore_mode:
+        # Preserve the backend's own ordering as the relevance rank.
+        for c in refl_candidates + sem_candidates:
+            c["rel_rank"] = c["bm_rank"]
+    else:
+        _assign_rel_ranks(refl_candidates)
+        _assign_rel_ranks(sem_candidates)
 
     all_scored = _rrf_score(refl_candidates) + _rrf_score(sem_candidates)
     all_scored.sort(key=lambda t: (-t[0], t[1]["id"]))
 
-    out = [
+    return [
         RelevantMemory(
             kind=c["kind"], id=c["id"], text=c["text"], polarity=c["polarity"],
             confidence=c["confidence"], useful_count=c["useful_count"],
@@ -300,6 +292,48 @@ def retrieve_relevant(
         )
         for score, c in all_scored[:max_items]
     ]
+
+
+def triggered_memories(
+    backend: Any,
+    *,
+    project: str,
+    tool_name: str,
+    tool_input: dict | None,
+    large_write_chars: int,
+    now: Callable[[], datetime] | None = None,
+) -> list[RelevantMemory]:
+    """Trigger channel (PreToolUse): every memory whose triggers fire for
+    this tool call, best Wilson prior first. ``reason`` carries the trigger
+    string that fired. No keyword matching happens here -- a memory without
+    triggers is never tool-triggered. Never raises: a backend failure
+    yields []."""
+    _now = (now or (lambda: datetime.now(UTC)))()
+    try:
+        candidates = backend.triggered_candidates(project=project)
+    except Exception:  # noqa: BLE001 - degrade to no trigger candidates
+        return []
+    out: list[RelevantMemory] = []
+    for c in candidates or []:
+        reason = match_trigger(
+            list(c.get("triggers") or []), tool_name, tool_input,
+            large_write_chars=large_write_chars,
+        )
+        if reason is None:
+            continue
+        wilson = _wilson_for(
+            int(c.get("useful_count") or 0),
+            int(c.get("times_overlooked") or 0),
+            int(c.get("times_ignored") or 0),
+        )
+        out.append(RelevantMemory(
+            kind=str(c.get("kind")), id=str(c.get("id")), text=str(c.get("text") or ""),
+            polarity=c.get("polarity"), confidence=c.get("confidence"),
+            useful_count=int(c.get("useful_count") or 0),
+            age_days=_age_days(c.get("updated_at"), _now),
+            hits=0, score=wilson, reason=reason,
+        ))
+    out.sort(key=lambda m: (-m.score, m.id))
     return out
 
 
@@ -340,5 +374,7 @@ def format_relevant(items: list[RelevantMemory]) -> str:
             text = f"Known pitfall -- do this instead: {text}"
         lines.append(f"{i}. {_meta_tag(m)}")
         lines.append(f"   {text}")
+        if m.reason:
+            lines.append(f"   Triggered by: {m.reason}")
     lines.append(_BLOCK_FOOTER)
     return "\n".join(lines)

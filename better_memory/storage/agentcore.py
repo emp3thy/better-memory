@@ -176,6 +176,18 @@ class AgentCoreBackend:
     def supports_reflection_text_edit(self) -> bool:
         return False
 
+    @property
+    def supports_triggers(self) -> bool:
+        return False
+
+    # ----- Triggers (unsupported: no trigger storage on AgentCore records) -----
+
+    def set_triggers(self, *, kind: str, id: str, triggers: list[str]) -> None:
+        raise NotImplementedError("triggers are not supported on the agentcore backend")
+
+    def triggered_candidates(self, *, project: str) -> list[dict[str, Any]]:
+        return []
+
     # ----- Session-id per-operation re-resolution -----
 
     def _require_session_id(self, operation: str) -> str:
@@ -1419,10 +1431,15 @@ class AgentCoreBackend:
         content: str,
         project: str | None = None,
         scope: str = "project",
+        triggers: list[str] | None = None,
     ) -> str:
         """Create a semantic memory record. Bypasses LLM extraction —
         the content is the preference text directly, written under the
-        userPreferenceMemoryStrategy so AWS applies its schema validation."""
+        userPreferenceMemoryStrategy so AWS applies its schema validation.
+        ``triggers`` is rejected when non-empty: AgentCore records have no
+        trigger storage (``supports_triggers`` is False)."""
+        if triggers:
+            raise NotImplementedError("triggers are not supported on the agentcore backend")
         actor_id = resolve_actor_id(project or self._project)
         if scope == "general":
             namespace = resolve_namespace("general", "semantic")

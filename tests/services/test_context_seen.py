@@ -66,38 +66,21 @@ def test_missing_state_dir_never_raises(tmp_path):
     s.mark_seen([("reflection", "r1")])
 
 
-class TestPretoolLatch:
-    def test_defaults_false_then_persists(self, tmp_path):
-        s = SeenStore(tmp_path, "sess")
-        assert s.pretool_fired() is False
-        s.mark_pretool_fired()
-        assert SeenStore(tmp_path, "sess").pretool_fired() is True
+def test_prune_stale_removes_legacy_pretool_sentinel(tmp_path):
+    """Older versions left a ``.pretool`` latch file per session; prune
+    still sweeps them so upgraded installs do not accumulate stale files."""
+    import os
+    sentinel = tmp_path / "context_seen_sess.pretool"
+    sentinel.write_text("", encoding="utf-8")
+    ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+    os.utime(sentinel, (ten_days_ago, ten_days_ago))
+    prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
+    assert not sentinel.exists()
 
-    def test_corrupt_state_means_not_fired(self, tmp_path):
-        (tmp_path / "context_seen_sess.json").write_text("{", encoding="utf-8")
-        assert SeenStore(tmp_path, "sess").pretool_fired() is False
 
-    def test_try_claim_pretool_fired_only_first_caller_wins(self, tmp_path):
-        # #107: PreToolUse "one real firing per session" was a check-then-set
-        # across two file operations, so N parallel hook processes could all
-        # observe pretool_fired == False and all proceed. The sentinel-based
-        # atomic claim guarantees exactly one True return.
-        stores = [SeenStore(tmp_path, "sess") for _ in range(4)]
-        wins = [s.try_claim_pretool_fired() for s in stores]
-        assert wins.count(True) == 1
-        assert wins.count(False) == 3
-        # And every subsequent instance sees the latch as fired.
-        assert SeenStore(tmp_path, "sess").pretool_fired() is True
-
-    def test_prune_stale_removes_pretool_sentinel(self, tmp_path):
-        import os
-        SeenStore(tmp_path, "sess").mark_pretool_fired()
-        sentinel = tmp_path / "context_seen_sess.pretool"
-        assert sentinel.exists()
-        ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
-        os.utime(sentinel, (ten_days_ago, ten_days_ago))
-        prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
-        assert not sentinel.exists()
+def test_seen_store_has_no_pretool_latch():
+    assert not hasattr(SeenStore, "try_claim_pretool_fired")
+    assert not hasattr(SeenStore, "pretool_fired")
 
 
 class TestConcurrentMutators:
@@ -179,3 +162,62 @@ class TestConcurrentMutators:
         assert fresh.filter_unseen(
             [("reflection", "r1"), ("semantic", "m1")], reinject_turns=0,
         ) == []
+
+
+class TestClaim:
+    def test_claim_first_caller_wins_per_memory(self, tmp_path):
+        """Parallel hook processes must not both serve the same memory: the
+        claim is an O_CREAT|O_EXCL sentinel per (session, kind, id)."""
+        stores = [SeenStore(tmp_path, "sess") for _ in range(4)]
+        wins = [s.claim([("reflection", "r1")]) for s in stores]
+        assert [w == [("reflection", "r1")] for w in wins].count(True) == 1
+        # Other memories and other sessions are independent.
+        assert stores[0].claim([("semantic", "s1")]) == [("semantic", "s1")]
+        assert SeenStore(tmp_path, "other").claim([("reflection", "r1")]) == [("reflection", "r1")]
+
+    def test_claim_returns_only_unclaimed_in_order(self, tmp_path):
+        s = SeenStore(tmp_path, "sess")
+        assert s.claim([("reflection", "a")]) == [("reflection", "a")]
+        assert s.claim([("reflection", "a"), ("semantic", "b"), ("reflection", "c")]) == [
+            ("semantic", "b"), ("reflection", "c"),
+        ]
+
+    def test_claim_never_raises_on_unwritable_dir(self, tmp_path):
+        bad = tmp_path / "file-not-dir"
+        bad.write_text("x", encoding="utf-8")
+        # state_dir is a file: mkdir fails; claim degrades to "nothing claimed".
+        assert SeenStore(bad, "sess").claim([("reflection", "a")]) == []
+
+    def test_prune_stale_removes_claim_files(self, tmp_path):
+        import os
+        s = SeenStore(tmp_path, "sess")
+        s.claim([("reflection", "a")])
+        files = list(tmp_path.glob("context_seen_sess*.claim"))
+        assert len(files) == 1
+        ten_days_ago = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+        os.utime(files[0], (ten_days_ago, ten_days_ago))
+        prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
+        assert not files[0].exists()
+
+
+def test_claim_reopens_after_reinject_window(tmp_path):
+    """A claim is keyed to the turn the memory was last seen at in the
+    caller's snapshot. Parallel callers sharing a snapshot get one winner;
+    a caller that loads a post-mark snapshot is excluded by filter_unseen
+    until the reinject window elapses, after which a fresh claim is possible."""
+    s = _store(tmp_path)
+    s.bump_turn()                                        # turn 1
+    peer = _store(tmp_path)                              # same pre-mark snapshot
+    assert s.claim([("reflection", "r1")]) == [("reflection", "r1")]
+    assert peer.claim([("reflection", "r1")]) == []      # same window: lost
+    s.mark_seen([("reflection", "r1")])
+    later = _store(tmp_path)
+    assert later.filter_unseen([("reflection", "r1")], reinject_turns=3) == []
+    for _ in range(3):
+        _store(tmp_path).bump_turn()                     # turns 2..4
+    s5 = _store(tmp_path)
+    s5.bump_turn()                                       # turn 5
+    peer5 = _store(tmp_path)                             # same snapshot as s5
+    assert s5.filter_unseen([("reflection", "r1")], reinject_turns=3) == [("reflection", "r1")]
+    assert s5.claim([("reflection", "r1")]) == [("reflection", "r1")]
+    assert peer5.claim([("reflection", "r1")]) == []     # second winner blocked

@@ -12,6 +12,17 @@
       Content
       <textarea name="content" rows="4" required>{{ memory.content }}</textarea>
     </label>
+    {% if caps.supports_triggers %}
+    <label>
+      Triggers (one per line: tool:Name, skill:name or prefix*, bash:text, path:text, write:large)
+      <textarea name="triggers" rows="3">{{ memory.triggers | join('\n') }}</textarea>
+    </label>
+    {% if memory.triggers %}
+    <div class="drawer-meta trigger-chips">
+      {% for t in memory.triggers %}<span class="chip">{{ t }}</span>{% endfor %}
+    </div>
+    {% endif %}
+    {% endif %}
     <div class="drawer-meta">
       <span>Project: {{ memory.project }}</span>
       <span>Scope: <strong>{{ memory.scope }}</strong></span>

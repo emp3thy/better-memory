@@ -37,6 +37,11 @@ def _reflection_drawer_detail(app: Flask, id: str) -> SimpleNamespace | None:
     return SimpleNamespace(reflection=SimpleNamespace(**row), sources=sources)
 
 
+#: Sessions in the "recent" window of the useful-rate panel: the design's
+#: measurement window for the 33% target (spec §3).
+_RECENT_SESSIONS_WINDOW = 15
+
+
 def create_app(
     *,
     inactivity_timeout: float = 1800.0,
@@ -75,6 +80,17 @@ def create_app(
         project=project_name(),
     )
 
+    def _triggers_field(flask_app) -> list[str] | None:
+        """The posted ``triggers`` textarea as a list (one per line), or
+        None when the field is absent or the backend has no trigger
+        storage -- a posted field is then ignored, never an error."""
+        if not getattr(flask_app.extensions["backend"], "supports_triggers", False):
+            return None
+        raw = request.form.get("triggers")
+        if raw is None:
+            return None
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+
     @app.context_processor
     def _inject_caps() -> dict[str, object]:
         b = app.extensions["backend"]
@@ -85,6 +101,7 @@ def create_app(
             "supports_retention_runs": b.supports_retention_runs,
             "supports_reflection_review": b.supports_reflection_review,
             "supports_reflection_text_edit": b.supports_reflection_text_edit,
+            "supports_triggers": bool(getattr(b, "supports_triggers", False)),
         }}
 
     @app.teardown_appcontext
@@ -473,6 +490,18 @@ def create_app(
                 f"<p>{escape(str(exc))}</p>"
                 "</div>"
             ), 409, {}
+        triggers_field = _triggers_field(app)
+        if triggers_field is not None:
+            try:
+                app.extensions["backend"].set_triggers(
+                    kind="reflection", id=id, triggers=triggers_field,
+                )
+            except ValueError as exc:
+                return (
+                    f'<div class="card card-error">'
+                    f"<p>{escape(str(exc))}</p>"
+                    "</div>"
+                ), 400, {}
         detail = queries.reflection_detail(conn, reflection_id=id)
         rating_evidence = queries.fetch_rating_evidence(
             conn, "reflection", id
@@ -583,8 +612,13 @@ def create_app(
     @app.post("/semantic/<id>/update")
     def semantic_update(id: str) -> tuple[str, int, dict[str, str]]:
         content = request.form.get("content", "").strip()
+        triggers_field = _triggers_field(app)
         try:
             app.extensions["backend"].semantic_update_text(id=id, content=content)
+            if triggers_field is not None:
+                app.extensions["backend"].set_triggers(
+                    kind="semantic", id=id, triggers=triggers_field,
+                )
         except (ValueError, RuntimeError) as exc:
             return (
                 f'<div class="card card-error">{escape(str(exc))}</div>',
@@ -709,6 +743,11 @@ def create_app(
             recent_ratings=recent_ratings,
             rating_diagnostics=rating_diagnostics,
             overlooked_total=overlooked_total,
+            useful_all=queries.useful_rate_by_channel(conn, last_n_sessions=None),
+            useful_recent=queries.useful_rate_by_channel(
+                conn, last_n_sessions=_RECENT_SESSIONS_WINDOW,
+            ),
+            recent_window=_RECENT_SESSIONS_WINDOW,
         )
 
     @app.get("/diagnostics/panel/hook-errors")

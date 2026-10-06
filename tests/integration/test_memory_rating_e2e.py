@@ -74,7 +74,14 @@ def _seed_semantic(c, sid: str) -> None:
 # ---------------------------------------------------------------------------
 
 def test_full_rating_loop(conn, monkeypatch):
-    """Full closed loop: bootstrap → retrieve → credit → sweep → verify."""
+    """Full closed loop: bootstrap → retrieve → credit → sweep → verify.
+
+    Pinned to legacy injection mode: the loop starts from the five
+    source='bootstrap' rows the legacy dump writes. Deferred (the default
+    since just-in-time serving) renders an index line and exposes nothing
+    at session start.
+    """
+    monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "legacy")
     T0 = datetime(2026, 5, 11, 12, 0, 0, tzinfo=UTC)
     T1 = T0 + timedelta(minutes=1)   # mid-session retrieve timestamp
 

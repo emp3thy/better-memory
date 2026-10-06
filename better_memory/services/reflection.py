@@ -40,6 +40,7 @@ from better_memory import _diag
 from better_memory._common import default_clock, env_session_id
 from better_memory.search.query import sanitize_fts5_query
 from better_memory.services.scoring import wilson_lower_bound
+from better_memory.services.triggers import parse_triggers, validate_triggers
 
 # Dropped from relevance queries. These survive `sanitize_fts5_query` and the
 # >2-char filter, but appear in so many reflections that OR-matching on them
@@ -1342,6 +1343,7 @@ class ReflectionSynthesisService:
             "times_overlooked": r["times_overlooked"],
             "times_ignored": r["times_ignored"],
             "updated_at": r["updated_at"],
+            "triggers": parse_triggers(r["triggers"]),
         }
 
     def retrieve_reflections(
@@ -1409,7 +1411,7 @@ class ReflectionSynthesisService:
                 SELECT id, title, phase, polarity, use_cases, hints,
                        confidence, tech, evidence_count, useful_count,
                        times_misled, times_overlooked, times_ignored,
-                       updated_at
+                       updated_at, triggers
                 FROM reflections
                 WHERE {where}
                 """,
@@ -1635,6 +1637,23 @@ class ReflectionService:
             "WHERE id = ?",
             (use_cases, json.dumps(hint_list), now, reflection_id),
         )
+        self._conn.commit()
+
+    def set_triggers(self, *, reflection_id: str, triggers: list[str]) -> None:
+        """Replace a reflection's tool-call triggers (any status).
+
+        Validates the grammar; an empty cleaned list stores NULL. Bumps
+        updated_at. Raises ValueError on bad grammar or missing id.
+        """
+        cleaned = validate_triggers(triggers or [])
+        now = self._clock().isoformat()
+        cur = self._conn.execute(
+            "UPDATE reflections SET triggers = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(cleaned) if cleaned else None, now, reflection_id),
+        )
+        if cur.rowcount == 0:
+            self._conn.rollback()
+            raise ValueError(f"Reflection not found: {reflection_id}")
         self._conn.commit()
 
     def promote_to_general(self, *, reflection_id: str) -> None:

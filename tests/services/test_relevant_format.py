@@ -53,3 +53,9 @@ def test_missing_age_omitted():
 def test_output_is_ascii():
     out = format_relevant([_mem()])
     out.encode("ascii")  # raises if any non-ASCII slipped in
+
+
+def test_reason_line_rendered_only_when_set():
+    out = format_relevant([_mem(reason="bash:<<")])
+    assert "   Triggered by: bash:<<" in out
+    assert "Triggered by" not in format_relevant([_mem()])

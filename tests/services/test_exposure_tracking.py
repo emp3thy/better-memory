@@ -49,6 +49,13 @@ def _seed_semantic(conn, sid, project="p"):
 
 
 class TestBootstrapExposureWrite:
+    @pytest.fixture(autouse=True)
+    def _legacy_inject_mode(self, monkeypatch):
+        """These tests describe the legacy dump's exposure rows; deferred
+        (the default since just-in-time serving) exposes nothing at
+        session start."""
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "legacy")
+
     def test_bootstrap_writes_exposure_rows_for_injected_memories(
         self, conn, fixed_clock,
     ):

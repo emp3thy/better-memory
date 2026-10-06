@@ -224,13 +224,12 @@ class Config:
     context_max_items: int
     context_reinject_turns: int
     inject_mode: Literal["deferred", "legacy"]
-    # NOTE: context_min_hits is DEPRECATED. The evidence-gated scorer in
-    # services/relevant.py (BM25 qualifiers, with a keyword-hit fallback
-    # when no FTS substrate is available -- or the backend's
-    # relevance_ranks in agentcore mode) replaced the old pure
-    # keyword-hits floor; contextual_inject.py no longer reads this
-    # field. Kept for back-compat with any external
-    # BETTER_MEMORY_CONTEXT_MIN_HITS overrides that still resolve here.
+    # Size above which a Write tool call counts as "large" for the
+    # ``write:large`` trigger (services/triggers.py).
+    trigger_large_write_chars: int = 8000
+    # context_min_hits is the distinct-hit floor of the prompt gate in
+    # services/relevant.py: a memory qualifies for contextual injection when
+    # at least this many distinct, non-ubiquitous query tokens appear in it.
 
 
 _DEFAULT_CONTEXT_INJECT_MODE = "both"
@@ -250,9 +249,10 @@ def _resolve_context_inject_mode() -> Literal["userprompt", "pretool", "both", "
 
 
 def _resolve_inject_mode() -> Literal["deferred", "legacy"]:
-    raw = (os.environ.get("BETTER_MEMORY_INJECT_MODE") or "legacy").strip().lower()
-    # Fail-safe: anything unrecognised means today's behaviour.
-    return "deferred" if raw == "deferred" else "legacy"
+    raw = (os.environ.get("BETTER_MEMORY_INJECT_MODE") or "deferred").strip().lower()
+    # Deferred is the default (and what `better-memory setup` installs);
+    # legacy is an explicit opt-in to the pre-deferred session-start dump.
+    return "legacy" if raw == "legacy" else "deferred"
 
 
 def _read_settings_storage_backend(home: Path) -> str | None:
@@ -348,4 +348,7 @@ def get_config() -> Config:
         context_max_items=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_MAX_ITEMS", 3),
         context_reinject_turns=_resolve_nonneg_int("BETTER_MEMORY_CONTEXT_REINJECT_TURNS", 0),
         inject_mode=_resolve_inject_mode(),
+        trigger_large_write_chars=_resolve_nonneg_int(
+            "BETTER_MEMORY_TRIGGER_LARGE_WRITE_CHARS", 8000
+        ),
     )

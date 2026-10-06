@@ -604,14 +604,33 @@ def test_injection_knobs_invalid_raises(monkeypatch):
 
 
 class TestInjectModeConfig:
-    def test_default_is_legacy(self, monkeypatch):
+    def test_default_is_deferred(self, monkeypatch):
         monkeypatch.delenv("BETTER_MEMORY_INJECT_MODE", raising=False)
-        assert get_config().inject_mode == "legacy"
+        assert get_config().inject_mode == "deferred"
 
     def test_deferred_selected(self, monkeypatch):
         monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "deferred")
         assert get_config().inject_mode == "deferred"
 
-    def test_unknown_coerces_to_legacy(self, monkeypatch):
-        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "yolo")
+    def test_legacy_opt_in_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", " Legacy ")
         assert get_config().inject_mode == "legacy"
+
+    def test_unknown_coerces_to_deferred(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_INJECT_MODE", "yolo")
+        assert get_config().inject_mode == "deferred"
+
+
+class TestTriggerLargeWriteConfig:
+    def test_default(self, monkeypatch):
+        monkeypatch.delenv("BETTER_MEMORY_TRIGGER_LARGE_WRITE_CHARS", raising=False)
+        assert get_config().trigger_large_write_chars == 8000
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_TRIGGER_LARGE_WRITE_CHARS", "100")
+        assert get_config().trigger_large_write_chars == 100
+
+    def test_negative_rejected(self, monkeypatch):
+        monkeypatch.setenv("BETTER_MEMORY_TRIGGER_LARGE_WRITE_CHARS", "-1")
+        with pytest.raises(ValueError):
+            get_config()

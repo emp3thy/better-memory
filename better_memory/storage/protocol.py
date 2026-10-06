@@ -99,6 +99,14 @@ class StorageBackend(Protocol):
         ...
 
     @property
+    def supports_triggers(self) -> bool:
+        """True when memories carry tool-call triggers that the PreToolUse
+        trigger channel can serve and the UI can edit (sqlite). False in
+        agentcore mode, where no trigger storage exists; the trigger
+        channel is then inactive and the UI hides the trigger editors."""
+        ...
+
+    @property
     def supports_reflection_text_edit(self) -> bool:
         """True when a reflection's use_cases / hints text is user-editable in
         place (the edit form). False in agentcore mode, where reflection
@@ -232,8 +240,12 @@ class StorageBackend(Protocol):
         content: str,
         project: str | None = None,
         scope: str = "project",
+        triggers: list[str] | None = None,
     ) -> str:
-        """Create a semantic memory. Returns its id."""
+        """Create a semantic memory. Returns its id. ``triggers`` is the
+        optional tool-call trigger list (services.triggers grammar);
+        backends without ``supports_triggers`` raise NotImplementedError
+        when it is non-empty."""
         ...
 
     def semantic_list(
@@ -267,6 +279,25 @@ class StorageBackend(Protocol):
         / semantic_set_scope use) and maps it through the same
         summary-to-model path semantic_list uses, treating a
         ResourceNotFoundException as the None case."""
+        ...
+
+    # ----- Triggers -----
+
+    def set_triggers(self, *, kind: str, id: str, triggers: list[str]) -> None:
+        """Replace the tool-call triggers of a reflection or semantic memory.
+        ``kind`` is 'reflection' | 'semantic'. Raises ValueError on bad
+        grammar, unknown kind or missing id; NotImplementedError when the
+        backend does not support triggers."""
+        ...
+
+    def triggered_candidates(self, *, project: str) -> list[dict[str, Any]]:
+        """Memories visible to ``project`` (project rows plus general scope)
+        that carry at least one trigger, as dicts with keys ``kind``, ``id``,
+        ``text``, ``triggers``, ``polarity`` (None for semantic),
+        ``confidence`` (None for semantic), ``useful_count``,
+        ``times_overlooked``, ``times_ignored``, ``updated_at``. Retired and
+        superseded reflections are excluded; a row whose stored triggers do
+        not parse is skipped. Backends without trigger storage return []."""
         ...
 
     # ----- Episodes -----

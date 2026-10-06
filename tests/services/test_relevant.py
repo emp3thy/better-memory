@@ -1,11 +1,11 @@
-"""Contextual relevance: BM25 + Wilson prior behind an evidence gate.
+"""Contextual relevance: a distinct-hit evidence gate, Wilson prior for rank.
 
-The gate is the point: a memory injects only with positive relevance
-evidence (BM25 match on the query for reflections; a keyword-hit floor for
-semantics, which have no FTS leg of their own). The Wilson prior RANKS
-qualifiers but can never qualify a memory alone -- popularity must not
-force irrelevant injections (that failure mode measured 13% useful as
-bootstrap).
+The gate is the point: a memory injects only when at least ``min_hits``
+distinct, non-ubiquitous query tokens appear in it (same rule for
+reflections and semantics). The Wilson prior RANKS qualifiers but can never
+qualify a memory alone -- popularity must not force irrelevant injections
+(that failure mode measured 13% useful as bootstrap; a single shared token
+such as "claude" measured 19% useful across all channels).
 """
 from __future__ import annotations
 
@@ -69,24 +69,91 @@ def _seed_semantic(
     conn.commit()
 
 
-class TestBM25Gate:
-    def test_bm25_match_qualifies(self, conn):
-        _seed_reflection(conn, "r1", title="Retention archives by confidence")
-        backend = _backend(conn)
-        out = retrieve_relevant(
-            backend, query="how does retention archive things", project="p",
-            conn=conn, now=lambda: FIXED_NOW,
-        )
-        assert [m.id for m in out] == ["r1"]
+class TestDistinctHitGate:
+    """One gate for both kinds: >= min_hits distinct non-ubiquitous query
+    tokens must appear as whole words in the memory text."""
 
-    def test_no_evidence_no_injection(self, conn):
-        _seed_reflection(conn, "r1", title="Zebra flamingo unrelated topic", useful=50)
-        backend = _backend(conn)
+    def test_single_shared_token_does_not_qualify(self, conn):
+        _seed_reflection(conn, "r1", title="Use Playwright for Amazon pages")
         out = retrieve_relevant(
-            backend, query="how does retention archive things", project="p",
+            _backend(conn), query="look at the amazon repo", project="p",
             conn=conn, now=lambda: FIXED_NOW,
         )
         assert out == []
+
+    def test_two_distinct_hits_qualify(self, conn):
+        _seed_reflection(conn, "r1", title="Use Playwright for Amazon pages")
+        out = retrieve_relevant(
+            _backend(conn), query="amazon playwright", project="p",
+            conn=conn, now=lambda: FIXED_NOW,
+        )
+        assert [m.id for m in out] == ["r1"]
+        assert out[0].hits == 2
+
+    def test_no_evidence_no_injection(self, conn):
+        _seed_reflection(conn, "r1", title="Zebra flamingo unrelated topic", useful=50)
+        out = retrieve_relevant(
+            _backend(conn), query="how does retention archive things", project="p",
+            conn=conn, now=lambda: FIXED_NOW,
+        )
+        assert out == []
+
+    def test_min_hits_floor_respected(self, conn):
+        _seed_reflection(conn, "r1", title="Use Playwright for Amazon pages")
+        out = retrieve_relevant(
+            _backend(conn), query="amazon playwright", project="p",
+            conn=conn, now=lambda: FIXED_NOW, min_hits=3,
+        )
+        assert out == []
+
+    def test_ubiquitous_tokens_dropped(self, conn):
+        # Five memories all mention "claude code"; those two tokens carry no
+        # evidence and must not qualify anything by themselves.
+        for i in range(5):
+            _seed_reflection(conn, f"r{i}", title=f"Claude Code pitfall number {i}")
+        out = retrieve_relevant(
+            _backend(conn), query="claude code research", project="p",
+            conn=conn, now=lambda: FIXED_NOW,
+        )
+        assert out == []
+        # ...but a memory with two further distinct hits still qualifies.
+        _seed_reflection(conn, "r-web", title="Claude Code web research needs forums")
+        out = retrieve_relevant(
+            _backend(conn), query="claude code web research", project="p",
+            conn=conn, now=lambda: FIXED_NOW,
+        )
+        assert [m.id for m in out] == ["r-web"]
+
+    def test_small_pool_keeps_all_tokens(self, conn):
+        # Pool below DF_MIN_POOL: nothing is "ubiquitous", so shared tokens
+        # still count and both memories qualify on two hits.
+        _seed_reflection(conn, "r1", title="Claude Code heredoc pitfall")
+        _seed_reflection(conn, "r2", title="Claude Code reddit pitfall")
+        out = retrieve_relevant(
+            _backend(conn), query="claude code", project="p",
+            conn=conn, now=lambda: FIXED_NOW,
+        )
+        assert sorted(m.id for m in out) == ["r1", "r2"]
+
+    def test_semantic_and_reflection_share_gate(self, conn):
+        _seed_reflection(conn, "r1", title="Use Playwright for Amazon pages")
+        _seed_semantic(conn, "s1", content="Amazon pages need the Playwright MCP")
+        _seed_semantic(conn, "s2", content="Amazon is a retailer")  # one hit only
+        out = retrieve_relevant(
+            _backend(conn), query="amazon playwright", project="p",
+            conn=conn, now=lambda: FIXED_NOW,
+        )
+        assert sorted((m.kind, m.id) for m in out) == [("reflection", "r1"), ("semantic", "s1")]
+
+    def test_hits_rank_above_wilson(self, conn):
+        _seed_reflection(conn, "r-two", title="Retention thresholds alpha", useful=9, ignored=1)
+        _seed_reflection(conn, "r-three", title="Retention thresholds archive beta",
+                          useful=0, ignored=6)
+        out = retrieve_relevant(
+            _backend(conn), query="retention thresholds archive", project="p",
+            conn=conn, now=lambda: FIXED_NOW,
+        )
+        assert [m.id for m in out] == ["r-three", "r-two"]
 
 
 class TestWilsonRanking:
@@ -104,26 +171,12 @@ class TestWilsonRanking:
 
 
 class TestSemantics:
-    def test_semantic_fallback_keyword_when_no_embedder(self, conn):
+    def test_semantic_gate_when_conn_none(self, conn):
+        """A sqlite backend called with ``conn=None`` applies the same
+        distinct-hit gate: semantics never needed the FTS table."""
         _seed_semantic(conn, "s1", content="repo uses uv run pytest on windows")
-        backend = _backend(conn)
         out = retrieve_relevant(
-            backend, query="uv run pytest windows setup", project="p",
-            conn=conn, now=lambda: FIXED_NOW,
-        )
-        assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
-
-    def test_semantic_fallback_keyword_when_conn_none(self, conn):
-        """Semantics have no vec/FTS leg at all, so the keyword-hit floor
-        is their only evidence leg regardless of ``conn`` -- a sqlite
-        backend called with ``conn=None`` keeps the same keyword-fallback
-        behaviour as ``conn=conn`` (see services/relevant.py's module
-        docstring: 'a sqlite backend called with conn=None keeps the
-        pre-existing keyword-fallback behavior unchanged')."""
-        _seed_semantic(conn, "s1", content="repo uses uv run pytest on windows")
-        backend = _backend(conn)
-        out = retrieve_relevant(
-            backend, query="uv run pytest windows setup", project="p",
+            _backend(conn), query="uv run pytest windows setup", project="p",
             conn=None, now=lambda: FIXED_NOW,
         )
         assert [(m.kind, m.id) for m in out] == [("semantic", "s1")]
@@ -133,6 +186,10 @@ class TestCapsAndDegradation:
     def test_max_items_cap(self, conn):
         for i in range(5):
             _seed_reflection(conn, f"r{i}", title=f"Retention thresholds variant {i}")
+        # Pad the pool so "retention"/"thresholds" stay under the ubiquity
+        # cap (5 of 11 memories); the cap, not the gate, is under test.
+        for i in range(6):
+            _seed_reflection(conn, f"z{i}", title=f"Zebra flamingo unrelated {i}")
         backend = _backend(conn)
         out = retrieve_relevant(
             backend, query="retention thresholds", project="p",
@@ -364,7 +421,7 @@ def test_returns_relevantmemory(conn):
     _seed_reflection(conn, "r1", title="Retention archives by confidence")
     backend = _backend(conn)
     out = retrieve_relevant(
-        backend, query="how does retention archive things", project="p",
+        backend, query="how does retention archives confidence work", project="p",
         conn=conn, now=lambda: FIXED_NOW,
     )
     assert out and all(isinstance(m, RelevantMemory) for m in out)

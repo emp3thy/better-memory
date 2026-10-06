@@ -1,25 +1,27 @@
 """UserPromptSubmit / PreToolUse hook: inject curated memories relevant to the
-current prompt or tool-input. Gated by BETTER_MEMORY_CONTEXT_INJECT_MODE
-(userprompt | pretool | both | off). Never raises; always exits 0.
+current prompt (typed-prompt channel) or tool call (trigger channel). Gated
+by BETTER_MEMORY_CONTEXT_INJECT_MODE (userprompt | pretool | both | off).
+Never raises; always exits 0.
 
-Candidates are scored via retrieve_relevant's evidence gate (BM25
-qualifiers, a keyword-hit fallback when no FTS substrate is available, or
-the backend's relevance_ranks in agentcore mode — see
-services/relevant.py) and capped at cfg.context_max_items. A per-session
-SeenStore dedups injected memories across turns within a run
-(cfg.context_reinject_turns controls re-injection after N turns).
-Survivors are recorded as 'contextual' exposures (best-effort;
-a write failure never blocks injection) and counted in rating_diagnostics for
-observability (contextual_fired_userprompt/pretool, contextual_injected,
-contextual_suppressed_floor, contextual_suppressed_dedup).
+UserPromptSubmit: non-human prompts (command output, system tags, peer
+agent messages) are skipped outright; human prompts go through
+retrieve_relevant's distinct-hit evidence gate (services/relevant.py) and
+are capped at cfg.context_max_items.
 
-PreToolUse is latched to one real firing per session
-(SeenStore.try_claim_pretool_fired — an atomic O_CREAT|O_EXCL claim on a
-sentinel file, race-safe across parallel hook processes): the installed
-matcher is unscoped (all tools), so without the latch every tool call
-would re-run the full retrieval path. Later PreToolUse events in the same
-session short-circuit on the sentinel before any DB work.
-UserPromptSubmit is unaffected by the latch.
+PreToolUse fires on EVERY tool call (no per-session latch any more) and is
+trigger-only: memories carrying triggers (services/triggers.py grammar)
+are matched against the tool name + input by triggered_memories; nothing
+is keyword-matched against tool input. Measured cost of the full path is
+within noise of the old latched short-circuit (184 ms vs 175 ms, of which
+168 ms is interpreter start). Hits are logged with exposure source
+'trigger' so the diagnostics panel can report the channel on its own.
+
+A per-session SeenStore dedups injected memories across both channels and
+across turns (cfg.context_reinject_turns controls re-injection after N
+turns). Exposure writes are best-effort -- a failure never blocks
+injection. Counters in rating_diagnostics: contextual_fired_userprompt /
+pretool, contextual_injected, contextual_suppressed_floor / dedup /
+nonhuman, trigger_fired, trigger_injected.
 """
 from __future__ import annotations
 
@@ -34,17 +36,20 @@ from better_memory.config import get_config, project_name
 from better_memory.db.connection import connect
 from better_memory.hooks._error_log import record_hook_error
 from better_memory.services.context_seen import SeenStore, prune_stale
-from better_memory.services.relevant import format_relevant, retrieve_relevant
+from better_memory.services.relevant import (
+    format_relevant,
+    retrieve_relevant,
+    triggered_memories,
+)
 from better_memory.storage import build_backend
 
 _MAX_STDIN_BYTES = 1_000_000
 
 
 class _SkipInjection(Exception):
-    """Module-local sentinel: PreToolUse latch already fired this session.
-
-    Caught explicitly (never via the outer BaseException guard) to leave
-    ``rendered = ""`` without treating the skip as an error.
+    """Module-local sentinel: this firing injects nothing by design (a
+    non-human prompt). Caught explicitly (never via the outer BaseException
+    guard) to leave ``rendered = ""`` without treating the skip as an error.
     """
 
 
@@ -61,6 +66,22 @@ def _bump_diagnostic(conn, cfg, metric: str) -> None:
         conn.commit()
     except BaseException:  # noqa: BLE001
         pass
+
+
+#: Prompt prefixes that mark a UserPromptSubmit payload as NOT typed by a
+#: human: command output and system tags (``<...>``) and peer-agent
+#: messages. The hook payload carries no origin field, so the text is the
+#: only signal. Measured: the hook fired 571 times across sessions holding
+#: 261 typed prompts and 296 peer messages (spec Assumption A5).
+NON_HUMAN_PREFIXES: tuple[str, ...] = ("<", "Another Claude session sent a message")
+
+
+def is_human_prompt(text: str) -> bool:
+    """True for a non-empty prompt that does not start with a non-human prefix."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    return not stripped.startswith(NON_HUMAN_PREFIXES)
 
 
 def _enabled(event: str, mode: str) -> bool:
@@ -109,27 +130,26 @@ def main() -> None:
             state_dir = cfg.home / "state"
             prune_stale(state_dir, now=datetime.now(UTC))
             seen = SeenStore(state_dir, session_id)
-            if event == "PreToolUse":
-                # Atomic O_CREAT|O_EXCL claim: if another parallel hook
-                # process already fired for this session, we return False
-                # and short-circuit before opening any DB connection.
-                if not seen.try_claim_pretool_fired():
-                    raise _SkipInjection()  # module-local sentinel; caught below
+            if event == "UserPromptSubmit" and not is_human_prompt(query):
+                # Peer-agent messages, command output and system tags are
+                # not prompts: no injection, no exposure, no turn bump.
+                with closing(connect(cfg.memory_db)) as conn:
+                    _bump_diagnostic(conn, cfg, "contextual_suppressed_nonhuman")
+                raise _SkipInjection()
+            if event == "PreToolUse" and cfg.storage_backend != "sqlite":
+                # The trigger channel needs trigger storage, which only the
+                # sqlite backend has. Return before any connection or
+                # backend build: on agentcore that would mean a boto3 import
+                # and two client builds on EVERY tool call for a channel
+                # that cannot fire.
+                raise _SkipInjection()
             seen.bump_turn()
-            # A real local connection is opened in BOTH modes now. Agentcore
-            # mode never stores memory CONTENT locally, but session-
-            # operational state (the exposure ledger) lives in the local
-            # memory.db regardless of backend — build_backend threads this
-            # conn through as the backend's exposure-ledger connection. The
-            # BM25 legs below still require the SQLITE-CONTENT
-            # substrate (reflection_fts), which agentcore has none of, so
-            # retrieve_relevant still gets conn=None for agentcore -- that
-            # parameter means "FTS index available", not "any local
-            # connection at all". retrieve_relevant itself detects
-            # agentcore (conn=None + supports_synthesis=False) and
-            # substitutes backend.relevance_ranks — a server-side semantic
-            # search — for the BM25 legs, so agentcore's evidence gate is
-            # no longer purely keyword-based despite conn=None here.
+            # A real local connection is opened in BOTH backend modes: the
+            # exposure ledger is session-operational state in the local
+            # memory.db regardless of where memory CONTENT lives. The
+            # ``conn`` passed to retrieve_relevant means "sqlite FTS
+            # substrate available", so agentcore gets None there and
+            # retrieve_relevant swaps in backend.relevance_ranks.
             with closing(connect(cfg.memory_db)) as conn:
                 _bump_diagnostic(
                     conn, cfg,
@@ -142,17 +162,36 @@ def main() -> None:
                     session_id=session_id or None,
                     project=project,
                 )
-                items = retrieve_relevant(
-                    backend, query=query, project=project,
-                    conn=conn if cfg.storage_backend == "sqlite" else None,
-                    max_items=cfg.context_max_items,
-                )
+                if event == "PreToolUse":
+                    _bump_diagnostic(conn, cfg, "trigger_fired")
+                    tool_input = payload.get("tool_input")
+                    items = triggered_memories(
+                        backend, project=project,
+                        tool_name=str(payload.get("tool_name") or ""),
+                        tool_input=tool_input if isinstance(tool_input, dict) else {},
+                        large_write_chars=cfg.trigger_large_write_chars,
+                    )
+                    source, injected_metric = "trigger", "trigger_injected"
+                else:
+                    items = retrieve_relevant(
+                        backend, query=query, project=project,
+                        conn=conn if cfg.storage_backend == "sqlite" else None,
+                        max_items=cfg.context_max_items,
+                        min_hits=cfg.context_min_hits,
+                    )
+                    source, injected_metric = "contextual", "contextual_injected"
                 had_candidates = bool(items)
                 pairs = [(m.kind, m.id) for m in items]
                 unseen = set(seen.filter_unseen(
                     pairs, reinject_turns=cfg.context_reinject_turns,
                 ))
                 items = [m for m in items if (m.kind, m.id) in unseen]
+                items = items[: cfg.context_max_items]
+                # Atomic per-memory claim: parallel hook processes (parallel
+                # tool calls) each read their own SeenStore snapshot, so
+                # without this both would serve the same memory.
+                won = set(seen.claim([(m.kind, m.id) for m in items]))
+                items = [m for m in items if (m.kind, m.id) in won]
                 if items:
                     rendered = format_relevant(items)
                     survivors = [(m.kind, m.id) for m in items]
@@ -161,7 +200,7 @@ def main() -> None:
                         backend.record_exposures(
                             session_id=session_id,
                             items=exposure_items,
-                            source="contextual",
+                            source=source,
                         )
                     except BaseException as exc:  # noqa: BLE001 - never block injection
                         try:
@@ -169,10 +208,14 @@ def main() -> None:
                         except BaseException:  # noqa: BLE001
                             pass
                     seen.mark_seen(survivors)
-                    _bump_diagnostic(conn, cfg, "contextual_injected")
+                    _bump_diagnostic(conn, cfg, injected_metric)
                 elif had_candidates:
                     _bump_diagnostic(conn, cfg, "contextual_suppressed_dedup")
-                else:
+                elif event == "UserPromptSubmit":
+                    # The floor counter is the PROMPT gate's figure (it
+                    # drives retuning of the distinct-hit floor); tool calls
+                    # that match no trigger are measured by
+                    # trigger_fired - trigger_injected instead.
                     _bump_diagnostic(conn, cfg, "contextual_suppressed_floor")
     except _SkipInjection:
         rendered = ""

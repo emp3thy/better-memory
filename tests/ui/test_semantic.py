@@ -723,3 +723,103 @@ def test_semantic_delete_runtimeerror_maps_to_400_card(client):
     resp = client.post("/semantic/x1/delete", headers={"Origin": "http://localhost"})
     assert resp.status_code == 400
     assert "card-error" in resp.get_data(as_text=True)
+
+
+class TestSemanticTriggersUI:
+    def _seed(self, tmp_db, triggers=None):
+        import json
+        import sqlite3
+        with sqlite3.connect(tmp_db) as seed_conn:
+            seed_conn.execute(
+                "INSERT INTO semantic_memories "
+                "(id, content, project, scope, created_at, updated_at, triggers) VALUES "
+                "('m1','old text','proj-a','project',"
+                " '2026-05-01T10:00:00+00:00','2026-05-01T10:00:00+00:00', ?)",
+                (json.dumps(triggers) if triggers else None,),
+            )
+            seed_conn.commit()
+
+    def test_update_saves_triggers(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import json
+        import sqlite3
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db)
+        response = client.post(
+            "/semantic/m1/update",
+            data={"content": "new text", "triggers": "tool:WebFetch\n\n bash:<< "},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200
+        with sqlite3.connect(tmp_db) as check:
+            row = check.execute(
+                "SELECT content, triggers FROM semantic_memories WHERE id='m1'"
+            ).fetchone()
+        assert row[0] == "new text"
+        assert json.loads(row[1]) == ["tool:WebFetch", "bash:<<"]
+
+    def test_update_clears_triggers_with_empty_field(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        import sqlite3
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db, triggers=["tool:WebFetch"])
+        client.post(
+            "/semantic/m1/update", data={"content": "old text", "triggers": ""},
+            headers={"Origin": "http://localhost"},
+        )
+        with sqlite3.connect(tmp_db) as check:
+            assert check.execute(
+                "SELECT triggers FROM semantic_memories WHERE id='m1'"
+            ).fetchone()[0] is None
+
+    def test_update_bad_trigger_returns_400(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db)
+        response = client.post(
+            "/semantic/m1/update", data={"content": "new text", "triggers": "nope"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 400
+        assert "invalid trigger" in response.get_data(as_text=True)
+
+    def test_drawer_shows_triggers_and_textarea(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db, triggers=["tool:WebFetch", "bash:<<"])
+        body = client.get("/semantic/m1/drawer").get_data(as_text=True)
+        assert 'name="triggers"' in body
+        assert "tool:WebFetch" in body
+        assert "bash:&lt;&lt;" in body or "bash:<<" in body
+
+    def test_triggers_field_hidden_without_capability(
+        self, client: FlaskClient, tmp_db: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from better_memory.ui import app as app_module
+        monkeypatch.setattr(app_module, "project_name", lambda: "proj-a")
+        self._seed(tmp_db, triggers=["tool:WebFetch"])
+        real = client.application.extensions["backend"]
+
+        class _NoTriggers:
+            supports_triggers = False
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        client.application.extensions["backend"] = _NoTriggers()
+        body = client.get("/semantic/m1/drawer").get_data(as_text=True)
+        assert 'name="triggers"' not in body
+        # A posted triggers field is ignored, not an error.
+        response = client.post(
+            "/semantic/m1/update", data={"content": "x", "triggers": "nope"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert response.status_code == 200

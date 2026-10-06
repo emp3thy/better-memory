@@ -9,14 +9,16 @@ See docs/superpowers/specs/2026-05-04-semantic-memories-design.md.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import uuid4
 
 from better_memory._common import default_clock, env_session_id
 from better_memory.services.scoring import wilson_lower_bound
+from better_memory.services.triggers import parse_triggers, validate_triggers
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class SemanticMemory:
     last_overlooked_at: str | None = None
     times_ignored: int = 0
     last_ignored_at: str | None = None
+    triggers: list[str] = field(default_factory=list)
 
 
 _VALID_SCOPES = ("project", "general")
@@ -59,7 +62,8 @@ class SemanticMemoryService:
         self._clock: Callable[[], datetime] = clock or default_clock
 
     def create(
-        self, *, content: str, project: str, scope: str = "project"
+        self, *, content: str, project: str, scope: str = "project",
+        triggers: list[str] | None = None,
     ) -> str:
         if scope not in _VALID_SCOPES:
             raise ValueError(
@@ -67,15 +71,17 @@ class SemanticMemoryService:
             )
         if not content.strip():
             raise ValueError("content must not be empty")
+        cleaned = validate_triggers(triggers or [])
         memory_id = uuid4().hex
         now = self._clock().isoformat()
         self._conn.execute(
             """
             INSERT INTO semantic_memories
-                (id, content, project, scope, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (id, content, project, scope, created_at, updated_at, triggers)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (memory_id, content, project, scope, now, now),
+            (memory_id, content, project, scope, now, now,
+             json.dumps(cleaned) if cleaned else None),
         )
         self._conn.commit()
         return memory_id
@@ -113,6 +119,25 @@ class SemanticMemoryService:
             "UPDATE semantic_memories SET scope = ?, updated_at = ? "
             "WHERE id = ?",
             (scope, now, id),
+        )
+        if cur.rowcount == 0:
+            self._conn.rollback()
+            raise ValueError(f"semantic memory not found: {id}")
+        self._conn.commit()
+
+    def set_triggers(self, *, id: str, triggers: list[str]) -> None:
+        """Replace a semantic memory's tool-call triggers.
+
+        Validates the grammar (``services.triggers.validate_triggers``);
+        an empty cleaned list stores NULL. Bumps updated_at. Raises
+        ValueError on bad grammar or missing id.
+        """
+        cleaned = validate_triggers(triggers or [])
+        now = self._clock().isoformat()
+        cur = self._conn.execute(
+            "UPDATE semantic_memories SET triggers = ?, updated_at = ? "
+            "WHERE id = ?",
+            (json.dumps(cleaned) if cleaned else None, now, id),
         )
         if cur.rowcount == 0:
             self._conn.rollback()
@@ -194,7 +219,7 @@ class SemanticMemoryService:
         row = self._conn.execute(
             "SELECT id, content, project, scope, created_at, updated_at, "
             "useful_count, last_useful_at, times_misled, last_misled_at, "
-            "times_overlooked, last_overlooked_at, times_ignored, last_ignored_at "
+            "times_overlooked, last_overlooked_at, times_ignored, last_ignored_at, triggers "
             "FROM semantic_memories WHERE id = ?",
             (id,),
         ).fetchone()
@@ -208,6 +233,7 @@ class SemanticMemoryService:
             times_overlooked=row["times_overlooked"] or 0,
             last_overlooked_at=row["last_overlooked_at"],
             times_ignored=row["times_ignored"] or 0, last_ignored_at=row["last_ignored_at"],
+            triggers=parse_triggers(row["triggers"]),
         )
 
     def list_for_project(
@@ -262,7 +288,7 @@ class SemanticMemoryService:
             "SELECT id, content, project, scope, created_at, updated_at, "
             "useful_count, last_useful_at, times_misled, last_misled_at, "
             "times_overlooked, last_overlooked_at, "
-            "times_ignored, last_ignored_at "
+            "times_ignored, last_ignored_at, triggers "
             "FROM semantic_memories "
             f"WHERE {' AND '.join(where_clauses)} "
             "ORDER BY created_at DESC"
@@ -281,6 +307,7 @@ class SemanticMemoryService:
                 last_overlooked_at=r["last_overlooked_at"],
                 times_ignored=r["times_ignored"] or 0,
                 last_ignored_at=r["last_ignored_at"],
+            triggers=parse_triggers(r["triggers"]),
             )
             for r in rows
         ]

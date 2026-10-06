@@ -7,9 +7,10 @@ through the service layer.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from better_memory.services.episode import Episode, row_to_episode
+from better_memory.services.triggers import parse_triggers
 
 
 @dataclass(frozen=True)
@@ -331,6 +332,7 @@ class ReflectionFull:
     last_misled_at: str | None = None
     times_overlooked: int = 0
     last_overlooked_at: str | None = None
+    triggers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -392,7 +394,7 @@ def reflection_row(
         "confidence, status, use_cases, hints, evidence_count, scope, "
         "created_at, updated_at, "
         "useful_count, last_useful_at, times_misled, last_misled_at, "
-        "times_overlooked, last_overlooked_at "
+        "times_overlooked, last_overlooked_at, triggers "
         "FROM reflections WHERE id = ?",
         (reflection_id,),
     ).fetchone()
@@ -419,6 +421,7 @@ def reflection_row(
         last_misled_at=r_row["last_misled_at"],
         times_overlooked=r_row["times_overlooked"] or 0,
         last_overlooked_at=r_row["last_overlooked_at"],
+        triggers=parse_triggers(r_row["triggers"]),
     )
 
 
@@ -873,3 +876,81 @@ def retention_runs_list_for_ui(
         )
         for r in rows
     ]
+
+
+def useful_rate_by_channel(
+    conn: sqlite3.Connection, *, last_n_sessions: int | None
+) -> dict:
+    """Useful rate per exposure source over rated exposures.
+
+    ``useful = cited + shaped``; ``rated = useful + ignored + misled`` (the
+    spec's denominator -- ``overlooked`` ratings are reported in their own
+    column but excluded from the rate); ``rate = useful / rated`` (0.0 when
+    rated is 0). ``last_n_sessions=None`` is all time; otherwise only the N most
+    recently rated sessions (by ``MAX(rated_at)`` per session) count.
+    ``useful_per_session`` (useful ratings / rated sessions) is the guard
+    against reaching a ratio by starving the channels (design spec
+    2026-10-05-just-in-time-serving-design.md §3).
+
+    Returns ``{"rows": [...], "total": {...}, "rated_sessions": int,
+    "useful_per_session": float}``; each row has ``source``, ``rated``,
+    ``useful``, ``ignored``, ``misled``, ``overlooked``, ``rate``.
+    """
+    session_filter = ""
+    params: list[object] = []
+    if last_n_sessions is not None:
+        session_filter = (
+            "AND session_id IN ("
+            "  SELECT session_id FROM session_memory_exposure "
+            "  WHERE rated_at IS NOT NULL "
+            "  GROUP BY session_id ORDER BY MAX(rated_at) DESC LIMIT ?)"
+        )
+        params.append(int(last_n_sessions))
+    rows = conn.execute(
+        f"""
+        SELECT source,
+               SUM(classification IN ('cited', 'shaped')) AS useful,
+               SUM(classification = 'ignored') AS ignored,
+               SUM(classification = 'misled') AS misled,
+               SUM(classification = 'overlooked') AS overlooked
+          FROM session_memory_exposure
+         WHERE rated_at IS NOT NULL {session_filter}
+         GROUP BY source
+         ORDER BY source
+        """,
+        params,
+    ).fetchall()
+    sessions = conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT session_id) FROM session_memory_exposure
+         WHERE rated_at IS NOT NULL {session_filter}
+        """,
+        params,
+    ).fetchone()[0]
+
+    def _row(source: str, useful: int, ignored: int, misled: int, overlooked: int) -> dict:
+        rated = useful + ignored + misled
+        return {
+            "source": source, "rated": rated, "useful": useful,
+            "ignored": ignored, "misled": misled, "overlooked": overlooked,
+            "rate": (useful / rated) if rated else 0.0,
+        }
+
+    out_rows = [
+        _row(r["source"], r["useful"] or 0, r["ignored"] or 0, r["misled"] or 0,
+             r["overlooked"] or 0)
+        for r in rows
+    ]
+    total = _row(
+        "all",
+        sum(r["useful"] for r in out_rows),
+        sum(r["ignored"] for r in out_rows),
+        sum(r["misled"] for r in out_rows),
+        sum(r["overlooked"] for r in out_rows),
+    )
+    return {
+        "rows": out_rows,
+        "total": total,
+        "rated_sessions": int(sessions or 0),
+        "useful_per_session": (total["useful"] / sessions) if sessions else 0.0,
+    }
