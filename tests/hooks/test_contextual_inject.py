@@ -578,3 +578,18 @@ def test_pretool_no_match_does_not_bump_prompt_floor_counter(bm_home, monkeypatc
     assert _diag_value(bm_home, "contextual_suppressed_floor") == 0
     assert _diag_value(bm_home, "trigger_fired") == 1
     assert _diag_value(bm_home, "trigger_injected") == 0
+
+
+def test_trigger_reinjects_after_window(bm_home, monkeypatch, capsys):
+    """BETTER_MEMORY_CONTEXT_REINJECT_TURNS=1: the same trigger re-serves the
+    memory on a later firing instead of being blocked forever by the claim."""
+    monkeypatch.setenv("BETTER_MEMORY_CONTEXT_REINJECT_TURNS", "1")
+    _seed_semantic(bm_home, "sem-heredoc", content="heredoc pitfall", triggers=["bash:<<"])
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _HEREDOC,
+               "cwd": ".", "session_id": "sess-reinject"}
+    first = _run(payload, monkeypatch, capsys)["hookSpecificOutput"]["additionalContext"]
+    assert "sem-heredoc" in first
+    _run({"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "x"},
+          "cwd": ".", "session_id": "sess-reinject"}, monkeypatch, capsys)
+    third = _run(payload, monkeypatch, capsys)["hookSpecificOutput"]["additionalContext"]
+    assert "sem-heredoc" in third

@@ -198,3 +198,26 @@ class TestClaim:
         os.utime(files[0], (ten_days_ago, ten_days_ago))
         prune_stale(tmp_path, now=datetime(2026, 7, 11, tzinfo=UTC))
         assert not files[0].exists()
+
+
+def test_claim_reopens_after_reinject_window(tmp_path):
+    """A claim is keyed to the turn the memory was last seen at in the
+    caller's snapshot. Parallel callers sharing a snapshot get one winner;
+    a caller that loads a post-mark snapshot is excluded by filter_unseen
+    until the reinject window elapses, after which a fresh claim is possible."""
+    s = _store(tmp_path)
+    s.bump_turn()                                        # turn 1
+    peer = _store(tmp_path)                              # same pre-mark snapshot
+    assert s.claim([("reflection", "r1")]) == [("reflection", "r1")]
+    assert peer.claim([("reflection", "r1")]) == []      # same window: lost
+    s.mark_seen([("reflection", "r1")])
+    later = _store(tmp_path)
+    assert later.filter_unseen([("reflection", "r1")], reinject_turns=3) == []
+    for _ in range(3):
+        _store(tmp_path).bump_turn()                     # turns 2..4
+    s5 = _store(tmp_path)
+    s5.bump_turn()                                       # turn 5
+    peer5 = _store(tmp_path)                             # same snapshot as s5
+    assert s5.filter_unseen([("reflection", "r1")], reinject_turns=3) == [("reflection", "r1")]
+    assert s5.claim([("reflection", "r1")]) == [("reflection", "r1")]
+    assert peer5.claim([("reflection", "r1")]) == []     # second winner blocked

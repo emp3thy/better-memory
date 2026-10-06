@@ -54,19 +54,27 @@ class SeenStore:
         Hook processes run in parallel (Claude issues parallel tool calls),
         and :meth:`filter_unseen` reads a snapshot taken at process start, so
         two processes can both see a memory as unseen. The claim is an
-        ``O_CREAT|O_EXCL`` sentinel per (session, kind, id):
-        ``context_seen_<session>.<kind>-<id>.claim``. Exactly one process
-        creates it. Never raises: an unwritable state dir claims nothing,
-        so a failure degrades to "do not serve" rather than "serve twice".
+        ``O_CREAT|O_EXCL`` sentinel per (session, kind, id, epoch):
+        ``context_seen_<session>.<kind>-<id>.<epoch>.claim`` where the epoch
+        is the turn the memory was last marked seen at in this process's
+        snapshot (0 if never). Parallel callers in the same re-inject window
+        share a snapshot and therefore a filename, so exactly one wins; once
+        ``mark_seen`` records a later turn and the
+        ``BETTER_MEMORY_CONTEXT_REINJECT_TURNS`` window re-admits the memory,
+        the epoch changes and a fresh claim is possible. Never raises: an
+        unwritable state dir claims nothing, so a failure degrades to "do
+        not serve" rather than "serve twice".
         """
         won: list[tuple[str, str]] = []
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
         except BaseException:  # noqa: BLE001 - cannot claim -> serve nothing
             return won
+        seen = self._data.get("seen") or {}
         for kind, id_ in ids:
             name = _SAFE_KEY_RE.sub("_", f"{kind}-{id_}")
-            sentinel = self._dir / f"context_seen_{self._safe}.{name}.claim"
+            epoch = int(seen.get(_key(kind, id_)) or 0)
+            sentinel = self._dir / f"context_seen_{self._safe}.{name}.{epoch}.claim"
             try:
                 fd = os.open(str(sentinel), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
                 os.close(fd)
