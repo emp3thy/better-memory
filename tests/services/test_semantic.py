@@ -613,12 +613,14 @@ class TestTriggers:
         svc = SemanticMemoryService(conn)
         sid = svc.create(content="rule", project="p", scope="general")
         svc.set_triggers(id=sid, triggers=["tool:WebFetch", " bash:<< "])
-        assert svc.get(id=sid).triggers == ["tool:WebFetch", "bash:<<"]
+        got = svc.get(id=sid)
+        assert got is not None and got.triggers == ["tool:WebFetch", "bash:<<"]
         assert svc.list_for_project(project="p", track_exposure=False)[0].triggers == [
             "tool:WebFetch", "bash:<<",
         ]
         svc.set_triggers(id=sid, triggers=[])
-        assert svc.get(id=sid).triggers == []
+        cleared = svc.get(id=sid)
+        assert cleared is not None and cleared.triggers == []
         assert conn.execute(
             "select triggers from semantic_memories where id=?", (sid,)
         ).fetchone()[0] is None
@@ -639,6 +641,8 @@ class TestTriggers:
         from better_memory.services.semantic import SemanticMemoryService
         svc = SemanticMemoryService(conn)
         sid = svc.create(content="rule", project="p", triggers=["skill:superpowers:*"])
-        assert svc.get(id=sid).triggers == ["skill:superpowers:*"]
+        with_triggers = svc.get(id=sid)
+        assert with_triggers is not None and with_triggers.triggers == ["skill:superpowers:*"]
         sid2 = svc.create(content="rule2", project="p")
-        assert svc.get(id=sid2).triggers == []
+        without = svc.get(id=sid2)
+        assert without is not None and without.triggers == []
