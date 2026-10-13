@@ -5,7 +5,7 @@ description: Use when user asks to start, launch, open, or run the better-memory
 
 # Start better-memory UI
 
-The MCP tool `mcp__better-memory__memory_start_ui` is a stub that returns "UI not yet implemented" — but the UI itself is fully built. Launch it directly.
+The MCP tool `mcp__better-memory__memory_start_ui` spawns or reuses the UI and returns `{"url", "reused"}`. This skill launches it directly instead.
 
 ## Project
 

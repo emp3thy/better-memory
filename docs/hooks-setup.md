@@ -8,30 +8,30 @@ below.
 
 | Event | Matcher / `if` | Purpose | Module |
 |---|---|---|---|
-| `SessionStart` | — | Open/reuse a background episode; inject project + general semantic memories and reflections as `additionalContext`; run the wiring autocheck | `better_memory.hooks.session_bootstrap` |
+| `SessionStart` | — | Open/reuse a background episode; inject a one-line memory index (or, in `legacy` mode, project + general semantic memories and reflections) as `additionalContext`; run the wiring autocheck | `better_memory.hooks.session_bootstrap` |
 | `PostToolUse` | `Write\|Edit\|Bash`, async | Capture every matched tool invocation as a spool event | `better_memory.hooks.observer` |
 | `Stop` | — | Mark session end for consolidation boundary detection; emit the end-of-session rating-sweep directive when unrated exposures remain | `better_memory.hooks.session_close` |
 | `Stop` | — (second, independent registration) | Remind Claude to record non-obvious observations before stopping | `better_memory.hooks.stop_sweep` |
 | `UserPromptSubmit` | — | Inject curated memories (semantic + reflections) relevant to the current prompt as `additionalContext` | `better_memory.hooks.contextual_inject` |
-| `PreToolUse` | unscoped, latched to one firing/session | Same as above, keyed to the tool name + input | `better_memory.hooks.contextual_inject` |
+| `PreToolUse` | unscoped | Inject memories whose declared triggers match the tool name + input (sqlite backend only) | `better_memory.hooks.contextual_inject` |
 | `PreToolUse` | `Bash`, `if: "Bash(git commit*)"` | Remind Claude to record an observation before a `git commit` that fixes a bug, addresses review feedback, or closes a phase | `better_memory.hooks.commit_checkpoint` |
 | `PreCompact` | — | Remind Claude to persist the in-flight task, decisions, and open questions before context compaction | `better_memory.hooks.pre_compact` |
 
 The `contextual_inject` hook is gated by `BETTER_MEMORY_CONTEXT_INJECT_MODE`
 (`userprompt` \| `pretool` \| `both` (default) \| `off`). It runs in-process
-against `memory.db` and gates each candidate through a two-leg evidence
-check (a BM25 match against `reflection_fts`, or — only when that leg is
-structurally unavailable, or for semantic memories, which have no FTS
-substrate of their own — a keyword-hit fallback), then ranks qualifiers
-by reciprocal rank fusion over a Wilson-score usefulness prior; it
-injects the top matches (capped at `BETTER_MEMORY_CONTEXT_MAX_ITEMS`) and
+against `memory.db`. On `UserPromptSubmit` it skips non-human prompts and gates
+each candidate (reflections and semantic memories alike) on distinct-hit
+evidence — a memory qualifies when at least `BETTER_MEMORY_CONTEXT_MIN_HITS`
+(default 2) distinct, non-ubiquitous prompt tokens appear in it — then ranks
+qualifiers by reciprocal rank fusion over a Wilson-score usefulness prior;
+it injects the top matches (capped at `BETTER_MEMORY_CONTEXT_MAX_ITEMS`) and
 never blocks a turn. On agentcore, both kinds are instead gated by the
 backend's own server-side `relevance_ranks`, falling back to the
 keyword-hit floor only when that lookup itself fails. `PreToolUse` hosts
 two independent registrations —
-`contextual_inject`, unscoped (matches every tool) but latched to one real
-firing per session (later tool calls short-circuit on a state file before
-touching the DB), and `commit_checkpoint`, scoped to `Bash` and gated to
+`contextual_inject`, unscoped (matches every tool) and trigger-only (it fires
+on every tool call and injects memories whose declared triggers match the
+tool name + input; sqlite backend only), and `commit_checkpoint`, scoped to `Bash` and gated to
 fire only immediately before a `git commit`. `stop_sweep` and `pre_compact`
 are simple, ungated reminder-injectors — no evidence gate, no DB access.
 
@@ -147,8 +147,8 @@ Notes on the shape above (`better_memory/setup/manifest.py::hook_entry`):
   `pythonw.exe`.
 - The `if` filter on `commit_checkpoint`'s `PreToolUse` group scopes it to
   commands matching `git commit*`; `contextual_inject`'s `PreToolUse`
-  group has no matcher (fires on every tool, latched to one real firing
-  per session — see above) and is a separate group, not merged with
+  group has no matcher (fires on every tool, trigger-only — see above)
+  and is a separate group, not merged with
   `commit_checkpoint`'s.
 - If better-memory is installed as a system-wide package rather than a
   repo-local `.venv`, the `command` is whatever `python -m
@@ -171,12 +171,12 @@ Notes on the shape above (`better_memory/setup/manifest.py::hook_entry`):
    - retrieves project-scoped + general-scope semantic memories and
      distilled reflections (`do` / `dont` / `neutral` buckets, capped at
      20 per bucket), then renders them per `BETTER_MEMORY_INJECT_MODE`:
-     - `deferred` (the mode actually deployed live) — renders only
-       general-scope semantic memories in full, plus a one-line index
+     - `deferred` (the config default, and what `better-memory setup` installs) —
+       renders no memories in full, only a one-line index
        ("better-memory knows N reflections + M semantic memories...")
-       telling Claude to pull specifics via `memory_retrieve` with a
-       task query. No reflections are rendered in full at bootstrap.
-     - `legacy` (the config default when the env var is unset) — renders
+       telling Claude that relevant ones surface as it works, or to pull
+       specifics via `memory_retrieve` with a task query.
+     - `legacy` (opt-in via `BETTER_MEMORY_INJECT_MODE=legacy`) — renders
        up to `BETTER_MEMORY_BOOTSTRAP_TOP_N` (default 5) semantic
        memories and reflections in full, with the remainder listed in a
        compact "Index (not expanded)" section.

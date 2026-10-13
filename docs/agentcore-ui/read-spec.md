@@ -55,8 +55,8 @@ gives three things:
   min_confidence) + `useful_only`; default `status IN ('pending_review',
   'confirmed')`; ordered confidence DESC, updated_at DESC, rowid DESC.
 - **agentcore source:** a **new flat backend method**
-  `AgentCoreBackend.list_reflections(*, project, status_filter, tech, phase,
-  polarity, min_confidence, useful_only, limit)`, built on
+  `AgentCoreBackend.reflection_list(*, project, tech, phase, polarity, status,
+  min_confidence, useful_only, limit)`, built on
   `self._data.list_memory_records(memoryId=episodic.memory_id, namespace=…,
   maxResults≤100, nextToken=…)` fanned out over **two** namespaces
   (`projects/{actor}/reflections/` + `general/reflections/`), plus
@@ -82,7 +82,7 @@ gives three things:
   / `last_*_at`); SELECT #2 the provenance join `reflection_sources →
   observations → episodes`.
 - **agentcore source:** the row leg only, via a **new thin accessor**
-  `AgentCoreBackend.get_reflection(*, reflection_id)` wrapping
+  `AgentCoreBackend.reflection_get(*, reflection_id)` wrapping
   `self._data.get_memory_record(memoryId=episodic.memory_id,
   memoryRecordId=id)['memoryRecord']` (falling back to `list_memory_records`
   with `metadataFilters` for BASE records, as `_get_record` already does),
@@ -116,7 +116,7 @@ gives three things:
 - **agentcore source:** **HIDDEN in agentcore mode by default**
   (`supports_reflection_text_edit=False`). Reflection text is AI-managed. When
   the flag is enabled (open decision — see Gaps), it reads only `use_cases` /
-  `hints` from the R2 accessor (`get_reflection` + `_parse_reflection_record`),
+  `hints` from the R2 accessor (`reflection_get` + `_parse_reflection_record`),
   decoupled from the join-heavy detail query.
 - **shape / field differences:** the provenance columns the sqlite form ignores
   are simply never fetched.
@@ -126,7 +126,7 @@ gives three things:
 - **sqlite source:** `queries.reflection_distinct_projects` — `SELECT DISTINCT
   project FROM reflections`, then unioned with `project_name()`.
 - **agentcore source:** a **new backend method**
-  `AgentCoreBackend.list_projects()` returning the UNION of:
+  `AgentCoreBackend.distinct_projects()` returning the UNION of:
   (a) `self._data.list_actors(memoryId=episodic.memory_id)` → `actorSummaries[].actorId`
   (event-derived actors — every project that has ≥1 `observe()`); and
   (b) the project set parsed from the local `agentcore_migration` ledger's
@@ -183,7 +183,7 @@ gives three things:
   (content, scope, timestamps, counters); `abort(404)` if absent. Evidence leg
   via `queries.fetch_rating_evidence`.
 - **agentcore source:** a **new public accessor**
-  `AgentCoreBackend.get_semantic(*, id)` wrapping the existing private
+  `AgentCoreBackend.semantic_get(*, id)` wrapping the existing private
   `_get_semantic_record` (=`get_memory_record(memoryId=semantic.memory_id,
   memoryRecordId=id)`), mapped by `_semantic_summary_to_model`. Evidence leg
   **stays local memory.db** (`fetch_rating_evidence`, `memory_kind='semantic'`).

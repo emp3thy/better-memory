@@ -6,6 +6,7 @@ It's a memory layer for Claude Code that (with the default sqlite backend) runs 
 
 ## How it works
 
+<!-- drift-unverified: 1st notice, run 2026-10-13-b27d, block 2ee85463. This describes the code but names nothing in it. Name what it describes, or add drift-ignore: <reason>. -->
 1. **As it works**, the assistant records what it tried and how it turned out — a fix that worked, an approach that failed, a preference you stated.
 2. **Between sessions**, those raw notes are distilled into short, durable lessons — signal kept, noise dropped.
 3. **Next session**, lessons surface exactly when they become relevant: each typed prompt is scored against the memory store (distinct-keyword evidence plus track record), and every tool call is checked against each memory's triggers, so a pitfall about Bash heredocs arrives as the heredoc is about to run and a planning rule arrives when the planning skill is invoked. Session start carries only a one-line index. No firehose, no guessing.
@@ -238,7 +239,7 @@ The skills in `.claude/skills/` (every directory with a `SKILL.md`) are enumerat
 
 - **`better-memory-synthesize`** — walks Claude through the per-episode reflection synthesis loop (`memory.synthesize_next_get_context` → decide → `memory.synthesize_next_apply`). Fires when `memory.start_episode` reports `pending_synthesis.pending > 0` or when the user asks to consolidate.
 - **`rate-session-memories`** — classifies exposed reflections / semantic memories at session end (`cited` / `shaped` / `ignored` / `misled` / `overlooked`) via `memory.list_session_exposures` + `memory.apply_session_ratings`. Triggered by a Stop-block directive from the `session_close` hook when unrated exposures remain.
-- **`start-better-memory-ui`** — launches the management UI directly (the `memory.start_ui` MCP tool is a stub; this skill runs `python -m better_memory.ui` itself). Triggered by phrasing like "start ui" / "launch the better-memory UI".
+- **`start-better-memory-ui`** — launches the management UI directly (the `memory.start_ui` MCP tool spawns or reuses the UI; this skill runs `python -m better_memory.ui` itself). Triggered by phrasing like "start ui" / "launch the better-memory UI".
 
 `better-memory setup` also writes the managed CLAUDE.md block that tells Claude when to invoke `better-memory-synthesize` (the `pending_synthesis.pending > 0` trigger) — no manual CLAUDE.md editing needed. The rating skill fires from the hook directive and needs no instruction line either.
 
@@ -304,7 +305,7 @@ Three shipped upgrades sit on top of that foundation (specs: `2026-07-23-retriev
 
 ## Observation lifecycle
 
-Observations don't live forever. They flow through four states (`active` → `consumed_*` → `archived` → deleted) driven by two pipelines: **synthesis** (LLM-driven, runs from the UI button or automatically by `memory.start_episode`) and **retention** (manual; spec §13 explicitly defers auto-scheduling).
+Observations don't live forever. They flow through four states (`active` → `consumed_*` → `archived` → deleted) driven by two pipelines: **synthesis** (LLM-driven, runs from the UI button or automatically by `memory.start_episode`) and **retention** (runs automatically at most once per 24h from `memory.retrieve`, or manually via `memory.run_retention`).
 
 ```mermaid
 stateDiagram-v2
@@ -340,7 +341,7 @@ stateDiagram-v2
 
 **Prune** (opt-in, `RetentionService.run(..., prune=True, prune_age_days=N)`): hard-deletes `archived` rows older than `prune_age_days`. `dry_run=True` previews the count without deleting. Reflections are **never** auto-deleted.
 
-Retention is invoked manually — there's no scheduler. Triggers today:
+Retention runs automatically from `memory.retrieve` (`RetentionScheduler.maybe_run`, at most once per 24h) and can also be invoked manually. Triggers today:
 - `memory.run_retention` MCP tool, or
 - Direct call from a script / cron / CI step.
 

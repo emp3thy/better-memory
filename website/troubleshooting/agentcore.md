@@ -56,7 +56,7 @@ The full message is:
 boto3 is required for the agentcore storage backend. Install it with: pip install 'better-memory[agentcore]'
 ```
 
-The agentcore backend's AWS dependencies live in an optional extra so sqlite-only installs stay lean. Install the extra into the same environment the MCP server (or hook) runs from: `pip install 'better-memory[agentcore]'` or `uv pip install '.[agentcore]'`. Both the server factory and the Stop hook's lazy import raise this same hint.
+The agentcore backend's AWS dependencies live in an optional extra so sqlite-only installs stay lean. Install the extra into the same environment the MCP server (or hook) runs from: `pip install 'better-memory[agentcore]'` or `uv pip install '.[agentcore]'`. The server factory raises this hint.
 
 ## `AgentCoreConfigError` — corrupt or unreadable `agentcore.json`
 

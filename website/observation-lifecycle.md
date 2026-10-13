@@ -36,7 +36,7 @@ Implemented by `better_memory.services.retention.RetentionService.run`, default 
 
 | Rule | Archives observations where … |
 |---|---|
-| **A** | linked only to *retired* reflections, oldest retirement ≥ retention_days old |
+| **A** | linked only to *retired* reflections, most recent retirement ≥ retention_days old |
 | **B** | `status='consumed_without_reflection'` and the status change was ≥ retention_days ago |
 | **C** | belongs to an episode whose `outcome='no_outcome'` and ended ≥ retention_days ago |
 
