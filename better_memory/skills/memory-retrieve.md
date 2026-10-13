@@ -43,8 +43,8 @@ When to use: before starting any meaningful coding task, or when entering a new 
    - `dont` — **hard constraints**. Do NOT repeat these approaches. If
      you're tempted to try something here, stop and reconsider.
    - `neutral` — general context, no strong signal either way.
-4. Also read `insights` (confirmed patterns) and `knowledge` (standards,
-   language conventions, project docs).
+4. Standards, language conventions and project docs are not in the
+   result — look them up with `knowledge.list` / `knowledge.search`.
 5. When a returned reflection or semantic memory actually shapes your
    work, call `memory.credit(kind, id, class, evidence)` — see
    "Crediting memories you use" below. `memory.record_use` is a

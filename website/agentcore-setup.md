@@ -7,7 +7,7 @@
 - AWS account with Bedrock AgentCore Memory available in your chosen region (`init --region` defaults to `eu-west-2`).
 - IAM principal (user or role) with the policy below attached.
 - AWS credentials discoverable by boto3 (env vars, `~/.aws/credentials`, EC2/EKS role, etc.).
-- `better-memory[agentcore]` installed: `pip install 'better-memory[agentcore]'` or `uv pip install '.[agentcore]'`. The extra pins `boto3>=1.43.56` and `botocore>=1.43.56` — older versions predate the `extractionMode` parameter on `CreateEvent`, which both the Stop hook's closure event and the end-of-session rating sweep's receipt event (see [Capability table](#capability-table)) depend on. If you install boto3/botocore separately (rather than through the extra), make sure they meet that floor.
+- `better-memory[agentcore]` installed: `pip install 'better-memory[agentcore]'` or `uv pip install '.[agentcore]'`. The extra pins `boto3>=1.43.56` and `botocore>=1.43.56` — older versions predate the `extractionMode` parameter on `CreateEvent`, which the end-of-session rating sweep's receipt event (see [Capability table](#capability-table)) depends on. If you install boto3/botocore separately (rather than through the extra), make sure they meet that floor.
 
 ## IAM policy
 
@@ -60,7 +60,7 @@ To revert to sqlite: remove the `storage_backend` key from `settings.json`, or s
 After `init` returns, restart your Claude Code session (or the MCP server) so it picks up the new backend. The MCP server reads `settings.json`, then `agentcore.json`, and constructs an `AgentCoreBackend` instead of `SqliteBackend`.
 
 !!! note "Custom `BETTER_MEMORY_HOME`"
-    The installer injects `BETTER_MEMORY_HOME` only into the MCP server's env block in `~/.claude.json`; hooks run without it and fall back to `~/.better-memory`. If you use a custom home, run `init` against it (`--home` or the env var) **and** make sure hooks can see the same home — otherwise the Stop hook looks for `~/.better-memory/settings.json` and stays on sqlite.
+    The installer injects `BETTER_MEMORY_HOME` only into the MCP server's env block in `~/.claude.json`; hooks run without it and fall back to `~/.better-memory`. If you use a custom home, run `init` against it (`--home` or the env var) **and** make sure hooks can see the same home — otherwise the hooks look for `~/.better-memory/settings.json` and stay on sqlite.
 
 ## Verify
 
@@ -130,7 +130,7 @@ The self-rating / learning loop is **backend-agnostic**: agentcore mode runs the
 
 ## UI capability flags
 
-The management UI's `create_app` builds a `StorageBackend` and reads six `@property -> bool` capability flags off it through a `caps` template context processor: `supports_episodes`, `supports_observations`, `supports_provenance`, `supports_retention_runs`, `supports_reflection_review`, `supports_reflection_text_edit`. All six are `False` in agentcore mode (all `True` on sqlite). Every flag now gates a real surface — nav link, route, and template block together — so an agentcore session cannot reach a page whose data the backend does not carry, and cannot land on a page whose gated block would otherwise render empty. The capability table below lists what each flag hides.
+The management UI's `create_app` builds a `StorageBackend` and reads seven `@property -> bool` capability flags off it through a `caps` template context processor: `supports_episodes`, `supports_observations`, `supports_provenance`, `supports_retention_runs`, `supports_reflection_review`, `supports_reflection_text_edit`, `supports_triggers`. All seven are `False` in agentcore mode (all `True` on sqlite). Every flag now gates a real surface — nav link, route, and template block together — so an agentcore session cannot reach a page whose data the backend does not carry, and cannot land on a page whose gated block would otherwise render empty. The capability table below lists what each flag hides.
 
 **Content routing.** The Reflections tab (list, detail, promote, retire) and the Semantic tab (create, list, detail, edit, scope toggle, delete) read and write agentcore-mode memory content through `AgentCoreBackend` instead of any local table — when the active backend is `agentcore`, the management UI shows AgentCore-resident reflections and semantic memories, not local `memory.db` rows. Reflection status shows the agentcore vocabulary (`active`/`promoted`/`retired`, no `pending_review`) rather than a sqlite-shaped one. `AgentCoreBackend.semantic_list(scope_filter=None)` fans out over both the project and `general/semantic/` namespaces and dedups by id (project wins), matching sqlite's default view (`project OR scope='general'`).
 

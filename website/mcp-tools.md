@@ -18,6 +18,7 @@ Create a new observation at a decision point.
 | `theme` | string | optional | Cross-cutting tag (`bug`, `decision`, `architecture`, `convention`, `gotcha`, `dependency`, `infrastructure`, `preference`). |
 | `trigger_type` | string | optional | What prompted the observation (`user-feedback`, `test-failure`, `review`, `deploy`). |
 | `tech` | string | optional | Free-text tech tag (`python`, `react`, `sqlite`). |
+| `scope` | `project` / `general` | optional | `project` (default) for project-scoped observations; `general` for cross-project workflow rules that surface in every project's `memory.retrieve`. |
 
 Project scope is auto-derived from `Path.cwd()`. Returns `{"id": "<uuid>"}`.
 
@@ -57,7 +58,7 @@ Stamp reinforcement outcome on a memory after validation.
 | Parameter | Type | Required |
 |---|---|---|
 | `id` | string | yes |
-| `outcome` | `success` / `failure` | yes |
+| `outcome` | `success` / `failure` | optional |
 
 Use sparingly and only when the signal is clear. Reinforcement decays stale memories and promotes reliable ones.
 
@@ -123,8 +124,8 @@ Spawn or reuse the management UI. Returns `{"url": "...", "reused": bool}`.
 
 Open or reuse a session episode and inject curated context as `additionalContext` markdown. Mirrors what the SessionStart hook does; callable manually for recovery, testing, or post-`/clear` re-injection. Shape depends on `BETTER_MEMORY_INJECT_MODE` (see [Architecture](architecture.md#injection-strategies)):
 
-- **`legacy`** (default) -- project + general semantic memories and reflections. Reflections are retrieved up to 20 per polarity bucket (`do` / `dont` / `neutral`), ranked by Wilson-prior lower bound on hit-rate, ties by confidence. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5; general-scope semantic memories always render in full) are shown in full -- the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` renders everything in full).
-- **`deferred`** -- general-scope semantic memories in full plus a single index line; project-scoped semantic memories and reflections are not rendered and surface only via the contextual channel or `memory.retrieve` / `memory.retrieve_observations`.
+- **`legacy`** -- project + general semantic memories and reflections. Reflections are retrieved up to 20 per polarity bucket (`do` / `dont` / `neutral`), ranked by Wilson-prior lower bound on hit-rate, ties by confidence. Only the top `BETTER_MEMORY_BOOTSTRAP_TOP_N` project-scoped items (default 5; general-scope semantic memories always render in full) are shown in full -- the rest collapse into a one-line index plus a retrieve affordance (`BETTER_MEMORY_BOOTSTRAP_TOP_N=0` renders everything in full).
+- **`deferred`** (default) -- a single index line and no memories at all, general-scope semantic memories included; semantic memories and reflections surface only via the contextual channel or `memory.retrieve` / `memory.retrieve_observations`.
 
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
