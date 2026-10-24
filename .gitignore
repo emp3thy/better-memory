@@ -55,3 +55,7 @@ Thumbs.db
 
 # tech-debt-scan artefacts
 .tech-debt/
+# tech-debt-scan: track the baseline, ignore the rest of the workdir
+!.tech-debt/
+.tech-debt/*
+!.tech-debt/baseline.json
