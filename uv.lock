@@ -74,7 +74,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "flask" },
-    { name = "httpx" },
     { name = "markupsafe" },
     { name = "mcp" },
     { name = "pydantic" },
@@ -107,7 +106,6 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'agentcore'", specifier = ">=1.43.56" },
     { name = "botocore", marker = "extra == 'agentcore'", specifier = ">=1.43.56" },
     { name = "flask", specifier = ">=3" },
-    { name = "httpx", specifier = ">=0.27" },
     { name = "markupsafe", specifier = ">=2" },
     { name = "mcp", specifier = ">=1" },
     { name = "pydantic", specifier = ">=2" },
